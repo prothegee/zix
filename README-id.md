@@ -81,7 +81,7 @@
     - [UDP](./README-id.md#udp)
     - [HTTP/3](./README-id.md#http3)
     - [Logger](./README-id.md#logger)
-- [Benchmark](./README-id.md#benchmark)
+- [Driver](./README-id.md#driver)
 
 <br>
 
@@ -124,6 +124,14 @@
 | [`docs/headers-id.md`](docs/headers-id.md) | Kapasitas header respons: tingkatan, keamanan, penanganan error |
 | [`docs/tests-id.md`](docs/tests-id.md) | Tingkatan pengujian (unit / integration / behaviour / edge) dan cara menjalankan |
 <!-- | [`rnd/rfc/README.md`](rnd/rfc/README.md) | Checklist conformance MUST / MUST NOT berbasis RFC untuk raw HTTP/1.1, HTTP/2, HTTP/3, dan TLS 1.3 | -->
+
+Dokumentasi driver (setiap README menyebar ke dokumen hld, lld, dan config miliknya):
+
+| Dokumen | Keterangan |
+| :- | :- |
+| [`docs/driver/postgrez/README-id.md`](docs/driver/postgrez/README-id.md) | Driver PostgreSQL: mulai cepat, init URL dan config, prepared statement, pool, executor |
+| [`docs/driver/rediz/README-id.md`](docs/driver/rediz/README-id.md) | Driver Redis: mulai cepat, init URL dan config, pipelining, deferred write-behind, pool |
+| [`docs/driver/prometheuz/README-id.md`](docs/driver/prometheuz/README-id.md) | Driver Prometheus: scrape, remote write, query PromQL |
 
 <br>
 
@@ -883,7 +891,7 @@ __*In the nutshell:*__
 
 > Dalam banyak kasus untuk throughput tinggi,
 > zix EPOLL sebagian besar unggul dalam efisiensi memori dan zix URING memiliki throughput lebih tinggi.
-> Namun dalam beberapa kasus, kinerjanya dapat bervariasi, lihat bagian benchmark untuk referensi.
+> Namun dalam beberapa kasus, kinerjanya dapat bervariasi, lihat benchmark historis di dalam direktori `docs/benchmark` untuk referensi.
 > Uring tidak diizinkan di beberapa lingkungan karena alasan tertentu (misalnya, dari sudut pandang keamanan). Tetapi Anda memiliki pilihan.
 
 **Kapan digunakan:** model dispatch adalah satu knob yang membentuk ulang seluruh server. Pakai `.ASYNC` saat latensi dan koneksi berumur panjang (SSE, WebSocket) penting atau saat target bukan Linux, dan `.EPOLL` / `.URING` di Linux untuk jumlah koneksi tertinggi dengan biaya per-request terendah. Di kotak dev loopback keduanya seri pada throughput dan `.URING` menang terutama pada cache locality. Di mesin many-core, ring close membuat `.URING` menjaga core-nya tetap sibuk lewat connection churn, di mana ia mencapai paritas atau lebih baik dari `.EPOLL` di setiap beban yang diukur dengan memori jauh lebih sedikit.
@@ -2215,42 +2223,17 @@ Pasangkan logger ke server mana saja dengan mengatur `logger: &logger` di konfig
 
 <br>
 
-## Benchmark
+## Driver
 
-Website: https://www.http-arena.com <br>
-Project repo: https://github.com/MDA2AV/HttpArena <br>
+Driver database dan metrics, ditulis murni dengan Zig di atas standard library seperti para engine. Masing-masing tinggal di `src/driver/<name>/` dengan build, contoh, dan suite test berbasis container miliknya sendiri, dan bisa init dari string URL atau struct config.
 
-<div align="left">
-    <a href="https://www.http-arena.com/#sort=rps:-1&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" height="44">
-    </a>
-    &nbsp;&nbsp;
-    <a href="https://www.http-arena.com/#scope=ws&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" height="44">
-    </a>
-</div>
-<br>
-<div align="left">
-    <!-- <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0" target="_blank" rel="noopener noreferrer"> -->
-    <!--     <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44"> -->
-    <!-- </a> -->
-    <!-- &nbsp;&nbsp; -->
-    <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
-    </a>
-</div>
-<br>
-<div align="left">
-    <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44">
-    </a>
-</div>
-<br>
+| Driver | Keterangan |
+| :- | :- |
+| [`postgrez`](docs/driver/postgrez/README-id.md) | PostgreSQL: prepared statement, pipelining, COPY, LISTEN dan NOTIFY, pool, executor, TLS 1.3 |
+| [`rediz`](docs/driver/rediz/README-id.md) | Redis: RESP3 dengan fallback RESP2 di tempat, pipelining, deferred write-behind, pool, TLS 1.3 |
+| [`prometheuz`](docs/driver/prometheuz/README-id.md) | Prometheus: scrape, remote write, query PromQL instant dan range |
 
-> Ketika pengukuran performa tidak dipersempit, asumsi beban kerja kita tidak bisa diukur,
-> perilaku CPU 6-12 core berbeda dengan 32-64 core. Berkat proyek HttpArena, zix bisa diukur pada beban kerja besar.
-
-> Benchmark historis disimpan di dalam direktori `docs/benchmark`.
+Setiap README yang ditaut mencakup instalasi, mulai cepat, kedua gaya init, dan menunjuk ke dokumen hld, lld, dan config miliknya.
 
 <br>
 
