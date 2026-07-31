@@ -47,6 +47,8 @@ pub fn runAsync(config: Config, handler: HandlerFn) !void {
             .registry = registry,
             .send_date_header = config.send_date_header,
             .large_body_rcvbuf = config.large_body_rcvbuf,
+            .max_recv_buf = config.max_recv_buf,
+            .max_request_body = config.max_request_body,
             .public_dir = config.public_dir,
             .max_response_headers = config.max_response_headers.value(),
             .compress = config.compress,
