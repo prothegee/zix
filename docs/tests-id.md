@@ -86,10 +86,11 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http/client_config.zig` | `refAllDecls` + default: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent=`zon_options.user_agent`) |
-| `tcp/http/client.zig` | `refAllDecls` |
-| `tcp/http/sse_client.zig` | `refAllDecls` + perilaku: `splitField` (data / event / retry / nama field telanjang / nama tidak cocok / tanpa spasi depan dipertahankan), `parseHttpUrl` (dasar, port default 80, https menghasilkan `TlsNotSupported`) |
-| `tcp/http/ws_client.zig` | `refAllDecls` + perilaku: vektor acceptKey RFC 6455, `parseWsUrl` (dasar, tanpa path default ke /, port default 80, wss menghasilkan `TlsNotSupported`, non-ws menghasilkan `InvalidUrl`) |
+| `tcp/http/client_config.zig` | `refAllDecls` + default: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, h2_max_read_rounds=4096, user_agent=`zon_options.user_agent`, version=HTTP_1, tls_verify=true, tls_ca_path=null) |
+| `tcp/http/client.zig` | `refAllDecls` + perilaku: `.HTTP_2` pada URL non-https ditolak sebelum connect, `.HTTP_3` menghasilkan `UnsupportedVersion`, server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, reply lengkap tidak terpotong oleh bound idle, body yang diam di tengah transfer menghasilkan `ReadTimeout` |
+| `tcp/http/h2_client.zig` | `refAllDecls` + perilaku: `methodHasBody` + `skipRequestHeader`, `putFrame` round-trip melalui parser frame, `putWindowUpdate` meng-encode increment big-endian, `headerBlock` melepas prefix PADDED dan PRIORITY, `dataPayload` melepas padding DATA, peer yang menerima koneksi lalu tidak pernah bicara menghasilkan `ResponseTimeout` |
+| `tcp/http/sse_client.zig` | `refAllDecls` + perilaku: `splitField` (data / event / retry / nama field telanjang / nama tidak cocok / tanpa spasi depan dipertahankan), `parseHttpUrl` (dasar, port default 80, https menghasilkan `TlsNotSupported`), server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, stream yang diam menghasilkan `ReadTimeout` (bukan close bersih) |
+| `tcp/http/ws_client.zig` | `refAllDecls` + perilaku: vektor acceptKey RFC 6455, `parseWsUrl` (dasar, tanpa path default ke /, port default 80, wss menghasilkan `TlsNotSupported`, non-ws menghasilkan `InvalidUrl`), server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, peer yang tidak mengirim frame menghasilkan `ReadTimeout` |
 
 ### zix.Channel
 
@@ -165,6 +166,7 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `utils/static_cache.zig` | `refAllDecls` + perilaku: penggabungan path menolak traversal / absolut / kepanjangan, header membawa `Vary` dan hanya menyebut encoding bila terkompresi, jumlah entry di-clamp dan dibulatkan ke power of two, request kedua memakai file terbuka yang sama, miss tidak menyimpan apa pun, ttl 0 tidak pernah menyentuh tabel, sibling `.br` / `.gz` diambil dan dinegosiasi, file tanpa sibling menyajikan identity, entry kedaluwarsa di-reclaim dan dibuka ulang, slot yang di-pin selamat dari reclaim, tabel penuh turun ke null, sweep membebaskan ruang, `install` process-wide dan `shutdown` membersihkannya |
 | `utils/dispatch_support.zig` | `refAllDecls` + perilaku: `.ASYNC` didukung di semua platform, dukungan `.EPOLL` / `.URING` mengikuti os tag target, `rejectedName` melaporkan tag model, `Error` membawa satu error penolakan kanonik |
 | `utils/static_send.zig` | `refAllDecls` + perilaku: jalur copy menulis seluruh body lewat fungsi tulis engine, menghormati offset dan panjang parsial, range nol-panjang tidak pernah menyentuh socket, body lebih besar dari buffer copy melakukan loop, kegagalan tulis engine muncul sebagai BrokenPipe. Khusus Linux: jalur zero-copy mengirim byte persis lewat socket sungguhan, menghormati offset, dan melaporkan BrokenPipe saat peer tertutup |
+| `utils/socket_poll.zig` | `refAllDecls` + perilaku: `readableWithin` melewati penantian saat budget nol, `waitReady` melaporkan datagram yang sudah antre di socket, `waitReady` melaporkan belum siap saat tidak ada yang datang dalam budget |
 
 ### multiplexers (src/multiplexers/, internal)
 
