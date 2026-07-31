@@ -423,23 +423,6 @@ fn forwardResult(io: std.Io, result: isolate.Result, tally: *Tally) void {
 /// respawning the whole check almost always clears it. Real assertion failures are never retried.
 const MAX_ATTEMPTS = 3;
 
-/// Whether an error is a transient startup-contention symptom worth retrying (versus a real failure).
-/// These are all connection-establishment errors: under a startup burst a fresh server's accept path
-/// is starved, so the probe or first client connect is refused, reset, or times out. A real check
-/// failure is an assertion (UnexpectedStatus, UnexpectedBody, ...), which is never on this list.
-fn isRetriable(err: anyerror) bool {
-    return switch (err) {
-        error.ServerStartTimeout,
-        error.ConnectFailed,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.ConnectionTimedOut,
-        error.BrokenPipe,
-        => true,
-        else => false,
-    };
-}
-
 /// One concurrent task: run a check in its own child process, retrying the whole check on a transient
 /// startup error. The check is self-contained (the child spawns its own server and kills it on return,
 /// even on error), so each retry respawns from a clean slate. A short backoff between attempts lets a
@@ -484,7 +467,7 @@ fn runOneCheck(io: std.Io, arg_iter: *std.process.Args.Iterator) noreturn {
     if (result) {
         std.process.exit(isolate.Exit.PASSED);
     } else |err| {
-        std.process.exit(if (isRetriable(err)) isolate.Exit.RETRIABLE else isolate.Exit.FAILED);
+        std.process.exit(if (isolate.isRetriable(err)) isolate.Exit.RETRIABLE else isolate.Exit.FAILED);
     }
 }
 
