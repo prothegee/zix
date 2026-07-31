@@ -1839,6 +1839,47 @@ test "zix http1: URING dispatch defers an oversized body and serves the counted 
     try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n100000"));
 }
 
+test "zix http1: URING dispatch waits for a body that fits the buffer and then reports the full count" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [256]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
+
+    // Content-Length fits conn.buf, so this is the wait path rather than the
+    // drain path: dispatch holds the head until the body lands.
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n";
+    var conn_buf: [256]u8 = undefined;
+    @memcpy(conn_buf[0..head.len], head);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = head.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const first = worker.dispatch(&conn);
+
+    // Nothing answered and nothing drained: the head is still buffered whole.
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(@as(usize, 0), conn.staged);
+    try std.testing.expectEqual(head.len, conn.filled);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_head_len);
+
+    @memset(conn_buf[head.len..][0..100], 'A');
+    conn.filled = head.len + 100;
+
+    const second = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+    try std.testing.expect(std.mem.endsWith(u8, send_buf[0..conn.staged], "\r\n\r\n100"));
+}
+
 test "zix http1: URING dispatch compacts the deferred head behind a pipelined request" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
