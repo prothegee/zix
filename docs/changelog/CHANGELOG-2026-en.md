@@ -91,6 +91,15 @@ __*Update:*__
     - `zix.Http3` differs by necessity: an HTTP/3 response body outlives its handler, since a body too large for one packet is parked in a send-stream slot and re-read for every packet and every retransmission. Its body therefore comes from a cache-held snapshot, and the cache pin is held for the whole response. This is why `public_dir_cache_ttl_ms = 0` disables static serving entirely on that engine rather than merely disabling the cache.
     - A file mapping was measured and rejected for that snapshot: rewriting a file in place (what copying a new build over a served file does) changes the bytes under a response still reading them, and a file that shrank would fault past its own end. A snapshot cannot be changed underneath a response.
 
+    ---
+
+- `zix.Http.Client` timeouts are now enforced, and every HTTP-family client read is bounded:
+    - `response_timeout_ms` and `read_timeout_ms` were stored but never applied, so a server that accepted the connection and then went quiet parked the caller forever. Both now gate the read behind a readiness poll (`src/utils/socket_poll.zig`): `error.ResponseTimeout` when the response head never arrives, `error.ReadTimeout` when the body stalls mid-transfer. A budget of 0 keeps the old blocking behaviour byte for byte.
+    - The same bound covers the Unix-domain-socket request path, the HTTP/2 client's handshake and record reads, and the test runner's raw TLS reads. The SSE and WebSocket clients gain the same two config fields, bounding the response head and every subsequent event / frame read.
+    - `read_timeout_ms` covers Content-Length bodies only: a chunked or close-delimited body has no byte count to end the loop on, so it keeps the unbounded read and only `response_timeout_ms` applies.
+    - The test runner retries a check that fails with `ResponseTimeout` / `ReadTimeout`: the check returned an error, so its cleanup ran and no orphan server holds the port, which is what makes the retry safe.
+    - Fixed along the way: the HTTP/2 client's raw descriptor reads and writes issued Linux syscall numbers on every non-Windows platform, and macOS plus the three BSDs kill such a process outright. Both paths now route through `src/utils/fd_io.zig`, the shared `windows` / `linux` / `posix` three-way split.
+
 <br>
 
 - `zix.Udp` client `recv_timeout_ms` now enforced on Windows:
