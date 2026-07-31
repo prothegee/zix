@@ -95,12 +95,21 @@ pub const Request = struct {
         return parser.getHeader(self.head, self.buf, name);
     }
 
-    /// Read and return the full request body.
-    /// Cached after first call. Handles both Content-Length and Transfer-Encoding: chunked.
-    /// Bytes already in the read buffer are used directly. Remaining bytes are recv'd from fd.
+    /// Read and return the request body bytes.
+    ///
+    /// Note:
+    /// - Lazy, unlike zix.Http1 where the engine drains before the handler
+    ///   runs. The first call is what pulls the body off the socket, so a
+    ///   handler that never calls this leaves the body unread.
+    /// - Cached after the first call, so calling it twice costs nothing.
+    /// - Handles both Content-Length and Transfer-Encoding: chunked. Bytes
+    ///   already in the read buffer are used directly, the rest are recv'd.
+    /// - The returned length is what was actually read, which can be short of
+    ///   the declared Content-Length when the peer stops early.
     ///
     /// Return:
-    /// - empty string when Content-Length is absent/zero and not chunked
+    /// - []const u8 (the body bytes)
+    /// - empty when Content-Length is absent or zero and the request is not chunked
     pub fn body(self: *Request) ![]const u8 {
         if (self.body_cache) |b| return b;
 
@@ -408,6 +417,77 @@ test "zix http: request chunked body must not truncate when chunks arrive in seg
     const body = try req.body();
 
     try std.testing.expectEqualStrings("abcdefghij", body);
+}
+
+test "zix http: request body delivers a body far larger than the read buffer" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    // zix.Http sizes the body allocation from Content-Length and reads until it
+    // is filled, so the read buffer never caps what the handler sees. The .ASYNC
+    // path of zix.Http1 truncates the delivered slice at its body chunk instead,
+    // and the multiplexed models drop the body entirely, so this is the contract
+    // that separates the two engines.
+    const linux = std.os.linux;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const body_len: usize = 64 * 1024;
+    const payload = try arena.allocator().alloc(u8, body_len);
+    @memset(payload, 'A');
+    try std.testing.expectEqual(body_len, linux.write(fds[1], payload.ptr, body_len));
+
+    const raw = "POST /upload HTTP/1.1\r\nContent-Length: 65536\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
+    var req = Request{
+        .buf = raw,
+        .head = head,
+        .fd = fds[0],
+        .buf_filled = raw.len,
+        .allocator = arena.allocator(),
+    };
+
+    const body = try req.body();
+
+    try std.testing.expectEqual(body_len, body.len);
+    try std.testing.expectEqual(@as(usize, body_len), std.mem.count(u8, body, "A"));
+}
+
+test "zix http: request body reports a short read when the peer closes before Content-Length" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    // The returned slice is what the keep-alive decision reads: a body shorter
+    // than Content-Length still comes back as a successful read, so a caller
+    // that trusts the length alone cannot tell the request was cut off.
+    const linux = std.os.linux;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+
+    try std.testing.expectEqual(@as(usize, 3), linux.write(fds[1], "abc", 3));
+    _ = linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const raw = "POST /upload HTTP/1.1\r\nContent-Length: 10\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
+    var req = Request{
+        .buf = raw,
+        .head = head,
+        .fd = fds[0],
+        .buf_filled = raw.len,
+        .allocator = arena.allocator(),
+    };
+
+    const body = try req.body();
+
+    try std.testing.expectEqualStrings("abc", body);
+    try std.testing.expect(body.len < head.content_length);
 }
 
 test "zix http: request keepAlive reflects the parsed head" {
