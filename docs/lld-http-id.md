@@ -400,8 +400,8 @@ Nilai default:
 | Field | Default | Diterapkan di v1? |
 | :- | :- | :- |
 | `connect_timeout_ms` | 0 | Ya, melalui `connectTcpOptions` |
-| `response_timeout_ms` | 0 | Tidak, hanya disimpan |
-| `read_timeout_ms` | 0 | Tidak, hanya disimpan |
+| `response_timeout_ms` | 0 | Ya, poll readiness sebelum `receiveHead` menghasilkan `error.ResponseTimeout` |
+| `read_timeout_ms` | 0 | Ya, poll readiness di dalam loop baca body menghasilkan `error.ReadTimeout` (hanya body Content-Length) |
 | `max_response_body` | 4 MB | Ya, melalui `allocRemaining` |
 | `follow_redirects` | true | Ya |
 | `max_redirects` | 3 | Ya |
