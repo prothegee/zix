@@ -91,6 +91,15 @@ __*Update:*__
     - `zix.Http3` berbeda karena keharusan: body respons HTTP/3 hidup lebih lama dari handler-nya, karena body yang terlalu besar untuk satu paket diparkir di slot send-stream dan dibaca ulang untuk setiap paket dan setiap retransmisi. Karena itu body-nya berasal dari snapshot yang ditahan cache, dan pin cache ditahan selama respons berlangsung. Inilah sebabnya `public_dir_cache_ttl_ms = 0` menonaktifkan penyajian static sepenuhnya di engine itu, bukan sekadar menonaktifkan cache-nya.
     - Pemetaan file (mmap) sudah diukur dan ditolak untuk snapshot itu: menulis ulang file di tempat (yang terjadi saat menyalin build baru ke atas file yang sedang disajikan) mengubah byte di bawah respons yang masih membacanya, dan file yang menyusut akan fault melewati ujungnya sendiri. Snapshot tidak bisa berubah di bawah sebuah respons.
 
+    ---
+
+- Timeout `zix.Http.Client` sekarang diberlakukan, dan setiap read client keluarga HTTP dibatasi:
+    - `response_timeout_ms` dan `read_timeout_ms` dulunya disimpan tapi tidak pernah diterapkan, jadi server yang menerima koneksi lalu diam memarkir pemanggil selamanya. Keduanya kini menjaga read di balik readiness poll (`src/utils/socket_poll.zig`): `error.ResponseTimeout` saat head response tidak pernah datang, `error.ReadTimeout` saat body macet di tengah transfer. Budget 0 mempertahankan perilaku blocking lama byte demi byte.
+    - Batas yang sama mencakup jalur request Unix-domain-socket, read handshake dan record client HTTP/2, serta read TLS mentah milik test runner. Client SSE dan WebSocket mendapat dua field config yang sama, membatasi head response dan setiap read event / frame berikutnya.
+    - `read_timeout_ms` hanya mencakup body Content-Length: body chunked atau close-delimited tidak punya jumlah byte untuk mengakhiri loop, jadi tetap pada read tanpa batas dan hanya `response_timeout_ms` yang berlaku.
+    - Test runner mencoba ulang check yang gagal dengan `ResponseTimeout` / `ReadTimeout`: check itu mengembalikan error, jadi cleanup-nya berjalan dan tidak ada server yatim menahan port, itulah yang membuat retry aman.
+    - Diperbaiki sekalian: read dan write raw descriptor client HTTP/2 memakai nomor syscall Linux di setiap platform non-Windows, dan macOS plus ketiga BSD langsung mematikan proses seperti itu. Kedua jalur kini melewati `src/utils/fd_io.zig`, three-way split `windows` / `linux` / `posix` bersama.
+
 <br>
 
 - `recv_timeout_ms` client `zix.Udp` sekarang berlaku di Windows:
