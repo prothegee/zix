@@ -750,8 +750,8 @@ pub const HttpClientConfig = struct {
     allocator:           std.mem.Allocator, // owns response body + head copies
     io:                  std.Io,            // event-loop backend, not owned by client
     connect_timeout_ms:  u32 = 0,          // 0 = no timeout. enforced via connectTcpOptions
-    response_timeout_ms: u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
-    read_timeout_ms:     u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
+    response_timeout_ms: u32 = 0,          // 0 = no timeout. error.ResponseTimeout when the head never arrives
+    read_timeout_ms:     u32 = 0,          // 0 = no timeout. error.ReadTimeout when the body stalls (Content-Length only)
     max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
     follow_redirects:    bool = true,
     max_redirects:       u8   = 3,
@@ -794,6 +794,8 @@ sequenceDiagram
 | `error.InvalidUrl` | `Uri.parse` gagal, skema tidak didukung, atau host tidak ada |
 | `error.BodyTooLarge` | body response melebihi `max_response_body` bytes |
 | `error.Timeout` | koneksi TCP melebihi `connect_timeout_ms` (dari `std.Io`) |
+| `error.ResponseTimeout` | server menerima koneksi tapi tidak mengirim head response dalam `response_timeout_ms` |
+| `error.ReadTimeout` | body macet melewati `read_timeout_ms` di tengah transfer (hanya body Content-Length) |
 
 Error lain dari `std.http.Client` diteruskan tanpa perubahan (OutOfMemory, ConnectionRefused, dll.).
 
@@ -818,8 +820,6 @@ Panggil `resp.deinit()` untuk melepas keduanya. Setelah `deinit()`, semua slice 
 
 | Fitur | Status |
 | :- | :- |
-| Penerapan `response_timeout_ms` | v1: field tersimpan, belum diterapkan |
-| Penerapan `read_timeout_ms` | v1: field tersimpan, belum diterapkan |
 | TLS / HTTPS (client) | https via `version = .HTTP_2` (h2 over TLS 1.3, `h2_client.zig`), mempercayai cert server lewat `tls_ca_path` / `tls_verify`. Jalur client HTTP/1 bersifat cleartext |
 | Reuse koneksi keep-alive pool | diwarisi dari pool `std.http.Client` (aktif secara default) |
 
@@ -830,7 +830,6 @@ Panggil `resp.deinit()` untuk melepas keduanya. Setelah `deinit()`, semua slice 
 | Fitur | Lokasi | Catatan |
 | :- | :- | :- |
 | Chain runner middleware | dihapus (ADR-062) | Komposisi wrapper comptime adalah idiom middleware, lihat `examples/http_middleware.zig` |
-| Penerapan timeout response/baca (client) | `client.zig` | Field konfigurasi tersimpan. Pemasangan level IO ditangguhkan |
 
 TLS untuk server ini (https native, opt-in lewat `config.tls`, dual listener lewat `config.tls_port`) sudah diimplementasikan, lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
 
