@@ -55,8 +55,49 @@ pub fn waitReady(handle: std.posix.socket_t, events: i16, timeout_ms: u32) !bool
     return try std.posix.poll(&pending, ms) > 0;
 }
 
+/// Whether the socket has something to read inside the budget, for a caller that treats "no" as its
+/// own timeout error.
+///
+/// Note:
+/// - A budget of 0 is the caller asking for no bound at all, so this reports ready without waiting
+///   and the read below blocks exactly as it did before any bound existed. That keeps an
+///   unconfigured client on its original behaviour.
+/// - A failed readiness check counts as not ready: the caller turns that into its timeout rather
+///   than parking on a socket it could not ask about.
+/// - Never place this in front of a buffered reader without first asking the reader what it already
+///   holds. Bytes in userspace leave the socket quiet, so the gate would wait out its whole budget
+///   on data that already arrived. Raw-descriptor callers have no such buffer and are safe.
+///
+/// Param:
+/// handle - std.posix.socket_t (the socket, from socket.handle)
+/// budget_ms - u32 (0 skips the wait entirely)
+///
+/// Return:
+/// - true when the socket is readable, or when no bound was configured
+/// - false when the budget elapsed first
+pub fn readableWithin(handle: std.posix.socket_t, budget_ms: u32) bool {
+    if (budget_ms == 0) return true;
+
+    return waitReady(handle, READABLE, budget_ms) catch false;
+}
+
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+test "zix utils: socket_poll readableWithin skips the wait when the budget is zero" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9756);
+    const idle = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer idle.close(io);
+
+    // Nothing is ever sent here, so a real check reports not ready. A zero budget has to report
+    // ready regardless, which is what leaves an unconfigured caller on its original blocking read.
+    try std.testing.expect(!readableWithin(idle.handle, 50));
+    try std.testing.expect(readableWithin(idle.handle, 0));
+}
 
 test "zix utils: socket_poll waitReady reports a datagram already queued on the socket" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
