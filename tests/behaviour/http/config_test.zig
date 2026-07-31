@@ -60,7 +60,6 @@ test "zix behaviour: ServerConfig, worker pool defaults to auto-size (zero)" {
         .dispatch_model = .ASYNC,
     };
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
-    try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
 }
 
 test "zix behaviour: ServerConfig, dispatch_model is required and stored as set" {
@@ -75,9 +74,8 @@ test "zix behaviour: ServerConfig, dispatch_model is required and stored as set"
 
 test "zix behaviour: DispatchModel, integer backing values (ASYNC=0 is zero-value)" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(zix.Tcp.DispatchModel.ASYNC));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.POOL));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.MIXED));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(zix.Tcp.DispatchModel.EPOLL));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(zix.Tcp.DispatchModel.URING));
 }
 
 test "zix behaviour: ServerConfig, max_response_headers defaults to MINIMAL (16)" {

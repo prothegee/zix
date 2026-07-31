@@ -1,6 +1,8 @@
 //! zix http response
 
 const std = @import("std");
+const socket_pair = @import("../../utils/socket_pair.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const builtin = @import("builtin");
 const win_io = @import("../../utils/windows_io.zig");
 const Status = @import("status.zig");
@@ -810,6 +812,12 @@ pub fn formatHttpDate(secs: u64, buf: []u8) []u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+/// A connected pair for the tests below, portable across every supported platform.
+fn socketPair(fds: *[2]std.posix.fd_t) !void {
+    const pair = try socket_pair.Pair.open(std.testing.allocator);
+    fds.* = pair.fds;
+}
+
 /// Test fd sentinel: Windows descriptors are opaque pointers, POSIX are ints.
 const TEST_FD: std.posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
@@ -904,7 +912,6 @@ test "zix http response cache: sendFromCache is a no-op when no cache is install
 }
 
 test "zix http response cache: sendCached stores then sendFromCache writes identical bytes" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
     defer cache.deinit();
 
@@ -915,10 +922,10 @@ test "zix http response cache: sendCached stores then sendFromCache writes ident
     defer arena.deinit();
     var req = try Request.fromRaw("GET /thing HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
 
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     // first request: miss, then build + store + write
     var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
@@ -926,7 +933,7 @@ test "zix http response cache: sendCached stores then sendFromCache writes ident
     try res.sendCached(&req, "hello", 0);
 
     var first: [256]u8 = undefined;
-    const n1 = try std.posix.read(fds[0], &first);
+    const n1 = try fd_io.readOnce(fds[0], &first);
     try std.testing.expect(std.mem.endsWith(u8, first[0..n1], "\r\n\r\nhello"));
 
     // second request: hit returns the identical cached bytes
@@ -934,28 +941,26 @@ test "zix http response cache: sendCached stores then sendFromCache writes ident
     try std.testing.expect(res2.sendFromCache(&req));
 
     var second: [256]u8 = undefined;
-    const n2 = try std.posix.read(fds[0], &second);
+    const n2 = try fd_io.readOnce(fds[0], &second);
     try std.testing.expectEqualStrings(first[0..n1], second[0..n2]);
 }
 
 fn negotiatedHttpRoundtrip(raw_req: []const u8, ct: Content.Type, body: []const u8, arena: std.mem.Allocator, out: []u8) !usize {
     var req = try Request.fromRaw(raw_req, arena);
 
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var res = Response.init(fds[1], true, undefined, arena, 16);
     res.setContentType(ct);
     try res.sendNegotiated(&req, body);
 
-    return std.posix.read(fds[0], out);
+    return fd_io.readOnce(fds[0], out);
 }
 
 test "zix http response: sendNegotiated compresses when gzip is accepted" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     setCompression(true, 256, 256 * 1024);
     defer setCompression(false, 0, 0);
 
@@ -980,8 +985,6 @@ test "zix http response: sendNegotiated compresses when gzip is accepted" {
 }
 
 test "zix http response: sendNegotiated sends uncompressed when compression is off" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     setCompression(false, 0, 0);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -997,8 +1000,6 @@ test "zix http response: sendNegotiated sends uncompressed when compression is o
 }
 
 test "zix http response: sendNegotiated skips bodies under the floor" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     setCompression(true, 256, 256 * 1024);
     defer setCompression(false, 0, 0);
 
@@ -1012,8 +1013,6 @@ test "zix http response: sendNegotiated skips bodies under the floor" {
 }
 
 test "zix http response: sendNegotiated skips already-compressed media types" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     setCompression(true, 256, 256 * 1024);
     defer setCompression(false, 0, 0);
 
@@ -1030,7 +1029,6 @@ test "zix http response: sendNegotiated skips already-compressed media types" {
 }
 
 test "zix http response cache: cached bytes match a plain send" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
     defer cache.deinit();
 
@@ -1041,12 +1039,12 @@ test "zix http response cache: cached bytes match a plain send" {
     defer arena.deinit();
     var req = try Request.fromRaw("GET /thing HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
 
-    var pair_a: [2]i32 = undefined;
-    var pair_b: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair_a));
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair_b));
-    defer for ([_]i32{ pair_a[0], pair_a[1], pair_b[0], pair_b[1] }) |fd| {
-        _ = std.os.linux.close(fd);
+    var pair_a: [2]std.posix.fd_t = undefined;
+    var pair_b: [2]std.posix.fd_t = undefined;
+    try socketPair(&pair_a);
+    try socketPair(&pair_b);
+    defer for ([_]std.posix.fd_t{ pair_a[0], pair_a[1], pair_b[0], pair_b[1] }) |fd| {
+        fd_io.close(fd);
     };
 
     // plain send
@@ -1055,7 +1053,7 @@ test "zix http response cache: cached bytes match a plain send" {
     try res_plain.send("{\"ok\":true}");
 
     var plain: [256]u8 = undefined;
-    const np = try std.posix.read(pair_a[0], &plain);
+    const np = try fd_io.readOnce(pair_a[0], &plain);
 
     // cached send with the same response shape
     var res_cached = Response.init(pair_b[1], true, undefined, arena.allocator(), 16);
@@ -1063,35 +1061,33 @@ test "zix http response cache: cached bytes match a plain send" {
     try res_cached.sendCached(&req, "{\"ok\":true}", 0);
 
     var cached: [256]u8 = undefined;
-    const nc = try std.posix.read(pair_b[0], &cached);
+    const nc = try fd_io.readOnce(pair_b[0], &cached);
 
     try std.testing.expectEqualStrings(plain[0..np], cached[0..nc]);
 }
 
 test "zix http response cache: sendCached without a cache falls back to a plain send" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     setCache(null, 0);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var req = try Request.fromRaw("GET /x HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
 
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
     try res.sendCached(&req, "data", 0);
 
     var recv: [128]u8 = undefined;
-    const n = try std.posix.read(fds[0], &recv);
+    const n = try fd_io.readOnce(fds[0], &recv);
     try std.testing.expect(std.mem.startsWith(u8, recv[0..n], "HTTP/1.1 200 Ok"));
     try std.testing.expect(std.mem.endsWith(u8, recv[0..n], "\r\n\r\ndata"));
 }
 
 test "zix http response cache: distinct paths and queries are separate keys" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 
@@ -1105,16 +1101,16 @@ test "zix http response cache: distinct paths and queries are separate keys" {
     var req_b = try Request.fromRaw("GET /b HTTP/1.1\r\n\r\n", allocator);
     var req_q = try Request.fromRaw("GET /a?v=2 HTTP/1.1\r\n\r\n", allocator);
 
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var res_a = Response.init(fds[1], true, undefined, allocator, 16);
     try res_a.sendCached(&req_a, "alpha", 0);
 
     var drain: [128]u8 = undefined;
-    _ = try std.posix.read(fds[0], &drain);
+    _ = try fd_io.readOnce(fds[0], &drain);
 
     // a different path and a different query are both misses
     var res_b = Response.init(fds[1], true, undefined, allocator, 16);
@@ -1137,10 +1133,10 @@ test "zix http: writeNonBlockFD stages a partial write then resumes after drain"
     // Nonblocking AF_UNIX stream pair with a tiny send/recv budget, so a large
     // write fills the kernel buffer and returns a partial count (the .EPOLL
     // backpressure path) instead of blocking the worker.
-    var fds: [2]i32 = undefined;
+    var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0, &fds));
-    defer _ = linux.close(fds[0]);
-    defer _ = linux.close(fds[1]);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     const small: c_int = 2048;
     std.posix.setsockopt(fds[0], std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&small)) catch {};
@@ -1160,7 +1156,7 @@ test "zix http: writeNonBlockFD stages a partial write then resumes after drain"
     defer std.testing.allocator.free(read_buf);
     var consumed: usize = 0;
     while (consumed < first) {
-        const n = std.posix.read(fds[1], read_buf) catch break;
+        const n = fd_io.readOnce(fds[1], read_buf) catch break;
         if (n == 0) break;
         consumed += n;
     }
@@ -1171,12 +1167,10 @@ test "zix http: writeNonBlockFD stages a partial write then resumes after drain"
 }
 
 test "zix http: Response.stream detaches the coalescing sink for direct SSE writes" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const linux = std.os.linux;
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
-    defer _ = linux.close(fds[0]);
-    defer _ = linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1198,22 +1192,20 @@ test "zix http: Response.stream detaches the coalescing sink for direct SSE writ
 
     // The header and event landed on the socket directly, not staged in the sink.
     var buf: [256]u8 = undefined;
-    const n = try std.posix.read(fds[0], &buf);
+    const n = try fd_io.readOnce(fds[0], &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "text/event-stream") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "data: hello") != null);
 }
 
 test "zix http: send() into an installed sink is byte-identical to a direct send" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const linux = std.os.linux;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
-    defer _ = linux.close(fds[0]);
-    defer _ = linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     // Direct send (no sink): build via the staging buffer, capture off the socket.
     tl_resp_sink = null;
@@ -1222,7 +1214,7 @@ test "zix http: send() into an installed sink is byte-identical to a direct send
     try res_direct.addHeader("X-Test", "1");
     try res_direct.send("{\"ok\":true}");
     var direct: [512]u8 = undefined;
-    const nd = try std.posix.read(fds[0], &direct);
+    const nd = try fd_io.readOnce(fds[0], &direct);
 
     // Sink send: serialize straight into the sink buffer (the optimized path).
     var out_buf: [512]u8 = undefined;
@@ -1258,21 +1250,20 @@ test "zix http: buildResponse emits Content-Type and Date without bufPrint, byte
 }
 
 test "zix http response: sendText sends text/plain and marks sent" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
     try std.testing.expect(!res.sent);
     try res.sendText("plain words");
 
     var buf: [512]u8 = undefined;
-    const n = try std.posix.read(fds[0], &buf);
+    const n = try fd_io.readOnce(fds[0], &buf);
     const wire = buf[0..n];
 
     try std.testing.expect(std.mem.indexOf(u8, wire, "Content-Type: text/plain\r\n") != null);
@@ -1282,18 +1273,17 @@ test "zix http response: sendText sends text/plain and marks sent" {
 }
 
 test "zix http response: sendRaw writes caller bytes verbatim and marks sent" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    var fds: [2]i32 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
-    defer _ = std.os.linux.close(fds[0]);
-    defer _ = std.os.linux.close(fds[1]);
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
 
     var res = Response.init(fds[1], true, undefined, std.testing.allocator, 16);
     const wire = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
     try res.sendRaw(wire);
 
     var buf: [128]u8 = undefined;
-    const n = try std.posix.read(fds[0], &buf);
+    const n = try fd_io.readOnce(fds[0], &buf);
 
     try std.testing.expectEqualStrings(wire, buf[0..n]);
     try std.testing.expectEqual(wire.len, res.bytes_written);

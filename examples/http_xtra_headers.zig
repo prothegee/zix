@@ -3,12 +3,11 @@ const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9011;
-const DISPATCH_MODEL: zix.Http.DispatchModel = .POOL;
+const DISPATCH_MODEL: zix.Http.DispatchModel = .ASYNC;
 const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 4;
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
-const WORKERS: usize = 0; // 0 = auto (cpu_count accept threads)
-const POOL_SIZE: usize = 0; // 0 = auto (max(10, cpu_count * 2) pool threads)
+const WORKERS: usize = 0; // ignored by .ASYNC
 
 // --------------------------------------------------------- //
 // This example demonstrates zix.Http.HeaderSize: the configurable
@@ -136,7 +135,6 @@ pub fn main(process: std.process.Init) !void {
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .workers = WORKERS,
-        .pool_size = POOL_SIZE,
         // .LARGE = 64 custom headers per response.
         // Use .MINIMAL (16) for APIs that never add extra headers.
         // Use .EXTRA_LARGE (128) for k8s / service-mesh deployments.

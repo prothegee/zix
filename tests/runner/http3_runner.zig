@@ -55,6 +55,8 @@ pub fn main(process: std.process.Init) void {
         std.process.exit(1);
     };
 
+    if (common.skipDispatchOffPlatform(label)) return;
+
     run(process.io, server_path) catch |err| {
         std.debug.print("FAIL {s}: {}\n", .{ label, err });
         std.process.exit(1);

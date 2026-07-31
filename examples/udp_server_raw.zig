@@ -36,7 +36,7 @@ pub fn main(process: std.process.Init) !void {
         .ip = SERVER_IP,
         .port = SERVER_PORT,
         .allow_args = false, // set true to read --ip / --port from the args passed below
-        .dispatch_model = .ASYNC, // .ASYNC / .POOL / .MIXED single worker, .EPOLL / .URING per-core
+        .dispatch_model = .ASYNC, // .ASYNC single worker, .EPOLL / .URING per-core
         .recv_batch = 32, // datagrams per recvmmsg
         .send_batch = 32, // replies coalesced per sendmmsg
         .max_recv_buf = 1500, // datagram buffer, common Ethernet MTU

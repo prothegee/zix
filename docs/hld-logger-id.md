@@ -174,12 +174,12 @@ pub fn main(process: std.process.Init) !void {
 ## Contoh
 
 Semua contoh server jaringan menyertakan blok inisialisasi logger yang sudah dikomentari di bagian atas dan dapat diaktifkan tanpa perubahan kode:
-- `examples/tcp_server_1_async.zig`
-- `examples/fix_server_1_async.zig`
+- `examples/tcp_server.zig`
+- `examples/fix_server.zig`
 - `examples/udp_server.zig`
 - `examples/uds_server.zig`
-- `examples/http_basic_1_async.zig`
-- `examples/grpc_location_server_1_async.zig` (logger sudah terhubung dan aktif secara default)
+- `examples/http_basic.zig`
+- `examples/grpc_location_server.zig` (logger sudah terhubung dan aktif secara default)
 - `examples/grpc_multi_server.zig` (logger sudah terhubung dan aktif secara default)
 
 ---

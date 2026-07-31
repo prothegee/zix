@@ -10,7 +10,11 @@ const zix = @import("zix");
 
 const static_cache = zix.utils.static_cache;
 
-const TEST_PORT: u16 = 18094;
+/// Base of this file's own port block. The eight tests below take TEST_PORT through TEST_PORT + 8
+/// (one of them runs two servers), so the block has to stay clear of every other suite: these run
+/// as parallel build steps, and a second binary listening on a shared port sends a client to the
+/// wrong server, which reads as a stall rather than as a bind failure.
+const TEST_PORT: u16 = 18110;
 
 // --------------------------------------------------------- //
 
@@ -35,13 +39,14 @@ const Routes = zix.Http2.Router(&[_]zix.Http2.Route{
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
     const stream = ctx.listener.accept(io) catch |err| {
         ctx.err = err;
+
         return;
     };
     const fd = stream.socket.handle;
 
     zix.Http2.serveConn(Routes.dispatch, fd, .{ .public_dir = g_public_dir }, io);
 
-    _ = std.posix.system.close(fd);
+    zix.utils.fd_io.close(fd);
 }
 
 fn spawnServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
@@ -204,7 +209,7 @@ test "zix integration: Http2 serves an unmatched path from public_dir over h2c" 
     const thread = try spawnServer(&ctx, io, TEST_PORT);
 
     const fd = try clientConnect(io, TEST_PORT);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendGet(fd, 1, "/styles.css", null);
@@ -244,7 +249,7 @@ test "zix integration: Http2 negotiates the brotli sibling from public_dir over 
     const thread = try spawnServer(&ctx, io, TEST_PORT + 1);
 
     const fd = try clientConnect(io, TEST_PORT + 1);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendGet(fd, 1, "/bundle.js", "br, gzip");
@@ -288,7 +293,7 @@ test "zix integration: Http2 repeats a public_dir file byte for byte across stre
     const thread = try spawnServer(&ctx, io, TEST_PORT + 2);
 
     const fd = try clientConnect(io, TEST_PORT + 2);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
 
@@ -333,7 +338,7 @@ test "zix integration: Http2 keeps a routed path ahead of public_dir" {
     const thread = try spawnServer(&ctx, io, TEST_PORT + 3);
 
     const fd = try clientConnect(io, TEST_PORT + 3);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendGet(fd, 1, "/", null);
@@ -389,7 +394,7 @@ test "zix integration: Http2 serves the same bytes with the cache off as with it
     try zix.Http2.sendGoawayFD(uncached_fd, 1, zix.Http2.ERR_NO_ERROR);
     uncached_thread.join();
     uncached_ctx.listener.deinit(io);
-    _ = std.posix.system.close(uncached_fd);
+    zix.utils.fd_io.close(uncached_fd);
     try std.testing.expect(uncached_ctx.err == null);
 
     // Same file, cache installed: the identity body has to be byte for byte what the uncached path
@@ -400,7 +405,7 @@ test "zix integration: Http2 serves the same bytes with the cache off as with it
     var cached_ctx: ServerCtx = undefined;
     const cached_thread = try spawnServer(&cached_ctx, io, TEST_PORT + 6);
     const cached_fd = try clientConnect(io, TEST_PORT + 6);
-    defer _ = std.posix.system.close(cached_fd);
+    defer zix.utils.fd_io.close(cached_fd);
 
     try sendPreface(cached_fd);
     try sendGet(cached_fd, 1, "/shared.js", null);
@@ -438,7 +443,7 @@ test "zix integration: Http2 404s an unmatched path with no file behind it" {
     const thread = try spawnServer(&ctx, io, TEST_PORT + 4);
 
     const fd = try clientConnect(io, TEST_PORT + 4);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendGet(fd, 1, "/absent.css", null);
@@ -480,7 +485,7 @@ test "zix integration: Http2 answers a Range with 206 over h2c" {
     const thread = try spawnServer(&ctx, io, TEST_PORT + 7);
 
     const fd = try clientConnect(io, TEST_PORT + 7);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendGetRange(fd, 1, "/media.bin", null, "bytes=1000-20999");
@@ -520,7 +525,7 @@ test "zix integration: Http2 answers 416 for an unsatisfiable Range over h2c" {
     const thread = try spawnServer(&ctx, io, TEST_PORT + 8);
 
     const fd = try clientConnect(io, TEST_PORT + 8);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendGetRange(fd, 1, "/small.txt", null, "bytes=500-600");

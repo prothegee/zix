@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 // https/1.1 over TLS. The Http1 server serves cleartext by default. Attaching a Tls.Context
@@ -47,8 +48,9 @@ pub fn main(process: std.process.Init) !void {
         .port = PORT,
         .tls = &tls,
         // .EPOLL / .URING terminate TLS in the event-driven epoll-mux worker (keep-alive, many
-        // connections per worker). .ASYNC / .POOL / .MIXED use the thread-per-connection path.
-        .dispatch_model = .EPOLL,
+        // connections per worker). .ASYNC uses the thread-per-connection path, which also serves
+        // TLS 1.2, so the model is picked per target at comptime (ADR-065).
+        .dispatch_model = if (builtin.os.tag == .linux) .URING else .ASYNC,
         .workers = 1,
     });
     defer server.deinit();

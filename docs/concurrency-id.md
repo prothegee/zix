@@ -1,6 +1,6 @@
 # Model Konkurensi: zix
 
-Lima model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Wajib: setel secara eksplisit (tidak ada default).
+Tiga model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model` (enum `DispatchModel`) di `HttpServerConfig` atau `TcpServerConfig`. Wajib: setel secara eksplisit (tidak ada default).
 
 ---
 
@@ -8,85 +8,31 @@ Lima model dispatch untuk HTTP dan raw TCP. Pilih melalui `config.dispatch_model
 
 ```zig
 pub const DispatchModel = enum(u8) {
-    ASYNC = 0, // single accept, io.async() dispatch
-    POOL  = 1, // work-queue thread pool
-    MIXED = 2, // N accept threads, each dispatching via io.async()
-    EPOLL = 3, // shared-nothing epoll workers, Linux-only
-    URING = 4, // shared-nothing io_uring workers, Linux-only
+    ASYNC = 0, // single accept, io.async() dispatch, satu-satunya model portabel
+    EPOLL = 1, // shared-nothing epoll workers, Linux-only
+    URING = 2, // shared-nothing io_uring workers, Linux-only
 };
 ```
 
-Didefinisikan sekali di `src/tcp/config.zig`. Diekspor ulang oleh `src/tcp/http/config.zig` (untuk `zix.Http`) dan diimpor oleh `src/tcp/http2/grpc/config.zig` (untuk `zix.Grpc`). Kelima nilai tersedia di setiap konfigurasi.
+Didefinisikan sekali di `src/tcp/config.zig`. Diekspor ulang oleh `src/tcp/http/config.zig` (untuk `zix.Http`) dan diimpor oleh `src/tcp/http2/grpc/config.zig` (untuk `zix.Grpc`). Ketiga nilai tersedia di setiap konfigurasi.
 
-`.EPOLL = 3` hanya tersedia di Linux. `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` mengimplementasikannya secara native di Linux. Build non-Linux akan fallback ke `.POOL` secara otomatis. `.URING = 4` juga hanya tersedia di Linux dan native di `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, dan `zix.Fix`. Handler per-connection `zix.Tcp` melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring secara native). Lihat tabel Perbandingan Model Dispatch di bawah.
+`.EPOLL = 1` hanya tersedia di Linux. `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` mengimplementasikannya secara native di Linux. `.URING = 2` juga hanya tersedia di Linux dan native di `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, dan `zix.Fix`. Handler per-connection `zix.Tcp` melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring secara native). Lihat tabel Perbandingan Model Dispatch di bawah.
 
----
+Di luar Linux tidak ada penurunan diam-diam: `run()` mengembalikan `error.DispatchModelUnsupported` saat model-nya `.EPOLL` atau `.URING`, jadi pemanggil tidak pernah mengira mendapat model yang tidak ia dapatkan (ADR-065). Pemanggil portabel memilih model per target saat comptime:
 
-## .POOL: Work-Queue Thread Pool
-
-N accept thread mendorong koneksi yang diterima ke `ConnQueue` bersama. M pool thread mengambil koneksi dan menanganinya secara sinkron dengan blocking I/O. `SO_REUSEPORT` memungkinkan semua accept thread mendengarkan port yang sama secara paralel.
-
-```
-Main thread:
-  create ConnQueue + std.Io.Threaded backend
-  spawn pool_size pool threads
-  spawn worker_count accept threads
-  join accept threads -> queue.close() -> join pool threads
-
-Accept threads (worker_count, default cpu_count):
-  bind/listen on same port with SO_REUSEPORT
-  loop:
-    stream = accept(io)
-    queue.push(stream)   <- fast, never blocks on I/O
-
-Pool threads (pool_size, default max(10, cpu_count * 2)):
-  loop:
-    stream = queue.pop()          <- blocks until a connection arrives
-    handleConnection(stream, io)  <- synchronous blocking I/O, keep-alive loop
-    (loop, next pop)
-```
-
-**Kapan menggunakan:**
-- Throughput terbaik pada jumlah koneksi yang tinggi.
-- `dispatch_model = .POOL` (eksplisit).
-- `workers = 0` (default) menggunakan cpu_count accept thread.
-- `workers = N` menggunakan tepat N accept thread.
-- `pool_size = 0` (default) mengatur ukuran pool menjadi `max(10, cpu_count * 2)`.
-- `pool_size = N` menggunakan tepat N pool thread.
-
-**Persyaratan OS:** `SO_REUSEPORT` (Linux >= 3.9, macOS, BSD).
-
-**Contoh** (`examples/http_basic_2_pool.zig` dengan POOL eksplisit):
 ```zig
-pub fn main(process: std.process.Init) !void {
-    var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
-        .{ .path = "/", .handler = homeHandler },
-    }).dispatch, .{
-        .io             = process.io,
-        .dispatch_model = .POOL,
-        // workers   = 0  -> cpu_count accept threads
-        // pool_size = 0  -> max(10, cpu_count * 2) pool threads
-    });
-    try server.run();
-}
+const builtin = @import("builtin");
+
+const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
 ```
 
-**Jumlah thread eksplisit:**
-```zig
-var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
-    .{ .path = "/", .handler = homeHandler },
-}).dispatch, .{
-    .io        = process.io,
-    .workers   = 4,   // 4 accept threads
-    .pool_size = 32,  // 32 pool threads
-});
-```
+Gate-nya satu predikat bersama, `zix.utils.dispatch_support.isSupported`, yang dikonsultasi oleh `run()` setiap engine sebelum ia mem-bind listener atau men-spawn thread TLS. Jadi config yang ditolak tidak meninggalkan apa pun.
 
 ---
 
 ## .ASYNC: Single Accept, Dispatch io.async()
 
-Satu accept thread mendispatch setiap koneksi yang diterima sebagai concurrent task melalui `io.async()` (non-blocking). Pemanggil memiliki backend `std.Io`. Paling baik untuk beban kerja latensi rendah dan koneksi yang berumur panjang (SSE, WebSocket) di mana pool thread tidak boleh diblokir.
+Satu accept thread mendispatch setiap koneksi yang diterima sebagai concurrent task melalui `io.async()` (non-blocking). Pemanggil memiliki backend `std.Io`. Paling baik untuk beban kerja latensi rendah dan koneksi yang berumur panjang (SSE, WebSocket), dan satu-satunya model yang tersedia di semua platform.
 
 ```
 Main thread:
@@ -101,10 +47,11 @@ Handler tasks (one per active connection):
 ```
 
 **Kapan menggunakan:**
-- SSE dan WebSocket: koneksi berumur panjang menghabiskan pool thread di `.POOL`. `.ASYNC` lebih direkomendasikan.
+- Target non-Linux apa pun: `.EPOLL` dan `.URING` ditolak di sana, jadi ini model yang dipilih.
+- SSE dan WebSocket: satu stream terbuka hanya memakai satu task, bukan slot worker event loop.
 - Perlu `concurrent_limit` eksplisit (deployment dengan sumber daya terbatas).
 - `dispatch_model = .ASYNC` di `HttpServerConfig`.
-- `workers` dan `pool_size` diabaikan.
+- `workers` diabaikan (selalu tepat satu accept thread).
 
 **Contoh** (`examples/http_sse.zig`, `examples/http_websocket.zig`):
 ```zig
@@ -133,38 +80,6 @@ var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
 
 ---
 
-## .MIXED: N Accept Thread, Dispatch io.async()
-
-N accept thread masing-masing mendispatch koneksi melalui `io.async()` secara langsung, tanpa `ConnQueue`. Throughput dan latensi yang seimbang, jitter lebih tinggi dibanding `.POOL` saat saturasi karena fallback `io.async()` ke eksekusi inline.
-
-```
-Main thread:
-  spawn worker_count accept threads
-
-Accept threads (worker_count, default cpu_count):
-  bind -> listen with SO_REUSEPORT
-  loop:
-    stream = accept(io)
-    io.async(handleConnection, stream)
-```
-
-**Kapan menggunakan:**
-- Paralelisme multi-accept tanpa blocking pool.
-- `dispatch_model = .MIXED` di `HttpServerConfig`.
-- `pool_size` diabaikan. `workers` mengontrol jumlah accept thread.
-
-**Contoh:**
-```zig
-var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
-    .{ .path = "/", .handler = homeHandler },
-}).dispatch, .{
-    .io             = process.io,
-    .dispatch_model = .MIXED,
-});
-```
-
----
-
 ## .EPOLL: Shared-Nothing epoll Event Loop (Linux-only)
 
 Setiap worker memiliki `SO_REUSEPORT` listener dan `epoll` instance tersendiri. Kernel
@@ -172,12 +87,12 @@ mendistribusikan koneksi baru ke listener per-worker. Tidak ada queue bersama, t
 handoff fd antar thread. Setiap worker menerima, mendaftarkan, membaca, dan merespons
 koneksinya sendiri tanpa menyentuh state worker lain.
 
-**Mengapa ini ada:** `.POOL` dan `.ASYNC` keduanya membayar biaya wakeup lintas thread pada
-setiap koneksi yang diterima (baik melalui `ConnQueue.pop()` maupun melalui fiber scheduler
-`io.async()`). Pada jumlah koneksi sangat tinggi di mana koneksi cepat namun banyak yang
-tumpang tindih, contention antrian menumpuk. Dengan shared-nothing, worker menerima langsung
-di listenernya sendiri dan menangani semua I/O secara inline: tanpa mutex, tanpa condvar,
-tanpa handoff fd.
+**Mengapa ini ada:** `.ASYNC` membayar biaya wakeup lintas thread pada setiap koneksi yang
+diterima (melalui fiber scheduler `io.async()`), dan hanya satu thread yang menerima. Pada
+jumlah koneksi sangat tinggi di mana koneksi cepat namun banyak yang tumpang tindih, jalur
+accept tunggal itu dan hand-off scheduler-nya sama-sama menjadi bottleneck. Dengan
+shared-nothing, setiap worker menerima langsung di listenernya sendiri dan menangani semua I/O
+secara inline: tanpa mutex, tanpa condvar, tanpa handoff fd.
 
 ```
 Worker (workers, default cpu_count):
@@ -212,7 +127,7 @@ dan hanya menempati satu entri di epoll set per-worker.
   worker ke `epoll_wait`.
 - Ingin menghindari overhead fiber scheduler `io.async()` sepenuhnya.
 - `dispatch_model = .EPOLL` di `HttpServerConfig` atau `Http1ServerConfig`.
-- `workers` mengontrol jumlah worker (0 = cpu_count). `pool_size` diabaikan untuk `zix.Http`.
+- `workers` mengontrol jumlah worker (0 = cpu_count) di setiap engine.
 
 **Contoh (`zix.Http`):**
 ```zig
@@ -244,20 +159,18 @@ try server.run();
 
 | Item | Detail |
 | :- | :- |
-| Platform | Hanya Linux (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Non-Linux fallback ke `.POOL` secara otomatis (dengan debug print) |
+| Platform | Hanya Linux (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` setelah mencatat model mana yang ditolak |
 | Ketersediaan | `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, dan `zix.Tcp` diimplementasikan secara native di Linux |
 | Model accept (`zix.Http`) | Setiap worker memiliki `SO_REUSEPORT` listener tersendiri. Kernel mendistribusikan koneksi ke worker: tanpa antrian accept bersama |
-| Perbedaan gRPC | `zix.Grpc` menggunakan model multiplexed shared-nothing: satu worker mendrive banyak koneksi h2 non-blocking via resumable state machine. `pool_size` sebagai jumlah worker. Lihat ADR-031 |
-| Perbedaan FIX dan TCP | `zix.Fix` dan `zix.Tcp` EPOLL menggunakan desain terpusat: satu accept loop mendorong fd ke antrian bersama, pool worker pop dan menahan setiap koneksi sepanjang hidupnya. `pool_size` sebagai jumlah worker |
-| Field `workers` (`zix.Http`, `zix.Http1`) | Mengontrol jumlah thread worker shared-nothing (0 = cpu_count). `pool_size` diabaikan |
-| Field `pool_size` (gRPC, FIX, TCP) | Mengontrol jumlah worker multiplexed atau pool. Lihat dokumentasi per-protokol |
+| Perbedaan gRPC | `zix.Grpc` menggunakan model multiplexed shared-nothing: satu worker mendrive banyak koneksi h2 non-blocking via resumable state machine. Lihat ADR-031 |
+| Field `workers` | Mengontrol jumlah worker di setiap engine (0 = cpu_count) |
 | Biaya idle keep-alive | Hampir nol: socket idle duduk di epoll set tanpa menahan thread apapun |
 | Debugging | `strace` atau `perf` akan menampilkan `epoll_wait` mendominasi waktu idle, ini adalah perilaku yang diharapkan dan benar |
 
 **Kapan TIDAK menggunakan:**
 - SSE atau WebSocket via `zix.Http`: koneksi tetap aktif dan data mengalir terus-menerus, blocking read akan menahan worker. Gunakan `.ASYNC`.
-- Target non-Linux: gunakan `.POOL` atau `.ASYNC` secara eksplisit untuk menghindari fallback dengan debug print.
-- Ketika jumlah koneksi rendah (< beberapa ratus): model `.POOL` atau `.ASYNC` yang lebih sederhana akan memiliki performa yang sama atau lebih baik dengan kompleksitas yang lebih rendah.
+- Target non-Linux: `run()` menolak model-nya, jadi pilih `.ASYNC` secara eksplisit.
+- Ketika jumlah koneksi rendah (< beberapa ratus): model `.ASYNC` yang lebih sederhana akan memiliki performa yang sama atau lebih baik dengan kompleksitas yang lebih rendah.
 
 ---
 
@@ -265,16 +178,17 @@ try server.run();
 
 `.URING` adalah saudara completion-based dari `.EPOLL`: topologi thread-per-core, shared-nothing yang sama (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa queue bersama, tanpa perpindahan fd antar thread), tetapi accept, read, dan write disubmit sebagai SQE io_uring dan dipanen sebagai CQE alih-alih menunggu readiness `epoll_wait`. Sebagian besar transisi syscall di-batch ke dalam ring (ADR-037 Fase 4).
 
-- Engine native: `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring). Build non-Linux fallback ke `.POOL`.
-- `workers` (Http/Http1) atau `pool_size` (gRPC/FIX/TCP) menentukan jumlah worker, persis seperti `.EPOLL`.
+- Engine native: `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat ke `.EPOLL` (callback framed `zix.Tcp` menjalankan ring). Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`.
+- `workers` menentukan jumlah worker di setiap engine, persis seperti `.EPOLL`.
 - Di loopback `.URING` setara `.EPOLL` pada throughput dan total CPU, menang terutama pada cache locality per-request. Di mesin many-core, ring close (`prep_close`, ADR-041) membuat worker terus memanen completion lintas connection churn alih-alih memblokir di `close` sinkron, jadi `.URING` mencapai paritas atau lebih baik dari `.EPOLL` di setiap beban yang diukur dengan memori jauh lebih sedikit.
+- Ketika io_uring sendiri tidak tersedia di host (kernel lama, `RLIMIT_MEMLOCK` rendah, sandbox), engine melipat ke loop `.EPOLL` dengan notice yang dicatat. Itu capability gap saat runtime di platform yang didukung, bukan penolakan platform di atas.
 - "Kapan tidak digunakan" sama dengan `.EPOLL`: SSE / WebSocket di `zix.Http`, jumlah koneksi rendah, target non-Linux.
 
 ---
 
 ## Mengapa Dispatch Loop Per-Engine
 
-Tiap engine memegang dispatch loop-nya sendiri di `server.zig`-nya masing-masing, bukan di belakang satu multiplexer generik. Pemisahan ini disengaja dan justru merupakan optimasinya: kepemilikan per-engine membuat tiap engine menyetel hot path-nya untuk bentuk koneksinya sendiri.
+Tiap engine memegang dispatch loop-nya sendiri (`.ASYNC` / `.EPOLL` / `.URING`) di `server.zig`-nya masing-masing, bukan di belakang satu multiplexer generik. Pemisahan ini disengaja dan justru merupakan optimasinya: kepemilikan per-engine membuat tiap engine menyetel hot path-nya untuk bentuk koneksinya sendiri.
 
 Contoh paling jelas adalah connection table `.EPOLL`, yang tampak sebagai bagian paling terduplikasi tetapi sebenarnya terspesialisasi per engine:
 
@@ -294,46 +208,45 @@ Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini 
 
 | Field | Default | Makna |
 | :- | :- | :- |
-| `dispatch_model = .POOL` | work-queue thread pool | N accept thread + M pool thread |
 | `dispatch_model = .ASYNC` | single accept, io.async() | 1 accept thread, io.async() per koneksi |
-| `dispatch_model = .MIXED` | N accept, io.async() | N accept thread, masing-masing mendispatch via io.async() |
-| `workers = 0` | cpu_count thread | digunakan oleh `.POOL`, `.MIXED`, dan `.EPOLL` (untuk `zix.Http` dan `zix.Http1`) |
-| `workers = N` | N thread | override eksplisit untuk `.POOL`, `.MIXED`, dan `.EPOLL` (untuk `zix.Http` dan `zix.Http1`) |
-| `pool_size = 0` | `max(10, cpu_count * 2)` | jumlah pool thread untuk `.POOL`. Jumlah worker EPOLL untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
-| `pool_size = N` | N pool atau mux worker | ukuran eksplisit untuk `.POOL`. Jumlah worker EPOLL eksplisit untuk `zix.Grpc`, `zix.Fix`, `zix.Tcp` |
+| `dispatch_model = .EPOLL` | worker epoll shared-nothing | satu worker per core, masing-masing dengan listener dan epoll instance sendiri |
+| `dispatch_model = .URING` | worker io_uring shared-nothing | satu worker per core, masing-masing dengan listener dan ring sendiri |
+| `workers = 0` | cpu_count thread | jumlah worker untuk `.EPOLL` dan `.URING` di setiap engine, diabaikan oleh `.ASYNC` |
+| `workers = N` | N thread | jumlah worker eksplisit untuk `.EPOLL` dan `.URING`, diabaikan oleh `.ASYNC` |
 
 ---
 
 ## Perbandingan Model Dispatch
 
-| | `.POOL` | `.ASYNC` | `.MIXED` | `.EPOLL` |
-| :- | :- | :- | :- | :- |
-| Accept thread | cpu_count (atau N) | 1 | cpu_count (atau N) | cpu_count (atau N) |
-| Dispatch koneksi | `queue.pop()` + sync I/O | task `io.async()` | task `io.async()` | epoll per-worker, level-triggered |
-| Overhead scheduler | tidak ada (blocking pop, tanpa fiber) | ada (condvar wakeup) | ada (condvar wakeup) | tidak ada (epoll, Linux only) |
-| Pool thread | ada (`pool_size`) | tidak ada | tidak ada | tidak ada |
-| `SO_REUSEPORT` | ya | tidak | ya | ya (listener per-worker, Http only) |
-| Field `workers` digunakan | ya | tidak (diabaikan) | ya | ya (Http/Http1 only) |
-| Field `pool_size` digunakan | ya | tidak (diabaikan) | tidak (diabaikan) | tidak (Http: diabaikan). Ya (gRPC/FIX/TCP) |
-| Terbaik untuk | throughput, jumlah koneksi tinggi | SSE, WebSocket, latensi rendah | balanced, multi-accept async | HTTP/1 atau gRPC throughput tinggi di Linux |
-| Tersedia di | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Tcp, Fix | Http, Http2, Grpc, Fix, Tcp (Linux-only) |
+| | `.ASYNC` | `.EPOLL` | `.URING` |
+| :- | :- | :- | :- |
+| Accept thread | 1 | cpu_count (atau N) | cpu_count (atau N) |
+| Dispatch koneksi | task `io.async()` | epoll per-worker, level-triggered | io_uring per-worker, completion-based |
+| Overhead scheduler | ada (condvar wakeup) | tidak ada (epoll, Linux only) | tidak ada (ring, Linux only) |
+| `SO_REUSEPORT` | tidak | ya (listener per-worker) | ya (listener per-worker) |
+| Field `workers` digunakan | tidak (diabaikan) | ya | ya |
+| Platform | semua | hanya Linux | hanya Linux |
+| Terbaik untuk | SSE, WebSocket, latensi rendah, non-Linux | HTTP/1 atau gRPC throughput tinggi di Linux | sama seperti `.EPOLL`, memori lebih rendah saat churn |
+| Tersedia di | Http, Http1, Http2, Grpc, Tcp, Fix | Http, Http1, Http2, Grpc, Fix, Tcp | Http, Http1, Http2, Grpc, Fix (Tcp melipat ke `.EPOLL`) |
 
 ---
 
 ## Penerapan per Protokol
 
-| Protokol | `.POOL` | `.ASYNC` | `.MIXED` | `.EPOLL` |
-| :- | :- | :- | :- | :- |
-| HTTP | ya | ya (default) | ya | ya, Linux-only |
-| SSE | tidak direkomendasikan (menghabiskan pool thread) | ya, direkomendasikan | ya | n/a |
-| WebSocket | tidak direkomendasikan (koneksi berumur panjang) | ya, direkomendasikan | ya | n/a |
-| HTTP/2 (h2c) | ya | ya (default) | ya | ya, Linux-only |
-| HTTP/3 (QUIC) | ya | ya (single worker) | ya | ya, Linux-only |
-| gRPC (h2c) | ya | ya (default) | ya | ya, Linux-only |
-| TCP (raw stream) | ya | ya (default) | ya | ya, Linux-only |
-| FIX 4.x | ya | ya (default) | ya | ya, Linux-only |
-| UDP | n/a | n/a | n/a | n/a |
-| UDS (stream) | n/a | ya (io.concurrent() per koneksi) | n/a | n/a |
+| Protokol | `.ASYNC` | `.EPOLL` | `.URING` |
+| :- | :- | :- | :- |
+| HTTP | ya | ya, Linux-only | ya, Linux-only |
+| SSE | ya, direkomendasikan | n/a | n/a |
+| WebSocket | ya, direkomendasikan | n/a | n/a |
+| HTTP/2 (h2c) | ya | ya, Linux-only | ya, Linux-only |
+| HTTP/3 (QUIC) | ya (single worker) | ya, Linux-only | ya, Linux-only |
+| gRPC (h2c) | ya | ya, Linux-only | ya, Linux-only |
+| TCP (raw stream) | ya | ya, Linux-only | hanya callback framed, handler per-connection melipat ke `.EPOLL` |
+| FIX 4.x | ya | ya, Linux-only | ya, Linux-only |
+| UDP (raw) | ya (single worker) | ya, Linux-only | ya, Linux-only |
+| UDS (stream) | ya (io.concurrent() per koneksi) | n/a | n/a |
+
+Http3 di bawah `.EPOLL` / `.URING` menjalankan worker per-core sungguhan (CID steering lintas core untuk migrasi mid-connection adalah v2, ADR-049 fase 3).
 
 ---
 
@@ -344,8 +257,6 @@ Setiap model menamai dua hal sekaligus: bentuk konkurensi (single atau multi-cor
 | Model | Perilaku core | OS | Status |
 | :- | :- | :- | :- |
 | `.ASYNC` | single | semua | sekarang |
-| `.POOL` | multi (thread pool) | semua | sekarang |
-| `.MIXED` | multi (hybrid) | semua | sekarang |
 | `.EPOLL` | multi (per-core) | Linux | sekarang |
 | `.URING` | multi (per-core) | Linux | sekarang |
 | `.KQUEUE` | multi (per-core) | macOS / BSD | rencana |
@@ -355,24 +266,24 @@ Setiap model menamai dua hal sekaligus: bentuk konkurensi (single atau multi-cor
 
 Seperti `.EPOLL` dan `.URING` saat ini, backend ini whole-family: setiap engine yang memilih `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) mendapat backend platform-nya lewat enum yang sama.
 
-Tidak ada keyword auto-select. Kode portable memilih bentuk portable (`.POOL` / `.MIXED`) atau menamai backend yang tepat dengan satu baris comptime switch pada `builtin.os.tag`. Dua ketidakcocokan ditangani berbeda:
+Tidak ada keyword auto-select. Kode portable memilih `.ASYNC` langsung atau menamai backend yang tepat dengan satu baris comptime switch pada `builtin.os.tag`. Dua ketidakcocokan ditangani berbeda:
 
-- Backend yang tidak mungkin ada di OS target (misalnya `.IOCP` di Linux) adalah compile-time error (category error), tertangkap saat build.
-- Backend yang ada tapi tidak bisa dipakai mesin saat runtime (misalnya `.URING` di kernel lama) di-fold ke model yang bekerja dengan notice yang dicatat (capability gap).
+- Backend yang tidak bisa berjalan di OS target (misalnya `.EPOLL` di luar Linux) ditolak oleh `run()` dengan `error.DispatchModelUnsupported`. Ini config error, dilaporkan alih-alih diakali (ADR-065).
+- Backend yang ada tapi tidak bisa dipakai mesin saat runtime (misalnya `.URING` di kernel lama) di-fold ke model yang bekerja dengan notice yang dicatat. Ini capability gap di platform yang memang mendukung model tersebut.
 
-Saat ini, sebelum backend macOS dan Windows hadir, `.EPOLL` di build non-Linux di-fold ke `.POOL` sebagai interim. `.KQUEUE` dan `.IOCP` hanya nama yang dipesan, belum diimplementasikan dan tidak hadir sebagai file source. Lihat ADR-050.
+Sampai backend macOS dan Windows hadir, `.ASYNC` adalah model untuk setiap target non-Linux. `.KQUEUE` dan `.IOCP` hanya nama yang dipesan, belum diimplementasikan dan tidak hadir sebagai file source. Keduanya juga butuh maintainer sebelum bisa hadir: model yang zix pertahankan adalah model yang bisa ia rawat, dan itulah alasan `.POOL` dan `.MIXED` dilepas di ADR-065. Lihat ADR-050 dan ADR-065.
 
 ---
 
 ## Channel
 
-`zix.Channel` **bukan** model konkurensi. Channel adalah primitif pengiriman pesan dalam proses yang bekerja berdampingan dengan kelima model dispatch. Channel menghubungkan producer dan consumer task (OS thread atau fiber `io.async()`) di dalam proses yang sama. Channel tidak melintasi batas jaringan atau batas proses.
+`zix.Channel` **bukan** model konkurensi. Channel adalah primitif pengiriman pesan dalam proses yang bekerja berdampingan dengan ketiga model dispatch. Channel menghubungkan producer dan consumer task (OS thread atau fiber `io.async()`) di dalam proses yang sama. Channel tidak melintasi batas jaringan atau batas proses.
 
 ```
 Producer task --> [ Channel(T) ring buffer ] --> Consumer task
 ```
 
-Kelima model dispatch dapat menghasilkan task `io.async()` atau OS thread yang berkomunikasi melalui Channel. Channel itu sendiri tidak bergantung pada model dispatch yang sedang digunakan.
+Ketiga model dispatch dapat menghasilkan task `io.async()` atau OS thread yang berkomunikasi melalui Channel. Channel itu sendiri tidak bergantung pada model dispatch yang sedang digunakan.
 
 | Properti | Channel |
 | :- | :- |

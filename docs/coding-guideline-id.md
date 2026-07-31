@@ -49,8 +49,8 @@ test "zix: unit test" {
 | File implementasi | `lowercase.zig` | `server.zig`, `config.zig` |
 | Type / struct / enum | `PascalCase` | `TcpServerConfig`, `DispatchModel`, `RespSink` |
 | Function | `camelCase` | `serveDispatch`, `frameRespond`, `uringUnavailableReason` |
-| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `pool_size`(gunakan `_var` jika penggunaan dalam hal private) |
-| Enum value domain / publik / config | `UPPER_CASE` | `ASYNC`, `POOL`, `EPOLL`, `URING` |
+| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `worker_stack_size_bytes`(gunakan `_var` jika penggunaan dalam hal private) |
+| Enum value domain / publik / config | `UPPER_CASE` | `ASYNC`, `EPOLL`, `URING` |
 | Error | `error.PascalCase` | `error.PortNotConfigured`, `error.ConnectionClosed` |
 | Konstanta versi comptime | `UPPER_CASE` | `ZIG_SEMVER.MAJOR` |
 
@@ -230,21 +230,35 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
 
 ## 8. Dispatch model dan fallback platform
 
-Concurrency adalah satu enum `DispatchModel` (`ASYNC`, `POOL`, `MIXED`, `EPOLL`, `URING`), tiap model di file sendiri di bawah `dispatch/` (ADR-043), dipilih oleh `switch` tipis di server. `.ASYNC = 0` adalah zero value sehingga config zero-init mendapat default yang masuk akal.
+Concurrency adalah satu enum `DispatchModel` (`ASYNC`, `EPOLL`, `URING`), tiap model di file sendiri di bawah `dispatch/` (ADR-043), dipilih oleh `switch` tipis di server. `.ASYNC = 0` adalah zero value sehingga config zero-init mendapat default yang masuk akal, dan itu satu-satunya model yang tersedia di semua platform.
 
-Model Linux-only menurun secara graceful alih-alih menghilang: comptime OS check melipat `.EPOLL` ke `.POOL` di luar Linux, dan runtime probe melipat `.URING` ke EPOLL adapter ketika io_uring tidak bisa dipakai (umumnya cap `RLIMIT_MEMLOCK`), masing-masing mencatat alasannya lewat `common.logSystem`:
+Dua ketidakcocokan berbeda, ditangani dengan dua cara berbeda (ADR-065):
+
+- **Model yang tidak bisa dijalankan OS target** (`.EPOLL` / `.URING` di luar Linux) adalah config error. `run()` mencatat model mana yang ditolak lalu mengembalikan `error.DispatchModelUnsupported`. Ia tidak pernah menurunkan model: pemanggil yang meminta loop per-core lalu diam-diam mendapat sesuatu yang lain tidak punya cara untuk tahu.
+- **Model yang tidak bisa dipakai host saat ini** (io_uring tidak tersedia di Linux, umumnya cap `RLIMIT_MEMLOCK`) adalah capability gap. `.URING` melipat ke loop EPOLL dan mencatat alasannya, sehingga server tidak hilang tepat setelah bind.
+
+Cek platform-nya satu predikat bersama, dikonsultasi sebelum server mem-bind apa pun:
 
 ```zig
-.EPOLL, .URING => if (comptime builtin.target.os.tag == .linux)
-    epoll_model.runEpoll(cfg, handler)
-else blk: {
-    common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
+if (!dispatch_support.isSupported(cfg.dispatch_model)) {
+    common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-    break :blk pool_model.runPool(cfg, handler);
-},
+    return error.DispatchModelUnsupported;
+}
 ```
 
-> Pilih comptime gating untuk fakta build-time (`comptime builtin.target.os.tag`), runtime probe hanya untuk fakta host-time (memlock, ketersediaan ring). Selalu catat alasan fallback. Jangan pernah biarkan server diam-diam hilang setelah bind.
+Arm `switch`-nya tetap memakai comptime OS gate juga, karena loop khusus Linux hanya bisa di-compile di Linux:
+
+```zig
+.EPOLL => if (comptime builtin.target.os.tag == .linux)
+    epoll_model.runEpoll(cfg, handler)
+else
+    error.DispatchModelUnsupported,
+```
+
+> Pilih comptime gating untuk fakta build-time (`comptime builtin.target.os.tag`), runtime probe hanya untuk fakta host-time (memlock, ketersediaan ring). Selalu catat alasannya. Jangan pernah biarkan server diam-diam hilang setelah bind, dan jangan pernah biarkan ia diam-diam menyajikan model yang tidak diminta pemanggil.
+
+> Model yang zix pertahankan adalah model yang bisa zix rawat. `.POOL` dan `.MIXED` dilepas di ADR-065 tepat karena alasan itu, dan `.KQUEUE` / `.IOCP` tetap nama yang dipesan sampai masing-masing punya maintainer.
 
 Guard yang sama berlaku untuk fast path Linux-only manapun yang ditambahkan murni demi performa, bukan cuma dispatch model (misalnya helper `wallClockNs` / `nowUs` yang memanggil `std.os.linux.clock_gettime` langsung, bukan lewat `std.posix.system`). Branch Linux (`comptime builtin.target.os.tag == .linux`, mencakup x86_64-linux dan aarch64-linux secara identik) adalah platform utama yang guarded: pertahankan agar tetap byte-identical dengan yang sudah terbukti, dan tambahkan tiap platform lain sebagai branch terpisah di sampingnya, jangan digabung jadi satu implementasi bersama.
 

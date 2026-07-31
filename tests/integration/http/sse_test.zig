@@ -1,60 +1,51 @@
-//! Integration tests: SseWriter wire format verified via an in-memory fd.
+//! Integration tests: SseWriter wire format verified over a connected descriptor pair.
 
 const std = @import("std");
 const zix = @import("zix");
 
-fn makeMemFd() !std.posix.fd_t {
-    return std.posix.memfd_create("sse_test", std.os.linux.MFD.CLOEXEC);
-}
-
-fn seekToStart(fd: std.posix.fd_t) void {
-    _ = std.posix.system.lseek(fd, 0, std.posix.SEEK.SET);
-}
-
-fn closefd(fd: std.posix.fd_t) void {
-    _ = std.posix.system.close(fd);
+/// A pair whose write end the writer targets and whose read end the assertion reads back.
+/// This replaced a memfd, which only exists on Linux: the pair needs no seek and works anywhere.
+fn makePair() !zix.utils.socket_pair.Pair {
+    return zix.utils.socket_pair.Pair.open(std.testing.allocator);
 }
 
 // --------------------------------------------------------- //
 
 test "zix integration: SseWriter writeEvent, data line wire format" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fd = try makeMemFd();
-    defer closefd(fd);
+    var pair = try makePair();
+    defer pair.deinit();
+    const fd = pair.fds[0];
 
     const sse = zix.Http.SseWriter{ .fd = fd };
     try sse.writeEvent("ping");
 
-    seekToStart(fd);
     var buf: [64]u8 = undefined;
-    const n = try std.posix.read(fd, &buf);
+    const n = try zix.utils.fd_io.readOnce(pair.fds[1], &buf);
     try std.testing.expectEqualStrings("data: ping\n\n", buf[0..n]);
 }
 
 test "zix integration: SseWriter writeNamedEvent, event + data lines wire format" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fd = try makeMemFd();
-    defer closefd(fd);
+    var pair = try makePair();
+    defer pair.deinit();
+    const fd = pair.fds[0];
 
     const sse = zix.Http.SseWriter{ .fd = fd };
     try sse.writeNamedEvent("update", "99");
 
-    seekToStart(fd);
     var buf: [64]u8 = undefined;
-    const n = try std.posix.read(fd, &buf);
+    const n = try zix.utils.fd_io.readOnce(pair.fds[1], &buf);
     try std.testing.expectEqualStrings("event: update\ndata: 99\n\n", buf[0..n]);
 }
 
 test "zix integration: SseWriter comment, comment line wire format" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
-    const fd = try makeMemFd();
-    defer closefd(fd);
+    var pair = try makePair();
+    defer pair.deinit();
+    const fd = pair.fds[0];
 
     const sse = zix.Http.SseWriter{ .fd = fd };
     try sse.comment("keepalive");
 
-    seekToStart(fd);
     var buf: [64]u8 = undefined;
-    const n = try std.posix.read(fd, &buf);
+    const n = try zix.utils.fd_io.readOnce(pair.fds[1], &buf);
     try std.testing.expectEqualStrings(": keepalive\n", buf[0..n]);
 }

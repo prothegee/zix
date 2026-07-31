@@ -1,6 +1,6 @@
 //! zix tcp server: the public Server type and the dispatch_model switch. Each
 //! dispatch model lives in its own file under dispatch/ (ADR-043). The
-//! per-connection handler runs on every model (URING folds to EPOLL), the
+//! per-connection handler runs on every model (.URING folds to .EPOLL), the
 //! framed callback runs natively on the io_uring ring under .URING.
 
 const std = @import("std");
@@ -10,11 +10,10 @@ const TcpServerConfig = Config.TcpServerConfig;
 const DispatchModel = Config.DispatchModel;
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
-const pool_model = @import("dispatch/pool.zig");
-const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const ignoreSigpipe = @import("../utils/ignore_sigpipe.zig").ignoreSigpipe;
+const dispatch_support = @import("../utils/dispatch_support.zig");
 
 // --------------------------------------------------------- //
 // Public surface re-exported from the dispatch helpers.
@@ -37,21 +36,24 @@ pub const FRAME_MAX_PAYLOAD = common.FRAME_MAX_PAYLOAD;
 fn serveDispatch(cfg: TcpServerConfig, handler: HandlerFn) !void {
     ignoreSigpipe();
 
+    // Reject an unrunnable model before binding, so a rejected config leaves nothing behind (ADR-065).
+    if (!dispatch_support.isSupported(cfg.dispatch_model)) {
+        common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+
+        return error.DispatchModelUnsupported;
+    }
+
     return switch (cfg.dispatch_model) {
         .ASYNC => async_model.runAsync(cfg, handler),
-        .POOL => pool_model.runPool(cfg, handler),
-        .MIXED => mixed_model.runMixed(cfg, handler),
         // The per-connection blocking handler cannot run on the single-threaded
         // .URING ring, so .URING folds to the .EPOLL shared-nothing loop here.
         // The framed callback path (Server.initFramed) does run natively on the
-        // ring (ADR-037, ADR-038).
+        // ring (ADR-037, ADR-038). The comptime guard stays because the epoll
+        // loop only compiles on Linux: the check above already rejected it here.
         .EPOLL, .URING => if (comptime builtin.target.os.tag == .linux)
             epoll_model.runEpoll(cfg, handler)
-        else blk: {
-            common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
-
-            break :blk pool_model.runPool(cfg, handler);
-        },
+        else
+            error.DispatchModelUnsupported,
     };
 }
 
@@ -83,7 +85,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
 
 /// Framed TCP server specialized over a comptime per-frame callback. On .URING
 /// the engine owns the connection and runs frame_fn on the io_uring ring. On
-/// every other model frame_fn is wrapped in a blocking per-connection adapter
+/// the remaining models frame_fn is wrapped in a blocking per-connection adapter
 /// and served through serveDispatch. run takes no callback argument: it is
 /// baked into the type at init.
 fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type {
@@ -261,7 +263,7 @@ test "zix tcp: TcpServer init with EPOLL dispatch model succeeds and deinit is s
     server.deinit();
 }
 
-test "zix tcp: TcpServer EPOLL uses workers field for worker count, pool_size is ignored" {
+test "zix tcp: TcpServer EPOLL uses the workers field for worker count" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -271,10 +273,8 @@ test "zix tcp: TcpServer EPOLL uses workers field for worker count, pool_size is
         .port = 9300,
         .dispatch_model = .EPOLL,
         .workers = 4,
-        .pool_size = 99,
     });
     try std.testing.expectEqual(@as(usize, 4), server.config.workers);
-    try std.testing.expectEqual(@as(usize, 99), server.config.pool_size);
 }
 
 test "zix tcp: TcpServer init, timeout fields default to zero" {
@@ -319,11 +319,11 @@ test "zix tcp: Tcp.Server.init bakes a comptime handler and stores config" {
         .io = threaded.io(),
         .ip = "127.0.0.1",
         .port = 9300,
-        .dispatch_model = .MIXED,
+        .dispatch_model = .EPOLL,
         .workers = 3,
     });
     try std.testing.expectEqual(@as(usize, 3), server.config.workers);
-    try std.testing.expectEqual(DispatchModel.MIXED, server.config.dispatch_model);
+    try std.testing.expectEqual(DispatchModel.EPOLL, server.config.dispatch_model);
 }
 
 test "zix tcp: Tcp.Server.initFramed, port zero returns PortNotConfigured" {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 // HTTP/2 over TLS (h2, RFC 7540 + 8446). The Http2 server serves h2c by default. Attaching a
@@ -37,7 +38,9 @@ pub fn main(process: std.process.Init) !void {
         .ip = IP,
         .port = PORT,
         .tls = &tls,
-        .dispatch_model = .EPOLL,
+        // Picked per target at comptime (ADR-065): .EPOLL / .URING terminate TLS in the
+        // epoll-mux worker on Linux, .ASYNC in the thread-per-connection path elsewhere.
+        .dispatch_model = if (builtin.os.tag == .linux) .URING else .ASYNC,
     });
     defer server.deinit();
 

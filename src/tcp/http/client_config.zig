@@ -33,10 +33,17 @@ pub const HttpClientConfig = struct {
     /// TCP connect timeout in milliseconds. 0 = no timeout (uses io backend default).
     connect_timeout_ms: u32 = 0,
     /// Time allowed to receive the first response byte after the request is sent, in milliseconds.
-    /// 0 = no timeout. v1: stored for future enforcement, not yet applied.
+    /// 0 = no timeout. Yields error.ResponseTimeout when a server accepts the connection and then
+    /// never answers, which without a bound parks the caller forever.
     response_timeout_ms: u32 = 0,
-    /// Time allowed to finish reading the full response body, in milliseconds.
-    /// 0 = no timeout. v1: stored for future enforcement, not yet applied.
+    /// Idle bound between response body reads, in milliseconds. The budget restarts on every chunk
+    /// that arrives, so a large body is not cut off for being large, only for going quiet.
+    /// 0 = no timeout. Yields error.ReadTimeout when the body stalls mid-transfer.
+    ///
+    /// Note:
+    /// - Applies to replies that declare a Content-Length. A chunked or close-delimited body has no
+    ///   byte count to stop on, so it stays on the unbounded read and only response_timeout_ms
+    ///   covers it.
     read_timeout_ms: u32 = 0,
     /// Maximum response body size in bytes. Yields error.BodyTooLarge when exceeded.
     max_response_body: usize = 1024 * 1024 * 4,

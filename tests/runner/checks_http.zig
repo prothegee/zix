@@ -12,6 +12,11 @@ const http3_client = @import("http3_client.zig");
 
 const Http2 = zix.Http2;
 
+/// Descriptor reads go through zix's own portable layer, which carries a backend for Windows,
+/// Linux and the other POSIX targets. std.posix.read and raw Linux syscalls both forced these
+/// checks to refuse Windows.
+const fd_io = zix.utils.fd_io;
+
 // --------------------------------------------------------- //
 
 pub fn runHttp(io: std.Io, server_path: []const u8, port: u16) !void {
@@ -27,6 +32,8 @@ pub fn runHttp(io: std.Io, server_path: []const u8, port: u16) !void {
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
     });
     defer client.deinit();
@@ -54,6 +61,8 @@ pub fn runHttp1(io: std.Io, server_path: []const u8, port: u16) !void {
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
     });
     defer client.deinit();
@@ -88,6 +97,8 @@ pub fn runHttpGet(
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 16384,
     });
     defer client.deinit();
@@ -123,6 +134,8 @@ pub fn runHttpHeader(io: std.Io, server_path: []const u8, port: u16, route: []co
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 16384,
     });
     defer client.deinit();
@@ -163,6 +176,8 @@ pub fn runHttpStatic(
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
     });
     defer client.deinit();
@@ -208,9 +223,6 @@ pub fn runHttpCompression(io: std.Io, server_path: []const u8, port: u16) !void 
 // Content-Length body (not EOF) so a keep-alive server cannot hang it. encoding is a compressed
 // coding, so contentEncoding() is never null.
 fn checkCoding(io: std.Io, port: u16, route: []const u8, encoding: zix.utils.compression.Encoding) !void {
-    // Raw fd wire checks are POSIX-only here: not ported to Windows.
-    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
-
     const token = encoding.contentEncoding().?;
 
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
@@ -228,7 +240,7 @@ fn checkCoding(io: std.Io, port: u16, route: []const u8, encoding: zix.utils.com
     var header_end: usize = 0;
     var content_length: usize = 0;
     while (len < buf.len) {
-        const n = std.posix.read(fd, buf[len..]) catch break;
+        const n = fd_io.readOnce(fd, buf[len..]) catch break;
         if (n == 0) break;
 
         len += n;
@@ -266,7 +278,7 @@ pub fn runSse(io: std.Io, server_path: []const u8, port: u16) !void {
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/events", .{port});
 
-    var sse_client = zix.Http.SseClient.init(.{ .io = io, .connect_timeout_ms = 3000 });
+    var sse_client = zix.Http.SseClient.init(.{ .io = io, .connect_timeout_ms = 3000, .response_timeout_ms = common.RESPONSE_TIMEOUT_MS, .read_timeout_ms = common.RESPONSE_TIMEOUT_MS });
     var stream = try sse_client.open(url);
     defer stream.deinit();
 
@@ -285,7 +297,7 @@ pub fn runWs(io: std.Io, server_path: []const u8, port: u16, ws_route: []const u
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "ws://127.0.0.1:{d}{s}", .{ port, ws_route });
 
-    var wsc = zix.Http.WsClient.init(.{ .io = io, .connect_timeout_ms = 3000 });
+    var wsc = zix.Http.WsClient.init(.{ .io = io, .connect_timeout_ms = 3000, .response_timeout_ms = common.RESPONSE_TIMEOUT_MS, .read_timeout_ms = common.RESPONSE_TIMEOUT_MS });
     var conn = try wsc.connect(url);
     defer conn.deinit();
 
@@ -298,9 +310,6 @@ pub fn runWs(io: std.Io, server_path: []const u8, port: u16, ws_route: []const u
 }
 
 pub fn runHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
-    // Raw fd wire checks are POSIX-only here: not ported to Windows.
-    if (comptime @import("builtin").target.os.tag == .windows) return error.PlatformNotSupported;
-
     var server_child = try common.spawnServer(io, server_path);
     defer server_child.kill(io);
 
@@ -341,15 +350,10 @@ pub fn runHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
     var rounds: usize = 0;
     while (rounds < 64) : (rounds += 1) {
         var tmp: [16384]u8 = undefined;
-        const rc = std.os.linux.read(fd, tmp[0..].ptr, tmp.len);
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
+        const got = try fd_io.readOnce(fd, &tmp);
+        if (got == 0) return error.ConnectionClosed;
 
-        if (try scanner.push(tmp[0..rc])) return;
+        if (try scanner.push(tmp[0..got])) return;
     }
 
     return error.NoStatus200;

@@ -1,6 +1,6 @@
 # HLD: zix.Tcp (raw stream)
 
-Raw TCP stream server and client. Generic byte-stream over IP with user-defined framing. The per-connection handler runs under ASYNC, POOL, MIXED, and EPOLL (all native on Linux, EPOLL folds to POOL on non-Linux). A separate per-frame callback path (`initFramed`) adds a native io_uring `.URING` ring (ADR-037). For the per-connection handler, `.URING` folds to `.EPOLL` (ADR-038).
+Raw TCP stream server and client. Generic byte-stream over IP with user-defined framing. The per-connection handler runs under ASYNC (portable) and EPOLL (Linux-only). A separate per-frame callback path (`initFramed`) adds a native io_uring `.URING` ring (ADR-037). For the per-connection handler, `.URING` folds to `.EPOLL` (ADR-038).
 
 ---
 
@@ -15,7 +15,7 @@ Implemented. See ADR-022 for design rationale.
 - Explicit over implicit: same config and dispatch-model pattern as `zix.Http`.
 - User owns the handler: `HandlerFn = *const fn(stream, io) void`, baked into the server type at `init` (ADR-038), identical in shape to `zix.Uds.HandlerFn`.
 - Length-prefixed framing built into the default echo handler and the client API (big-endian, network byte order).
-- ASYNC, POOL, MIXED, EPOLL dispatch models for the per-connection handler: same semantics as HTTP, all native on Linux (EPOLL folds to POOL on non-Linux). The per-frame `FrameFn` callback (`initFramed`) adds a native `.URING` ring path (ADR-037, ADR-038).
+- ASYNC and EPOLL dispatch models for the per-connection handler: same semantics as HTTP. EPOLL is Linux-only and `run()` rejects it off Linux with `error.DispatchModelUnsupported` (ADR-065). The per-frame `FrameFn` callback (`initFramed`) adds a native `.URING` ring path (ADR-037, ADR-038).
 - `initArgs()` on both server and client so `--ip` and `--port` are overridable at runtime without rebuilding.
 - No cross-protocol dependencies: `src/tcp/server.zig`, `src/tcp/client.zig`, `src/tcp/config.zig` have no import from `src/tcp/http/`.
 
@@ -45,9 +45,9 @@ pub const Tcp = @import("tcp/Tcp.zig");
 | :- | :- | :- |
 | `zix.Tcp.Server` | namespace | `init(handler, config)` / `initArgs(handler, config, args)` (per-connection), `initFramed(frame_fn, config)` / `initFramedArgs(frame_fn, config, args)` (per-frame ring), each returns a server with `run()` / `deinit()` |
 | `zix.Tcp.Client` | struct | `connect(config, io)` / `connectArgs(config, io, args)` / `sendMsg(io, msg)` / `recvMsg(io, buf)` / `deinit(io)` |
-| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `pool_size` (0), `worker_stack_size_bytes` (512 KiB), `reuseport_cbpf` (false), `uring_send_buf_size` (64 KiB), `uring_max_conns_per_worker` (65536), `recv_timeout_ms` (0), `send_timeout_ms` (0), `logger` (null) |
+| `zix.Tcp.ServerConfig` | struct | `io`, `ip`, `port`, `dispatch_model` (.ASYNC), `kernel_backlog` (4096), `max_recv_buf` (4096), `workers` (0), `worker_stack_size_bytes` (512 KiB), `reuseport_cbpf` (false), `uring_send_buf_size` (64 KiB), `uring_max_conns_per_worker` (65536), `recv_timeout_ms` (0), `send_timeout_ms` (0), `logger` (null) |
 | `zix.Tcp.ClientConfig` | struct | `ip`, `port`, `max_recv_buf` (4096) |
-| `zix.Tcp.DispatchModel` | enum(u8) | `ASYNC=0`, `POOL=1`, `MIXED=2`, `EPOLL=3`, `URING=4`. Per-connection handler: ASYNC/POOL/MIXED/EPOLL native, URING folds to EPOLL. Framed path: URING native. |
+| `zix.Tcp.DispatchModel` | enum(u8) | `ASYNC=0`, `EPOLL=1`, `URING=2`. Per-connection handler: ASYNC and EPOLL native, URING folds to EPOLL. Framed path: URING native. |
 | `zix.Tcp.HandlerFn` | type | `*const fn(stream: std.Io.net.Stream, io: std.Io) void` (per-connection, owns the stream) |
 | `zix.Tcp.FrameFn` | type | `*const fn(payload: []const u8, fd: std.posix.fd_t) void` (per-frame, engine owns the connection, never blocks, runs on the `.URING` ring) |
 | `zix.Tcp.echoHandler` | fn | Default echo handler: reads length-prefixed frames and echoes each back. Passed explicitly to `init` |
@@ -89,28 +89,6 @@ Frames with `payload_len == 0` or `payload_len > max_recv_buf` (default 4096) cl
 
 ## Dispatch Models
 
-### POOL
-
-N accept threads push accepted connections to a shared `ConnQueue`. M pool threads pop and handle each connection synchronously with blocking I/O.
-
-```mermaid
-flowchart TD
-    A["server.run()"] --> B["spawn pool_count pool threads"]
-    B --> C["spawn worker_count accept threads"]
-    C --> D["workerEntry loop"]
-    D --> E["stream = accept(io)"]
-    E --> F["queue.push(stream)"]
-    F --> D
-    B --> G["poolEntry loop"]
-    G --> H["stream = queue.pop()"]
-    H --> I["handler(stream, io)"]
-    I --> G
-```
-
-- `workers = 0` -> `cpu_count` accept threads.
-- `pool_size = 0` -> `max(10, cpu_count * 2)` pool threads.
-- All accept threads bind the same port via `SO_REUSEPORT` (`.reuse_address = true`).
-
 ### ASYNC
 
 Single accept thread dispatches each connection via `io.async()`. No pool threads or shared queue.
@@ -126,29 +104,12 @@ flowchart TD
     F --> G["stream.close(io)"]
 ```
 
-- `workers` and `pool_size` are ignored.
-- Preferred when connections are long-lived (keeps no pool threads occupied).
-
-### MIXED
-
-N accept threads, each dispatching connections via `io.async()` directly, no `ConnQueue`.
-
-```mermaid
-flowchart TD
-    A["server.run()"] --> B["spawn worker_count accept threads"]
-    B --> C["asyncWorkerEntry loop"]
-    C --> D["stream = accept(io)"]
-    D --> E["io.async(dispatchConn, task)"]
-    E --> C
-    E --> F["handler(stream, io) in async task"]
-```
-
-- `pool_size` is ignored. `workers = 0` -> `cpu_count` accept threads.
-- Balanced throughput and latency.
+- `workers` is ignored (there is always exactly one accept thread).
+- Preferred when connections are long-lived, and the only model available on every platform.
 
 ### EPOLL
 
-Shared-nothing: each worker owns one `SO_REUSEPORT` listener and one epoll instance. The kernel load-balances accepted connections across workers with no shared queue. Each connection still runs the blocking per-connection `HandlerFn`. Linux-only, native (no longer a POOL fallback). `workers = 0` -> `cpu_count` workers, `pool_size` is ignored. On non-Linux it folds to POOL.
+Shared-nothing: each worker owns one `SO_REUSEPORT` listener and one epoll instance. The kernel load-balances accepted connections across workers with no shared queue. Each connection still runs the blocking per-connection `HandlerFn`. Linux-only and native: `workers = 0` -> `cpu_count` workers. Off Linux, `run()` returns `error.DispatchModelUnsupported`, so pick `.ASYNC` there.
 
 ### URING (framed path only)
 
@@ -161,13 +122,13 @@ The per-connection `HandlerFn` cannot run on a single-threaded completion loop (
 ```
 Tcp.Server.init(handler, config): validates port != 0, bakes the handler into the type
     -> .run(): dispatches via dispatch_model (io from config.io)
-        -> blocks until error (ASYNC) or accept/worker threads exit (POOL/MIXED/EPOLL)
+        -> blocks until error (ASYNC) or the shared-nothing workers exit (EPOLL/URING)
 
 server.deinit(): no-op (resources released inside run via defer)
 ```
 
 - `init()` / `initFramed()` only validate configuration: no socket is opened.
-- `run()` opens sockets, spawns threads (POOL/MIXED) or shared-nothing epoll/uring workers, then blocks.
+- `run()` opens sockets, spawns the accept thread (ASYNC) or the shared-nothing epoll/uring workers, then blocks.
 - `deinit()` is a no-op. All network resources are released when `run()` returns.
 
 ---
@@ -246,12 +207,8 @@ Args are parsed left-to-right. Unknown args are silently skipped. Missing `--ip`
 
 | File | Dispatch model | Port | Audience |
 | :- | :- | :- | :- |
-| `examples/tcp_server_1_async.zig` | `.ASYNC` | 9300 | New: simplest server, single accept, custom handler |
-| `examples/tcp_server_2_pool.zig` | `.POOL` | 9301 | Experienced: explicit workers/pool_size tuning |
-| `examples/tcp_server_3_mixed.zig` | `.MIXED` | 9302 | Experienced: N accept + io.async, no queue |
-| `examples/tcp_server_4_epoll.zig` | `.EPOLL` | 9303 | Linux: shared-nothing epoll workers |
-| `examples/tcp_server_5_uring.zig` | `.URING` | 9304 | Linux: per-frame `FrameFn` on the io_uring ring (`initFramed`) |
-| `examples/tcp_client.zig` | n/a | 9300 | Connect, send one message, print response, exit |
+| `examples/tcp_server.zig` | picked per target (`.URING` on Linux, `.ASYNC` elsewhere) | 9043 | per-frame `FrameFn` through `initFramed`, one server for every platform |
+| `examples/tcp_client.zig` | n/a | 9043 | Connect, send one message, print response, exit |
 
 ---
 

@@ -1,6 +1,7 @@
 //! HTTP/2 connection loop: h2c direct (PRI preface) and h2c upgrade (HTTP/1.1 Upgrade: h2c).
 
 const std = @import("std");
+const socket_pair = @import("../../utils/socket_pair.zig");
 const win_io = @import("../../utils/windows_io.zig");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
@@ -147,7 +148,8 @@ pub const ServeOpts = struct {
     /// A larger initial avoids early reallocation under big responses on the TLS path.
     tls_write_buf_initial: usize = 16 * 1024,
     /// Enable the per-worker response cache (ADR-036). When off, serveCached / sendCachedFD degrade to
-    /// a plain send. Active under .EPOLL and .URING (shared-nothing, one owner per worker).
+    /// a plain send. Active under every dispatch model (shared-nothing: one owner per multiplexed
+    /// worker, one per io pool thread under .ASYNC).
     response_cache: bool = false,
     /// Response cache slot count, rounded down to a power of two by ResponseCache.init.
     cache_max_entries: u32 = 256,
@@ -603,15 +605,14 @@ test "zix http2: ServeOpts defaults" {
 }
 
 test "zix http2: response cache round-trips via sendCachedFD then serveCached" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 1024 });
     defer cache.deinit();
     setCache(&cache, 1000);
     defer setCache(null, 0);
 
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     tl_req_path = "/cached";
     tl_req_body = "";

@@ -1,12 +1,18 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 // Unique port (feature examples each own one so a test-runner can spawn them
 // without colliding with the basic dispatch-model examples on 9031).
 const PORT: u16 = 9031;
-// Flip to .EPOLL to compare the cache effect across dispatch models.
-const DISPATCH_MODEL: zix.Http1.DispatchModel = .URING;
+// Pick the model per target at comptime (ADR-065): .URING is the Linux shared-nothing
+// completion loop, .ASYNC the portable model. .EPOLL and .URING are Linux-only, and run()
+// returns error.DispatchModelUnsupported rather than silently serving a different model.
+// The response cache is installed by the .EPOLL / .URING workers only. Under .ASYNC the
+// lookup always misses and the store is a no-op, so the route still answers correctly, just
+// without the cache effect this example measures.
+const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
 const WORKERS: usize = 0; // 0 = cpu_count
 
 // --------------------------------------------------------- //

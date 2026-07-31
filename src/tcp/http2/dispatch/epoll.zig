@@ -302,13 +302,13 @@ fn epollMuxWorker(ctx: MuxWorkerCtx) void {
 /// worker multiplexes many non-blocking connections through the resumable h2 state machine.
 ///
 /// Note:
-/// - worker_count = pool_size (0 = cpu count). A handler runs on the event loop, so it must stay
+/// - worker_count = workers (0 = cpu count). A handler runs on the event loop, so it must stay
 ///   bounded (it blocks the worker's other connections while running).
 pub fn runEpoll(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     const io = cfg.io;
     // cgroup-aware so a limited cpuset defaults to one worker per available CPU, not one per machine core.
     const cpu = common.getAvailableCpuCount();
-    const worker_count = if (cfg.pool_size == 0) cpu else cfg.pool_size;
+    const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
     const opts = common.serveOpts(cfg);
 
     logSystem(cfg, "listening on {s}:{d} (epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });

@@ -27,8 +27,8 @@ Both are HTTP/1.1 servers. `zix.Http` is the full-featured layer, `zix.Http1` is
 | Response writing | buffered `Response` object | `Response` builder delegating to direct fd write helpers |
 | Static files / multipart / SSE writer | built in | `public_dir` static fallback with an optional open-file cache (ADR-064), shared `Multipart`, `SseWriter` |
 | Routing | runtime handler via `Router(routes).dispatch` (ADR-063, not baked into the type) | comptime route table (optional, handler can be bare) |
-| WebSocket | handler-owned frame loop | engine-owned frame pump (.EPOLL / .URING) |
-| Dispatch models | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
+| WebSocket | handler-owned frame loop | engine-owned frame pump (every model) |
+| Dispatch models | ASYNC, EPOLL, URING | ASYNC, EPOLL, URING |
 
 The trio surface is caller-identical across both engines (a compile-time parity test in `src/lib.zig` enforces it). Use `zix.Http` when handlers need the richer client-facing layer. Use `zix.Http1` when raw throughput and predictable per-request cost matter more: the trio is views plus an arena reset, and the escape hatch (`ctx.fd` plus the `*FD` write helpers) keeps the raw path open.
 
@@ -36,7 +36,7 @@ The trio surface is caller-identical across both engines (a compile-time parity 
 
 ## Runtime Model
 
-Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default).
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.DispatchModelUnsupported` rather than silently serving a different model (ADR-065).
 
 ### .ASYNC: Single Accept, io.async() Dispatch
 
@@ -53,29 +53,8 @@ flowchart TD
 ```
 
 - One accept thread, each connection dispatched as a concurrent task via `io.async()`.
-- `workers` and `pool_size` are ignored.
-
-### .POOL: Work-Queue Thread Pool
-
-```mermaid
-flowchart TD
-    MAIN["main()\nServer.run()"] --> SPAWN["spawn pool_size pool threads\nspawn worker_count accept threads"]
-    SPAWN --> ACC["Accept thread\nlisten SO_REUSEPORT\naccept -> queue.push(stream)"]
-    SPAWN --> POOL["Pool thread\nqueue.pop()"]
-    ACC --> ACC
-    POOL --> SERVE["core.serveConn(fd, handler, opts)"]
-    SERVE --> LOOP["keep-alive loop\nrecvHead -> parseHead -> handler"]
-    LOOP -->|close or error| Z["stream.close()\nback to queue.pop()"]
-```
-
-- Accept threads only push accepted streams into a shared ring-buffer `ConnQueue`.
-- Pool threads pop and serve each connection synchronously.
-- Default: cpu_count accept threads, `max(10, cpu_count * 2)` pool threads.
-
-### .MIXED: N Accept Threads, io.async() Dispatch
-
-- N accept threads (default cpu_count, `SO_REUSEPORT`), each dispatches connections via `io.async()` directly, no `ConnQueue`.
-- `pool_size` is ignored. `workers` controls accept thread count.
+- `workers` is ignored (there is always exactly one accept thread).
+- The only model available on every platform, so it is the model every non-Linux target uses.
 
 ### .EPOLL: Shared-Nothing Event Loop (Linux only)
 
@@ -97,12 +76,12 @@ flowchart TD
 
 - Each worker owns a private listener, epoll instance, and connection table. The kernel load-balances new connections across the per-worker listeners (`SO_REUSEPORT`), so there is no accept thread, no shared queue, and no cross-thread fd handoff.
 - Pipelined requests arriving in one readable event are all parsed and dispatched in that pass, and their responses are coalesced into a single `write()` via a per-event response sink.
-- On non-Linux targets `.EPOLL` falls back to `.POOL` with a logged notice.
+- Off Linux, `run()` returns `error.DispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
 - This is the only model that honors engine-owned WebSocket promotion (see WebSocket section).
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
-`zix.Http1` is the reference engine for the io_uring path (ADR-037). Same shared-nothing, thread-per-core topology as `.EPOLL` (private `SO_REUSEPORT` listener and one ring per worker), but completion-based: accept, recv, send, and close are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring. The WebSocket pump also runs natively on the ring (BufferGroup). On non-Linux it falls back to `.POOL`. On loopback it matches `.EPOLL` on throughput and wins mainly on per-request cache locality.
+`zix.Http1` is the reference engine for the io_uring path (ADR-037). Same shared-nothing, thread-per-core topology as `.EPOLL` (private `SO_REUSEPORT` listener and one ring per worker), but completion-based: accept, recv, send, and close are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring. The WebSocket pump also runs natively on the ring (BufferGroup). Off Linux, `run()` returns `error.DispatchModelUnsupported`, and when io_uring itself is unavailable on a Linux host the engine folds to the `.EPOLL` loop with a logged notice. On loopback it matches `.EPOLL` on throughput and wins mainly on per-request cache locality.
 
 Teardown also rings the close (`prep_close`, ADR-041) instead of a synchronous `linux.close`, so the worker keeps reaping completions across connection teardowns. On the 64-core box this is the difference under connection churn: with the synchronous close the ring barely engaged its cores under reconnect storms, with the ring close it fills them and reaches parity or better on every cell at a fraction of the memory. The shared io_uring `OpKind` and ring helpers live in `src/multiplexers/ring.zig`. See ADR-041 for the measurement.
 
@@ -136,7 +115,7 @@ Access via `const zix = @import("zix");`
 | :- | :- | :- |
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` returns the server, then `run()` / `deinit()` (the single entry, ADR-062) |
 | `zix.Http1.ServerConfig` | struct | Server configuration (see Http1ServerConfig section) |
-| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively) `.URING`(4, Linux-only natively) |
+| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only) |
 | `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (the trio, ADR-062) |
 | `zix.Http1.Request` | struct | Zero-copy request view: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
 | `zix.Http1.Response` | struct | Response builder over the fd writers: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus the `sent` flag |
@@ -196,13 +175,12 @@ pub const Http1ServerConfig = struct {
     max_recv_buf:       usize = 6 * 1024,      // per-connection buffer (.EPOLL / .URING, see note)
     large_body_rcvbuf:  usize = 0,             // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
     ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via res.sendNegotiated / core.sendNegotiateFD (.EPOLL/.URING)
+    compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via res.sendNegotiated / core.sendNegotiateFD (every model)
     compression_min_size: usize = 256,           // skip bodies under this floor
     compression_max_out:  usize = 256 * 1024,    // codec-agnostic compressed-output cap, was max_gzip_out
     max_response_headers: HeaderSize = .MINIMAL, // addHeader capacity class (ADR-062)
-    conn_timeout_ms:    u32   = 0,             // connection lifetime, .ASYNC/.POOL/.MIXED only (no-op on .EPOLL/.URING)
+    conn_timeout_ms:    u32   = 0,             // connection lifetime, .ASYNC only (no-op on .EPOLL/.URING)
     workers:            usize = 0,             // 0 = cpu_count accept threads, ignored by .ASYNC
-    pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL only
     handler_timeout_ms: u32   = 0,             // per-handler budget, 0 = disabled
     send_date_header:   bool  = true,          // emit Date header, false saves 37 bytes/response
     tls:                ?*Tls.Context = null,  // non-null serves HTTP/1.1 over TLS (native https), else cleartext
@@ -212,7 +190,7 @@ pub const Http1ServerConfig = struct {
 
 The listing above is abbreviated: the full field reference (cache, uring tuning, TLS dual listener, steering) lives in [`docs/zix-config-en.md`](zix-config-en.md).
 
-Note: under `.ASYNC` / `.POOL` / `.MIXED` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`.
+Note: under `.ASYNC` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`.
 
 Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
@@ -222,12 +200,12 @@ Note: `send_date_header` defaults to `true` for RFC 7231 compliance. Set `false`
 
 `zix.Http1` exposes one timeout, `handler_timeout_ms`, the per-handler execution budget. When non-zero, the server arms a thread-local deadline before each dispatch. The handler opts in by calling `zix.Http1.isExpired()` between expensive steps and responding early, or shortens its own budget with `zix.Http1.setTimeout()`. This is the same Layer B budget as `zix.Http`'s `handler_timeout_ms`.
 
-`conn_timeout_ms` (ADR-062) is the connection-lifetime guard, a port of `zix.Http`'s Layer D: a `ConnRegistry` plus a background timer thread shuts down connections exceeding the configured lifetime. It is active on the blocking models (`.ASYNC`, `.POOL`, `.MIXED`), where a slow or idle connection parks a thread or task. On `.EPOLL` and `.URING` it is a documented no-op: their event loops own connection lifetime, and an idle keep-alive connection holds no thread, just one slot and its buffer.
+`conn_timeout_ms` (ADR-062) is the connection-lifetime guard, a port of `zix.Http`'s Layer D: a `ConnRegistry` plus a background timer thread shuts down connections exceeding the configured lifetime. It is active on the blocking model (`.ASYNC`), where a slow or idle connection parks a task. On `.EPOLL` and `.URING` it is a documented no-op: their event loops own connection lifetime, and an idle keep-alive connection holds no thread, just one slot and its buffer.
 
 | Timeout | `zix.Http` | `zix.Http1` | Mechanism |
 | :- | :- | :- | :- |
 | `handler_timeout_ms` | yes | yes | thread-local deadline armed per dispatch, handler-opt-in |
-| `conn_timeout_ms` | yes | yes (`.ASYNC` / `.POOL` / `.MIXED`) | `ConnRegistry` + background timer thread |
+| `conn_timeout_ms` | yes | yes (`.ASYNC`) | `ConnRegistry` + background timer thread |
 
 If connection-lifetime enforcement under `.EPOLL` / `.URING` is ever needed, the natural fit is an idle-deadline sweep over the per-worker table (no extra thread), not the timer-thread `ConnRegistry`.
 
@@ -279,7 +257,7 @@ try server.run();
 
 ---
 
-## Connection Lifecycle (.ASYNC / .POOL / .MIXED)
+## Connection Lifecycle (.ASYNC)
 
 ```mermaid
 sequenceDiagram
@@ -411,7 +389,7 @@ sequenceDiagram
 - `WebSocket.serve(fd, key, on_frame)` computes the accept key, writes `101 Switching Protocols`, and requests promotion via a thread-local handoff slot that the engine reads right after the handler returns.
 - Ping is auto-ponged and close is auto-echoed by the engine. The callback only ever sees text and binary frames.
 - Frames sent during one pump pass coalesce into a single `write()`.
-- Promotion is honored under `.EPOLL` only. Under `.ASYNC` / `.POOL` / `.MIXED` the handoff is cleared and the connection ends after the handler returns (use `zix.Http` for handler-owned WebSocket loops on those models).
+- Promotion is honored under `.EPOLL` only. Under `.ASYNC` the handoff is cleared and the connection ends after the handler returns (use `zix.Http` for handler-owned WebSocket loops on that model).
 - Over TLS (`config.tls`, the thread-per-connection path), call `WebSocket.serveTls(fd, key, on_frame)` instead (ADR-055): the `101` and every frame encrypt through the ADR-054 stream sink, and the https thread runs the frame loop inline over the TLS session. Rooms / broadcast are cleartext-only (per-session encryption), so wss is per-connection.
 
 See `examples/http1_websocket.zig` (cleartext) and `examples/tls/tls_http1_ws.zig` (wss).
@@ -431,7 +409,7 @@ Per-request access logging is the handler's responsibility: the response bytes g
 | Scope | Storage | Lifetime |
 | :- | :- | :- |
 | Route table | comptime (zero heap cost) | Process |
-| Receive + body buffers (.ASYNC/.POOL/.MIXED) | stack of the serving thread/task (16 KB + 8 KB) | Connection |
+| Receive + body buffers (.ASYNC) | stack of the serving task (16 KB + 8 KB) | Connection |
 | Per-connection buffer (.EPOLL) | per-worker slab, compact page-aligned slots, `max_recv_buf` bytes usable | Connection |
 | Per-connection recv + send buffers (.URING) | per-worker mmap'd stride slab, compact slots, THP opted out | Connection |
 | Body + output staging (.EPOLL) | `smp_allocator`, per worker | Worker thread |
@@ -446,12 +424,12 @@ Per-request access logging is the handler's responsibility: the response bytes g
 | Limit | Behaviour |
 | :- | :- |
 | Header block size | Max 16 KB (`core.BUF_SIZE`, or `max_recv_buf` under .EPOLL). Exceeding returns `431` and closes |
-| Body under .ASYNC/.POOL/.MIXED | The handler sees up to 8 KB (`ASYNC_BODY_CHUNK`). A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable (the handler reads `head.content_length`, not the bytes) |
+| Body under .ASYNC | The handler sees up to 8 KB (`ASYNC_BODY_CHUNK`). A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable (the handler reads `head.content_length`, not the bytes) |
 | Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body keeps the connection usable by draining the remainder off the socket (`MSG_TRUNC`): `.EPOLL` dispatches the handler first with an empty body slice, `.URING` drains and counts first, then the handler runs with the counted total in `req.bodyReceived()` |
 | Large request body (uploads) | The drain widens the receive window via `large_body_rcvbuf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
 | Chunked request body | Decoded into the body buffer, excess discarded |
 | HTTP versions | HTTP/1.0 and HTTP/1.1 only, anything else is `400` |
-| TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` / `.POOL` / `.MIXED` terminate per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
+| TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` terminates per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
 
 Endpoints that accept large uploads read `req.bodyReceived()` under `.URING` (the drained bytes are counted, not buffered). The other models do not carry the count, so they rely on `head.content_length` there.
 

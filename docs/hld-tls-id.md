@@ -32,7 +32,7 @@ graph TD
     CERT --> STD
 ```
 
-`zix.Tls` bersifat sans-I/O: tidak punya listener dan tidak punya socket loop. Engine yang memiliki socket. Engine h2 (Http2, Grpc) memilih antara dua jalur serve TLS lewat `dispatch_model`: `.EPOLL` / `.URING` memakai loop multipleks per-core (`tls_mux.zig`) di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` / `.POOL` / `.MIXED` memakai `tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig` (ADR-052). Handshake didorong lewat `connection.zig`, yang menyusun lapisan wire, key-schedule, record, certificate, extension, dan alert, semuanya di atas `std.crypto`.
+`zix.Tls` bersifat sans-I/O: tidak punya listener dan tidak punya socket loop. Engine yang memiliki socket. Engine h2 (Http2, Grpc) memilih antara dua jalur serve TLS lewat `dispatch_model`: `.EPOLL` / `.URING` memakai loop multipleks per-core (`tls_mux.zig`) di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` memakai `tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig` (ADR-052). Handshake didorong lewat `connection.zig`, yang menyusun lapisan wire, key-schedule, record, certificate, extension, dan alert, semuanya di atas `std.crypto`.
 
 ## Source Layout
 
@@ -125,7 +125,7 @@ TLS adalah jalur serve blocking ber-gate per engine, dipilih oleh `config.tls`, 
 - Http1: `serveConnTls` menjalankan handshake, lalu per request men-decrypt record, memakai ulang `core.parseHead`, menjalankan handler dengan response sink in-memory yang menangkap plaintext-nya (`runHandlerToBuffer`), lalu meng-encrypt hasilnya.
 - Http2 dan Grpc (ADR-052): dua jalur serve, dipilih oleh `dispatch_model`. ALPN memilih h2 di keduanya.
   - `.EPOLL` / `.URING`: satu worker epoll `SO_REUSEPORT` per core (`tls_mux.zig`, `grpc/tls_mux.zig`) menterminasi TLS di tempat lewat session TLS 1.3 resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker. Tanpa socketpair, tanpa thread per koneksi. Ini jalur konkurensi-tinggi.
-  - `.ASYNC` / `.POOL` / `.MIXED`: `tls_serve.zig` menjalankan accept loop thread-per-koneksi di atas terminator bersama `tcp/tls/h2_terminator.zig`, yang menjalankan driver inline-mux langsung di atas record terdekripsi (frame disegel kembali ke record TLS lewat write hook thread-local). Tanpa socketpair, tanpa thread kedua. Jalur ini juga melayani fallback TLS 1.2.
+  - `.ASYNC`: `tls_serve.zig` menjalankan accept loop thread-per-koneksi di atas terminator bersama `tcp/tls/h2_terminator.zig`, yang menjalankan driver inline-mux langsung di atas record terdekripsi (frame disegel kembali ke record TLS lewat write hook thread-local). Tanpa socketpair, tanpa thread kedua. Jalur ini juga melayani fallback TLS 1.2.
 
 - Dual listener (ADR-060): dengan `tls_port` diisi bersama `tls` (Http1, Http, Http2, Grpc), SATU server melayani cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama. Mesin transport per-koneksi yang dipakai bersama jalur mux hidup di `src/multiplexers/tls_conn.zig`, dan di bawah `.URING` sisi TLS berjalan di ring (tanpa fleet epoll terpisah).
 

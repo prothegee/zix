@@ -24,9 +24,9 @@ const Config = @import("config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const core = @import("core.zig");
 
+const common = @import("dispatch/common.zig");
+const dispatch_support = @import("../utils/dispatch_support.zig");
 const async_model = @import("dispatch/async.zig");
-const pool_model = @import("dispatch/pool.zig");
-const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 
@@ -65,12 +65,22 @@ pub fn Raw(comptime handler: HandlerFn) type {
         }
 
         /// Bind and serve. Blocks until an error occurs. The dispatch model selects the worker shape:
-        /// `.ASYNC` runs a single worker, `.POOL` / `.MIXED` / `.EPOLL` / `.URING` run one per CPU.
+        /// `.ASYNC` runs a single worker, `.EPOLL` / `.URING` run one per CPU.
+        ///
+        /// Return:
+        /// - !void
+        /// - error.DispatchModelUnsupported if dispatch_model is .EPOLL or .URING off Linux
         pub fn run(self: *const Self) !void {
+            // Reject an unrunnable model before binding, so a rejected config leaves nothing
+            // behind (ADR-065).
+            if (!dispatch_support.isSupported(self.config.dispatch_model)) {
+                common.logSystem(self.config, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
+
+                return error.DispatchModelUnsupported;
+            }
+
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(handler, self.config),
-                .POOL => pool_model.runPool(handler, self.config),
-                .MIXED => mixed_model.runMixed(handler, self.config),
                 .EPOLL => epoll_model.runEpoll(handler, self.config),
                 .URING => uring_model.runUring(handler, self.config),
             };

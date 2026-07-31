@@ -1,17 +1,17 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9058;
-// Compression is active under .EPOLL and .URING only (shared-nothing, one owner per
-// worker). Under .ASYNC / .POOL / .MIXED sendNegotiateCachedFD falls back to uncompressed.
-const DISPATCH_MODEL: zix.Http1.DispatchModel = .EPOLL;
+// Response compression now runs under every model, so this takes the per-target idiom:
+// io_uring where it exists, the portable blocking model everywhere else.
+const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
 const KERNEL_BACKLOG: u31 = 1024;
 const MAX_RECV_BUF: usize = 16 * 1024;
 const COMPRESSION_MIN_SIZE: usize = 256;
 const COMPRESSION_MAX_OUT: usize = 256 * 1024;
 const WORKERS: usize = 0; // 0 = cpu_count epoll workers
-const POOL_SIZE: usize = 0; // ignored by .EPOLL
 
 // --------------------------------------------------------- //
 
@@ -121,7 +121,6 @@ pub fn main(process: std.process.Init) !void {
         .compression_min_size = COMPRESSION_MIN_SIZE,
         .compression_max_out = COMPRESSION_MAX_OUT,
         .workers = WORKERS,
-        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 

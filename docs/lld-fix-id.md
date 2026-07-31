@@ -157,10 +157,8 @@ Prefiks SOH mencegah false positive di mana `10=` muncul di dalam nilai field. M
 | Model | Fungsi entry | Dispatch koneksi |
 | :- | :- | :- |
 | `.ASYNC` | `asyncWorkerEntry` | Accept tunggal, `io.async(dispatchConn)` |
-| `.POOL` | `poolEntry` (pool thread) + `workerEntry` (accept) | `ConnQueue` + blocking pool handler |
-| `.MIXED` | `asyncWorkerEntry` per accept thread | N accept thread, masing-masing memanggil `io.async(dispatchConn)` |
-| `.EPOLL` | `epollWorkerEntry` (`dispatch/epoll.zig`, `runEpoll`) | Single epoll accept loop, koneksi readable di-dispatch via `io.async` (Linux-only, fallback ke `.POOL`) |
-| `.URING` | `uringFixWorker` (`dispatch/uring.zig`, `runUring`) | Worker io_uring shared-nothing menjalankan `core.processFixRing` resumable per batch readable (Linux-only, fallback ke `.POOL`) |
+| `.EPOLL` | `epollWorkerEntry` (`dispatch/epoll.zig`, `runEpoll`) | Shared-nothing: satu SO_REUSEPORT listener plus satu instance epoll per worker (Linux-only, ditolak di luar Linux dengan `error.DispatchModelUnsupported`) |
+| `.URING` | `uringFixWorker` (`dispatch/uring.zig`, `runUring`) | Worker io_uring shared-nothing menjalankan `core.processFixRing` resumable per batch readable (Linux-only, ditolak di luar Linux dengan cara yang sama) |
 
 `dispatchConn` memanggil `core.serveConn(task.stream, task.io, task.comp_id, task.opts)`.
 

@@ -354,7 +354,7 @@ Alongside the typed `Server(Packet)`, `zix.Udp.Raw(handler)` serves variable-len
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. It gets the bytes as received (up to `max_recv_buf`), the peer, and a `Sink`. `sink.reply(bytes)` answers the sender with no address conversion, `sink.replyTo(peer, bytes)` answers an explicit peer.
 - Batched I/O (Linux): receive in `recvmmsg` batches (`recv_batch`), send in `sendmmsg` batches (`send_batch`). Replies coalesce into one `sendmmsg` per received batch. Non-Linux falls back to a single `std.Io.net` receive loop.
-- Dispatch (`dispatch_model`, the same enum as the TCP engines, partitioned per ADR-043 into `src/udp/dispatch/`): `.ASYNC` runs a single worker. `.POOL` / `.MIXED` / `.EPOLL` / `.URING` run one SO_REUSEPORT worker per CPU (per-core shared-nothing). `.EPOLL` is an epoll readiness loop, `.URING` a real io_uring completion loop (epoll fallback when io_uring is unavailable).
+- Dispatch (`dispatch_model`, the same enum as the TCP engines, partitioned per ADR-043 into `src/udp/dispatch/`): `.ASYNC` runs a single worker. `.EPOLL` / `.URING` run one SO_REUSEPORT worker per CPU (per-core shared-nothing) and are Linux-only, rejected off Linux with `error.DispatchModelUnsupported`. `.EPOLL` is an epoll readiness loop, `.URING` a real io_uring completion loop (epoll fallback when io_uring is unavailable).
 
 ```zig
 fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {

@@ -2,8 +2,8 @@
 //!
 //! What:
 //! - Only what the per-model files share: the per-datagram serve (`serveDatagram`), the recvmmsg worker
-//!   loop (`workerLoop`) plus its two run shapes (`runSingle` - one worker for ASYNC, `runMulti` - one
-//!   SO_REUSEPORT worker per CPU for POOL / MIXED, which ADR-050 defines as multi-core), the worker
+//!   loop (`workerLoop`) plus its run shape (`runSingle` - one worker for .ASYNC, the portable
+//!   SO_REUSEPORT worker per CPU for .EPOLL / .URING, which ADR-050 defines as multi-core), the worker
 //!   helpers (`effectiveWorkers` / `pinToCpu` / `setBusyPoll`), and the non-Linux fallback. The per-core
 //!   EPOLL and URING workers own their own loops in `epoll.zig` and `uring.zig` (ADR-050: each model is
 //!   independently tunable, .URING is a real io_uring ring, not an alias of .EPOLL).
@@ -242,7 +242,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reu
     }
 }
 
-/// Single worker on the calling thread. Used by the ASYNC model (POOL / MIXED run multi-core).
+/// Single worker on the calling thread. Used by the .ASYNC model, the only portable one.
 pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
     if (!datagram.is_linux) return runFallback(handler, config);
 
@@ -250,28 +250,9 @@ pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !voi
     workerLoop(handler, config, config.reuse_address, 0);
 }
 
-/// One SO_REUSEPORT blocking-recvmmsg worker per CPU (POOL / MIXED, which ADR-050 defines as multi-core
-/// everywhere). Per-core workers each bind the same port, so SO_REUSEPORT is forced on regardless of the
-/// reuse_address flag, and each pins to its CPU and owns its own send / recv batches (shared-nothing), so
-/// the kernel load-balances datagrams by 4-tuple. The .EPOLL / .URING siblings add readiness / completion
-/// on top of the same per-core shape (epoll.zig / uring.zig).
-pub fn runMulti(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
-    if (!datagram.is_linux) return runFallback(handler, config);
-
-    const want = effectiveWorkers(config);
-    logSystem(config, "raw listening on {s}:{d} ({d} workers, SO_REUSEPORT + recvmmsg)", .{ config.ip, config.port, want });
-
-    const threads = try config.allocator.alloc(std.Thread, want);
-    defer config.allocator.free(threads);
-
-    var spawned: usize = 0;
-    for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoop, .{ handler, config, true, i }) catch break;
-        spawned += 1;
-    }
-
-    for (threads[0..spawned]) |t| t.join();
-}
+/// The descriptor the portable loop hands the sink. Never opened and never sent on: the batch
+/// carries a PortableSink, so the flush the sink can reach goes through std.Io.
+const NO_SOCKET: posix.socket_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
 /// Portable single-socket fallback for non-Linux targets: one datagram per receive, replies sent
 /// individually through std.Io.net (no recvmmsg / sendmmsg batching).
@@ -290,12 +271,17 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: UdpServerConfig) !v
     var tx = try datagram.SendBatch.init(config.allocator, config.send_batch, config.send_batch * config.max_recv_buf);
     defer tx.deinit();
 
+    // A handler that replies more than the batch holds makes the sink flush mid-handler, and the
+    // descriptor it has here was never opened. The batch carries the bound socket so that flush
+    // sends through std.Io: without it the queued replies would be dropped and never reported.
+    tx.portable = .{ .socket = socket, .io = io };
+
     while (true) {
         const msg = socket.receive(io, buf) catch continue;
 
         const sender = datagram.ipToSockaddr6(msg.from);
         const peer = msg.from;
-        var sink = core.Sink{ .batch = &tx, .fd = undefined, .sender = sender };
+        var sink = core.Sink{ .batch = &tx, .fd = NO_SOCKET, .sender = sender };
         handler(msg.data, &peer, &sink);
 
         for (0..tx.count) |i| {

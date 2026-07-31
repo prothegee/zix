@@ -2,7 +2,7 @@
 //!
 //! GET /ws - WebSocket echo endpoint over TLS.
 //!
-//! WebSocket over TLS rides the thread-per-connection path (.ASYNC / .POOL / .MIXED), so this
+//! WebSocket over TLS rides the thread-per-connection path (.ASYNC), so this
 //! example uses .ASYNC. The handler validates the upgrade then calls WebSocket.serveTls, which
 //! completes the handshake (the 101 encrypted through the ADR-054 stream sink) and hands the
 //! connection to the https thread: from then on wsOnFrame runs per frame over the TLS session

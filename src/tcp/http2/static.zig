@@ -20,6 +20,8 @@
 //! with its first range, which a server is allowed to do.
 
 const std = @import("std");
+const fd_io = @import("../../utils/fd_io.zig");
+const socket_pair = @import("../../utils/socket_pair.zig");
 const builtin = @import("builtin");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
@@ -356,10 +358,7 @@ fn drain(peer: std.posix.fd_t, buf: []u8) []const u8 {
     var total: usize = 0;
 
     while (total < buf.len) {
-        const rc = std.os.linux.read(peer, buf[total..].ptr, buf.len - total);
-        if (std.posix.errno(rc) != .SUCCESS) break;
-
-        const got: usize = @intCast(rc);
+        const got = fd_io.readOnce(peer, buf[total..]) catch break;
         if (got == 0) break;
 
         total += got;
@@ -406,8 +405,8 @@ test "zix http2: static serve frames a file as HEADERS plus DATA with END_STREAM
     var pair: [2]std.posix.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair));
     defer {
-        _ = std.os.linux.close(pair[0]);
-        _ = std.os.linux.close(pair[1]);
+        fd_io.close(pair[0]);
+        fd_io.close(pair[1]);
     }
 
     var arena_buf: [1024]u8 = undefined;
@@ -419,7 +418,7 @@ test "zix http2: static serve frames a file as HEADERS plus DATA with END_STREAM
     try testing.expect(static_cache.instance() == null);
     try testing.expect(serve(&req, &ctx, "app.json", frame.DEFAULT_MAX_FRAME_SIZE));
 
-    _ = std.os.linux.close(pair[0]);
+    fd_io.close(pair[0]);
 
     var wire_buf: [4096]u8 = undefined;
     const wire = drain(pair[1], &wire_buf);
@@ -465,8 +464,8 @@ test "zix http2: static serve chunks a body past the max frame size" {
     var pair: [2]std.posix.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair));
     defer {
-        _ = std.os.linux.close(pair[0]);
-        _ = std.os.linux.close(pair[1]);
+        fd_io.close(pair[0]);
+        fd_io.close(pair[1]);
     }
 
     var arena_buf: [1024]u8 = undefined;
@@ -476,7 +475,7 @@ test "zix http2: static serve chunks a body past the max frame size" {
 
     try testing.expect(serve(&req, &ctx, "big.bin", 256));
 
-    _ = std.os.linux.close(pair[0]);
+    fd_io.close(pair[0]);
 
     var wire_buf: [4096]u8 = undefined;
     const wire = drain(pair[1], &wire_buf);
@@ -504,8 +503,8 @@ test "zix http2: static serve closes the stream on the HEADERS frame for an empt
     var pair: [2]std.posix.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair));
     defer {
-        _ = std.os.linux.close(pair[0]);
-        _ = std.os.linux.close(pair[1]);
+        fd_io.close(pair[0]);
+        fd_io.close(pair[1]);
     }
 
     var arena_buf: [1024]u8 = undefined;
@@ -515,7 +514,7 @@ test "zix http2: static serve closes the stream on the HEADERS frame for an empt
 
     try testing.expect(serve(&req, &ctx, "empty.txt", frame.DEFAULT_MAX_FRAME_SIZE));
 
-    _ = std.os.linux.close(pair[0]);
+    fd_io.close(pair[0]);
 
     var wire_buf: [1024]u8 = undefined;
     const wire = drain(pair[1], &wire_buf);
@@ -567,25 +566,24 @@ const Served = struct {
 };
 
 fn serveOnce(root: []const u8, req: *Request, req_path: []const u8, max_frame_size: u32, wire_buf: []u8) Served {
-    var pair: [2]std.posix.fd_t = undefined;
-    if (std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair) != 0) return .{ .wire = &.{}, .ok = false };
+    var owned = socket_pair.Pair.open(std.testing.allocator) catch return .{ .wire = &.{}, .ok = false };
+    defer owned.deinit();
+    const pair = owned.fds;
 
     var arena_buf: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     var ctx = Context{ .fd = pair[0], .sid = 1, .io = testing.io, .allocator = fba.allocator(), .public_dir = root };
 
     const ok = serve(req, &ctx, req_path, max_frame_size);
-    _ = std.os.linux.close(pair[0]);
+    fd_io.close(pair[0]);
 
     const wire = drain(pair[1], wire_buf);
-    _ = std.os.linux.close(pair[1]);
+    fd_io.close(pair[1]);
 
     return .{ .wire = wire, .ok = ok };
 }
 
 test "zix http2: static serves a byte range as 206 with Content-Range" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -616,8 +614,6 @@ test "zix http2: static serves a byte range as 206 with Content-Range" {
 }
 
 test "zix http2: static fills an open-ended range to the last byte" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -645,8 +641,6 @@ test "zix http2: static fills an open-ended range to the last byte" {
 }
 
 test "zix http2: static answers 416 for a range past the end of the file" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -678,8 +672,6 @@ test "zix http2: static answers 416 for a range past the end of the file" {
 }
 
 test "zix http2: static ignores a malformed Range and serves the whole file" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -708,8 +700,6 @@ test "zix http2: static ignores a malformed Range and serves the whole file" {
 }
 
 test "zix http2: static serves a range from the cache and from resident bytes alike" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -744,8 +734,6 @@ test "zix http2: static serves a range from the cache and from resident bytes al
 }
 
 test "zix http2: static chunks a range at the peer's frame size" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -792,7 +780,7 @@ test "zix http2: static acquireHit takes resident bytes only when zero copy is r
 
     var arena_buf: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
-    var ctx = Context{ .fd = 3, .sid = 1, .io = testing.io, .allocator = fba.allocator(), .public_dir = root };
+    var ctx = Context{ .fd = TEST_FD, .sid = 1, .io = testing.io, .allocator = fba.allocator(), .public_dir = root };
     var req = Request{ .method = "GET", .path = "/resident.css", .query = "", .headers = &.{}, .body = &.{} };
 
     // Nothing coalescing and a real descriptor: sendfile can carry it, so the body stays unread.
@@ -816,8 +804,6 @@ test "zix http2: static acquireHit takes resident bytes only when zero copy is r
 }
 
 test "zix http2: static frames a resident body without reading the file again" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -835,7 +821,7 @@ test "zix http2: static frames a resident body without reading the file again" {
 
     var arena_buf: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
-    var ctx = Context{ .fd = 3, .sid = 11, .io = testing.io, .allocator = fba.allocator(), .public_dir = root };
+    var ctx = Context{ .fd = TEST_FD, .sid = 11, .io = testing.io, .allocator = fba.allocator(), .public_dir = root };
     var req = Request{ .method = "GET", .path = "/bundle.js", .query = "", .headers = &.{}, .body = &.{} };
 
     var sink_ctx: usize = 0;
@@ -860,8 +846,6 @@ test "zix http2: static frames a resident body without reading the file again" {
 }
 
 test "zix http2: static serves the brotli sibling from resident bytes while coalescing" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -876,7 +860,7 @@ test "zix http2: static serves the brotli sibling from resident bytes while coal
 
     var arena_buf: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
-    var ctx = Context{ .fd = 3, .sid = 13, .io = testing.io, .allocator = fba.allocator(), .public_dir = root };
+    var ctx = Context{ .fd = TEST_FD, .sid = 13, .io = testing.io, .allocator = fba.allocator(), .public_dir = root };
 
     var headers = [_]hpack.Header{.{ .name = "accept-encoding", .value = "br, gzip" }};
     var req = Request{ .method = "GET", .path = "/theme.css", .query = "", .headers = &headers, .body = &.{} };
@@ -916,8 +900,8 @@ test "zix http2: static serve picks the brotli sibling from the cache" {
     var pair: [2]std.posix.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair));
     defer {
-        _ = std.os.linux.close(pair[0]);
-        _ = std.os.linux.close(pair[1]);
+        fd_io.close(pair[0]);
+        fd_io.close(pair[1]);
     }
 
     var arena_buf: [1024]u8 = undefined;
@@ -929,7 +913,7 @@ test "zix http2: static serve picks the brotli sibling from the cache" {
 
     try testing.expect(serve(&req, &ctx, "vendor.js", frame.DEFAULT_MAX_FRAME_SIZE));
 
-    _ = std.os.linux.close(pair[0]);
+    fd_io.close(pair[0]);
 
     var wire_buf: [2048]u8 = undefined;
     const wire = drain(pair[1], &wire_buf);

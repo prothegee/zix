@@ -7,6 +7,7 @@
 const std = @import("std");
 const zix = @import("zix");
 const common = @import("common.zig");
+const socket_poll = zix.utils.socket_poll;
 
 // --------------------------------------------------------- //
 
@@ -93,13 +94,12 @@ pub fn runUdpRaw(io: std.Io, server_path: []const u8) !void {
     const server = try std.Io.net.IpAddress.parse("127.0.0.1", 9064);
     try sock.send(io, &server, "raw-echo-ping");
 
-    const timeout: std.Io.Timeout = .{ .duration = .{
-        .raw = std.Io.Duration.fromMilliseconds(3000),
-        .clock = .awake,
-    } };
+    // Readiness first, then a plain receive: a timed std.Io receive needs the Io to run the receive
+    // and a timer concurrently, which the Windows backend cannot do for a socket.
+    if (!try socket_poll.waitReady(sock.handle, socket_poll.READABLE, 3000)) return error.EchoTimeout;
 
     var buf: [64]u8 = undefined;
-    const msg = try sock.receiveTimeout(io, &buf, timeout);
+    const msg = try sock.receive(io, &buf);
     if (!std.mem.eql(u8, msg.data, "raw-echo-ping")) return error.EchoMismatch;
 }
 
@@ -111,8 +111,13 @@ pub fn runUds(io: std.Io, server_path: []const u8) !void {
 
     try common.waitForUdsSocket(io, "tmp/zix.sock", common.START_TIMEOUT_MS);
 
+    // The same absolute path the server derived. Connecting by relative path is refused on
+    // Windows, so both sides go through the shared resolver.
+    var path_buf: [600]u8 = undefined;
+    const sock_path = try zix.utils.socket_path.resolve(io, "tmp", "zix.sock", &path_buf);
+
     var client = try zix.Uds.Client.connect(.{
-        .path = "tmp/zix.sock",
+        .path = sock_path,
         .recv_timeout_ms = 3000,
     }, io);
     defer client.deinit(io);
@@ -145,6 +150,8 @@ pub fn runUdsHttp(io: std.Io, uds_server_path: []const u8, uds_http_path: []cons
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
     });
     defer client.deinit();
@@ -169,12 +176,12 @@ pub fn runChannelSelfterm(io: std.Io, binary_path: []const u8) !void {
 }
 
 pub fn runChannelIpc(io: std.Io, ipc_a_path: []const u8, ipc_b_path: []const u8) !void {
-    std.Io.Dir.cwd().deleteFile(io, "/tmp/zix_ipc.sock") catch {};
+    std.Io.Dir.cwd().deleteFile(io, "tmp/zix_ipc.sock") catch {};
 
     var child_a = try common.spawnServer(io, ipc_a_path);
     defer child_a.kill(io);
 
-    try common.waitForUdsSocket(io, "/tmp/zix_ipc.sock", common.START_TIMEOUT_MS);
+    try common.waitForUdsSocket(io, "tmp/zix_ipc.sock", common.START_TIMEOUT_MS);
 
     var child_b = try common.spawnServer(io, ipc_b_path);
     defer child_b.kill(io);

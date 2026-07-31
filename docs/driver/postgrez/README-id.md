@@ -141,10 +141,21 @@ Pemakai hanya menulis tipe `Job` dan `run_batch`, driver yang memegang concurren
 
 ## Pengujian
 
-Setiap suite memegang siklus hidup container PostgreSQL 18 sendiri:
+Tiga suite tidak butuh apa pun terpasang, dua memegang container PostgreSQL 18:
 
 ```
 zig build test-unit          # in-process, tanpa server
+zig build test-behaviour     # in-process backend in-process, tanpa container
+zig build test-edge          # in-process backend in-process, tanpa container
 zig build test-integration   # start, uji, teardown container
 zig build test-runner        # jalankan setiap example terhadap container
 ```
+
+`test-behaviour` dan `test-edge` menjalankan in-process backend yang berbicara
+protokol wire v3 secara in-process: startup, autentikasi SCRAM dan cleartext,
+siklus extended query, COPY, notifikasi, serta TLS dengan channel binding.
+Keduanya tidak butuh docker dan jalan di setiap platform yang didukung,
+sehingga CI bisa menjalankannya di mana saja. Yang tidak bisa dicek keduanya
+adalah apakah sebuah statement benar-benar bermakna seperti maksud penulisnya,
+karena backend in-process tidak menjalankan SQL: itu tetap tugas `test-integration` dan
+`test-runner`.

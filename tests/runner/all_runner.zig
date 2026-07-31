@@ -1,4 +1,4 @@
-// Test runner for all protocols and all dispatch models.
+// Test runner for all protocols.
 //
 // Invoked by `zig build test-runner-all`. The build pushes one server binary
 // path per check as argv, in the exact order of the `checks` table below: that
@@ -7,11 +7,17 @@
 // build) rather than editing three parallel lists.
 //
 // The checks run concurrently in bounded waves (see runWaves): each check is
-// self-contained (own child process, unique port), so they no longer block one
+// self-contained (own server process, unique port), so they no longer block one
 // another. Results are collected by table index and reported in table order, so
 // the output stays stable. A check that shares a filesystem resource with
 // another (the two /tmp/zix.sock users) carries a `resource` tag, and the
 // scheduler never runs two checks with the same tag at once.
+//
+// Every check body runs in a child copy of this binary rather than in the
+// runner itself (see isolate.zig): the runner respawns itself with `--only
+// <label>`, which gives a parked check an upper bound the parent can enforce.
+// The child prints its own PASS or FAIL line and the parent forwards it, so
+// running a check alone is just `test-runner-all --only <label> <server path>`.
 //
 // The check bodies live in sibling files grouped by concern:
 //   wire.zig         low-level TLS record / header / h2-frame-scan helpers
@@ -22,6 +28,7 @@
 
 const std = @import("std");
 const common = @import("common.zig");
+const isolate = @import("isolate.zig");
 const checks_http = @import("checks_http.zig");
 const checks_tls = @import("checks_tls.zig");
 const checks_rpc = @import("checks_rpc.zig");
@@ -47,138 +54,38 @@ const Check = struct {
 };
 
 const zix_sock = "tmp/zix.sock";
-const zix_ipc_sock = "/tmp/zix_ipc.sock";
+const zix_ipc_sock = "tmp/zix_ipc.sock";
 
 const checks = [_]Check{
-    // Basic dispatch-model checks.
-    .{ .label = "http-async", .run = &struct {
+    // Basic per-engine checks: one unified example each, on the dispatch model its target picks.
+    .{ .label = "http", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp(io, paths[0], 9000);
         }
     }.f },
-    .{ .label = "http-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp(io, paths[0], 9001);
-        }
-    }.f },
-    .{ .label = "http-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp(io, paths[0], 9002);
-        }
-    }.f },
-    .{ .label = "http-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp(io, paths[0], 9003);
-        }
-    }.f },
-    .{ .label = "http1-async", .run = &struct {
+    .{ .label = "http1", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp1(io, paths[0], 9015);
         }
     }.f },
-    .{ .label = "http1-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9016);
-        }
-    }.f },
-    .{ .label = "http1-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9017);
-        }
-    }.f },
-    .{ .label = "http1-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9018);
-        }
-    }.f },
-    .{ .label = "http1-uring", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp1(io, paths[0], 9019);
-        }
-    }.f },
-    .{ .label = "grpc-async", .run = &struct {
+    .{ .label = "grpc", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpc(io, paths[0], 9032);
         }
     }.f },
-    .{ .label = "grpc-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpc(io, paths[0], 9033);
-        }
-    }.f },
-    .{ .label = "grpc-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpc(io, paths[0], 9034);
-        }
-    }.f },
-    .{ .label = "grpc-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpc(io, paths[0], 9035);
-        }
-    }.f },
-    .{ .label = "tcp-async", .run = &struct {
+    .{ .label = "tcp", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runTcp(io, paths[0], 9043);
         }
     }.f },
-    .{ .label = "tcp-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_misc.runTcp(io, paths[0], 9044);
-        }
-    }.f },
-    .{ .label = "tcp-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_misc.runTcp(io, paths[0], 9045);
-        }
-    }.f },
-    .{ .label = "tcp-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_misc.runTcp(io, paths[0], 9046);
-        }
-    }.f },
-    .{ .label = "fix-async", .run = &struct {
+    .{ .label = "fix", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runFix(io, paths[0], 9048);
         }
     }.f },
-    .{ .label = "fix-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runFix(io, paths[0], 9049);
-        }
-    }.f },
-    .{ .label = "fix-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runFix(io, paths[0], 9050);
-        }
-    }.f },
-    .{ .label = "fix-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runFix(io, paths[0], 9051);
-        }
-    }.f },
-    .{ .label = "http2-async", .run = &struct {
+    .{ .label = "http2", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp2(io, paths[0], 9065);
-        }
-    }.f },
-    .{ .label = "http2-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9066);
-        }
-    }.f },
-    .{ .label = "http2-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9067);
-        }
-    }.f },
-    .{ .label = "http2-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9068);
-        }
-    }.f },
-    .{ .label = "http2-uring", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_http.runHttp2(io, paths[0], 9069);
         }
     }.f },
     .{ .label = "udp", .run = &struct {
@@ -317,24 +224,9 @@ const checks = [_]Check{
     }.f },
 
     // gRPC feature checks.
-    .{ .label = "grpc-location-async", .run = &struct {
+    .{ .label = "grpc-location", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpcLocation(io, paths[0], 9038);
-        }
-    }.f },
-    .{ .label = "grpc-location-pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpcLocation(io, paths[0], 9039);
-        }
-    }.f },
-    .{ .label = "grpc-location-mixed", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpcLocation(io, paths[0], 9040);
-        }
-    }.f },
-    .{ .label = "grpc-location-epoll", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
-            return checks_rpc.runGrpcLocation(io, paths[0], 9041);
         }
     }.f },
     .{ .label = "grpc-multi", .run = &struct {
@@ -463,6 +355,33 @@ const total_paths = blk: {
     break :blk sum;
 };
 
+/// Widest arity in the table, sizing the child's path buffer.
+const max_arity = blk: {
+    var widest: u8 = 1;
+    for (checks) |c| widest = @max(widest, c.arity);
+    break :blk widest;
+};
+
+/// The check that owns argv path `index`, for naming a missing path.
+fn labelForPath(index: usize) []const u8 {
+    var seen: usize = 0;
+    for (checks) |c| {
+        seen += c.arity;
+        if (index < seen) return c.label;
+    }
+
+    return "unknown";
+}
+
+/// The table row carrying `label`, or null when no row does.
+fn findCheck(label: []const u8) ?Check {
+    for (checks) |c| {
+        if (std.mem.eql(u8, c.label, label)) return c;
+    }
+
+    return null;
+}
+
 // --------------------------------------------------------- //
 
 /// Running tally so the final count is derived from the actual number of report() calls, not a
@@ -474,6 +393,8 @@ fn exitMissing(name: []const u8) noreturn {
     std.process.exit(1);
 }
 
+/// Print a check's own outcome. Only a child copy of the runner calls this, since only a child runs
+/// a check body.
 fn report(label: []const u8, result: anyerror!void, tally: *Tally) void {
     tally.total += 1;
     if (result) {
@@ -485,6 +406,16 @@ fn report(label: []const u8, result: anyerror!void, tally: *Tally) void {
     }
 }
 
+/// Print what a check's child reported and fold the outcome into the tally. Only the parent calls
+/// this, and it calls it as it awaits each slot, which is what keeps results in table order however
+/// the checks themselves finished.
+fn forwardResult(io: std.Io, result: isolate.Result, tally: *Tally) void {
+    tally.total += 1;
+    if (result.verdict != .PASSED) tally.failed += 1;
+
+    isolate.forward(io, result.report);
+}
+
 // --------------------------------------------------------- //
 
 /// Max attempts per check. A startup-contention failure (a fresh server's accept threads starved by
@@ -492,37 +423,51 @@ fn report(label: []const u8, result: anyerror!void, tally: *Tally) void {
 /// respawning the whole check almost always clears it. Real assertion failures are never retried.
 const MAX_ATTEMPTS = 3;
 
-/// Whether an error is a transient startup-contention symptom worth retrying (versus a real failure).
-/// These are all connection-establishment errors: under a startup burst a fresh server's accept path
-/// is starved, so the probe or first client connect is refused, reset, or times out. A real check
-/// failure is an assertion (UnexpectedStatus, UnexpectedBody, ...), which is never on this list.
-fn isRetriable(err: anyerror) bool {
-    return switch (err) {
-        error.ServerStartTimeout,
-        error.ConnectFailed,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.ConnectionTimedOut,
-        error.BrokenPipe,
-        => true,
-        else => false,
-    };
-}
-
-/// One concurrent task: invoke a check's wrapper with the server path(s) it owns, retrying the whole
-/// check on a transient startup error. The check is self-contained (it spawns its own server and
-/// kills it on return, even on error), so each retry respawns from a clean slate. A short backoff
-/// between attempts lets a momentary load spike clear instead of respawning straight back into it.
-fn runCheck(io: std.Io, run: RunFn, paths: []const []const u8) anyerror!void {
+/// One concurrent task: run a check in its own child process, retrying the whole check on a transient
+/// startup error. The check is self-contained (the child spawns its own server and kills it on return,
+/// even on error), so each retry respawns from a clean slate. A short backoff between attempts lets a
+/// momentary load spike clear instead of respawning straight back into it.
+///
+/// Note:
+/// - A TIMED_OUT check is never retried. The parent killed that child, so it ran no defers and left
+///   its server running on the check's port. A second attempt would talk to the orphan rather than a
+///   fresh server, which is worse than reporting the failure.
+fn runIsolatedCheck(
+    io: std.Io,
+    self_exe: []const u8,
+    label: []const u8,
+    paths: []const []const u8,
+    report_buf: []u8,
+) isolate.Result {
     var attempt: usize = 1;
     while (true) : (attempt += 1) {
-        if (run(io, paths)) {
-            return;
-        } else |err| {
-            if (attempt >= MAX_ATTEMPTS or !isRetriable(err)) return err;
+        const result = isolate.runIsolated(io, self_exe, label, paths, report_buf);
+        if (result.verdict != .RETRIABLE or attempt >= MAX_ATTEMPTS) return result;
 
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(750), .awake) catch {};
-        }
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(750), .awake) catch {};
+    }
+}
+
+/// Child mode: run exactly one check, print its result line, and exit with the code the parent reads.
+/// One attempt only, since retries belong to the parent.
+fn runOneCheck(io: std.Io, arg_iter: *std.process.Args.Iterator) noreturn {
+    const label = arg_iter.next() orelse exitMissing(isolate.ONLY_FLAG);
+    const check = findCheck(label) orelse {
+        std.debug.print("FAIL: no check named {s}\n", .{label});
+        std.process.exit(isolate.Exit.FAILED);
+    };
+
+    var paths: [max_arity][]const u8 = undefined;
+    for (0..check.arity) |i| paths[i] = arg_iter.next() orelse exitMissing(label);
+
+    var tally: Tally = .{};
+    const result = check.run(io, paths[0..check.arity]);
+    report(label, result, &tally);
+
+    if (result) {
+        std.process.exit(isolate.Exit.PASSED);
+    } else |err| {
+        std.process.exit(if (isolate.isRetriable(err)) isolate.Exit.RETRIABLE else isolate.Exit.FAILED);
     }
 }
 
@@ -542,7 +487,7 @@ fn resourceBusy(active: []const ?[]const u8, res: []const u8) bool {
 const WAVE_MAX = 16;
 
 /// Live wave width scaled to the host. Each engine server spawns a worker pool sized to the CPU
-/// count (a POOL server is ~3x CPU threads), so starting too many servers at once oversubscribes the
+/// count (a multiplexed server is one worker per CPU), so starting too many servers at once oversubscribes the
 /// cores, starves a fresh server's accept threads, and the runner's connect probe then gets refused
 /// (a flaky "ServerStartTimeout"). Conservative on purpose: a small box can only bring up a few of
 /// these heavyweight servers at a time, a large box scales out. The per-check retry (see runCheck) is
@@ -557,6 +502,8 @@ fn maxHeavy(cpu: usize) usize {
     return std.math.clamp(cpu / 12, 1, 3);
 }
 
+// --------------------------------------------------------- //
+
 /// Run every check concurrently in waves whose width is scaled to the host, reporting each result as
 /// its wave completes. Two limits shape a wave: a check whose `resource` tag is already in flight is
 /// deferred so two checks that share a filesystem path never overlap, and at most `max_heavy` of the
@@ -565,10 +512,10 @@ fn maxHeavy(cpu: usize) usize {
 /// Output streams in stable table order: a wave is a contiguous block of checks, waves run in index
 /// order, and within a wave the slots are awaited and reported in index order. report() runs only
 /// here on the main thread (never on the concurrent check threads), so the prints never interleave.
-fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize) void {
+fn runWaves(io: std.Io, self_exe: []const u8, all_paths: []const []const u8, tally: *Tally, cpu: usize) void {
     const wave_width = waveWidth(cpu);
     const max_heavy = maxHeavy(cpu);
-    const Fut = std.Io.Future(anyerror!void);
+    const Fut = std.Io.Future(isolate.Result);
 
     var check_idx: usize = 0;
     var path_cursor: usize = 0;
@@ -576,6 +523,9 @@ fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize
         var futs: [WAVE_MAX]Fut = undefined;
         var slot_check: [WAVE_MAX]usize = undefined;
         var slot_res: [WAVE_MAX]?[]const u8 = undefined;
+        // One report buffer per slot: the child writes its line here while the wave is in flight, and
+        // the parent reads it back when it awaits that slot.
+        var slot_report: [WAVE_MAX][isolate.REPORT_MAX]u8 = undefined;
         var count: usize = 0;
         var heavy_count: usize = 0;
 
@@ -593,7 +543,7 @@ fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize
             if (c.heavy and heavy_count == max_heavy) break;
 
             const paths = all_paths[path_cursor..][0..c.arity];
-            futs[count] = io.async(runCheck, .{ io, c.run, paths });
+            futs[count] = io.async(runIsolatedCheck, .{ io, self_exe, c.label, paths, slot_report[count][0..] });
             slot_check[count] = check_idx;
             slot_res[count] = c.resource;
 
@@ -605,7 +555,7 @@ fn runWaves(io: std.Io, all_paths: []const []const u8, tally: *Tally, cpu: usize
 
         for (0..count) |s| {
             const result = futs[s].await(io);
-            report(checks[slot_check[s]].label, result, tally);
+            forwardResult(io, result, tally);
         }
     }
 }
@@ -614,17 +564,21 @@ pub fn main(process: std.process.Init) void {
     const io = process.io;
 
     var arg_iter = common.argsIterator(process.minimal.args);
-    _ = arg_iter.skip();
+
+    // argv[0] is how a check gets respawned as a child, so it is kept rather than skipped. zig build
+    // invokes the runner by its emitted path, which is what std.process.spawn needs.
+    const self_exe = arg_iter.next() orelse exitMissing("runner path");
+    const first = arg_iter.next() orelse exitMissing(labelForPath(0));
+
+    // Child mode: this copy runs one check and exits, it never schedules a wave.
+    if (std.mem.eql(u8, first, isolate.ONLY_FLAG)) runOneCheck(io, &arg_iter);
 
     // Collect server paths in argv order, one slot per declared check path.
     var all_paths: [total_paths][]const u8 = undefined;
-    var fill: usize = 0;
-    for (checks) |c| {
-        var k: usize = 0;
-        while (k < c.arity) : (k += 1) {
-            all_paths[fill] = arg_iter.next() orelse exitMissing(c.label);
-            fill += 1;
-        }
+    all_paths[0] = first;
+    var fill: usize = 1;
+    while (fill < total_paths) : (fill += 1) {
+        all_paths[fill] = arg_iter.next() orelse exitMissing(labelForPath(fill));
     }
 
     // Run all checks concurrently in bounded waves (width scaled to the host), streaming each wave's
@@ -632,7 +586,8 @@ pub fn main(process: std.process.Init) void {
     const cpu = std.Thread.getCpuCount() catch 4;
 
     var tally: Tally = .{};
-    runWaves(io, &all_paths, &tally, cpu);
+
+    runWaves(io, self_exe, &all_paths, &tally, cpu);
 
     if (tally.failed > 0) {
         std.debug.print("{d}/{d} protocol(s) failed\n", .{ tally.failed, tally.total });

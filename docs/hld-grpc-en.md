@@ -4,7 +4,7 @@
 
 - gRPC h2c (HTTP/2 cleartext) server and client implemented without C FFI.
 - All 4 RPC types: unary, server streaming, client streaming, bidirectional streaming.
-- All 5 dispatch models: ASYNC, POOL, MIXED, EPOLL (Linux-only), URING (Linux-only). Required, no default.
+- All 3 dispatch models: ASYNC (portable), EPOLL (Linux-only), URING (Linux-only). Required, no default.
 - Minimal protobuf codec (varint + LEN wire types) for payload encoding without codegen.
 - grpc-timeout header parsing, grpc-status trailer serialization.
 - Native TLS (TLS 1.3 / 1.2, ALPN h2) via a `Tls.Context`, additive over the h2c default. A reverse proxy (nginx, haproxy) stays an option for offloading.
@@ -53,7 +53,7 @@ graph LR
 | `zix.Grpc.Router(routes)` | comptime type: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (sends UNIMPLEMENTED if no route matches). `Server.init` takes the Router TYPE itself, not `.dispatch`, because the engine reads `Route.is_server_streaming` off `route_slice` before dispatch |
 | `zix.Grpc.ServerConfig` | see config fields below |
 | `zix.Grpc.ClientConfig` | `ip`, `port` |
-| `zix.Grpc.DispatchModel` | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 (Linux-only), URING=4 (Linux-only), required with no default |
+| `zix.Grpc.DispatchModel` | ASYNC=0 (portable), EPOLL=1 (Linux-only), URING=2 (Linux-only), required with no default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: per-connection options passed to `serveConn` |
@@ -79,10 +79,9 @@ graph LR
 | `io` | required | caller-provided `std.Io` backend |
 | `ip` | required | bind address |
 | `port` | required | listen port, 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, or `.URING` (the last two Linux-only, native) |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.EPOLL`, or `.URING` (the last two Linux-only, native, rejected off Linux with error.DispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | `listen()` backlog |
-| `workers` | 0 | 0 -> cpu_count accept threads (POOL and MIXED) |
-| `pool_size` | 0 | POOL: 0 -> max(10, cpu_count * 2) pool threads. EPOLL: 0 -> cpu_count multiplexing workers |
+| `workers` | 0 | 0 -> cpu_count multiplexing workers for EPOLL and URING. Ignored by ASYNC |
 | `max_streams` | 128 | max concurrent HTTP/2 streams per connection (advertised SETTINGS_MAX_CONCURRENT_STREAMS) |
 | `max_frame_size` | 16384 | advertised max HTTP/2 frame size |
 | `max_header_scratch` | 4096 | HPACK decode scratch buffer per stream (pooled per worker) |
@@ -318,23 +317,19 @@ When the handler calls `res.finish(status, msg)` without sending any data, the s
 | Model | Accept threads | Connection dispatch | Notes |
 | :- | :- | :- | :- |
 | `.ASYNC` | 1 | `io.async()` per connection | preferred for unbounded or long-lived streams |
-| `.POOL` | cpu_count | shared `ConnQueue` + blocking pool | workers and pool_size apply |
-| `.MIXED` | cpu_count | `io.async()` per accept thread | no ConnQueue, pool_size ignored |
 | `.EPOLL` | per worker | multiplexed event loop (Linux only) | highest throughput, see below |
 | `.URING` | per worker | multiplexed io_uring loop (Linux only) | same shape as `.EPOLL`, completion-based |
 
-MIXED accept threads use `.{}` default stack size (system default ~8MB) to prevent stack overflow when `io.async()` falls back to inline execution.
-
-`.EPOLL` is Linux-specific. On non-Linux platforms, `.EPOLL` falls back to `.POOL` automatically. `.URING` is the same shared-nothing multiplexed design on the io_uring ring (`runUring`, ADR-037 Phase 4): completion-based instead of readiness-based, `pool_size` workers (0 = cpu_count), Linux-only, and also falls back to `.POOL` on non-Linux.
+`.EPOLL` is Linux-specific. Off Linux, `run()` returns `error.DispatchModelUnsupported` after logging which model was rejected, so pick `.ASYNC` there. `.URING` is the same shared-nothing multiplexed design on the io_uring ring (`runUring`, ADR-037 Phase 4): completion-based instead of readiness-based, `workers` workers (0 = cpu_count), Linux-only, and rejected off Linux the same way. When io_uring itself is unavailable on a Linux host, `.URING` folds to the `.EPOLL` loop with a logged notice.
 
 ### `.EPOLL` is multiplexed and shared-nothing
 
-`.EPOLL` does not park one thread per connection. It runs `pool_size` worker threads (0 = cpu count), each owning a private `SO_REUSEPORT` listener, its own epoll instance, and a private fd-indexed connection table. The kernel load-balances new connections across the per-worker listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff. One worker drives many non-blocking connections through a resumable HTTP/2 state machine (`GrpcMuxConn`), so concurrency is bounded by connection count, not by thread count. Each worker's `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call (ADR-032). The low-level design is in `lld-grpc-en.md`.
+`.EPOLL` does not park one thread per connection. It runs `workers` worker threads (0 = cpu count), each owning a private `SO_REUSEPORT` listener, its own epoll instance, and a private fd-indexed connection table. The kernel load-balances new connections across the per-worker listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff. One worker drives many non-blocking connections through a resumable HTTP/2 state machine (`GrpcMuxConn`), so concurrency is bounded by connection count, not by thread count. Each worker's `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call (ADR-032). The low-level design is in `lld-grpc-en.md`.
 
-Two consequences differ from the other models:
+Two consequences differ from `.ASYNC`:
 
-- `pool_size` is the multiplexing worker count for `.EPOLL` (the optimal value is around cpu count), not a blocking pool size. Oversubscribing it only adds scheduler churn.
-- Every route, including server-streaming, is dispatched inline on the worker (no per-stream thread). A streaming handler runs on the event loop, so it must be bounded - a long-running or unbounded stream blocks the other connections on that worker. Use `.ASYNC` for unbounded streaming. The per-stream thread spawn still applies to server-streaming routes under `.ASYNC`, `.POOL`, and `.MIXED`.
+- `workers` is the multiplexing worker count for `.EPOLL` (the optimal value is around cpu count). Oversubscribing it only adds scheduler churn.
+- Every route, including server-streaming, is dispatched inline on the worker (no per-stream thread). A streaming handler runs on the event loop, so it must be bounded - a long-running or unbounded stream blocks the other connections on that worker. Use `.ASYNC` for unbounded streaming, where the per-stream thread spawn still applies to server-streaming routes.
 - Server-streaming replies coalesce many gRPC messages into each HTTP/2 DATA frame (up to the 16 KiB default max frame size) instead of one frame per message, so a chatty stream costs far fewer frames on the wire and far less per-frame parsing on the client. See the LLD for the mechanism.
 
 The advertised `max_streams` must be at least the client's concurrent-stream count. A client (for example a benchmark with 100 parallel streams per connection) opens streams optimistically before it sees the server SETTINGS, and any beyond `max_streams` are answered with `REFUSED_STREAM`.
@@ -345,8 +340,6 @@ The advertised `max_streams` must be at least the client's concurrent-stream cou
 flowchart TD
     A[GrpcServer.run] --> B{dispatch_model}
     B -->|ASYNC| C[single accept thread\nio.async per conn]
-    B -->|POOL| D[N accept threads\nConnQueue\nM pool threads]
-    B -->|MIXED| E[N accept threads\nio.async per conn]
     B -->|EPOLL| EP[N workers\nSO_REUSEPORT listener\n+ epoll each]
     C --> F[serveGrpcConn blocking]
     D --> F
@@ -393,7 +386,7 @@ const n = zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_mux.zig`), with no socketpair and no thread per connection. Under `.ASYNC` / `.POOL` / `.MIXED`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. With `tls_port` set next to `tls`, ONE server serves h2c on `port` and gRPC over TLS on `tls_port` from the same worker fleet (ADR-060).
+`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_mux.zig`), with no socketpair and no thread per connection. Under `.ASYNC`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. With `tls_port` set next to `tls`, ONE server serves h2c on `port` and gRPC over TLS on `tls_port` from the same worker fleet (ADR-060).
 
 ```mermaid
 graph LR
@@ -406,15 +399,10 @@ A reverse proxy stays an alternative when TLS offload, routing, or sharing a por
 
 | File | Pattern |
 | :- | :- |
-| `examples/grpc_server_1_async.zig` | ASYNC dispatch: SayHello and Echo handlers, port 8083 |
-| `examples/grpc_server_2_pool.zig` | POOL dispatch: SayHello and Echo handlers, port 8083 |
-| `examples/grpc_server_3_mixed.zig` | MIXED dispatch: SayHello and Echo handlers, port 8083 |
-| `examples/grpc_server_4_epoll.zig` | EPOLL dispatch (Linux-only): SayHello and Echo handlers, port 8083 |
+| `examples/grpc_server.zig` | dispatch model picked per target (URING on Linux, ASYNC elsewhere): SayHello, Echo, and StreamSum handlers, port 9032 |
 | `examples/grpc_client.zig` | unary call and manual streaming demo, port 8083 |
 | `examples/grpc_timeout.zig` | context timeout demo: handler_timeout_ms, Route.timeout_ms, ctx.isExpired(), ctx.deadline_ns override, port 8084 |
-| `examples/grpc_location_server_1_async.zig` | ASYNC, location.Location/SendLocationAndSave, port 10101, logger wired |
-| `examples/grpc_location_server_2_pool.zig` | POOL, port 10101 |
-| `examples/grpc_location_server_3_mixed.zig` | MIXED, port 10101 |
+| `examples/grpc_location_server.zig` | location.Location/SendLocationAndSave, dispatch model picked per target, port 9038 |
 | `examples/grpc_location_client.zig` | location service client: encodes double fields, decodes bool response |
 | `examples/grpc_multi_server.zig` | ASYNC, helloworld.Greeter + location.Location on one port (10102), logger wired |
 | `examples/grpc_multi_client.zig` | calls both services on one connection, port 10102 |

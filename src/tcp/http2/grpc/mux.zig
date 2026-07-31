@@ -13,6 +13,7 @@
 //!   reused unchanged from here.
 
 const std = @import("std");
+const socket_pair = @import("../../../utils/socket_pair.zig");
 const builtin = @import("builtin");
 const h2 = @import("../Http2.zig");
 const frame = @import("frame.zig");
@@ -771,12 +772,11 @@ test "zix grpc: pooled stream is reused and reset clean on release" {
 }
 
 test "zix grpc: stream slots are pooled across connections" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 128, .max_header_scratch = 64 };
 
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     // Connection A borrows a slot, then releases it back to the per-worker pool.
     const conn_a = GrpcMuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
@@ -807,9 +807,9 @@ test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED 
     }
     const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 256 };
 
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     const conn = GrpcMuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();
@@ -882,9 +882,9 @@ test "zix grpc: mux HEADERS past max_streams is refused with REFUSED_STREAM" {
     }
     const opts = GrpcServeOpts{ .max_streams = 1, .max_body = 64, .max_header_scratch = 256 };
 
-    const fds = try std.Io.Threaded.pipe2(.{});
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
 
     const conn = GrpcMuxConn.init(fds[1], opts, undefined) orelse return error.OutOfMemory;
     defer conn.deinit();

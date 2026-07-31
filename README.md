@@ -43,7 +43,7 @@
 </h4>
 <div align="center">
     <img src="https://img.shields.io/badge/x86__64-Linux-green">
-    <img src="https://img.shields.io/badge/aarch64-Linux-yellow">
+    <img src="https://img.shields.io/badge/aarch64-Linux-green">
     <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
     <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
     <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">

@@ -41,8 +41,13 @@ fn run(io: std.Io, server_path: []const u8) !void {
 
     try common.waitForUdsSocket(io, SOCK_PATH, WAIT_MS);
 
+    // The same absolute path the server derived. Connecting by relative path is refused on
+    // Windows, so both sides go through the shared resolver.
+    var path_buf: [600]u8 = undefined;
+    const sock_path = try zix.utils.socket_path.resolve(io, "tmp", "zix.sock", &path_buf);
+
     var client = try zix.Uds.Client.connect(.{
-        .path = SOCK_PATH,
+        .path = sock_path,
         .recv_timeout_ms = 3000,
     }, io);
     defer client.deinit(io);

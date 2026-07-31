@@ -313,7 +313,7 @@ fn tlsMuxWorker(worker: WorkerCtx) void {
 pub fn runTlsMux(handler: core.HandlerFn, config: Http2ServerConfig) !void {
     const ctx = config.tls.?;
     const cpu = common.getAvailableCpuCount();
-    const worker_count = if (config.pool_size == 0) cpu else config.pool_size;
+    const worker_count = if (config.workers == 0) cpu else config.workers;
     const opts = common.serveOpts(config);
 
     common.logSystem(config, "listening on {s}:{d} (h2 TLS, epoll-mux/{d})", .{ config.ip, config.port, worker_count });

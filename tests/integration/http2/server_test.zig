@@ -36,7 +36,7 @@ fn makeRunner(comptime routes: []const zix.Http2.Route) type {
             const fd = stream.socket.handle;
             const router = zix.Http2.Router(routes);
             zix.Http2.serveConn(router.dispatch, fd, .{}, io);
-            _ = std.posix.system.close(fd);
+            zix.utils.fd_io.close(fd);
         }
     };
 }
@@ -195,7 +195,7 @@ test "zix integration: Http2 GET / returns Hello World over h2c direct" {
     const t = try spawnServer(&ctx, io, TEST_PORT, R.run);
 
     const fd = try clientConnect(io, TEST_PORT);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendRequest(fd, 1, "GET", "/", null);
@@ -225,7 +225,7 @@ test "zix integration: Http2 POST /echo returns request body" {
     const t = try spawnServer(&ctx, io, TEST_PORT + 1, R.run);
 
     const fd = try clientConnect(io, TEST_PORT + 1);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
     try sendRequest(fd, 1, "POST", "/echo", "ping from client");
@@ -255,7 +255,7 @@ test "zix integration: Http2 two sequential streams on same connection" {
     const t = try spawnServer(&ctx, io, TEST_PORT + 2, R.run);
 
     const fd = try clientConnect(io, TEST_PORT + 2);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     try sendPreface(fd);
 
@@ -289,7 +289,7 @@ test "zix integration: Http2 h2c upgrade GET / returns Hello World" {
     const t = try spawnServer(&ctx, io, TEST_PORT + 3, R.run);
 
     const fd = try clientConnect(io, TEST_PORT + 3);
-    defer _ = std.posix.system.close(fd);
+    defer zix.utils.fd_io.close(fd);
 
     const upgrade_req =
         "GET / HTTP/1.1\r\n" ++
@@ -300,7 +300,7 @@ test "zix integration: Http2 h2c upgrade GET / returns Hello World" {
     try zix.Http2.writeAllFD(fd, upgrade_req);
 
     var resp101: [256]u8 = undefined;
-    const n101 = try std.posix.read(fd, &resp101);
+    const n101 = try zix.utils.fd_io.readOnce(fd, &resp101);
     try std.testing.expect(std.mem.startsWith(u8, resp101[0..n101], "HTTP/1.1 101"));
 
     try sendPreface(fd);

@@ -15,11 +15,10 @@ const Context = @import("context.zig").Context;
 const rcache = @import("../../utils/response_cache.zig");
 const static_cache = @import("../../utils/static_cache.zig");
 const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
+const dispatch_support = @import("../../utils/dispatch_support.zig");
 const setCache = @import("response.zig").setCache;
 const common = @import("dispatch/common.zig");
-const pool_model = @import("dispatch/pool.zig");
 const async_model = @import("dispatch/async.zig");
-const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const tls_serve = @import("tls_serve.zig");
@@ -30,11 +29,12 @@ const tls_mux = @import("tls_mux.zig");
 /// HTTP server: initialize with a handler built via Router(routes).dispatch.
 ///
 /// Note:
-/// - workers = 0 (default): cpu_count accept threads + max(10, cpu_count * 2) pool threads
-/// - workers = N: exactly N accept threads, same pool sizing formula
+/// - workers = 0 (default): one shared-nothing worker per available CPU under .EPOLL / .URING
+/// - workers = N: exactly N workers, ignored by .ASYNC (always one accept thread)
 /// - If config.public_dir is non-empty, validates the directory exists. Yields error.PublicDirNotFound if absent
-/// - Accept threads listen on the same port via SO_REUSEPORT
-/// - Pool threads handle connections synchronously via a shared work queue
+/// - Each .EPOLL / .URING worker owns its own SO_REUSEPORT listener, so the kernel load-balances
+///   new connections with no shared queue and no cross-thread fd handoff
+/// - .EPOLL / .URING are Linux-only: run() returns error.DispatchModelUnsupported elsewhere (ADR-065)
 ///
 /// Usage:
 /// ```zig
@@ -89,7 +89,7 @@ pub const Server = struct {
         self.registry.deinit();
     }
 
-    /// Dual-listener TLS accept thread for the thread models: serves https on config.port
+    /// Dual-listener TLS accept thread for the thread model (.ASYNC): serves https on config.port
     /// (already overridden to tls_port by the caller) while the cleartext model runs on the
     /// original port.
     fn serveTlsThread(server_copy: Self, tls_io: std.Io) void {
@@ -107,9 +107,15 @@ pub const Server = struct {
         // error return leaves no detached thread reading this server's registry.
         if (cfg.tls != null and cfg.tls_port != 0 and cfg.tls_port == cfg.port) return error.TlsPortConflict;
 
-        ignoreSigpipe();
+        // Reject an unrunnable model before the timer thread spawns, so a rejected config leaves
+        // nothing behind (ADR-065).
+        if (!dispatch_support.isSupported(cfg.dispatch_model)) {
+            common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-        const cpu = try std.Thread.getCpuCount();
+            return error.DispatchModelUnsupported;
+        }
+
+        ignoreSigpipe();
 
         const thread_io: std.Io = cfg.io;
 
@@ -129,31 +135,20 @@ pub const Server = struct {
 
         const is_linux = comptime builtin.target.os.tag == .linux;
 
-        const effective_model: DispatchModel = blk: {
-            if (comptime !is_linux) {
-                // EPOLL and URING are Linux-only: fall back to POOL elsewhere.
-                if (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING) {
-                    common.logSystem(cfg, "EPOLL/URING are Linux-only. Falling back to POOL.", .{});
-                    break :blk .POOL;
-                }
-            }
-            break :blk cfg.dispatch_model;
-        };
-
         // https opt-in (config.tls): terminate TLS on a gated path, the cleartext models above
         // are untouched. EPOLL / URING multiplex TLS in the event-driven worker (one SO_REUSEPORT
-        // epoll worker per core, many connections each), the thread models hand each connection to
+        // epoll worker per core, many connections each), the thread model hands each connection to
         // its own worker thread.
         if (cfg.tls != null) {
             // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
             // fleet, instead of a second server launch.
             if (cfg.tls_port != 0) {
-                if (is_linux and effective_model == .EPOLL) return epoll_model.runEpoll(self, thread_io);
-                if (is_linux and effective_model == .URING) return uring_model.runUring(self, thread_io);
+                if (is_linux and cfg.dispatch_model == .EPOLL) return epoll_model.runEpoll(self, thread_io);
+                if (is_linux and cfg.dispatch_model == .URING) return uring_model.runUring(self, thread_io);
 
-                // Thread models (.ASYNC / .POOL / .MIXED): one extra accept thread terminates
-                // TLS on tls_port (thread-per-connection, WebSocket + SSE included, ADR-054 /
-                // ADR-055), the cleartext model runs below unchanged.
+                // Thread model (.ASYNC): one extra accept thread terminates TLS on tls_port
+                // (thread-per-connection, WebSocket + SSE included, ADR-054 / ADR-055), the
+                // cleartext model runs below unchanged.
                 var tls_server = self.*;
                 tls_server.config.port = cfg.tls_port;
                 tls_server.config.tls_port = 0;
@@ -161,22 +156,20 @@ pub const Server = struct {
                 const tls_thread = try std.Thread.spawn(.{}, serveTlsThread, .{ tls_server, thread_io });
                 tls_thread.detach();
             } else {
-                if (is_linux and (effective_model == .EPOLL or effective_model == .URING)) {
+                if (is_linux and (cfg.dispatch_model == .EPOLL or cfg.dispatch_model == .URING)) {
                     return tls_mux.runTlsMux(self, thread_io);
                 }
                 return tls_serve.runTls(self, thread_io);
             }
         }
 
-        switch (effective_model) {
-            .POOL => try pool_model.runPool(self, thread_io, cpu),
+        // The guard at the top already rejected .EPOLL / .URING off Linux, the comptime gate here
+        // only keeps the Linux-only loops out of analysis there.
+        switch (cfg.dispatch_model) {
             .ASYNC => try async_model.runAsync(self, thread_io),
-            .MIXED => try mixed_model.runMixed(self, thread_io, cpu),
-            // effective_model already resolved .EPOLL / .URING to .POOL off Linux,
-            // the comptime gate only keeps the Linux-only loops out of analysis there.
-            .EPOLL => if (comptime is_linux) try epoll_model.runEpoll(self, thread_io) else unreachable,
+            .EPOLL => if (comptime is_linux) try epoll_model.runEpoll(self, thread_io) else return error.DispatchModelUnsupported,
             // Native io_uring ring path (ADR-037 Phase 4 step 4).
-            .URING => if (comptime is_linux) try uring_model.runUring(self, thread_io) else unreachable,
+            .URING => if (comptime is_linux) try uring_model.runUring(self, thread_io) else return error.DispatchModelUnsupported,
         }
     }
 };

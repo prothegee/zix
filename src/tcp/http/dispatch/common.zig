@@ -19,6 +19,8 @@ const Context = @import("../context.zig").Context;
 const method = @import("../method.zig");
 const parser = @import("../parser.zig");
 const setCache = @import("../response.zig").setCache;
+const setCompression = @import("../response.zig").setCompression;
+const async_cache = @import("../../../utils/async_cache.zig");
 const RespSink = @import("../response.zig").RespSink;
 const slab = @import("../../../multiplexers/slab.zig");
 
@@ -635,7 +637,7 @@ pub fn processRequest(
     return if (head.keep_alive) .keep_alive else .close;
 }
 
-/// Recv loop + dispatch for one HTTP request on a blocking fd (POOL/ASYNC/MIXED).
+/// Recv loop + dispatch for one HTTP request on a blocking fd (.ASYNC).
 ///
 /// Note:
 /// - Incremental recv loop accumulates bytes until \r\n\r\n is found
@@ -688,13 +690,13 @@ fn handleOneRequest(
     return processRequest(server, stream, fd, io, buf_read[0..filled], arena);
 }
 
-/// Stack read-buffer cap for the thread models (POOL / MIXED / ASYNC): a connection whose
+/// Stack read-buffer cap for the thread model (.ASYNC): a connection whose
 /// max_recv_buf fits within this reads on the connection thread stack, a larger max_recv_buf
 /// heap-allocates from smp_allocator. max_recv_buf (config) is the tuning knob, this cap only
 /// bounds the comptime-sized stack array.
 pub const stack_read_buf_max: usize = 4096;
 
-/// Handle a single TCP connection with a keep-alive request loop (POOL/MIXED/ASYNC)
+/// Handle a single TCP connection with a keep-alive request loop (.ASYNC)
 ///
 /// Note:
 /// - Sets TCP_NODELAY immediately on accepted connection
@@ -714,6 +716,20 @@ pub fn handleConnection(stream: std.Io.net.Stream, io: std.Io, server: anytype) 
 
     const cfg = server.config;
     const fd = stream.socket.handle;
+
+    // The multiplexed models install these once per worker. .ASYNC has no worker: io.async hands
+    // each connection to whichever pool thread is free, so they are installed per connection.
+    // Compression is stateless, the cache is built once per pool thread and reused.
+    setCompression(cfg.compress, cfg.compression_min_size, cfg.compression_max_out);
+
+    if (cfg.response_cache) {
+        const entries = async_cache.effectiveEntries(cfg.cache_max_entries, cfg.cache_max_value_bytes, cfg.cache_max_total_bytes);
+        const cache = async_cache.forThisThread(.{ .max_entries = entries, .max_value_bytes = cfg.cache_max_value_bytes });
+
+        setCache(cache, cfg.cache_ttl_ms);
+    } else {
+        setCache(null, 0);
+    }
 
     // Layer D: connection guard via registry eviction.
     var maybe_conn_entry: ?ConnEntry = null;

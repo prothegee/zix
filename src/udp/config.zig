@@ -44,9 +44,9 @@ pub const UdpServerConfig = struct {
     // messaging path runs a single async receive loop: it folds a non-ASYNC `dispatch_model` with a
     // notice and does not use the batch / worker knobs.
 
-    /// Concurrency model for the raw path. `.ASYNC` runs a single worker. `.POOL` / `.MIXED` /
-    /// `.EPOLL` / `.URING` run one worker per CPU (ADR-050): `.EPOLL` / `.URING` are per-core
-    /// SO_REUSEPORT, `.POOL` / `.MIXED` the recvmmsg loop. Required: set explicitly (no default).
+    /// Concurrency model for the raw path. `.ASYNC` runs a single worker. `.EPOLL` / `.URING` run one
+    /// per-core SO_REUSEPORT worker per CPU (ADR-050) and are Linux-only, run() rejects them elsewhere
+    /// with error.DispatchModelUnsupported. Required: set explicitly (no default).
     dispatch_model: DispatchModel,
     /// Worker count for the per-core models. 0 means one per available CPU.
     workers: usize = 0,

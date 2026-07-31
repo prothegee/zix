@@ -49,8 +49,8 @@ test "zix: unit test" {
 | Implementation file | `lowercase.zig` | `server.zig`, `config.zig` |
 | Type / struct / enum | `PascalCase` | `TcpServerConfig`, `DispatchModel`, `RespSink` |
 | Function | `camelCase` | `serveDispatch`, `frameRespond`, `uringUnavailableReason` |
-| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `pool_size` (use `_var` if it meant for private usage) |
-| Domain / public / config enum value | `UPPER_CASE` | `ASYNC`, `POOL`, `EPOLL`, `URING` |
+| Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `worker_stack_size_bytes` (use `_var` if it meant for private usage) |
+| Domain / public / config enum value | `UPPER_CASE` | `ASYNC`, `EPOLL`, `URING` |
 | Error | `error.PascalCase` | `error.PortNotConfigured`, `error.ConnectionClosed` |
 | Comptime version constants | `UPPER_CASE` | `ZIG_SEMVER.MAJOR` |
 
@@ -228,23 +228,37 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
 
 ---
 
-## 8. Dispatch model and platform fallback
+## 8. Dispatch model and platform support
 
-Concurrency is one `DispatchModel` enum (`ASYNC`, `POOL`, `MIXED`, `EPOLL`, `URING`), each model in its own file under `dispatch/` (ADR-043), selected by a thin `switch` in the server. `.ASYNC = 0` is the zero value so a zero-init config gets a sane default.
+Concurrency is one `DispatchModel` enum (`ASYNC`, `EPOLL`, `URING`), each model in its own file under `dispatch/` (ADR-043), selected by a thin `switch` in the server. `.ASYNC = 0` is the zero value so a zero-init config gets a sane default, and it is the only model available on every platform.
 
-Linux-only models degrade gracefully instead of vanishing: a comptime OS check folds `.EPOLL` to `.POOL` off Linux, and a runtime probe folds `.URING` to the EPOLL adapter when io_uring is unusable (commonly the `RLIMIT_MEMLOCK` cap), each logging the reason through `common.logSystem`:
+Two different mismatches, handled two different ways (ADR-065):
+
+- **A model the target OS cannot run** (`.EPOLL` / `.URING` off Linux) is a config error. `run()` logs which model was rejected and returns `error.DispatchModelUnsupported`. It never downgrades: a caller that asked for a per-core loop and silently got something else has no way to tell.
+- **A model the host cannot use right now** (io_uring unavailable on Linux, commonly the `RLIMIT_MEMLOCK` cap) is a capability gap. `.URING` folds to the EPOLL loop and logs the reason, so the server does not vanish right after binding.
+
+The platform check is one shared predicate, consulted before the server binds anything:
 
 ```zig
-.EPOLL, .URING => if (comptime builtin.target.os.tag == .linux)
-    epoll_model.runEpoll(cfg, handler)
-else blk: {
-    common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
+if (!dispatch_support.isSupported(cfg.dispatch_model)) {
+    common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-    break :blk pool_model.runPool(cfg, handler);
-},
+    return error.DispatchModelUnsupported;
+}
 ```
 
-> Prefer comptime gating for a build-time fact (`comptime builtin.target.os.tag`), a runtime probe only for a host-time fact (memlock, ring availability). Always log the fallback reason. Never let the server silently disappear after binding.
+The `switch` arms keep their comptime OS gate as well, because the Linux-only loops only compile on Linux:
+
+```zig
+.EPOLL => if (comptime builtin.target.os.tag == .linux)
+    epoll_model.runEpoll(cfg, handler)
+else
+    error.DispatchModelUnsupported,
+```
+
+> Prefer comptime gating for a build-time fact (`comptime builtin.target.os.tag`), a runtime probe only for a host-time fact (memlock, ring availability). Always log the reason. Never let the server silently disappear after binding, and never let it silently serve a model the caller did not ask for.
+
+> A model zix keeps is a model zix can maintain. `.POOL` and `.MIXED` were dropped in ADR-065 for exactly that reason, and `.KQUEUE` / `.IOCP` stay reserved names until each has a maintainer.
 
 The same guard applies to any hand-rolled Linux-only fast path added purely for performance, not just the dispatch model (for example a `wallClockNs` / `nowUs` helper calling `std.os.linux.clock_gettime` directly instead of going through `std.posix.system`). The Linux branch (`comptime builtin.target.os.tag == .linux`, covers both x86_64-linux and aarch64-linux identically) is the primary, guarded platform: keep it byte-identical to what is already proven, and add every other platform as its own separate branch next to it, never folded into one shared implementation.
 

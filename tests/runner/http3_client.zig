@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const zix = @import("zix");
+const socket_poll = zix.utils.socket_poll;
 
 const h3 = zix.Http3;
 const crypto = h3.crypto;
@@ -353,7 +354,7 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
     var sends: usize = 1;
     while (!have_app) {
         var rbuf: [2048]u8 = undefined;
-        const msg = sock.receiveTimeout(io, &rbuf, handshakeTimeout()) catch {
+        const msg = receiveWithin(io, sock, &rbuf, HANDSHAKE_TIMEOUT_MS) orelse {
             // No response yet. The server's UDP socket may not be bound (there is no accept to poll),
             // or a packet was lost under load. Retransmit the Initial with a fresh packet number, the
             // QUIC reliability the handshake depends on, until the budget is spent.
@@ -444,7 +445,7 @@ fn recvBody(io: std.Io, sock: anytype, app_keys: keyschedule.AppKeys, body_out: 
     var attempts: usize = 0;
     while (attempts < 16) : (attempts += 1) {
         var rbuf: [2048]u8 = undefined;
-        const msg = sock.receiveTimeout(io, &rbuf, recvTimeout()) catch break;
+        const msg = receiveWithin(io, sock, &rbuf, RECV_TIMEOUT_MS) orelse break;
         const data = msg.data;
         if (data.len == 0 or data[0] & 0x80 != 0) continue;
 
@@ -472,7 +473,7 @@ fn recvBody(io: std.Io, sock: anytype, app_keys: keyschedule.AppKeys, body_out: 
 /// - an error if any handshake or framing step fails
 pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const u8, body_out: []u8) ![]const u8 {
     var rnd: [16 + 16 + 32 + 32]u8 = undefined;
-    _ = std.os.linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     const dcid = rnd[0..CID_LEN];
     const scid = rnd[16 .. 16 + CID_LEN];
     const client_random: [32]u8 = rnd[32..64].*;
@@ -501,7 +502,7 @@ pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const 
 /// - an error if the handshake fails or either response is missing
 pub fn fetchTwo(io: std.Io, server_ip: []const u8, server_port: u16, path0: []const u8, path1: []const u8, body0_out: []u8, body1_out: []u8) !struct { []const u8, []const u8 } {
     var rnd: [16 + 16 + 32 + 32]u8 = undefined;
-    _ = std.os.linux.getrandom(&rnd, rnd.len, 0);
+    io.random(&rnd);
     const dcid = rnd[0..CID_LEN];
     const scid = rnd[16 .. 16 + CID_LEN];
     const client_random: [32]u8 = rnd[32..64].*;
@@ -528,12 +529,25 @@ pub fn fetchTwo(io: std.Io, server_ip: []const u8, server_port: u16, path0: []co
     return .{ body0, body1 };
 }
 
-fn recvTimeout() std.Io.Timeout {
-    return .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(3000), .clock = .awake } };
-}
+/// Per-response wait for a 1-RTT packet.
+const RECV_TIMEOUT_MS: u32 = 3000;
 
 // Per-attempt wait for a handshake packet. Short enough that the Initial is retransmitted
 // promptly when the first send is lost, the retransmit loop spends at most 25 of these.
-fn handshakeTimeout() std.Io.Timeout {
-    return .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(600), .clock = .awake } };
+const HANDSHAKE_TIMEOUT_MS: u32 = 600;
+
+/// Receive one datagram within `timeout_ms`, or null when nothing arrived in time.
+///
+/// Note:
+/// - Readiness first, then a plain receive. A timed std.Io receive races the receive against a
+///   timer, which the Windows backend cannot do for a socket: it answers
+///   error.ConcurrencyUnavailable, which every caller here reads as a lost packet and retries
+///   until the budget is spent. Readiness plus a blocking receive needs no concurrency.
+/// - A receive that fails after readiness is reported the same as a timeout: to the QUIC loops
+///   above, both mean this attempt produced no packet.
+fn receiveWithin(io: std.Io, sock: std.Io.net.Socket, buf: []u8, timeout_ms: u32) ?std.Io.net.IncomingMessage {
+    const ready = socket_poll.waitReady(sock.handle, socket_poll.READABLE, timeout_ms) catch return null;
+    if (!ready) return null;
+
+    return sock.receive(io, buf) catch null;
 }

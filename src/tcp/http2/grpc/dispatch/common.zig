@@ -1,15 +1,16 @@
 //! zix grpc dispatch: helpers shared across the dispatch models (ADR-043).
-//! The route-agnostic pieces (logSystem, opts builders, setNoDelay, ConnQueue,
-//! the accept worker) are plain decls. The Router-type-dependent per-connection
-//! helpers live in Dispatch(RouterType), since core.serveGrpcConn takes a
+//! The route-agnostic pieces (logSystem, opts builders, setNoDelay) are plain
+//! decls. The Router-type-dependent per-connection helpers live in
+//! Dispatch(RouterType), since core.serveGrpcConn takes a
 //! comptime Router type (is_server_streaming must be visible before dispatch).
 //! EPOLL and URING keep their own (Router-baked) workers in their files.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const ZIG_SEMVER = @import("../../../../lib.zig").ZIG_SEMVER;
-const win_io = @import("../../../../utils/windows_io.zig");
+const fd_io = @import("../../../../utils/fd_io.zig");
 const core = @import("../core.zig");
+const async_cache = @import("../../../../utils/async_cache.zig");
 const GrpcServerConfig = @import("../config.zig").GrpcServerConfig;
 
 /// Effective cache slot count for a worker, honoring cache_max_total_bytes.
@@ -38,8 +39,8 @@ pub fn logSystem(cfg: GrpcServerConfig, comptime fmt: []const u8, args: anytype)
         std.debug.print("zix grpc: " ++ fmt ++ "\n", args);
 }
 
-/// Basic per-connection serve options, used by ASYNC / POOL / MIXED (the
-/// response cache is active only on the multiplexed EPOLL / URING workers).
+/// Per-connection serve options without the response cache, used by the TLS paths where each
+/// connection terminates its own session.
 pub fn serveOpts(cfg: GrpcServerConfig) core.GrpcServeOpts {
     return .{
         .max_streams = cfg.max_streams,
@@ -55,8 +56,8 @@ pub fn serveOpts(cfg: GrpcServerConfig) core.GrpcServeOpts {
     };
 }
 
-/// Full serve options including the response-cache fields, used by the
-/// multiplexed EPOLL / URING workers.
+/// Full serve options including the response-cache fields, used by every cleartext model:
+/// the multiplexed workers own one cache each, .ASYNC one per io pool thread.
 pub fn serveOptsWithCache(cfg: GrpcServerConfig) core.GrpcServeOpts {
     return .{
         .max_streams = cfg.max_streams,
@@ -95,14 +96,15 @@ pub fn setNoDelay(fd: std.posix.fd_t) void {
     }
 }
 
-/// Close a connection fd: the ntdll shim on Windows, the raw close syscall elsewhere.
+/// Close a connection fd.
+///
+/// Note:
+/// - Delegates to the shared helper rather than branching here. It used to call the raw Linux close
+///   on every platform but Windows, which off Linux aims a Linux syscall number at a kernel that
+///   assigns it to something else, so the connection was never closed and something unrelated ran
+///   in its place. fd_io owns the three-way branch (ntdll, raw syscall, libc) for every engine.
 pub fn closeFD(fd: std.posix.fd_t) void {
-    if (comptime builtin.os.tag == .windows) {
-        win_io.close(fd);
-        return;
-    }
-
-    _ = std.os.linux.close(fd);
+    fd_io.close(fd);
 }
 
 /// Put a socket in non-blocking mode (listener and accepted fds in the event-driven paths).
@@ -135,97 +137,9 @@ pub fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
 
 // --------------------------------------------------------- //
 
-pub const ConnQueue = struct {
-    mutex: std.Io.Mutex = .init,
-    ready: std.Io.Condition = .init,
-    buf: []std.posix.fd_t = &.{},
-    head: usize = 0,
-    len: usize = 0,
-    closed: bool = false,
-
-    pub fn push(self: *ConnQueue, fd: std.posix.fd_t, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        if (self.len == self.buf.len) {
-            const new_cap = if (self.buf.len == 0) 16 else self.buf.len * 2;
-            const new_buf = std.heap.smp_allocator.alloc(std.posix.fd_t, new_cap) catch {
-                self.mutex.unlock(io);
-                closeFD(fd);
-                return;
-            };
-            if (self.buf.len > 0) {
-                for (0..self.len) |i| new_buf[i] = self.buf[(self.head + i) % self.buf.len];
-                std.heap.smp_allocator.free(self.buf);
-            }
-            self.buf = new_buf;
-            self.head = 0;
-        }
-        self.buf[(self.head + self.len) % self.buf.len] = fd;
-        self.len += 1;
-        self.mutex.unlock(io);
-        self.ready.signal(io);
-    }
-
-    pub fn pop(self: *ConnQueue, io: std.Io) ?std.posix.fd_t {
-        self.mutex.lockUncancelable(io);
-        while (self.len == 0) {
-            if (self.closed) {
-                self.mutex.unlock(io);
-                return null;
-            }
-            self.ready.waitUncancelable(io, &self.mutex);
-        }
-        const fd = self.buf[self.head];
-        self.head = (self.head + 1) % self.buf.len;
-        self.len -= 1;
-        self.mutex.unlock(io);
-        return fd;
-    }
-
-    pub fn close(self: *ConnQueue, io: std.Io) void {
-        self.mutex.lockUncancelable(io);
-        self.closed = true;
-        self.mutex.unlock(io);
-        self.ready.broadcast(io);
-    }
-
-    pub fn deinit(self: *ConnQueue) void {
-        if (self.buf.len > 0) std.heap.smp_allocator.free(self.buf);
-    }
-};
-
-// --------------------------------------------------------- //
-
-pub const WorkerCtx = struct {
-    queue: *ConnQueue,
-    io: std.Io,
-    ip: []const u8,
-    port: u16,
-    kernel_backlog: u31,
-};
-
-pub fn workerEntry(ctx: WorkerCtx) void {
-    const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-    var listener = addr.listen(ctx.io, .{
-        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
-        .kernel_backlog = ctx.kernel_backlog,
-    }) catch return;
-    defer listener.deinit(ctx.io);
-
-    while (true) {
-        const stream = listener.accept(ctx.io) catch |err| {
-            if (err != error.ConnectionAborted) break;
-            continue;
-        };
-        ctx.queue.push(stream.socket.handle, ctx.io);
-    }
-}
-
-// --------------------------------------------------------- //
-
-/// Router-type-dependent dispatch helpers for ASYNC / POOL / MIXED. The Router
-/// type is comptime (is_server_streaming must be visible before dispatch), so
-/// every function that calls core.serveGrpcConn(RouterType, ...) is baked per
-/// Router type.
+/// Router-type-dependent dispatch helpers for .ASYNC. The Router type is comptime
+/// (is_server_streaming must be visible before dispatch), so every function that
+/// calls core.serveGrpcConn(RouterType, ...) is baked per Router type.
 pub fn Dispatch(comptime RouterType: type) type {
     return struct {
         pub const ConnTask = struct {
@@ -236,51 +150,31 @@ pub fn Dispatch(comptime RouterType: type) type {
 
         pub fn dispatchConn(task: ConnTask) void {
             defer closeFD(task.fd);
+
+            // The multiplexed workers build one cache each and hold it for their whole life.
+            // .ASYNC has no worker, so the cache is built once per io pool thread and reused by
+            // every connection that lands on it. Reclaimed together when the accept loop ends.
+            installThreadCache(task.opts);
+
             core.serveGrpcConn(RouterType, task.fd, task.opts, task.io);
         }
-
-        pub const PoolCtx = struct {
-            queue: *ConnQueue,
-            io: std.Io,
-            opts: core.GrpcServeOpts,
-        };
-
-        pub fn poolEntry(ctx: PoolCtx) void {
-            while (ctx.queue.pop(ctx.io)) |fd| {
-                defer closeFD(fd);
-                core.serveGrpcConn(RouterType, fd, ctx.opts, ctx.io);
-            }
-        }
-
-        pub const AsyncWorkerCtx = struct {
-            io: std.Io,
-            ip: []const u8,
-            port: u16,
-            kernel_backlog: u31,
-            opts: core.GrpcServeOpts,
-        };
-
-        pub fn asyncWorkerEntry(ctx: AsyncWorkerCtx) void {
-            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
-            var listener = addr.listen(ctx.io, .{
-                .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
-                .kernel_backlog = ctx.kernel_backlog,
-            }) catch return;
-            defer listener.deinit(ctx.io);
-
-            while (true) {
-                const stream = listener.accept(ctx.io) catch |err| {
-                    if (err != error.ConnectionAborted) break;
-                    continue;
-                };
-                _ = ctx.io.async(dispatchConn, .{ConnTask{
-                    .fd = stream.socket.handle,
-                    .opts = ctx.opts,
-                    .io = ctx.io,
-                }});
-            }
-        }
     };
+}
+
+/// Point this pool thread's response cache at the config, or clear it when caching is off.
+pub fn installThreadCache(opts: core.GrpcServeOpts) void {
+    if (!opts.response_cache) {
+        core.setCache(null, 0);
+
+        return;
+    }
+
+    const cache = async_cache.forThisThread(.{
+        .max_entries = effectiveCacheEntries(opts),
+        .max_value_bytes = opts.cache_max_value_bytes,
+    });
+
+    core.setCache(cache, opts.cache_ttl_ms);
 }
 
 /// Widest allowed-CPU list the pinning path tracks: one slot per affinity-mask bit.

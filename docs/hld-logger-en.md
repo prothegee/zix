@@ -174,12 +174,12 @@ pub fn main(process: std.process.Init) !void {
 ## Examples
 
 All network server examples include a commented logger init block at the top that can be enabled without code changes:
-- `examples/tcp_server_1_async.zig`
-- `examples/fix_server_1_async.zig`
+- `examples/tcp_server.zig`
+- `examples/fix_server.zig`
 - `examples/udp_server.zig`
 - `examples/uds_server.zig`
-- `examples/http_basic_1_async.zig`
-- `examples/grpc_location_server_1_async.zig` (logger wired and active by default)
+- `examples/http_basic.zig`
+- `examples/grpc_location_server.zig` (logger wired and active by default)
 - `examples/grpc_multi_server.zig` (logger wired and active by default)
 
 ---

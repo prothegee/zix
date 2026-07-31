@@ -50,6 +50,12 @@ pub const utils = struct {
     pub const static_cache = @import("utils/static_cache.zig");
     pub const static_send = @import("utils/static_send.zig");
     pub const http_range = @import("utils/http_range.zig");
+    pub const dispatch_support = @import("utils/dispatch_support.zig");
+    pub const fd_io = @import("utils/fd_io.zig");
+    pub const socket_pair = @import("utils/socket_pair.zig");
+    pub const socket_poll = @import("utils/socket_poll.zig");
+    pub const async_cache = @import("utils/async_cache.zig");
+    pub const socket_path = @import("utils/socket_path.zig");
 
     pub const compression = @import("utils/compression/compression.zig");
 };
@@ -118,8 +124,6 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tcp/http/server.zig"));
     std.testing.refAllDecls(@import("tcp/http/dispatch/common.zig"));
     std.testing.refAllDecls(@import("tcp/http/dispatch/async.zig"));
-    std.testing.refAllDecls(@import("tcp/http/dispatch/pool.zig"));
-    std.testing.refAllDecls(@import("tcp/http/dispatch/mixed.zig"));
     // EPOLL / URING modules are Linux-only, their decls stay out of
     // analysis elsewhere (their tests still collect and self-skip).
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http/dispatch/epoll.zig"));
@@ -138,8 +142,6 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tcp/http1/server.zig"));
     std.testing.refAllDecls(@import("tcp/http1/dispatch/common.zig"));
     std.testing.refAllDecls(@import("tcp/http1/dispatch/async.zig"));
-    std.testing.refAllDecls(@import("tcp/http1/dispatch/pool.zig"));
-    std.testing.refAllDecls(@import("tcp/http1/dispatch/mixed.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http1/dispatch/epoll.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http1/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("tcp/http1/router.zig"));
@@ -219,6 +221,12 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/static_send.zig"));
     std.testing.refAllDecls(@import("utils/http_range.zig"));
     std.testing.refAllDecls(@import("utils/ignore_sigpipe.zig"));
+    std.testing.refAllDecls(@import("utils/dispatch_support.zig"));
+    std.testing.refAllDecls(@import("utils/fd_io.zig"));
+    std.testing.refAllDecls(@import("utils/socket_pair.zig"));
+    std.testing.refAllDecls(@import("utils/socket_poll.zig"));
+    std.testing.refAllDecls(@import("utils/async_cache.zig"));
+    std.testing.refAllDecls(@import("utils/socket_path.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate_fast.zig"));
     std.testing.refAllDecls(@import("utils/compression/brotli.zig"));
@@ -234,8 +242,6 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/raw.zig"));
     std.testing.refAllDecls(@import("udp/dispatch/common.zig"));
     std.testing.refAllDecls(@import("udp/dispatch/async.zig"));
-    std.testing.refAllDecls(@import("udp/dispatch/pool.zig"));
-    std.testing.refAllDecls(@import("udp/dispatch/mixed.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/dispatch/epoll.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/dispatch/uring.zig"));
 
@@ -268,8 +274,6 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/http3/server.zig"));
     std.testing.refAllDecls(@import("udp/http3/dispatch/common.zig"));
     std.testing.refAllDecls(@import("udp/http3/dispatch/async.zig"));
-    std.testing.refAllDecls(@import("udp/http3/dispatch/pool.zig"));
-    std.testing.refAllDecls(@import("udp/http3/dispatch/mixed.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/http3/dispatch/epoll.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/http3/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("udp/http3/Http3.zig"));

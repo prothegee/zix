@@ -354,7 +354,7 @@ Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani data
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. Ia menerima byte apa adanya (hingga `max_recv_buf`), peer, dan `Sink`. `sink.reply(bytes)` membalas pengirim tanpa konversi address, `sink.replyTo(peer, bytes)` membalas peer eksplisit.
 - I/O batched (Linux): menerima dalam batch `recvmmsg` (`recv_batch`), mengirim dalam batch `sendmmsg` (`send_batch`). Balasan digabung jadi satu `sendmmsg` per batch yang diterima. Non-Linux jatuh ke satu loop receive `std.Io.net`.
-- Dispatch (`dispatch_model`, enum yang sama dengan engine TCP, dipartisi sesuai ADR-043 ke `src/udp/dispatch/`): `.ASYNC` menjalankan satu worker. `.POOL` / `.MIXED` / `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per CPU (per-core shared-nothing). `.EPOLL` adalah epoll readiness loop, `.URING` io_uring completion loop nyata (fallback ke epoll saat io_uring tidak tersedia).
+- Dispatch (`dispatch_model`, enum yang sama dengan engine TCP, dipartisi sesuai ADR-043 ke `src/udp/dispatch/`): `.ASYNC` menjalankan satu worker. `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per CPU (per-core shared-nothing) dan khusus Linux, ditolak di luar Linux dengan `error.DispatchModelUnsupported`. `.EPOLL` adalah epoll readiness loop, `.URING` io_uring completion loop nyata (fallback ke epoll saat io_uring tidak tersedia).
 
 ```zig
 fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {

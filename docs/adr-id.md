@@ -1536,6 +1536,102 @@ Tersisa mmap, yang terukur nyaris gratis, dan itu sudah diimplementasikan sebelu
 
 **Guardrail yang terpenuhi:** tidak ada alokasi di jalur request, setiap array diukur sekali saat init. `zig fmt` bersih, `test-all` hijau di `zig-0.16` dan `zig-0.17`, `examples` hijau, dan ketujuh target matriks cross-build terkompilasi bersih. Jalur `public_dir_cache_ttl_ms = 0` tetap identik byte demi byte dengan jalur sebelumnya, dan itulah yang menjaga `zix.Http1` lepas dari gate perf.
 
+## ADR-065: Menghapus dispatch model POOL dan MIXED
+
+**Status:** Accepted
+
+**Konteks:** `DispatchModel` membawa lima nilai: `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, `.URING`. Lima model di delapan engine berarti 40 loop dispatch yang harus dijaga benar, dan hanya tiga di antaranya yang benar-benar dirawat. `.EPOLL` dan `.URING` hanya untuk Linux, sehingga `.POOL` juga memikul tugas kedua yang tidak pernah dipilih siapa pun: ia menjadi target fallback diam-diam di luar Linux.
+
+Fallback itulah masalah sebenarnya. Setiap `run()` engine memuat cabang seperti ini:
+
+```zig
+.EPOLL => if (comptime builtin.target.os.tag == .linux)
+    epoll_model.runEpoll(cfg, handler)
+else blk: {
+    common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
+
+    break :blk pool_model.runPool(cfg, handler);
+},
+```
+
+Pemanggil yang mengonfigurasi loop shared-nothing per-core lalu men-deploy ke Windows justru mendapat thread pool. Baris log adalah satu-satunya sinyal, dan server tanpa logger terkonfigurasi tidak mengeluarkan apa pun di release. Profil throughput, memori, dan latency pemanggil semuanya berubah, tanpa suara.
+
+`.POOL` dan `.MIXED` juga tidak gratis untuk dipertahankan. `.POOL` butuh `ConnQueue` (mutex, condvar, ring yang bisa tumbuh) dan dua peran thread per engine, `.MIXED` butuh bentuk accept-thread ketiga dengan workaround stack-size sendiri untuk fallback inline `io.async`. Keduanya ada di direktori `dispatch/` setiap engine dan di `common.zig` setiap engine.
+
+**Keputusan:** Pertahankan tiga model yang dirawat. Tolak model yang tidak didukung, bukan menurunkannya.
+
+- `DispatchModel` menjadi `ASYNC = 0`, `EPOLL = 1`, `URING = 2`. Tanpa celah, karena tidak ada yang menserialisasi nilainya: ini hanya config di level source.
+- Di luar Linux, `run()` sebuah engine mengembalikan `error.DispatchModelUnsupported` untuk `.EPOLL` dan `.URING`. Ia mencatat model mana yang ditolak lebih dulu, sehingga operator melihat penyebabnya, bukan sekadar nama error.
+- Pengecekan memakai satu predikat bersama, `src/utils/dispatch_support.zig`, yang dibaca di awal setiap `run()` sebelum ia membuka listener, men-spawn timer thread, atau men-detach accept thread TLS. Config yang ditolak karena itu tidak meninggalkan apa pun.
+- 16 berkas `dispatch/pool.zig` dan `dispatch/mixed.zig` dihapus, berikut helper `ConnQueue`, `WorkerCtx`, `PoolCtx`, dan `AsyncWorkerCtx` yang hanya dipakai keduanya.
+- `pool_size` dihapus dari kedelapan config, dan `pool_stack_size_bytes` dari `zix.Fix`. Di `zix.Http2` dan `zix.Grpc`, `pool_size` adalah jumlah worker `.EPOLL` / `.URING` sementara `workers` hanya milik POOL dan MIXED, jadi kedua engine itu dialihkan ke `workers`. Kedelapan engine kini membaca field yang sama untuk tujuan yang sama. Keduanya default 0, jadi perilaku default tidak berubah.
+- Example bernomor per model diringkas menjadi satu example terpadu per engine (`examples/http1_basic.zig`, `examples/tcp_server.zig`, dan seterusnya), masing-masing memilih model per target secara comptime:
+
+```zig
+const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
+```
+
+Empat example masih memasang pin Linux-only saat keputusan ini diambil, karena compression, pump WebSocket, dan demo WebSocket io_uring hanya dipasang oleh worker multiplexed. ADR-066 menghapus batasan itu, sehingga tidak ada lagi example yang memasang pin dispatch model.
+
+**Konsekuensi:**
+
+- Pemanggil di luar tree ini yang menyetel `.POOL`, `.MIXED`, `pool_size`, atau `pool_stack_size_bytes` tidak lagi terkompilasi. Itu memang tujuannya: compile error menyebut masalahnya, sedangkan fallback lama tidak.
+- `.ASYNC` kini satu-satunya model portable, dan keenam target non-Linux di matriks cross-build memakainya. Ia juga model yang dituju di Linux ketika koneksi berumur panjang (SSE, WebSocket).
+- Pelipatan runtime `.URING` ke `.EPOLL` tetap ada. Itu hal berbeda: celah kapabilitas di platform yang memang mendukung model tersebut (kernel lama, `RLIMIT_MEMLOCK` rendah, sandbox), bukan ketidakcocokan platform. Notifikasi log-nya tetap.
+- Matriks test-runner per model diringkas menjadi satu baris runner per engine. Dua leg hilang dan disebut di sini alih-alih dibiarkan ditemukan sendiri: runner `http1-drain` hanya menyisakan leg URING, dan `grpc-stream` kini berbagi port 9032 dengan `grpc`.
+- `tests/runner/common.zig:skipDispatchOffPlatform` sebelumnya mencocokkan substring label untuk `"epoll"` dan `"uring"`. Peringkasan baris runner menghapus kata-kata itu dari setiap label, sehingga guard tersebut diam-diam berhenti mencocokkan apa pun. Kini ia menjadi daftar exact-match label skenario Linux-only, yang tidak bisa lapuk dengan cara yang sama tanpa disadari.
+- `tests/behaviour/dispatch/platform_gate_test.zig` menguji predikat dan bentuk enum-nya, dan tidak melewati apa pun. Tiga test sebelumnya yang memanggil `run()` tiap engine untuk mengamati penolakan dihapus: keduanya hanya bisa berjalan di luar Linux, jadi selamanya skip di platform tempat mereka dikembangkan. Yang hilang adalah pengecekan runtime bahwa `run()` membaca predikat itu, dan proses compile tetap membuktikan call site-nya.
+- Ini menggantikan bagian `.POOL` dan `.MIXED` dari ADR-043 (rollout `dispatch/` per engine) dan ADR-058 (pool per worker). Sisa keduanya tetap berlaku.
+- `.KQUEUE` dan `.IOCP` tetap nama yang dicadangkan di ADR-050, dan aturan yang sama kini berlaku untuk keduanya: sebuah model dirilis ketika ada yang merawatnya. Sampai saat itu target non-Linux memakai `.ASYNC`.
+
+**Guardrail yang terpenuhi:** `zig fmt` bersih, `test-all` hijau di `zig-0.16` dan `zig-0.17` tanpa skip, `examples` hijau, `test-runner-all` hijau di seluruh 52 protokol, dan `scripts/build-all-targets.sh` melaporkan `all targets passed` untuk matriks 7 target penuh. Loop dispatch sendiri tidak disentuh, jadi satu-satunya jalur yang digeser keputusan ini adalah pengalihan `pool_size` ke `workers` pada pembacaan jumlah worker `zix.Http2` dan `zix.Grpc`.
+
+---
+
+## ADR-066: Setiap fitur bekerja di bawah .ASYNC, di setiap platform
+
+**Status:** Accepted
+
+**Konteks:** ADR-065 menyisakan `.ASYNC` sebagai satu-satunya model yang tersedia di luar Linux. Itu hanya berguna jika `.ASYNC` benar-benar bisa melayani apa yang diiklankan engine. Nyatanya belum bisa.
+
+Tiga celah terpisah, ditemukan lewat audit dan bukan lewat test yang gagal, karena tidak satu pun dari ketiganya gagal di mesin pengembangan Linux:
+
+1. **Fitur yang dipasang worker multiplexed dan tidak dipasang `.ASYNC`.** Response compression dan response cache adalah switch threadlocal per worker, dipasang sekali per worker oleh `dispatch/epoll.zig` dan `dispatch/uring.zig`. `.ASYNC` tidak punya worker: `io.async` menyerahkan tiap koneksi ke pool thread mana pun yang senggang, jadi tidak ada yang pernah memasangnya. Server dengan `compress = true` di `.ASYNC` mengembalikan body tanpa kompresi dan tanpa error. Promosi WebSocket milik engine lebih buruk: `core.zig` menerima handoff-nya lalu membuangnya, sehingga koneksi berakhir.
+
+2. **Pemisahan platform dua arah yang diam-diam menyasar kernel yang salah.** Enam berkas bercabang `if (windows) ... else <syscall Linux>`, sehingga macOS, FreeBSD, NetBSD dan OpenBSD jatuh ke cabang Linux dan mengeluarkan nomor syscall Linux. `tls_serve.zig` adalah jalur TLS `.ASYNC`, jadi TLS di atas `.ASYNC` rusak di empat dari tujuh platform yang didukung. Ia tetap terkompilasi, itulah sebabnya sweep cross-build tidak pernah menangkapnya, dan keempat leg itu memang belum pernah dijalankan.
+
+3. **Protokol tanpa jalur portable.** `runSingle` milik HTTP/3 mencatat satu baris lalu mengembalikan void di luar Linux, sehingga `run()` melaporkan sukses dan tidak pernah mem-bind socket. Unix-domain socket mem-bind path relatif, yang langsung ditolak bind AF_UNIX Windows, dan pasangan channel IPC memakai `/tmp/...`, lokasi yang tidak dimiliki Windows.
+
+**Keputusan:** `.ASYNC` bukan model yang dikurangi. Apa pun yang ditawarkan engine bekerja di bawahnya, di setiap platform yang didukung. Sebuah fitur boleh lebih cepat di model multiplexed, tidak boleh absen dari `.ASYNC`.
+
+- **Pakai `std.Io` sejauh jangkauannya.** Descriptor mentah hasil accept menjadi `std.Io.net.Stream` dan dikemudikan lewat stream reader dan writer, tanpa cabang OS sama sekali. Secret handshake berasal dari `io.randomSecure`, yang aman dipanggil dari `std.Thread` biasa dan membawa CSPRNG platform. Inilah jawaban portabilitas di 0.16, dan ia menggantikan shim syscall buatan tangan.
+- **Di tempat `std.Io` tidak menjangkau, pisahkan tiga arah dan jaga cabang Linux-nya.** `sendfile`, `recvmmsg` dan `sendmmsg`, `epoll`, `io_uring` serta `socketpair` tidak punya padanan `std.Io`. Semuanya memakai pemisahan comptime `windows` / `linux` / `posix`, dengan posix mencakup macOS dan tiga BSD. Pemisahan dua arah adalah cacat pada poin konteks nomor 2 dan tidak boleh muncul lagi.
+- **Substrate bersama yang baru**, satu tanggung jawab masing-masing:
+
+| Module | Tanggung jawab |
+| :- | :- |
+| `utils/fd_io.zig` | read / write / close / readiness blocking di descriptor mentah |
+| `utils/socket_pair.zig` | sepasang descriptor terhubung, socketpair di POSIX, loopback di Windows |
+| `utils/socket_path.zig` | lokasi local socket, absolut dan identik untuk kedua ujung |
+| `utils/async_cache.zig` | response cache untuk `.ASYNC`, satu per io pool thread, plus reclaim |
+
+- **Cache `.ASYNC` bersifat threadlocal, bukan shared dan bukan per koneksi.** Per koneksi ia akan mati sebelum sempat kena hit. Shared ia butuh lock di jalur response. Threadlocal cocok dengan desain shared-nothing yang sudah dipakai worker multiplexed. Threadlocal tidak punya destructor dan `ResponseCache` memegang arena plus slab mmap, jadi setiap cache dicatat di registry dan accept loop me-reclaim semuanya saat keluar.
+- **HTTP/3 mendapat fallback portable**, mencerminkan yang sudah dimiliki `udp`: satu datagram per receive lewat `std.Io` alih-alih batch `recvmmsg`, memakai ulang state machine QUIC tanpa perubahan. Helper pengirimnya hanya mengantre ke batch, jadi `flushPortable` di `SendBatch` adalah satu-satunya primitif baru yang dibutuhkan.
+- **Path local socket di-resolve, bukan ditulis literal.** Kedua ujung menurunkan path absolut yang sama dari working directory yang sama, jadi tidak ada shared state dan tidak ada literal khusus platform.
+
+**Konsekuensi:**
+
+- Empat example yang di-pin ADR-065 ke model multiplexed semuanya memakai idiom per-target, jadi tidak ada lagi example yang memasang pin dispatch model dan setiap example berjalan di setiap platform.
+- `examples/http1_websocket_uring.zig` dihapus. Dengan idiom tersebut `http1_websocket.zig` sudah berjalan `.URING` di Linux dan karena itu sudah menjalankan `websocket.pumpRing`, sehingga example terpisah menjadi mubazir. Route echo `/ws` miliknya dipindahkan, bersebelahan dengan demo rooms `/ws/:room-id` yang sudah ada, dan runner-nya menjadi `test-runner-http1-websocket-echo` di port yang tersisa. Port 9029 dipensiunkan, tidak dipakai ulang.
+- `tests/runner/common.zig:linux_only_labels` kini kosong. Kelima puluh dua skenario runner diharapkan lulus di setiap platform.
+- 85 test unit, integration dan edge melepas guard skip `!= .linux`, karena yang membuatnya Linux-only adalah harness test-nya (`socketpair`, `pipe2`, `memfd_create`), bukan perilaku yang diuji. Delapan test logger menukar guard `!= .linux` menjadi `== .windows` yang lebih sempit: keduanya membaca ulang berkas log lewat `openat(AT.FDCWD)`, yang tidak punya padanan di Windows, jadi kini mereka berjalan di macOS dan tiga BSD tempat mereka belum pernah berjalan.
+- `.ASYNC` tetap lebih lambat daripada model multiplexed saat beban tinggi. Tidak ada yang mengubah itu di sini, dan tidak ada yang menyentuh jalur pemasangan `.EPOLL` / `.URING`: setup cache dan compression per worker mereka tetap sama byte demi byte.
+- Pemanggil di macOS atau BSD yang entah bagaimana bergantung pada perilaku TLS lama sebenarnya bergantung pada undefined behaviour. Tidak ada kompatibilitas yang perlu dipertahankan.
+
+**Cara menemukan lagi cacat pada poin konteks nomor 2:** untuk setiap berkas, hitung panggilan `linux.*` produksi sebelum `test "` pertama, lalu bandingkan jumlah guard `os.tag == .windows` dengan guard `os.tag == .linux`. Berkas dengan guard Windows dan nol guard Linux adalah pemisahan dua arah tersebut, dan ia akan terkompilasi bersih di setiap target sambil hanya benar-benar berjalan di Linux.
+
+**Guardrail yang terpenuhi:** `zig fmt` bersih, `test-all` 1422/1422 di `zig-0.16` maupun `zig-0.17`, `test-runner-all` hijau di seluruh 52 protokol, dan `scripts/build-all-targets.sh` melaporkan `all targets passed` dengan `test-all`, `examples` dan `test-runner-all` terkompilasi untuk setiap triple. Setiap perilaku baru dibuktikan dengan memaksa `.ASYNC` di Linux lalu menjalankan runner sungguhan, bukan lewat inspeksi: compression lewat `http1-compression` dan `http-compression`, response cache lewat `http1-cache`, WebSocket lewat `http1-websocket`, fallback portable HTTP/3 lewat runner `http3` yang dipaksa ke `runFallback` (handshake plus dua request multiplexed), dan path local socket lewat `uds`, `uds-http` dan `channel-ipc`.
+
 ---
 
 ###### end of adr

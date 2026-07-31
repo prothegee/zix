@@ -5,7 +5,7 @@
 //! GET /events  - SSE stream: sends a counter every second until the client disconnects
 //!
 //! Uses .ASYNC dispatch: each long-lived SSE connection is dispatched via io.async()
-//! so it does not pin a pool thread.
+//! so it does not pin an event-loop worker.
 //!
 //! curl usage:
 //! curl -N http://localhost:9027/events

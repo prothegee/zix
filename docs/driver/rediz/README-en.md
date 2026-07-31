@@ -136,10 +136,18 @@ const replies = try pipe.sync();
 
 ## Testing
 
-The suites own their Redis container lifecycle:
+Three suites need nothing installed, two own a Redis 8 container:
 
 ```
 zig build test-unit          # in-process, no server
+zig build test-behaviour     # in-process server, no container
+zig build test-edge          # in-process server, no container
 zig build test-integration   # starts, tests, tears down the container
 zig build test-runner        # runs every example against the container
 ```
+
+`test-behaviour` and `test-edge` drive an in-process server that speaks RESP2 and
+RESP3 in process, with a real keyspace, ACL authentication, client kill, and
+TLS. They need no docker and run on every supported platform, so CI can run
+them everywhere. `test-integration` and `test-runner` remain the coverage
+against a real Redis 8.

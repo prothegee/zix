@@ -7,6 +7,7 @@ const cache = @import("../../utils/response_cache.zig");
 const compression = @import("../../utils/compression/compression.zig");
 const slab_mem = @import("../../multiplexers/slab.zig");
 const parser = @import("parser.zig");
+const websocket = @import("websocket.zig");
 const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 pub const Request = @import("request.zig").Request;
 pub const Response = @import("response.zig").Response;
@@ -27,6 +28,10 @@ const SMALL_BODY_INLINE_BUF: usize = 4096;
 
 /// Body read chunk for the ASYNC serve loop: bytes drained per recv after the head.
 const ASYNC_BODY_CHUNK: usize = 8 * 1024;
+
+/// Staging buffer for one blocking WebSocket pump pass, matching what the .EPOLL worker gives
+/// its own pump so a pipelined burst costs one write on either model.
+const WS_OUT_SIZE: usize = 4 * 1024;
 
 // Head parsing lives in parser.zig, re-exported here so every dispatch loop
 // and call site keeps the same core.* names.
@@ -109,7 +114,7 @@ pub const ServeOpts = struct {
 };
 
 /// SO_RCVBUF for the large-body path under the event-loop models (.EPOLL / .URING), set once per
-/// worker from config.large_body_rcvbuf. The blocking models carry it on ServeOpts instead. The
+/// worker from config.large_body_rcvbuf. The blocking model (.ASYNC) carries it on ServeOpts instead. The
 /// event-loop request functions do not thread config through, so a threadlocal is the carrier. 0
 /// leaves the kernel default.
 pub threadlocal var tl_large_body_rcvbuf: usize = 0;
@@ -232,9 +237,10 @@ const WsPending = struct {
     on_frame: WsFrameFn,
 };
 
-/// Set by WebSocket.serve during a handler, read by the EPOLL engine right
-/// after the handler returns. Thread-local so each worker hands off only its
-/// own connection. The handoff is honored under .EPOLL dispatch only.
+/// Set by WebSocket.serve during a handler, read right after the handler returns by whichever
+/// loop owns the connection. Thread-local, so a thread only ever hands off its own connection.
+/// Honored under every dispatch model: the event loops drive their own frame pump, .ASYNC drives
+/// the blocking one in websocket.serveBlocking.
 threadlocal var tl_ws_pending: ?WsPending = null;
 
 /// Request that the connection on fd be promoted to an engine-owned WebSocket
@@ -255,10 +261,10 @@ pub fn takeWebSocket() ?WsPending {
 // --------------------------------------------------------- //
 // Response cache: per-worker, per-key precomputed response (ADR-036).
 
-/// Per-worker response cache. Set once per worker by the EPOLL engine when
-/// config.response_cache is on, null otherwise. When null every cache call below
-/// degrades to a no-op, so a handler that uses the cache API still works on a
-/// server with caching disabled.
+/// The calling thread's response cache when config.response_cache is on, null otherwise. The
+/// multiplexed workers set it once per worker, .ASYNC once per io pool thread (utils/async_cache).
+/// When null every cache call below degrades to a no-op, so a handler that uses the cache API
+/// still works on a server with caching disabled.
 pub threadlocal var tl_cache: ?*cache.ResponseCache = null;
 
 /// Configured default TTL in milliseconds, installed alongside tl_cache. A
@@ -1677,9 +1683,16 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
         _ = arena.reset(.retain_capacity);
         invokeHandler(handler, &head, body_buf[0..body_len], fd, io, arena.allocator());
 
-        // Engine-owned WebSocket promotion is honored by the EPOLL loop only.
-        // On this path clear the handoff and end the connection so it never leaks.
-        if (takeWebSocket() != null) return;
+        // Engine-owned WebSocket promotion: the event loops hand the connection to their own
+        // frame pump, this path runs the blocking one. Either way the connection stops being
+        // an HTTP request stream from here, so the serve loop ends when the pump returns.
+        if (takeWebSocket()) |pending| {
+            var ws_out_buf: [WS_OUT_SIZE]u8 = undefined;
+
+            websocket.serveBlocking(pending.fd, pending.on_frame, &recv_buf, &body_buf, &ws_out_buf);
+
+            return;
+        }
 
         if (!head.keep_alive) return;
 

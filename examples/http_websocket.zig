@@ -8,7 +8,6 @@ const KERNEL_BACKLOG: usize = 1024 * 4;
 const MAX_RECV_BUF: usize = 1024 * 8; // 8 KB read buffer per connection
 const MAX_ALLOCATOR_SIZE: usize = 1024 * 4;
 const WORKERS: usize = 0; // ignored by .ASYNC
-const POOL_SIZE: usize = 0; // ignored by .ASYNC
 
 // Global room registry, lives for the process lifetime.
 // join() and leave() are called by each WebSocket handler task.
@@ -178,7 +177,6 @@ pub fn main(process: std.process.Init) !void {
         .max_recv_buf = MAX_RECV_BUF,
         .max_allocator_size = MAX_ALLOCATOR_SIZE,
         .workers = WORKERS,
-        .pool_size = POOL_SIZE,
     });
     defer server.deinit();
 

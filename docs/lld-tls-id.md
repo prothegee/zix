@@ -2,7 +2,7 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-tls-id.md`](hld-tls-id.md) dan ADR-045 / 046 / 047.
 
-`zix.Tls` bersifat sans-I/O. Handshake server didorong oleh `connection.serverHandshake`, client oleh `client.zig` / `tls12_client.zig`. Engine memiliki socket loop. Http1 thread-per-koneksi di `tcp/http1/tls_serve.zig`. Http2 dan Grpc memilih antara dua jalur lewat `dispatch_model` (ADR-052): `.EPOLL` / `.URING` memakai `tcp/http2/tls_mux.zig` dan `tcp/http2/grpc/tls_mux.zig` multipleks per-core di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` / `.POOL` / `.MIXED` memakai `tcp/http2/tls_serve.zig` dan `tcp/http2/grpc/tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig`.
+`zix.Tls` bersifat sans-I/O. Handshake server didorong oleh `connection.serverHandshake`, client oleh `client.zig` / `tls12_client.zig`. Engine memiliki socket loop. Http1 thread-per-koneksi di `tcp/http1/tls_serve.zig`. Http2 dan Grpc memilih antara dua jalur lewat `dispatch_model` (ADR-052): `.EPOLL` / `.URING` memakai `tcp/http2/tls_mux.zig` dan `tcp/http2/grpc/tls_mux.zig` multipleks per-core di atas session resumable di `tcp/tls/tls_session.zig`, dan `.ASYNC` memakai `tcp/http2/tls_serve.zig` dan `tcp/http2/grpc/tls_serve.zig` di atas terminator bersama `tcp/tls/h2_terminator.zig`.
 
 ---
 
@@ -131,11 +131,11 @@ WebSocket dibangun di atas stream sink yang sama untuk write half dan menambah r
 
 ## tcp/tls/h2_terminator.zig (terminator h2-over-TLS bersama)
 
-`serveConnTls(fd, ctx, driver)` adalah terminator engine-agnostic yang dipakai jalur `.ASYNC` / `.POOL` / `.MIXED` dari Http2 dan Grpc. Ia menjalankan handshake (version policy + fallback 1.2 ke `serveConnTls12`, yang menerima `driver` yang sama), memastikan ALPN memilih h2 (`AlpnNotH2` jika tidak), memverifikasi client Finished, lalu memanggil `driver.drive(fd, &conn, &record_buf)`. Driver memiliki koneksi sampai close: ia menjalankan mux h2 resumable langsung di atas record terdekripsi dan menyegel frame engine kembali ke record TLS lewat write hook thread-local. Tanpa socketpair, tanpa thread kedua.
+`serveConnTls(fd, ctx, driver)` adalah terminator engine-agnostic yang dipakai jalur `.ASYNC` dari Http2 dan Grpc. Ia menjalankan handshake (version policy + fallback 1.2 ke `serveConnTls12`, yang menerima `driver` yang sama), memastikan ALPN memilih h2 (`AlpnNotH2` jika tidak), memverifikasi client Finished, lalu memanggil `driver.drive(fd, &conn, &record_buf)`. Driver memiliki koneksi sampai close: ia menjalankan mux h2 resumable langsung di atas record terdekripsi dan menyegel frame engine kembali ke record TLS lewat write hook thread-local. Tanpa socketpair, tanpa thread kedua.
 
 ## tcp/http2/tls_serve.zig dan tcp/http2/grpc/tls_serve.zig
 
-Ini jalur `.ASYNC` / `.POOL` / `.MIXED`. `runTls` membaca `config.tls.?`, menjalankan accept loop, dan menyerahkan tiap koneksi ke worker thread-nya sendiri, yang memanggil `serveConnTls` dengan `MuxDriver(routes)`. `drive` milik driver yang berbeda: Http2 menjalankan `mux.processRing` di atas `mux.MuxConn`, Grpc menjalankan `core.grpcMuxProcessRing` di atas `GrpcMuxConn` lalu `flushStage` untuk cork balasan yang di-stage. Keduanya menyegel frame ke record TLS lewat `frame.write_hook`, state machine resumable yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak ada race write per-stream. Model dispatch `.EPOLL` / `.URING` justru memakai `tls_mux.zig` multipleks di bawah.
+Ini jalur `.ASYNC`. `runTls` membaca `config.tls.?`, menjalankan accept loop, dan menyerahkan tiap koneksi ke worker thread-nya sendiri, yang memanggil `serveConnTls` dengan `MuxDriver(routes)`. `drive` milik driver yang berbeda: Http2 menjalankan `mux.processRing` di atas `mux.MuxConn`, Grpc menjalankan `core.grpcMuxProcessRing` di atas `GrpcMuxConn` lalu `flushStage` untuk cork balasan yang di-stage. Keduanya menyegel frame ke record TLS lewat `frame.write_hook`, state machine resumable yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak ada race write per-stream. Model dispatch `.EPOLL` / `.URING` justru memakai `tls_mux.zig` multipleks di bawah.
 
 ## tcp/tls/tls_session.zig (session server TLS 1.3 resumable)
 

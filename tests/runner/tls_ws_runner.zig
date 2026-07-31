@@ -46,5 +46,5 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 
     try common.waitForTcpPort(io, &server_child, port, WAIT_MS);
 
-    try common.tlsWsEcho(port);
+    try common.tlsWsEcho(io, port);
 }

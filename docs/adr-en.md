@@ -1536,6 +1536,102 @@ That left mmap, which measured essentially free, and it was implemented before a
 
 **Guardrails held:** no allocation on the request path, every array sized once at init. `zig fmt` clean, `test-all` green on `zig-0.16` and `zig-0.17`, `examples` green, and all 7 targets of the cross-build matrix compiling clean. The `public_dir_cache_ttl_ms = 0` leg stays byte for byte identical to the prior path, which is what keeps `zix.Http1` off the perf gate.
 
+## ADR-065: drop the POOL and MIXED dispatch models
+
+**Status:** Accepted
+
+**Context:** `DispatchModel` carried five values: `.ASYNC`, `.POOL`, `.MIXED`, `.EPOLL`, `.URING`. Five models across eight engines meant 40 dispatch loops to keep correct, and only three of them were actually maintained. `.EPOLL` and `.URING` are Linux-only, so `.POOL` also served a second job nobody chose it for: it was the silent fallback target off Linux.
+
+That fallback was the real problem. Every engine's `run()` contained a branch like this:
+
+```zig
+.EPOLL => if (comptime builtin.target.os.tag == .linux)
+    epoll_model.runEpoll(cfg, handler)
+else blk: {
+    common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
+
+    break :blk pool_model.runPool(cfg, handler);
+},
+```
+
+A caller who configured a shared-nothing per-core loop and deployed to Windows got a thread pool instead. The log line was the only signal, and a server with no logger configured emitted nothing in release. The caller's throughput, memory, and latency profile all changed, silently.
+
+`.POOL` and `.MIXED` were also not free to keep. `.POOL` needed a `ConnQueue` (mutex, condvar, growable ring) and two thread roles per engine, `.MIXED` needed a third accept-thread shape with its own stack-size workaround for the `io.async` inline fallback. Both existed in every engine's `dispatch/` directory and in every engine's `common.zig`.
+
+**Decision:** Keep the three maintained models. Reject an unsupported one instead of downgrading it.
+
+- `DispatchModel` becomes `ASYNC = 0`, `EPOLL = 1`, `URING = 2`. Gapless, because nothing serializes the value: it is source-level config only.
+- Off Linux, an engine's `run()` returns `error.DispatchModelUnsupported` for `.EPOLL` and `.URING`. It logs which model was rejected first, so an operator sees the cause and not just an error name.
+- The check is one shared predicate, `src/utils/dispatch_support.zig`, consulted at the top of every `run()` before it opens a listener, spawns a timer thread, or detaches a TLS accept thread. A rejected config therefore leaves nothing behind.
+- The 16 `dispatch/pool.zig` and `dispatch/mixed.zig` files are deleted, along with the `ConnQueue`, `WorkerCtx`, `PoolCtx`, and `AsyncWorkerCtx` helpers that only they used.
+- `pool_size` is removed from all 8 configs, and `pool_stack_size_bytes` from `zix.Fix`. In `zix.Http2` and `zix.Grpc` `pool_size` was the `.EPOLL` / `.URING` worker count while `workers` was POOL and MIXED only, so those two engines are repointed onto `workers`. All 8 engines now read the same field for the same purpose. Both defaulted to 0, so default behaviour is unchanged.
+- The numbered per-model examples collapse to one unified example per engine (`examples/http1_basic.zig`, `examples/tcp_server.zig`, and so on), each picking its model per target at comptime:
+
+```zig
+const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
+```
+
+Four examples kept a Linux-only pin at the time this decision was taken, because compression, the WebSocket pump, and the io_uring WebSocket demo were installed by the multiplexed workers only. ADR-066 removed that limitation, so no example pins a dispatch model any more.
+
+**Consequences:**
+
+- A caller outside this tree that set `.POOL`, `.MIXED`, `pool_size`, or `pool_stack_size_bytes` no longer compiles. That is the intent: a compile error names the problem, where the old fallback did not.
+- `.ASYNC` is now the only portable model, and the six non-Linux targets in the cross-build matrix all use it. It is also the model to reach for on Linux when connections are long-lived (SSE, WebSocket).
+- The `.URING` runtime fold to `.EPOLL` stays. That is a different thing: a capability gap on a platform that does support the model (an old kernel, a low `RLIMIT_MEMLOCK`, a sandbox), not a platform mismatch. It keeps its logged notice.
+- The per-model test-runner matrix collapses to one runner row per engine. Two legs are lost and named here rather than left to be discovered: the `http1-drain` runner keeps only its URING leg, and `grpc-stream` now shares port 9032 with `grpc`.
+- `tests/runner/common.zig:skipDispatchOffPlatform` previously substring-matched the label for `"epoll"` and `"uring"`. Collapsing the runner rows removed those words from every label, so the guard silently stopped matching anything. It became an exact-match list of the Linux-only scenario labels, which cannot rot the same way unnoticed.
+- `tests/behaviour/dispatch/platform_gate_test.zig` covers the predicate and the enum shape, and skips nothing. Three earlier tests that called each engine's `run()` to observe the rejection were removed: they could only ever execute off Linux, so they were a permanent skip on the platform they were developed on. What is lost is a runtime check that `run()` consults the predicate, which the compile still proves the call site of.
+- This supersedes the `.POOL` and `.MIXED` parts of ADR-043 (per-engine `dispatch/` rollout) and ADR-058 (per-worker pool). The rest of both stands.
+- `.KQUEUE` and `.IOCP` remain reserved names in ADR-050, and the same rule now applies to them: a model ships when it has a maintainer. Until then non-Linux targets use `.ASYNC`.
+
+**Guardrails held:** `zig fmt` clean, `test-all` green on `zig-0.16` and `zig-0.17` with zero skips, `examples` green, `test-runner-all` green across all 52 protocols, and `scripts/build-all-targets.sh` reporting `all targets passed` for the full 7-target matrix. Dispatch loops themselves are untouched, so the only path this decision moved is the `pool_size` to `workers` repoint on the `zix.Http2` and `zix.Grpc` worker-count read.
+
+---
+
+## ADR-066: every feature works under .ASYNC, on every platform
+
+**Status:** Accepted
+
+**Context:** ADR-065 left `.ASYNC` as the only model available off Linux. That is only useful if `.ASYNC` can actually serve what the engine advertises. It could not.
+
+Three separate gaps, found by auditing rather than by a failing test, because none of them fail on a Linux development machine:
+
+1. **Features the multiplexed workers installed and `.ASYNC` did not.** Response compression and the response cache are per-worker threadlocal switches, installed once per worker by `dispatch/epoll.zig` and `dispatch/uring.zig`. `.ASYNC` has no worker: `io.async` hands each connection to whichever pool thread is free, so nothing ever installed them. A server with `compress = true` on `.ASYNC` returned uncompressed bodies with no error. The engine-owned WebSocket promotion was worse: `core.zig` took the handoff and dropped it, ending the connection.
+
+2. **A two-way platform split that silently targeted the wrong kernel.** Six files branched `if (windows) ... else <Linux syscall>`, so macOS, FreeBSD, NetBSD and OpenBSD fell into the Linux branch and issued Linux syscall numbers. `tls_serve.zig` is the `.ASYNC` TLS path, so TLS over `.ASYNC` was broken on four of the seven supported platforms. It compiled, which is why the cross-build sweep never caught it, and those four legs had never been run.
+
+3. **Protocols with no portable path.** HTTP/3's `runSingle` logged a line and returned void off Linux, so `run()` reported success and never bound a socket. Unix-domain sockets bound a relative path, which the Windows AF_UNIX bind rejects outright, and the channel IPC pair used `/tmp/...`, a location Windows does not have.
+
+**Decision:** `.ASYNC` is not a reduced model. Anything the engine offers works under it, on every supported platform. A feature may be faster on a multiplexed model, never absent from `.ASYNC`.
+
+- **Use `std.Io` wherever it reaches.** A raw accepted descriptor becomes a `std.Io.net.Stream` and is driven through the stream reader and writer, with no OS branch at all. Handshake secrets come from `io.randomSecure`, which is safe from a plain `std.Thread` and carries the platform's CSPRNG. This is the 0.16 answer to portability, and it replaces hand-rolled syscall shims.
+- **Where `std.Io` does not reach, split three ways and guard the Linux branch.** `sendfile`, `recvmmsg` and `sendmmsg`, `epoll`, `io_uring` and `socketpair` have no `std.Io` equivalent. Those get a comptime `windows` / `linux` / `posix` split, where posix covers macOS and the three BSDs. A two-way split is the defect in context item 2 and must not reappear.
+- **New shared substrate**, one responsibility each:
+
+| Module | Owns |
+| :- | :- |
+| `utils/fd_io.zig` | blocking read / write / close / readiness on a raw descriptor |
+| `utils/socket_pair.zig` | a connected descriptor pair, socketpair on POSIX, loopback on Windows |
+| `utils/socket_path.zig` | where a local socket lives, absolute and identical for both ends |
+| `utils/async_cache.zig` | the response cache for `.ASYNC`, one per io pool thread, plus reclaim |
+
+- **The `.ASYNC` cache is threadlocal, not shared and not per connection.** Per connection it would die before it ever hit. Shared it would need a lock on the response path. Threadlocal matches the shared-nothing design the multiplexed workers already use. A threadlocal has no destructor and a `ResponseCache` owns an arena plus an mmap slab, so every cache is recorded in a registry and the accept loop reclaims them all on exit.
+- **HTTP/3 gains a portable fallback**, mirroring the one `udp` already had: one datagram per receive over `std.Io` instead of a `recvmmsg` batch, reusing the QUIC state machine unchanged. The send helpers only queue into the batch, so a `flushPortable` on `SendBatch` was the only new primitive needed.
+- **Local socket paths are resolved, not written literally.** Both ends derive the same absolute path from the same working directory, so there is no shared state and no platform-specific literal.
+
+**Consequences:**
+
+- The four examples ADR-065 pinned to a multiplexed model all take the per-target idiom, so no example pins a dispatch model any more and every one of them starts on every platform.
+- `examples/http1_websocket_uring.zig` is deleted. Under the idiom `http1_websocket.zig` already runs `.URING` on Linux and so already exercises `websocket.pumpRing`, which made the separate example redundant. Its `/ws` echo route moved across, next to the existing `/ws/:room-id` rooms demo, and its runner became `test-runner-http1-websocket-echo` on the surviving port. Port 9029 is retired, not reused.
+- `tests/runner/common.zig:linux_only_labels` is now empty. Every one of the 52 runner scenarios is expected to pass on every platform.
+- 85 unit, integration and edge tests dropped their `!= .linux` skip guard, because what made them Linux-only was the test harness (`socketpair`, `pipe2`, `memfd_create`) and not the behaviour under test. Eight logger tests traded their `!= .linux` guard for a narrower `== .windows` one: they read a log file back through `openat(AT.FDCWD)`, which Windows has no equivalent for, so they now run on macOS and the three BSDs where they never did before.
+- `.ASYNC` remains slower than a multiplexed model under load. Nothing here changes that, and nothing here touches the `.EPOLL` / `.URING` install path: their per-worker cache and compression setup is byte for byte what it was.
+- A caller on macOS or a BSD who was somehow relying on the old TLS behaviour was relying on undefined behaviour. There is no compatibility story to preserve.
+
+**How the defect in context item 2 is found again:** for each file, count production `linux.*` calls before the first `test "`, then count `os.tag == .windows` guards against `os.tag == .linux` guards. A file with Windows guards and zero Linux guards is the two-way split, and it will compile cleanly on every target while running on none of them but Linux.
+
+**Guardrails held:** `zig fmt` clean, `test-all` 1422/1422 on both `zig-0.16` and `zig-0.17`, `test-runner-all` green across all 52 protocols, and `scripts/build-all-targets.sh` reporting `all targets passed` with `test-all`, `examples` and `test-runner-all` compiling for every triple. Each new behaviour was proven by forcing `.ASYNC` on Linux and running the real runner rather than by inspection: compression through `http1-compression` and `http-compression`, the response cache through `http1-cache`, WebSocket through `http1-websocket`, the HTTP/3 portable fallback through the `http3` runner forced onto `runFallback` (handshake plus two multiplexed requests), and the local socket paths through `uds`, `uds-http` and `channel-ipc`.
+
 ---
 
 ###### end of adr

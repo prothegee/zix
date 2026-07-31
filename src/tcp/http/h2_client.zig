@@ -19,6 +19,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win_io = @import("../../utils/windows_io.zig");
+const fd_io = @import("../../utils/fd_io.zig");
+const socket_poll = @import("../../utils/socket_poll.zig");
 const Config = @import("client_config.zig");
 const HttpClientConfig = Config.HttpClientConfig;
 const Method = @import("method.zig");
@@ -105,7 +107,7 @@ pub fn fetch(
 
     try sendRequestFD(fd, &conn, method, host.bytes, path, headers, body, config.user_agent);
 
-    return readResponse(gpa, fd, &conn, config.max_response_body, config.h2_max_read_rounds);
+    return readResponse(gpa, fd, &conn, config.max_response_body, config.h2_max_read_rounds, config.read_timeout_ms);
 }
 
 // --------------------------------------------------------- //
@@ -124,7 +126,12 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
     // server flight: ServerHello + ChangeCipherSpec + the encrypted flight (3 records).
     var flight_buf: [HANDSHAKE_FLIGHT_BUF]u8 = undefined;
     var flen: usize = 0;
-    for (0..3) |_| flen += try readRecordInto(fd, flight_buf[flen..]);
+    // A peer that accepts and then never speaks parks this read with no end, so the flight is
+    // bounded by the same budget the HTTP_1 path uses for its first response byte.
+    for (0..3) |_| flen += readRecordInto(fd, flight_buf[flen..], config.response_timeout_ms) catch |err| switch (err) {
+        error.ReadTimeout => return error.ResponseTimeout,
+        else => return err,
+    };
 
     var fin_buf: [FINISHED_BUF]u8 = undefined;
     const finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
@@ -144,7 +151,7 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
         try finished.verifyServerCert(anchor_der, host, nowSec());
     }
 
-    try writeAllFD(fd, finished.client_finished);
+    try fd_io.writeAll(fd, finished.client_finished);
 
     return finished.connection;
 }
@@ -202,7 +209,7 @@ fn sendRequestFD(
     n += putWindowUpdate(out[n..], 1, WINDOW_INCREMENT);
 
     var send_buf: [H2_SEND_BUF]u8 = undefined;
-    try writeAllFD(fd, conn.writeAppData(out[0..n], &send_buf));
+    try fd_io.writeAll(fd, conn.writeAppData(out[0..n], &send_buf));
 
     if (has_body) try sendBodyFD(fd, conn, body.?);
 }
@@ -219,7 +226,7 @@ fn sendBodyFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, body: []const 
         const len = putFrame(&frame, Http2.FRAME_TYPE_DATA, flags, 1, body[sent..end]);
 
         var enc_buf: [chunk_max + 128]u8 = undefined;
-        try writeAllFD(fd, conn.writeAppData(frame[0..len], &enc_buf));
+        try fd_io.writeAll(fd, conn.writeAppData(frame[0..len], &enc_buf));
 
         sent = end;
     }
@@ -228,7 +235,7 @@ fn sendBodyFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, body: []const 
 // --------------------------------------------------------- //
 // response: decrypt records, parse frames on stream 1, honor SETTINGS / PING, stop at END_STREAM.
 
-fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.ClientConnection, max_body: usize, max_read_rounds: usize) !Parts {
+fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.ClientConnection, max_body: usize, max_read_rounds: usize, idle_ms: u32) !Parts {
     var hdec = Http2.HpackDecoder.init();
 
     var head: std.ArrayList(u8) = .empty;
@@ -245,7 +252,7 @@ fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.Client
     var rounds: usize = 0;
     while (!stream_done and rounds < max_read_rounds) : (rounds += 1) {
         var rec_buf: [record.max_record_wire]u8 = undefined;
-        const rec_len = try readRecordInto(fd, &rec_buf);
+        const rec_len = try readRecordInto(fd, &rec_buf, idle_ms);
         if (rec_buf[0] != 23) continue; // application_data only
 
         var dec: [record.max_record_wire]u8 = undefined;
@@ -404,7 +411,7 @@ fn sendControlFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, frame_type:
     const len = putFrame(&frame, frame_type, flags, stream_id, payload);
 
     var enc_buf: [Http2.FRAME_HEADER_LEN + 128]u8 = undefined;
-    try writeAllFD(fd, conn.writeAppData(frame[0..len], &enc_buf));
+    try fd_io.writeAll(fd, conn.writeAppData(frame[0..len], &enc_buf));
 }
 
 // --------------------------------------------------------- //
@@ -471,58 +478,40 @@ fn writeRecordFD(fd: posix.fd_t, content_type: u8, msg: []const u8) !void {
     header[2] = 0x03;
     std.mem.writeInt(u16, header[3..5], @intCast(msg.len), .big);
 
-    try writeAllFD(fd, &header);
-    try writeAllFD(fd, msg);
+    try fd_io.writeAll(fd, &header);
+    try fd_io.writeAll(fd, msg);
 }
 
-fn readRecordInto(fd: posix.fd_t, buf: []u8) !usize {
-    try readAll(fd, buf[0..5]);
+/// Read one TLS record: the 5-byte header, then the body it declares. Both reads carry the caller's
+/// idle budget, since either can be the one a silent peer parks on.
+fn readRecordInto(fd: posix.fd_t, buf: []u8, idle_ms: u32) !usize {
+    try readAll(fd, buf[0..5], idle_ms);
     const len = std.mem.readInt(u16, buf[3..5], .big);
-    try readAll(fd, buf[5 .. 5 + len]);
+    try readAll(fd, buf[5 .. 5 + len], idle_ms);
 
     return 5 + len;
 }
 
-fn readAll(fd: posix.fd_t, buf: []u8) !void {
-    if (comptime builtin.os.tag == .windows) {
-        var read: usize = 0;
-        while (read < buf.len) {
-            const n = win_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
-            if (n == 0) return error.ConnectionClosed;
-
-            read += n;
-        }
-        return;
-    }
-
-    const linux = std.os.linux;
+/// Fill buf, bounding each read so a peer that stops speaking cannot park the caller forever.
+///
+/// Note:
+/// - Raw descriptor with no buffered reader above it, so the readiness gate sits directly in front
+///   of the read. See socket_poll.readableWithin for why that placement matters.
+/// - h2_max_read_rounds does not cover this. It caps how many records a chatty peer may send before
+///   the stream completes, and a silent peer never advances that counter at all.
+/// - An idle_ms of 0 keeps the original blocking read, so an unconfigured caller is unaffected.
+fn readAll(fd: posix.fd_t, buf: []u8, idle_ms: u32) !void {
     var read: usize = 0;
+
     while (read < buf.len) {
-        const rc = linux.read(fd, buf[read..].ptr, buf.len - read);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-        read += rc;
-    }
-}
+        // Inside the loop, not above it: a peer that sends one byte and then stops would clear a
+        // single gate at the top and park on the next read with nothing left to bound it.
+        if (!socket_poll.readableWithin(fd, idle_ms)) return error.ReadTimeout;
 
-fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
+        const n = fd_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
+        if (n == 0) return error.ConnectionClosed;
 
-    const linux = std.os.linux;
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const rc = linux.write(fd, bytes[written..].ptr, bytes.len - written);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        if (rc == 0) return error.WriteFailed;
-        written += rc;
+        read += n;
     }
 }
 
@@ -592,4 +581,28 @@ test "zix http: h2 client, dataPayload strips DATA padding" {
 
     const padded = Http2.FrameHeader{ .length = 6, .frame_type = Http2.FRAME_TYPE_DATA, .flags = Http2.FLAG_PADDED, .stream_id = 1 };
     try std.testing.expectEqualSlices(u8, "abc", try dataPayload(padded, &[_]u8{ 2, 'a', 'b', 'c', 0, 0 }));
+}
+
+test "zix http: h2 client, a peer that accepts and never speaks yields ResponseTimeout" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // The handshake writes a ClientHello and then reads the server flight. A peer that accepts and
+    // answers nothing parks that read, and h2_max_read_rounds cannot help: the round counter only
+    // advances once a record has been read.
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9404);
+    var silent = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer silent.deinit(io);
+
+    const host = try std.Io.net.HostName.init("127.0.0.1");
+    const outcome = fetch(.{
+        .allocator = std.testing.allocator,
+        .io = io,
+        .version = .HTTP_2,
+        .tls_verify = false,
+        .response_timeout_ms = 150,
+    }, .GET, host, 9404, "/", &.{}, null);
+
+    try std.testing.expectError(error.ResponseTimeout, outcome);
 }

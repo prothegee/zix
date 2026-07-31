@@ -1,9 +1,12 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9028;
-const DISPATCH_MODEL: zix.Http1.DispatchModel = .EPOLL;
+// Engine-owned WebSocket promotion now runs under every model: the event loops drive their own
+// frame pump, .ASYNC drives the blocking one. So this takes the per-target idiom.
+const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
 const KERNEL_BACKLOG: u31 = 1024;
 // Comptime per-deployment tuning profile (ADR-041): .lean uses a small recv
 // buffer for memory-bound hosts, .throughput a larger one for RAM-abundant hosts.
@@ -31,11 +34,22 @@ const NO_FD: std.posix.fd_t = if (@import("builtin").os.tag == .windows) std.os.
 /// Whether fd still refers to an open descriptor. Probes with fcntl(F_GETFD),
 /// a closed fd returns EBADF. Windows has no cheap probe here, so members are
 /// assumed live and pruned when a send to them fails.
+///
+/// Note:
+/// - fcntl has no portable wrapper in std here: the Linux form returns the raw syscall convention
+///   (a negative errno packed into a usize) and the libc form returns c_int with -1 on failure,
+///   so each branch checks its own return. Issuing the Linux form everywhere aims a Linux syscall
+///   number at a kernel that assigns it to something else entirely.
 fn fdAlive(fd: std.posix.fd_t) bool {
-    if (comptime @import("builtin").os.tag == .windows) return true;
+    if (comptime builtin.os.tag == .windows) return true;
 
-    const rc = std.os.linux.fcntl(fd, std.posix.F.GETFD, 0);
-    return std.posix.errno(rc) == .SUCCESS;
+    if (comptime builtin.os.tag == .linux) {
+        const rc = std.os.linux.fcntl(fd, std.posix.F.GETFD, 0);
+
+        return std.posix.errno(rc) == .SUCCESS;
+    }
+
+    return std.c.fcntl(fd, std.posix.F.GETFD, @as(c_int, 0)) != -1;
 }
 
 /// One connection tracked in a room: its fd, the room it joined, and the
@@ -259,9 +273,53 @@ fn wsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Co
     rooms.join(req.fd, room_id, display_name);
 }
 
+// GET /ws
+// The same engine-owned WebSocket without the room bookkeeping: every frame is echoed straight
+// back to its sender. Read this one first, then /ws/:room-id for the stateful version.
+//
+// Which pump runs it depends on the model, and the handler is identical either way:
+// .URING stages frames and submits one ring send (websocket.pumpRing), .EPOLL writes them from
+// its event loop (websocket.pump), .ASYNC runs the blocking loop (websocket.serveBlocking).
+//
+// Connect:
+// wscat    -c "ws://localhost:9028/ws"
+// websocat    "ws://localhost:9028/ws"
+fn wsEchoHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
+    if (req.method() != .GET) {
+        res.setStatus(.METHOD_NOT_ALLOWED);
+
+        try res.sendJson("{\"error\":\"method not allowed\"}");
+        return;
+    }
+
+    const upgrade_val = req.header("upgrade") orelse "";
+    const ws_key = req.header("sec-websocket-key");
+
+    if (!std.ascii.eqlIgnoreCase(upgrade_val, "websocket") or ws_key == null) {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"not a websocket upgrade request\"}");
+        return;
+    }
+
+    zix.Http1.WebSocket.serve(req.fd, ws_key.?, wsEchoOnFrame) catch {
+        res.setStatus(.INTERNAL_SERVER_ERROR);
+
+        try res.sendJson("{\"error\":\"handshake failed\"}");
+        return;
+    };
+}
+
+/// Per-frame callback for /ws: echo the payload back to its sender. The engine has already
+/// auto-ponged any ping and auto-echoed any close, so only text and binary reach here.
+fn wsEchoOnFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
+    zix.Http1.WebSocket.sendFD(fd, @enumFromInt(opcode), payload) catch {};
+}
+
 // --------------------------------------------------------- //
 
 const Routes = zix.Http1.Router(&[_]zix.Http1.Route{
+    .{ .path = "/ws", .handler = wsEchoHandler },
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
 });
 

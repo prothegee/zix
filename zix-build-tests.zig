@@ -40,8 +40,20 @@ pub fn addSteps(
     const zix_tests = b.addTest(.{ .root_module = zix });
     const zix_tests_step = testRunStep(b, zix_tests, foreign_target, "unit-test");
 
+    // The test runner's check isolation helper carries its own unit tests. It imports std only, not
+    // zix, so it gets its own module rather than a slot in the suite lists below.
+    const isolate_mod = b.createModule(.{
+        .root_source_file = b.path("tests/runner/isolate.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const isolate_tests = b.addTest(.{ .root_module = isolate_mod });
+    const isolate_step = testRunStep(b, isolate_tests, foreign_target, "tests/runner/isolate.zig");
+    isolate_step.dependOn(zix_tests_step);
+
     const test_step = b.step("unit-test", "Run unit tests");
     test_step.dependOn(zix_tests_step);
+    test_step.dependOn(isolate_step);
 
     // --------------------------------------------------------- //
 
@@ -113,6 +125,8 @@ pub fn addSteps(
     const behaviour_test_step = b.step("behaviour-test", "Run behaviour tests");
 
     const behaviour_tests = .{
+        // dispatch
+        "tests/behaviour/dispatch/platform_gate_test.zig",
         // tcp
         "tests/behaviour/tcp/config_test.zig",
         // http
@@ -226,6 +240,7 @@ pub fn addSteps(
 
     const all_test_step = b.step("test-all", "Run unit, integration, behaviour, and edge tests");
     all_test_step.dependOn(zix_tests_step);
+    all_test_step.dependOn(isolate_step);
     all_test_step.dependOn(integration_test_step);
     all_test_step.dependOn(behaviour_test_step);
     all_test_step.dependOn(edge_test_step);

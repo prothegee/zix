@@ -2,7 +2,7 @@
 //!
 //! Note:
 //! - Gated on config.tls (a *Tls.Context). The accept loop hands each connection to its own worker
-//!   thread (.ASYNC / .POOL / .MIXED), so a slow handshake or a keep-alive client never serializes
+//!   thread (.ASYNC), so a slow handshake or a keep-alive client never serializes
 //!   the others. The worker reads the ClientHello, branches on the version policy (TLS 1.3 via
 //!   zix.Tls, a 1.2-only client via tls12_connection), then per request decrypts the record(s),
 //!   accumulates a full request, runs the router through processRequest with the response captured
@@ -17,9 +17,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
 const posix = std.posix;
-const win_io = @import("../../utils/windows_io.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const common = @import("dispatch/common.zig");
 const resp = @import("response.zig");
 const parser = @import("parser.zig");
@@ -29,6 +28,11 @@ const tls12 = @import("../../tls/tls12_connection.zig");
 const record = @import("../../tls/record.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+/// Record traffic runs over the bare accepted descriptor, so it goes through the shared
+/// fd helpers rather than a per-platform branch in this file.
+const readAll = fd_io.readAll;
+const writeAllFD = fd_io.writeAll;
 
 const content_type_change_cipher_spec: u8 = 20;
 const content_type_alert: u8 = 21;
@@ -135,7 +139,7 @@ pub fn processRequestToBuffer(server: anytype, io: std.Io, request: []u8, out: [
     return .{ .bytes = out[0..sink.len], .outcome = outcome };
 }
 
-/// Listen and serve https/1.1, one worker thread per connection (the .ASYNC / .POOL / .MIXED path,
+/// Listen and serve https/1.1, one worker thread per connection (the .ASYNC path,
 /// .EPOLL / .URING use the event-driven tls_mux). The cert / key / policy are already loaded and
 /// validated in the context (config.tls), so this only accepts and drives per-connection handshakes.
 pub fn runTls(server: anytype, io: std.Io) !void {
@@ -153,11 +157,7 @@ pub fn runTls(server: anytype, io: std.Io) !void {
         fn handle(srv_ptr: @TypeOf(server), conn_fd: posix.fd_t, tls_ctx: *const Tls.Context, h_io: std.Io) void {
             serveConnTls(srv_ptr, h_io, conn_fd, tls_ctx) catch {};
 
-            if (comptime builtin.os.tag == .windows) {
-                win_io.close(conn_fd);
-            } else {
-                _ = linux.close(conn_fd);
-            }
+            fd_io.close(conn_fd);
         }
     };
 
@@ -168,11 +168,7 @@ pub fn runTls(server: anytype, io: std.Io) !void {
         const worker = std.Thread.spawn(.{ .stack_size = cfg.worker_stack_size_bytes }, Spawn.handle, .{ server, conn_fd, ctx, io }) catch {
             // Spawn failed (thread / pid limit): drop this connection and keep accepting. Serving
             // inline would block the accept loop for the connection's whole lifetime.
-            if (comptime builtin.os.tag == .windows) {
-                win_io.close(conn_fd);
-            } else {
-                _ = linux.close(conn_fd);
-            }
+            fd_io.close(conn_fd);
 
             continue;
         };
@@ -190,9 +186,10 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
     var ephemeral_secret: [32]u8 = undefined;
     var server_random: [32]u8 = undefined;
     var pss_salt: [32]u8 = undefined;
-    _ = linux.getrandom(&ephemeral_secret, ephemeral_secret.len, 0);
-    _ = linux.getrandom(&server_random, server_random.len, 0);
-    _ = linux.getrandom(&pss_salt, pss_salt.len, 0);
+    // std.Io carries the platform's CSPRNG, so the handshake secrets need no syscall branch.
+    try io.randomSecure(&ephemeral_secret);
+    try io.randomSecure(&server_random);
+    try io.randomSecure(&pss_salt);
 
     const opts = ctx.handshakeOptions(ephemeral_secret, server_random, pss_salt);
 
@@ -524,48 +521,6 @@ fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
     try readAll(fd, buf[5 .. 5 + length]);
 
     return .{ .content_type = buf[0], .full = buf[0 .. 5 + length], .body = buf[5 .. 5 + length] };
-}
-
-fn readAll(fd: posix.fd_t, buf: []u8) !void {
-    if (comptime builtin.os.tag == .windows) {
-        var read: usize = 0;
-        while (read < buf.len) {
-            const n = win_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
-            if (n == 0) return error.ConnectionClosed;
-
-            read += n;
-        }
-        return;
-    }
-
-    var read: usize = 0;
-    while (read < buf.len) {
-        const chunk = buf[read..];
-        const rc = linux.read(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-        read += rc;
-    }
-}
-
-fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
-
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const chunk = bytes[written..];
-        const rc = linux.write(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        written += rc;
-    }
 }
 
 // --------------------------------------------------------------- //

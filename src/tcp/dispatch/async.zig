@@ -22,7 +22,7 @@ pub fn runAsync(cfg: TcpServerConfig, handler: HandlerFn) !void {
     var net_server = try addr.listen(io, .{
         .mode = .stream,
         .protocol = .tcp,
-        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, required for POOL, applied to all models
+        .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, applied to all models
         .kernel_backlog = cfg.kernel_backlog,
     });
     defer net_server.deinit(io);

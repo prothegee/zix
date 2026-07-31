@@ -56,6 +56,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var sse_client = zix.Http.SseClient.init(.{
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
     });
     var stream = try sse_client.open(url);
     defer stream.deinit();

@@ -11,8 +11,8 @@ const PORT: u16 = 9210;
 const TLS_PORT: u16 = 9211;
 const URING_PORT: u16 = 9213;
 const URING_TLS_PORT: u16 = 9214;
-const POOL_PORT: u16 = 9215;
-const POOL_TLS_PORT: u16 = 9216;
+const ASYNC_PORT: u16 = 9215;
+const ASYNC_TLS_PORT: u16 = 9216;
 const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
 const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
@@ -110,12 +110,12 @@ fn startServersOnce() !void {
     } });
     uring_thread.detach();
 
-    const pool_thread = try std.Thread.spawn(.{}, serveDual, .{ io, tls, logger, ServeArgs{
-        .port = POOL_PORT,
-        .tls_port = POOL_TLS_PORT,
-        .dispatch_model = .POOL,
+    const async_thread = try std.Thread.spawn(.{}, serveDual, .{ io, tls, logger, ServeArgs{
+        .port = ASYNC_PORT,
+        .tls_port = ASYNC_TLS_PORT,
+        .dispatch_model = .ASYNC,
     } });
-    pool_thread.detach();
+    async_thread.detach();
 }
 
 /// One full TLS exchange against tls_port: handshake, one GET, assert the shared route answered.
@@ -224,24 +224,24 @@ test "zix integration: Http1 dual listener URING serves TLS on-ring on tls_port"
     try expectTlsOk(threaded.io(), URING_TLS_PORT);
 }
 
-test "zix integration: Http1 dual listener POOL serves cleartext on port" {
+test "zix integration: Http1 dual listener ASYNC serves cleartext on port" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
     try startServersOnce();
-    try expectCleartextOk(threaded.io(), POOL_PORT);
+    try expectCleartextOk(threaded.io(), ASYNC_PORT);
 }
 
-test "zix integration: Http1 dual listener POOL serves TLS via the extra accept thread" {
+test "zix integration: Http1 dual listener ASYNC serves TLS via the extra accept thread" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
     try startServersOnce();
-    try expectTlsOk(threaded.io(), POOL_TLS_PORT);
+    try expectTlsOk(threaded.io(), ASYNC_TLS_PORT);
 }
 
 test "zix integration: Http1 tls_port equal to port is rejected at run" {

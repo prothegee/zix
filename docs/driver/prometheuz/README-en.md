@@ -131,8 +131,16 @@ for (result.vector) |entry| std.debug.print("{d}\n", .{entry.value});
 
 ```
 zig build test-unit          # in-process, no server
+zig build test-behaviour     # in-process endpoint, no container
+zig build test-edge          # in-process endpoint, no container
 zig build examples           # build every one-shot example into zig-out/bin
 zig build test-runner        # runs every one-shot example against real containers (owns the lifecycle)
 ```
+
+`test-behaviour` and `test-edge` drive one in-process HTTP endpoint standing in for
+all three servers the driver talks to: the exporter it scrapes, the receiver it
+writes to, and the query API it reads from. They need no docker and run on
+every supported platform, so CI can run them everywhere. `test-runner` remains
+the coverage against real node-exporter and Prometheus containers.
 
 `test-runner` builds and starts `containers/node-exporter` and `containers/prometheus` (repo root), waits for both to answer, runs every one-shot example, then tears the containers down. `examples/registry_live_demo.zig` is not part of any of the above: it is a long-running demo that self-manages its own container lifecycle, see `hld-en.md`.

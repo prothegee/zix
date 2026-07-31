@@ -18,8 +18,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | :- | :- |
 | `io`, `ip`, `port`, `kernel_backlog` | semua model (resolve + listen) |
 | `dispatch_model` | switch di `run()` |
-| `workers` | jumlah accept .POOL, jumlah worker .MIXED dan .EPOLL |
-| `pool_size` | jumlah pool thread .POOL |
+| `workers` | jumlah worker .EPOLL dan .URING, diabaikan oleh .ASYNC |
 | `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
 | `max_recv_buf` | ukuran buffer per-connection .EPOLL (`ConnTable.alloc`) |
 | `large_body_rcvbuf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
@@ -185,7 +184,7 @@ String IMF-fixdate diformat ulang paling banyak sekali per detik per thread, dan
 
 ### serveConn(): loop keep-alive blocking
 
-Dipakai .ASYNC, .POOL, dan .MIXED. State stack: `recv_buf[16 KB]`, `body_buf[8 KB]`, `leftover: usize`.
+Dipakai .ASYNC. State stack: `recv_buf[16 KB]`, `body_buf[8 KB]`, `leftover: usize`.
 
 ```
 0. TCP_NODELAY (opts.nodelay, dilewati di Windows)
@@ -254,7 +253,7 @@ Memecah pattern dan path pada `/` secara berpasangan. Segmen `:name` menangkap (
 
 Baris lifecycle dirutekan melalui `config.logger.system(.INFO, "http1", ...)` bila ada. Tanpa logger, baris jatuh ke `std.debug.print` dengan prefix `zix: ` hanya pada Debug build (`builtin.mode == .Debug`), dan diam pada release. Setiap server zix memakai bentuk `logSystem` ter-gate yang sama (http, http2, grpc, fix, tcp, udp, uds), jadi release build tanpa logger tidak mengeluarkan init noise.
 
-### connEntry() (badan task .ASYNC / .MIXED)
+### connEntry() (badan task .ASYNC)
 
 ```
 defer stream.close(io)
@@ -268,34 +267,6 @@ core.serveConn(stream.socket.handle, handler, .{ .handler_timeout_ms })
 2. accept loop: srv.accept(io) catch continue
       io.async(connEntry, ...)        // handle dibuang, task memiliki stream
 ```
-
-### ConnQueue (.POOL)
-
-Ring buffer yang dapat tumbuh, dijaga `std.Io.Mutex` + `std.Io.Condition`:
-
-```
-push: lock -> tumbuh x2 saat penuh (gagal alloc menutup stream alih-alih mendorong)
-      -> buf[(head + len) % cap] = stream -> unlock -> signal
-pop:  lock -> while kosong: closed ? return null : waitUncancelable
-      -> ambil buf[head], head maju modulo cap -> unlock
-close: lock -> closed = true -> unlock -> broadcast
-```
-
-Penyimpanan memakai `std.heap.smp_allocator`. Entri yang ada dipadatkan ulang ke indeks 0 saat tumbuh.
-
-### runPool()
-
-```
-1. worker_count = workers == 0 ? cpu_count : workers
-2. pool_count   = pool_size == 0 ? max(10, cpu_count * 2) : pool_size
-3. spawn pool_count thread poolEntry (stack 512 KB): pop -> serveConn -> close
-4. spawn worker_count thread acceptEntry (stack 256 KB): listener SO_REUSEPORT sendiri -> accept -> push
-5. join accept thread, queue.close(), join pool thread
-```
-
-### runMixed()
-
-`worker_count` accept thread, masing-masing dengan listener `SO_REUSEPORT` sendiri, men-dispatch `connEntry` via `io.async()`. Thread sengaja di-spawn dengan ukuran stack default: stack eksplisit 256 KB meluap saat `io.async` jatuh kembali ke dispatch inline (serveConn butuh ~128 KB stack).
 
 ### Engine EPOLL
 
@@ -426,7 +397,7 @@ Langkah 2 sampai 4 adalah wakeup coalescing adaptif: loop yang panas (reap besar
 
 #### armDrainRecv()
 
-Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` dan `sqe.len` ditimpa menjadi `min(conn.drain, 1 GB)`: kernel membuang byte body di tempat (tanpa salinan ke `conn.buf`, request tidak dibatasi panjang buffer), sehingga satu recv menguras seluruh sisa body alih-alih satu round-trip per `max_recv_buf`. `handleRecv` menghitung mundur byte yang dikuras (mengakumulasi `conn.drain_received`) dan re-arm sampai `conn.drain` mencapai nol, lalu menyajikan request yang ditunda melalui jalur dispatch normal: byte head selamat di depan `conn.buf` karena `MSG_TRUNC` tidak pernah menulis buffer. Membatasi request pada `conn.drain` membuat byte pipelined setelah body tetap tak tersentuh. Dicakup oleh runner `test-runner-http1-drain-{epoll,uring}`, yang mem-pipeline POST over-large lalu GET lanjutan pada satu koneksi keep-alive.
+Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` dan `sqe.len` ditimpa menjadi `min(conn.drain, 1 GB)`: kernel membuang byte body di tempat (tanpa salinan ke `conn.buf`, request tidak dibatasi panjang buffer), sehingga satu recv menguras seluruh sisa body alih-alih satu round-trip per `max_recv_buf`. `handleRecv` menghitung mundur byte yang dikuras (mengakumulasi `conn.drain_received`) dan re-arm sampai `conn.drain` mencapai nol, lalu menyajikan request yang ditunda melalui jalur dispatch normal: byte head selamat di depan `conn.buf` karena `MSG_TRUNC` tidak pernah menulis buffer. Membatasi request pada `conn.drain` membuat byte pipelined setelah body tetap tak tersentuh. Dicakup oleh runner `test-runner-http1-drain`, yang mem-pipeline POST over-large lalu GET lanjutan pada satu koneksi keep-alive. Ia hanya menyisakan leg URING ketika ADR-065 meringkas baris runner per model.
 
 #### watchExternal() / op external
 

@@ -23,39 +23,7 @@ HTTP server and client built on Zig 0.16.x `std.Io`.
 
 ## Runtime Model
 
-Five dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default).
-
-### .POOL: Work-Queue Thread Pool
-
-```mermaid
-flowchart TD
-    MAIN["main(process)\nServer.run()"] --> SPAWN["spawn pool_size pool threads\nspawn worker_count accept threads"]
-    SPAWN --> ACC["Accept thread\nbind/listen SO_REUSEPORT\naccept(io) -> queue.push(stream)"]
-    SPAWN --> POOL["Pool thread\nqueue.pop()\nhandleConnection(stream)"]
-    ACC --> ACC
-    POOL --> HC["handleConnection()"]
-    HC --> G["stack/heap read_buf + write_buf"]
-    G --> H["std.http.Server.init()"]
-    H --> I["ArenaAllocator per-connection"]
-    I --> J["keep-alive loop"]
-    J --> K["receiveHead()"]
-    K -->|close or reset| Z["stream.close()"]
-    K --> L["build Request + Response + Context"]
-    L --> M["Router.dispatch()"]
-    M -->|matched| N["HandlerFn"]
-    M -->|no match| O{"public_dir set?"}
-    O -->|yes| P["static.serve()"]
-    O -->|no| Q["404 Not Found"]
-    P -->|file not found| Q
-    N --> J
-    P --> J
-    Q --> J
-```
-
-- Accept threads only call `accept()` and push to the shared `ConnQueue`. They never handle I/O.
-- Pool threads pop and handle each connection with synchronous blocking I/O (no `io.async()` overhead).
-- Default: cpu_count accept threads, `max(10, cpu_count * 2)` pool threads.
-- `workers` and `pool_size` tune thread counts, see `HttpServerConfig`.
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, so a portable caller picks the model per target at comptime and `run()` rejects a Linux-only model off Linux with `error.DispatchModelUnsupported` (ADR-065).
 
 ### .ASYNC: Single Accept, io.async() Dispatch
 
@@ -84,14 +52,9 @@ flowchart TD
 ```
 
 - One accept thread, each connection dispatched as a concurrent task via `io.async()`.
-- `workers` and `pool_size` are ignored.
-- Preferred for SSE and WebSocket: long-lived connections do not hold pool threads.
-
-### .MIXED: N Accept Threads, io.async() Dispatch
-
-- N accept threads (default cpu_count, `SO_REUSEPORT`). Each dispatches connections via `io.async()` directly, no `ConnQueue`.
-- `pool_size` is ignored. `workers` controls accept thread count.
-- Balanced throughput and latency, higher jitter than `.POOL` under saturation.
+- `workers` is ignored (there is always exactly one accept thread).
+- Preferred for SSE and WebSocket: an open stream costs a task, not an event-loop worker slot.
+- The only model available on every platform, so it is the model every non-Linux target uses.
 
 ### .EPOLL: Shared-Nothing epoll Workers (Linux-only)
 
@@ -113,18 +76,19 @@ flowchart TD
 - Each worker owns one `SO_REUSEPORT` listener and one `epoll` instance. The kernel distributes new connections across workers with no shared queue.
 - Level-triggered `EPOLLIN`: connections stay registered after each request and re-fire when new data arrives. No explicit re-arm.
 - Blocking fds: `handleOneRequest` does a synchronous recv/parse/send, then returns the worker to `epoll_wait`.
-- `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
+- `workers` controls worker count (0 = cpu_count).
 - Best for high-throughput short-lived requests on Linux. Not suitable for SSE or WebSocket (blocking reads would park the worker).
-- Non-Linux builds fall back to `.POOL` automatically.
+- Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
 
 ### .URING: Shared-Nothing io_uring Workers (Linux-only)
 
 Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based: accepts, reads, and writes are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring (`self.runUring(io)`, ADR-037 Phase 4).
 
-- `workers` controls worker count (0 = cpu_count). `pool_size` is ignored.
+- `workers` controls worker count (0 = cpu_count).
 - Best for sustained, pipelined load where the batched ring amortizes syscalls. On loopback it matches `.EPOLL` on throughput and wins mainly on cache locality. On a many-core box the ring close (`prep_close`, ADR-041, native to `zix.Http1` for now) keeps the worker reaping completions through connection churn, where `.URING` reaches parity or better at a fraction of the memory.
 - Like `.EPOLL`, the per-connection serve is blocking once a request is ready, so it is not suited to SSE or WebSocket.
-- Non-Linux builds fall back to `.POOL` automatically.
+- When io_uring itself is unavailable on the host (old kernel, low `RLIMIT_MEMLOCK`, sandbox) the engine folds to the `.EPOLL` loop with a logged notice.
+- Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
 
 `zix.Http.Server` receives an opaque `std.Io` value and does not own or deinit the backend. See [`docs/concurrency.md`](concurrency.md) for thread count details and model comparison.
 
@@ -220,7 +184,7 @@ Access via `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, Linux-only natively, non-Linux and non-HTTP/Grpc protocols use `.POOL` automatically) `.URING`(4, Linux-only io_uring, same automatic `.POOL` fallback off Linux) |
+| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only io_uring). Off Linux `run()` returns `error.DispatchModelUnsupported` for the last two |
 | `zix.Http.RequestHeaderSize` | union(enum) | Request header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | Client user agent string from `build.zig.zon` (e.g. `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Response header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -252,11 +216,11 @@ pub const HttpServerConfig = struct {
     io:                   std.Io,                         // caller-provided io backend, required, must outlive the server
     ip:                   []const u8,
     port:                 u16,
-    dispatch_model:       DispatchModel,    // required: ASYNC, POOL, MIXED, EPOLL, or URING (EPOLL/URING Linux-only)
+    dispatch_model:       DispatchModel,    // required: ASYNC, EPOLL, or URING (EPOLL/URING Linux-only)
     kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
     large_body_rcvbuf:    usize             = 0,          // SO_RCVBUF on the large-body/upload path, 0 = kernel default
-    compress:             bool              = false,      // gzip / deflate / brotli negotiation, opt-in via resp.sendNegotiated (.EPOLL/.URING)
+    compress:             bool              = false,      // gzip / deflate / brotli negotiation, opt-in via resp.sendNegotiated (every model)
     compression_min_size: usize             = 256,        // skip bodies under this floor
     compression_max_out:  usize             = 256 * 1024, // codec-agnostic compressed-output cap
     max_allocator_size:   usize             = 1024 * 4,  // per-connection arena backing size
@@ -266,10 +230,9 @@ pub const HttpServerConfig = struct {
     public_dir_upload:    []const u8        = "u",        // upload subdir under public_dir
     public_dir_cache_ttl_ms:      u32       = 0,          // 0 = never cached, the shipped default
     public_dir_cache_max_entries: u32       = 256,        // static cache slots, one per file
-    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled; .POOL only
+    conn_timeout_ms:      u32               = 0,          // Layer D: connection guard. 0 = disabled, .ASYNC only
     handler_timeout_ms:   u32               = 0,          // Layer B: handler budget. 0 = disabled; ctx.isExpired() / ctx.timedOut()
-    workers:              usize             = 0,          // 0 = cpu_count; accept threads for .POOL/.MIXED, workers for .EPOLL; ignored by .ASYNC
-    pool_size:            usize             = 0,          // 0 = max(10, cpu_count * 2); .POOL only (ignored by .EPOLL, .MIXED, .ASYNC)
+    workers:              usize             = 0,          // 0 = cpu_count workers for .EPOLL / .URING, ignored by .ASYNC
     tls:                  ?*zix.Tls.Context = null,       // non-null serves this engine over TLS (native https), else cleartext
     tls_port:             u16               = 0,          // dual-listener companion port, 0 = single-listener; see docs/hld-tls-en.md
     logger:               ?*zix.Logger      = null,       // access logger. null = no HTTP access logging
@@ -286,7 +249,7 @@ For header cap selection and security guidance see [`docs/headers.md`](headers.m
 
 ## Connection Lifecycle
 
-`.POOL` (pool thread handles connection synchronously):
+`.ASYNC` (an io.async() task handles the connection):
 
 ```mermaid
 sequenceDiagram
@@ -392,7 +355,7 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 
 **`Date` logic** (cross-platform, proxy-aware):
 1. `server.zig` scans request headers once before dispatch for a proxy-forwarded `Date` value. If found, stores it in `res.date_cache`.
-2. Otherwise `res.date_cache` is set from the global atomic date cache (updated by a timer thread every 500 ms in `.POOL`, or by the accept loop in `.ASYNC`): one atomic load per request, no clock syscall.
+2. Otherwise `res.date_cache` is set from the global atomic date cache (updated by a background timer thread every 500 ms): one atomic load per request, no clock syscall.
 3. `send()` reads `res.date_cache` directly, no header scan at send time.
 4. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
@@ -702,7 +665,7 @@ sequenceDiagram
 
 ### Concurrency requirement
 
-SSE connections are long-lived. `.POOL`'s blocking thread pool would be exhausted (one thread per open stream, blocked for the full stream duration). `.ASYNC` is preferred: each connection runs as a concurrent task via `io.async()` without occupying a pool thread.
+SSE connections are long-lived. The `.EPOLL` and `.URING` event loops would park a worker for the full stream duration. `.ASYNC` is preferred: each connection runs as a concurrent task via `io.async()`, so an open stream costs a task rather than a worker slot.
 
 ### Handler pattern
 
@@ -788,8 +751,8 @@ pub const HttpClientConfig = struct {
     allocator:           std.mem.Allocator, // owns response body + head copies
     io:                  std.Io,            // event-loop backend, not owned by client
     connect_timeout_ms:  u32 = 0,          // 0 = no timeout. enforced via connectTcpOptions
-    response_timeout_ms: u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
-    read_timeout_ms:     u32 = 0,          // 0 = no timeout. v1: stored, not yet enforced
+    response_timeout_ms: u32 = 0,          // 0 = no timeout. error.ResponseTimeout when the head never arrives
+    read_timeout_ms:     u32 = 0,          // 0 = no timeout. error.ReadTimeout when the body stalls (Content-Length only)
     max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
     follow_redirects:    bool = true,
     max_redirects:       u8   = 3,
@@ -832,6 +795,8 @@ sequenceDiagram
 | `error.InvalidUrl` | `Uri.parse` fails, unsupported scheme, or missing host |
 | `error.BodyTooLarge` | response body exceeds `max_response_body` bytes |
 | `error.Timeout` | TCP connect exceeded `connect_timeout_ms` (from `std.Io`) |
+| `error.ResponseTimeout` | server accepted the connection but sent no response head within `response_timeout_ms` |
+| `error.ReadTimeout` | body stalled past `read_timeout_ms` mid-transfer (Content-Length bodies only) |
 
 Other errors from `std.http.Client` propagate unchanged (OutOfMemory, ConnectionRefused, etc.).
 
@@ -856,8 +821,6 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 
 | Feature | Status |
 | :- | :- |
-| `response_timeout_ms` enforcement | v1: field stored, not yet applied |
-| `read_timeout_ms` enforcement | v1: field stored, not yet applied |
 | TLS / HTTPS (client) | https via `version = .HTTP_2` (h2 over TLS 1.3, `h2_client.zig`), trusting the server cert through `tls_ca_path` / `tls_verify`. The HTTP/1 client path is cleartext |
 | Connection pool keep-alive reuse | inherited from `std.http.Client` pool (enabled by default) |
 
@@ -868,7 +831,6 @@ Call `resp.deinit()` to release both. After `deinit()`, all slices returned by `
 | Feature | Location | Note |
 | :- | :- | :- |
 | Middleware chain runner | deleted (ADR-062) | Comptime wrapper composition is the middleware idiom, see `examples/http_middleware.zig` |
-| response/read timeout enforcement (client) | `client.zig` | Config fields stored. IO-level wiring deferred |
 
 TLS for this server (native https, opt-in via `config.tls`, dual listener via `config.tls_port`) is implemented, see [`docs/hld-tls-en.md`](hld-tls-en.md).
 

@@ -151,7 +151,6 @@ fn epollWorkerEntry(ctx: EpollWorkerCtx) void {
 ///   to epoll_wait immediately and is not parked on the connection lifetime.
 /// - workers = 0 (default): one worker per available CPU (cgroup-allowed mask),
 ///   each pinned to its own CPU slot.
-/// - pool_size is ignored for EPOLL (no session-worker pool needed).
 pub fn runEpoll(cfg: TcpServerConfig, handler: HandlerFn) !void {
     const cpu = common.getAvailableCpuCount();
     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;

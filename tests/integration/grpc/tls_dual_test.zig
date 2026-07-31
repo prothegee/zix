@@ -45,7 +45,7 @@ fn serveDual(io: std.Io, tls: *zix.Tls.Context, logger: *zix.Logger, args: Serve
         .tls = tls,
         .tls_port = args.tls_port,
         .dispatch_model = args.dispatch_model,
-        .pool_size = 1,
+        .workers = 1,
         .logger = logger,
     });
     defer server.deinit();

@@ -2,7 +2,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 // Runs against any of the http basic servers on port 9000
-// (e.g. example-http_basic_1_async with routes / /echo /about).
+// (e.g. example-http_basic with routes / /echo /about).
 // Usage: zig build example-http_client && ./zig-out/bin/example-http_client
 
 pub fn main(process: std.process.Init) !void {

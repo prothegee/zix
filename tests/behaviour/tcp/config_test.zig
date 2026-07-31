@@ -38,14 +38,6 @@ test "zix behaviour: TcpServerConfig, workers defaults to 0 (auto)" {
     try std.testing.expectEqual(@as(usize, 0), cfg.workers);
 }
 
-test "zix behaviour: TcpServerConfig, pool_size defaults to 0 (auto)" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-
-    const cfg = zix.Tcp.ServerConfig{ .io = threaded.io(), .ip = "127.0.0.1", .port = 9300, .dispatch_model = .ASYNC };
-    try std.testing.expectEqual(@as(usize, 0), cfg.pool_size);
-}
-
 test "zix behaviour: TcpClientConfig, max_recv_buf defaults to 4096" {
     const cfg = zix.Tcp.ClientConfig{ .ip = "127.0.0.1", .port = 9300 };
     try std.testing.expectEqual(@as(usize, 4096), cfg.max_recv_buf);
@@ -95,7 +87,6 @@ test "zix behaviour: TcpServerConfig EPOLL, workers governs shared-nothing worke
         .port = 9300,
         .dispatch_model = .EPOLL,
         .workers = 8,
-        .pool_size = 0,
     };
     try std.testing.expectEqual(zix.Tcp.DispatchModel.EPOLL, cfg.dispatch_model);
     try std.testing.expectEqual(@as(usize, 8), cfg.workers);

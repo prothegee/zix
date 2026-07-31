@@ -18,8 +18,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | :- | :- |
 | `io`, `ip`, `port`, `kernel_backlog` | all models (resolve + listen) |
 | `dispatch_model` | `run()` switch |
-| `workers` | .POOL accept count, .MIXED and .EPOLL worker count |
-| `pool_size` | .POOL pool thread count |
+| `workers` | .EPOLL and .URING worker count, ignored by .ASYNC |
 | `handler_timeout_ms` | armed before every dispatch in all models |
 | `max_recv_buf` | .EPOLL per-connection buffer size (`ConnTable.alloc`) |
 | `large_body_rcvbuf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
@@ -185,7 +184,7 @@ The IMF-fixdate string is reformatted at most once per second per thread, and th
 
 ### serveConn(): blocking keep-alive loop
 
-Used by .ASYNC, .POOL, and .MIXED. Stack state: `recv_buf[16 KB]`, `body_buf[8 KB]`, `leftover: usize`.
+Used by .ASYNC. Stack state: `recv_buf[16 KB]`, `body_buf[8 KB]`, `leftover: usize`.
 
 ```
 0. TCP_NODELAY (opts.nodelay, skipped on Windows)
@@ -254,7 +253,7 @@ Splits pattern and path on `/` in lockstep. `:name` segments capture (empty path
 
 Lifecycle lines route through `config.logger.system(.INFO, "http1", ...)` when present. Without a logger they fall back to `std.debug.print` with a `zix: ` prefix only in Debug builds (`builtin.mode == .Debug`), and are silent in release. Every zix server uses this same gated `logSystem` shape (http, http2, grpc, fix, tcp, udp, uds), so a release build with no logger emits no init noise.
 
-### connEntry() (.ASYNC / .MIXED task body)
+### connEntry() (.ASYNC task body)
 
 ```
 defer stream.close(io)
@@ -268,34 +267,6 @@ core.serveConn(stream.socket.handle, handler, .{ .handler_timeout_ms })
 2. accept loop: srv.accept(io) catch continue
       io.async(connEntry, ...)        // discard handle, task owns the stream
 ```
-
-### ConnQueue (.POOL)
-
-Growable ring buffer guarded by `std.Io.Mutex` + `std.Io.Condition`:
-
-```
-push: lock -> grow x2 when full (alloc failure closes the stream instead of pushing)
-      -> buf[(head + len) % cap] = stream -> unlock -> signal
-pop:  lock -> while empty: closed ? return null : waitUncancelable
-      -> take buf[head], head advances modulo cap -> unlock
-close: lock -> closed = true -> unlock -> broadcast
-```
-
-Backing storage uses `std.heap.smp_allocator`. Existing entries are re-packed to index 0 on growth.
-
-### runPool()
-
-```
-1. worker_count = workers == 0 ? cpu_count : workers
-2. pool_count   = pool_size == 0 ? max(10, cpu_count * 2) : pool_size
-3. spawn pool_count poolEntry threads (512 KB stacks): pop -> serveConn -> close
-4. spawn worker_count acceptEntry threads (256 KB stacks): own SO_REUSEPORT listener -> accept -> push
-5. join accept threads, queue.close(), join pool threads
-```
-
-### runMixed()
-
-`worker_count` accept threads, each with its own `SO_REUSEPORT` listener, dispatching `connEntry` via `io.async()`. Threads are spawned with the default stack size on purpose: an explicit 256 KB stack overflows when `io.async` falls back to inline dispatch (serveConn needs ~128 KB of stack).
 
 ### EPOLL engine
 
@@ -427,7 +398,7 @@ Steps 2 to 4 are the adaptive wakeup coalescing: a hot loop (large reaps) waits 
 
 #### armDrainRecv()
 
-The ring twin of `serveEpollDrain`. Posts a `recv` SQE with `MSG_TRUNC` and `sqe.len` overridden to `min(conn.drain, 1 GB)`: the kernel discards the body bytes in place (no copy into `conn.buf`, the request is not capped by the buffer length), so one recv drains the whole remaining body instead of one round-trip per `max_recv_buf`. `handleRecv` counts the drained bytes down (accumulating `conn.drain_received`) and re-arms until `conn.drain` reaches zero, then serves the deferred request through the normal dispatch path: the head bytes survived at the front of `conn.buf` because `MSG_TRUNC` never writes it. Capping the request at `conn.drain` leaves any pipelined bytes after the body untouched. Covered by the `test-runner-http1-drain-{epoll,uring}` runners, which pipeline an over-large POST then a follow-up GET on one keep-alive connection.
+The ring twin of `serveEpollDrain`. Posts a `recv` SQE with `MSG_TRUNC` and `sqe.len` overridden to `min(conn.drain, 1 GB)`: the kernel discards the body bytes in place (no copy into `conn.buf`, the request is not capped by the buffer length), so one recv drains the whole remaining body instead of one round-trip per `max_recv_buf`. `handleRecv` counts the drained bytes down (accumulating `conn.drain_received`) and re-arms until `conn.drain` reaches zero, then serves the deferred request through the normal dispatch path: the head bytes survived at the front of `conn.buf` because `MSG_TRUNC` never writes it. Capping the request at `conn.drain` leaves any pipelined bytes after the body untouched. Covered by the `test-runner-http1-drain` runner, which pipelines an over-large POST then a follow-up GET on one keep-alive connection. It kept only its URING leg when ADR-065 collapsed the per-model runner rows.
 
 #### watchExternal() / the external op
 

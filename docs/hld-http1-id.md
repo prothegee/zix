@@ -27,8 +27,8 @@ Keduanya server HTTP/1.1. `zix.Http` adalah lapisan berfitur lengkap, `zix.Http1
 | Penulisan response | objek `Response` ter-buffer | builder `Response` yang mendelegasikan ke write helper fd langsung |
 | Static files / multipart / SSE writer | built in | fallback static `public_dir` dengan cache file terbuka opsional (ADR-064), `Multipart` bersama, `SseWriter` |
 | Routing | handler runtime lewat `Router(routes).dispatch` (ADR-063, tidak dibakukan ke tipe) | tabel route comptime (opsional, handler boleh polos) |
-| WebSocket | frame loop milik handler | frame pump milik engine (.EPOLL / .URING) |
-| Model dispatch | ASYNC, POOL, MIXED, EPOLL, URING | ASYNC, POOL, MIXED, EPOLL, URING |
+| WebSocket | frame loop milik handler | frame pump milik engine (semua model) |
+| Model dispatch | ASYNC, EPOLL, URING | ASYNC, EPOLL, URING |
 
 Permukaan trio identik bagi caller di kedua engine (test paritas compile-time di `src/lib.zig` menegakkannya). Pakai `zix.Http` saat handler membutuhkan lapisan client-facing yang lebih kaya. Pakai `zix.Http1` saat raw throughput dan biaya per-request yang terprediksi lebih penting: trio hanyalah view plus reset arena, dan escape hatch (`ctx.fd` plus write helper `*FD`) menjaga jalur raw tetap terbuka.
 
@@ -36,7 +36,7 @@ Permukaan trio identik bagi caller di kedua engine (test paritas compile-time di
 
 ## Model Runtime
 
-Lima model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default).
+Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `error.DispatchModelUnsupported` alih-alih diam-diam menyajikan model lain (ADR-065).
 
 ### .ASYNC: Accept Tunggal, Dispatch io.async()
 
@@ -53,29 +53,8 @@ flowchart TD
 ```
 
 - Satu accept thread, setiap koneksi di-dispatch sebagai task konkuren melalui `io.async()`.
-- `workers` dan `pool_size` diabaikan.
-
-### .POOL: Work-Queue Thread Pool
-
-```mermaid
-flowchart TD
-    MAIN["main()\nServer.run()"] --> SPAWN["spawn pool_size pool threads\nspawn worker_count accept threads"]
-    SPAWN --> ACC["Accept thread\nlisten SO_REUSEPORT\naccept -> queue.push(stream)"]
-    SPAWN --> POOL["Pool thread\nqueue.pop()"]
-    ACC --> ACC
-    POOL --> SERVE["core.serveConn(fd, handler, opts)"]
-    SERVE --> LOOP["keep-alive loop\nrecvHead -> parseHead -> handler"]
-    LOOP -->|close or error| Z["stream.close()\nback to queue.pop()"]
-```
-
-- Accept thread hanya mendorong stream hasil accept ke `ConnQueue` (ring buffer) yang dipakai bersama.
-- Pool thread mengambil dan melayani setiap koneksi secara sinkron.
-- Default: cpu_count accept thread, `max(10, cpu_count * 2)` pool thread.
-
-### .MIXED: N Accept Thread, Dispatch io.async()
-
-- N accept thread (default cpu_count, `SO_REUSEPORT`), masing-masing men-dispatch koneksi langsung melalui `io.async()`, tanpa `ConnQueue`.
-- `pool_size` diabaikan. `workers` mengontrol jumlah accept thread.
+- `workers` diabaikan (selalu tepat satu accept thread).
+- Satu-satunya model yang tersedia di semua platform, jadi ini model yang dipakai setiap target non-Linux.
 
 ### .EPOLL: Event Loop Shared-Nothing (khusus Linux)
 
@@ -97,12 +76,12 @@ flowchart TD
 
 - Setiap worker memiliki listener pribadi, instance epoll pribadi, dan connection table pribadi. Kernel menyeimbangkan koneksi baru di antara listener per-worker (`SO_REUSEPORT`), sehingga tidak ada accept thread, tidak ada queue bersama, dan tidak ada perpindahan fd antar thread.
 - Request pipelined yang tiba dalam satu readable event semuanya di-parse dan di-dispatch dalam satu pass, dan response-nya digabung menjadi satu `write()` melalui response sink per-event.
-- Pada target non-Linux `.EPOLL` jatuh kembali ke `.POOL` dengan notice yang dicatat di log.
+- Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
 - Ini satu-satunya model yang menghormati promosi WebSocket milik engine (lihat bagian WebSocket).
 
 ### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
 
-`zix.Http1` adalah engine referensi untuk jalur io_uring (ADR-037). Topologi shared-nothing, thread-per-core yang sama dengan `.EPOLL` (listener `SO_REUSEPORT` pribadi dan satu ring per worker), tetapi completion-based: accept, recv, send, dan close disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Pump WebSocket juga berjalan native di ring (BufferGroup). Di non-Linux melipat ke `.POOL`. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality per-request.
+`zix.Http1` adalah engine referensi untuk jalur io_uring (ADR-037). Topologi shared-nothing, thread-per-core yang sama dengan `.EPOLL` (listener `SO_REUSEPORT` pribadi dan satu ring per worker), tetapi completion-based: accept, recv, send, dan close disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Pump WebSocket juga berjalan native di ring (BufferGroup). Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`, dan saat io_uring sendiri tidak tersedia di host Linux engine melipat ke loop `.EPOLL` dengan notice yang dicatat. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality per-request.
 
 Teardown juga me-ring close-nya (`prep_close`, ADR-041) alih-alih `linux.close` sinkron, jadi worker terus memanen completion lintas teardown koneksi. Di mesin 64-core inilah pembedanya di bawah connection churn: dengan close sinkron ring nyaris tidak mengaktifkan core-nya di bawah reconnect storm, dengan ring close ia mengisinya dan mencapai paritas atau lebih baik di setiap cell dengan memori jauh lebih sedikit. `OpKind` io_uring bersama dan helper ring berada di `src/multiplexers/ring.zig`. Lihat ADR-041 untuk pengukurannya.
 
@@ -136,7 +115,7 @@ Diakses melalui `const zix = @import("zix");`
 | :- | :- | :- |
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` mengembalikan server, lalu `run()` / `deinit()` (pintu tunggal, ADR-062) |
 | `zix.Http1.ServerConfig` | struct | Konfigurasi server (lihat bagian Http1ServerConfig) |
-| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0) `.POOL`(1) `.MIXED`(2) `.EPOLL`(3, native hanya di Linux) `.URING`(4, native hanya di Linux) |
+| `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0, portabel) `.EPOLL`(1, hanya Linux) `.URING`(2, hanya Linux) |
 | `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio, ADR-062) |
 | `zix.Http1.Request` | struct | View request zero-copy: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
 | `zix.Http1.Response` | struct | Builder response di atas writer fd: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus flag `sent` |
@@ -196,13 +175,12 @@ pub const Http1ServerConfig = struct {
     max_recv_buf:       usize = 6 * 1024,      // buffer per-connection (.EPOLL / .URING, lihat catatan)
     large_body_rcvbuf:  usize = 0,             // SO_RCVBUF khusus jalur body besar (upload), 0 = default kernel
     ws_recv_buf:        usize = 0,             // buffer WebSocket (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compress:             bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via res.sendNegotiated / core.sendNegotiateFD (.EPOLL/.URING)
+    compress:             bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via res.sendNegotiated / core.sendNegotiateFD (semua model)
     compression_min_size: usize = 256,           // lewati body di bawah floor ini
     compression_max_out:  usize = 256 * 1024,    // cap output terkompresi codec-agnostic, dulu max_gzip_out
     max_response_headers: HeaderSize = .MINIMAL, // kelas kapasitas addHeader (ADR-062)
-    conn_timeout_ms:    u32   = 0,             // masa hidup koneksi, hanya .ASYNC/.POOL/.MIXED (no-op di .EPOLL/.URING)
+    conn_timeout_ms:    u32   = 0,             // masa hidup koneksi, hanya .ASYNC (no-op di .EPOLL/.URING)
     workers:            usize = 0,             // 0 = cpu_count accept thread, diabaikan .ASYNC
-    pool_size:          usize = 0,             // 0 = max(10, cpu_count * 2), .POOL saja
     handler_timeout_ms: u32   = 0,             // budget per-handler, 0 = nonaktif
     send_date_header:   bool  = true,          // kirim header Date, false hemat 37 byte/response
     tls:                ?*Tls.Context = null,  // non-null menyajikan HTTP/1.1 di atas TLS (native https), selain itu cleartext
@@ -212,7 +190,7 @@ pub const Http1ServerConfig = struct {
 
 Listing di atas diringkas: referensi field lengkap (cache, tuning uring, dual listener TLS, steering) ada di [`docs/zix-config-id.md`](zix-config-id.md).
 
-Catatan: pada `.ASYNC` / `.POOL` / `.MIXED` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection pada `.EPOLL` dan `.URING`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`: handler opt-in dengan `res.sendNegotiated` (atau `core.sendNegotiateFD` di jalur raw). Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`.
+Catatan: pada `.ASYNC` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection pada `.EPOLL` dan `.URING`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada semua dispatch model: handler opt-in dengan `res.sendNegotiated` (atau `core.sendNegotiateFD` di jalur raw). Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`.
 
 Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection WebSocket. Pada `.EPOLL` menentukan ukuran buffer recv; pada `.URING` menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask, independen dari `max_recv_buf` request yang kecil. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi burst pipelined yang dalam sebelum engine compact dan re-read saat fill.
 
@@ -222,12 +200,12 @@ Catatan: `send_date_header` default `true` untuk kepatuhan RFC 7231. Set `false`
 
 `zix.Http1` mengekspos satu timeout, `handler_timeout_ms`, budget eksekusi per-handler. Saat non-zero, server memasang deadline thread-local sebelum setiap dispatch. Handler ikut serta dengan memanggil `zix.Http1.isExpired()` di antara langkah mahal dan merespons lebih awal, atau memperpendek budget-nya sendiri dengan `zix.Http1.setTimeout()`. Ini budget Layer B yang sama dengan `handler_timeout_ms` milik `zix.Http`.
 
-`conn_timeout_ms` (ADR-062) adalah guard masa hidup koneksi, port dari Layer D milik `zix.Http`: `ConnRegistry` plus background timer thread menutup koneksi yang melebihi masa hidup terkonfigurasi. Aktif pada model blocking (`.ASYNC`, `.POOL`, `.MIXED`), tempat koneksi lambat atau idle menahan thread atau task. Pada `.EPOLL` dan `.URING` ia no-op terdokumentasi: event loop-nya memiliki umur koneksi, dan koneksi keep-alive idle tidak menahan thread, hanya satu slot dan buffernya.
+`conn_timeout_ms` (ADR-062) adalah guard masa hidup koneksi, port dari Layer D milik `zix.Http`: `ConnRegistry` plus background timer thread menutup koneksi yang melebihi masa hidup terkonfigurasi. Aktif pada model blocking (`.ASYNC`), tempat koneksi lambat atau idle menahan task. Pada `.EPOLL` dan `.URING` ia no-op terdokumentasi: event loop-nya memiliki umur koneksi, dan koneksi keep-alive idle tidak menahan thread, hanya satu slot dan buffernya.
 
 | Timeout | `zix.Http` | `zix.Http1` | Mekanisme |
 | :- | :- | :- | :- |
 | `handler_timeout_ms` | ya | ya | deadline thread-local dipasang per dispatch, opt-in handler |
-| `conn_timeout_ms` | ya | ya (`.ASYNC` / `.POOL` / `.MIXED`) | `ConnRegistry` + background timer thread |
+| `conn_timeout_ms` | ya | ya (`.ASYNC`) | `ConnRegistry` + background timer thread |
 
 Jika penegakan masa hidup koneksi pada `.EPOLL` / `.URING` suatu saat dibutuhkan, yang paling cocok adalah sweep idle-deadline atas tabel per-worker (tanpa thread tambahan), bukan `ConnRegistry` timer-thread.
 
@@ -279,7 +257,7 @@ try server.run();
 
 ---
 
-## Siklus Hidup Koneksi (.ASYNC / .POOL / .MIXED)
+## Siklus Hidup Koneksi (.ASYNC)
 
 ```mermaid
 sequenceDiagram
@@ -411,7 +389,7 @@ sequenceDiagram
 - `WebSocket.serve(fd, key, on_frame)` menghitung accept key, menulis `101 Switching Protocols`, dan meminta promosi melalui slot handoff thread-local yang dibaca engine tepat setelah handler return.
 - Ping otomatis dibalas pong dan close otomatis digema oleh engine. Callback hanya pernah menerima frame text dan binary.
 - Frame yang dikirim dalam satu pass pump digabung menjadi satu `write()`.
-- Promosi hanya dihormati pada `.EPOLL`. Pada `.ASYNC` / `.POOL` / `.MIXED` handoff dibersihkan dan koneksi berakhir setelah handler return (pakai `zix.Http` untuk loop WebSocket milik handler pada model-model itu).
+- Promosi hanya dihormati pada `.EPOLL`. Pada `.ASYNC` handoff dibersihkan dan koneksi berakhir setelah handler return (pakai `zix.Http` untuk loop WebSocket milik handler pada model itu).
 - Melalui TLS (`config.tls`, jalur thread-per-koneksi), panggil `WebSocket.serveTls(fd, key, on_frame)` (ADR-055): `101` dan tiap frame dienkripsi lewat ADR-054 stream sink, dan thread https menjalankan frame loop inline atas TLS session. Rooms / broadcast hanya cleartext (enkripsi per-session), jadi wss bersifat per-koneksi.
 
 Lihat `examples/http1_websocket.zig` (cleartext) dan `examples/tls/tls_http1_ws.zig` (wss).
@@ -431,7 +409,7 @@ Access logging per-request adalah tanggung jawab handler: handler Http1 menulis 
 | Lingkup | Penyimpanan | Masa hidup |
 | :- | :- | :- |
 | Tabel route | comptime (nol biaya heap) | Proses |
-| Buffer receive + body (.ASYNC/.POOL/.MIXED) | stack thread/task yang melayani (16 KB + 8 KB) | Koneksi |
+| Buffer receive + body (.ASYNC) | stack task yang melayani (16 KB + 8 KB) | Koneksi |
 | Buffer per-connection (.EPOLL) | slab per-worker, slot kompak page-aligned, `max_recv_buf` byte terpakai | Koneksi |
 | Buffer recv + send per-connection (.URING) | slab stride mmap per-worker, slot kompak, THP di-opt-out | Koneksi |
 | Staging body + output (.EPOLL) | `smp_allocator`, per worker | Worker thread |
@@ -446,12 +424,12 @@ Access logging per-request adalah tanggung jawab handler: handler Http1 menulis 
 | Batas | Perilaku |
 | :- | :- |
 | Ukuran blok header | Maksimum 16 KB (`core.BUF_SIZE`, atau `max_recv_buf` pada .EPOLL). Melebihi mengembalikan `431` dan menutup |
-| Body pada .ASYNC/.POOL/.MIXED | Handler melihat sampai 8 KB (`ASYNC_BODY_CHUNK`). Body Content-Length yang lebih besar sisanya dibuang dari socket agar koneksi keep-alive tetap dapat dipakai (handler membaca `head.content_length`, bukan byte-nya) |
+| Body pada .ASYNC | Handler melihat sampai 8 KB (`ASYNC_BODY_CHUNK`). Body Content-Length yang lebih besar sisanya dibuang dari socket agar koneksi keep-alive tetap dapat dipakai (handler membaca `head.content_length`, bukan byte-nya) |
 | Body pada .EPOLL / .URING | Harus muat di `max_recv_buf` dikurangi head. Body yang lebih besar menjaga koneksi tetap dapat dipakai dengan membuang sisanya dari socket (`MSG_TRUNC`): `.EPOLL` men-dispatch handler lebih dulu dengan slice body kosong, `.URING` men-drain dan menghitung lebih dulu, lalu handler berjalan dengan total terhitung di `req.bodyReceived()` |
 | Body request besar (upload) | Drain melebarkan receive window via `large_body_rcvbuf` (SO_RCVBUF), lihat [`docs/zix-config-id.md`](zix-config-id.md) |
 | Body request chunked | Di-decode ke body buffer, kelebihan dibuang |
 | Versi HTTP | Hanya HTTP/1.0 dan HTTP/1.1, selain itu `400` |
-| TLS | https/1.1 native (TLS 1.3 + 1.2), opt-in via `config.tls`, pada perf band-nya sendiri. `.ASYNC` / `.POOL` / `.MIXED` melakukan terminasi per koneksi di worker thread, `.EPOLL` / `.URING` di worker epoll-mux event-driven. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
+| TLS | https/1.1 native (TLS 1.3 + 1.2), opt-in via `config.tls`, pada perf band-nya sendiri. `.ASYNC` melakukan terminasi per koneksi di worker thread, `.EPOLL` / `.URING` di worker epoll-mux event-driven. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
 
 Endpoint yang menerima upload besar membaca `req.bodyReceived()` pada `.URING` (byte yang dibuang dihitung, tidak di-buffer). Model lain tidak membawa hitungan itu, jadi di sana tetap mengandalkan `head.content_length`.
 

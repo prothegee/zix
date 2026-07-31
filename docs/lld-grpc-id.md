@@ -2,7 +2,7 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-grpc-id.md`](hld-grpc-id.md) dan ADR-031.
 
-Model blocking (`.ASYNC`, `.POOL`, `.MIXED`) berbagi satu jalur koneksi (`serveGrpcConn` -> `serveGrpcLoop`). Model `.EPOLL` adalah jalur terpisah, multiplex, non-blocking (`grpcMuxOnReadable`) yang menjadi fokus utama dokumen ini.
+Model blocking (`.ASYNC`) memakai satu jalur koneksi (`serveGrpcConn` -> `serveGrpcLoop`). Model `.EPOLL` adalah jalur terpisah, multiplex, non-blocking (`grpcMuxOnReadable`) yang menjadi fokus utama dokumen ini.
 
 Setiap fungsi internal yang bergantung pada tabel route di bawah ini tetap menerima `comptime RouterType: type` (ADR-063), bukan `handler: HandlerFn` runtime yang diratakan seperti padanan Http2. Ini disengaja: engine membaca `Route.is_server_streaming` dari `RouterType.route_slice` sebelum memanggil handler, untuk memilih dispatch sync-inline vs task-spawn, dan pointer `HandlerFn` polos tidak bisa membawa metadata itu. Lihat bagian Pola Handler di `docs/hld-grpc-id.md` untuk biaya terukur kehilangan metadata itu.
 
@@ -173,7 +173,7 @@ Untuk route streaming (dideteksi oleh `routeIsStreaming(RouterType.route_slice, 
 
 ### Jalur blocking (serveGrpcConn / serveGrpcLoop)
 
-Tidak berubah untuk `.ASYNC`, `.POOL`, `.MIXED`. `serveGrpcConn` mengeset `TCP_NODELAY` dan memanggil `serveGrpcConnInner`, yang menangani preface h2c-direct atau upgrade h2c, lalu `serveGrpcLoop`. Loop memakai `ConnReader` blocking dan switch frame yang sama, dispatch via `dispatchStream`: unary inline (`dispatchGrpcInline`, di-stage via `ReplyStage` di stack), server-streaming via `spawnGrpcStream` (satu thread terlepas, menyalin header dan body, menulis di bawah `ConnMutex` bersama).
+Tidak berubah untuk `.ASYNC`. `serveGrpcConn` mengeset `TCP_NODELAY` dan memanggil `serveGrpcConnInner`, yang menangani preface h2c-direct atau upgrade h2c, lalu `serveGrpcLoop`. Loop memakai `ConnReader` blocking dan switch frame yang sama, dispatch via `dispatchStream`: unary inline (`dispatchGrpcInline`, di-stage via `ReplyStage` di stack), server-streaming via `spawnGrpcStream` (satu thread terlepas, menyalin header dan body, menulis di bawah `ConnMutex` bersama).
 
 ---
 
@@ -210,7 +210,7 @@ Blok diproduksi dengan menjalankan `HpackEncoder` asli di comptime, jadi byte-ny
 
 ### Dispatch (run)
 
-`server.zig` memuat tipe publik `GrpcServer` dan `run()` switch tipis pada `dispatch_model`. Implementasi per-model berada di `dispatch/` (`async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` / `.POOL` / `.MIXED` mempertahankan struktur accept-thread + pool `io.async` / `ConnQueue` dan memanggil `serveGrpcConn`. `.EPOLL` memanggil `epoll.runEpoll`. `.URING` memanggil `uring.runUring` (bentuk berbasis completion io_uring dari `.EPOLL`). Saat `cfg.tls != null`, `run()` justru bercabang ke `tls_mux.runTlsMux` (multiplex) atau `tls_serve.runTls` (blocking per koneksi).
+`server.zig` memuat tipe publik `GrpcServer` dan `run()` switch tipis pada `dispatch_model`. Implementasi per-model berada di `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` mempertahankan struktur accept-thread + `io.async` dan memanggil `serveGrpcConn`. `.EPOLL` memanggil `epoll.runEpoll`. `.URING` memanggil `uring.runUring` (bentuk berbasis completion io_uring dari `.EPOLL`). Saat `cfg.tls != null`, `run()` justru bercabang ke `tls_mux.runTlsMux` (multiplex) atau `tls_serve.runTls` (blocking per koneksi). Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
 
 Simbol `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, dan `runEpoll` di bawah semuanya berada di `dispatch/epoll.zig`.
 
@@ -239,7 +239,7 @@ Menguras `accept4(SOCK.NONBLOCK | SOCK.CLOEXEC)` sampai `EAGAIN` (level-triggere
 
 ### runEpoll(comptime RouterType: type, cfg)
 
-`worker_count = pool_size` (0 = jumlah cpu). Men-spawn `worker_count` thread `epollMuxWorkerFn(RouterType)` (stack 512 KB) dan join. Kernel menyeimbangkan koneksi lintas listener `SO_REUSEPORT` tiap worker.
+`worker_count = workers` (0 = jumlah cpu). Men-spawn `worker_count` thread `epollMuxWorkerFn(RouterType)` (stack 512 KB) dan join. Kernel menyeimbangkan koneksi lintas listener `SO_REUSEPORT` tiap worker.
 
 ---
 

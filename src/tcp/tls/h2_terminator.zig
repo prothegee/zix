@@ -11,9 +11,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
 const posix = std.posix;
-const win_io = @import("../../utils/windows_io.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
 const record = @import("../../tls/record.zig");
@@ -52,6 +51,7 @@ fn peerAlert(body: []const u8) anyerror {
 pub fn serveConnTls(
     fd: posix.fd_t,
     ctx: *const Tls.Context,
+    io: std.Io,
     driver: anytype,
 ) !void {
     var record_buf: [record.max_record_wire]u8 = undefined;
@@ -63,9 +63,10 @@ pub fn serveConnTls(
     var ephemeral_secret: [32]u8 = undefined;
     var server_random: [32]u8 = undefined;
     var pss_salt: [32]u8 = undefined;
-    _ = linux.getrandom(&ephemeral_secret, ephemeral_secret.len, 0);
-    _ = linux.getrandom(&server_random, server_random.len, 0);
-    _ = linux.getrandom(&pss_salt, pss_salt.len, 0);
+    // std.Io carries the platform's CSPRNG, so the handshake secrets need no syscall branch.
+    try io.randomSecure(&ephemeral_secret);
+    try io.randomSecure(&server_random);
+    try io.randomSecure(&pss_salt);
 
     const hs_opts = ctx.handshakeOptions(ephemeral_secret, server_random, pss_salt);
 
@@ -201,44 +202,8 @@ pub fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
     return .{ .content_type = buf[0], .full = buf[0 .. 5 + length], .body = buf[5 .. 5 + length] };
 }
 
-fn readAll(fd: posix.fd_t, buf: []u8) !void {
-    if (comptime builtin.os.tag == .windows) {
-        var read: usize = 0;
-        while (read < buf.len) {
-            const n = win_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
-            if (n == 0) return error.ConnectionClosed;
+/// Record traffic runs over the bare accepted descriptor, so it goes through the shared
+/// fd helpers rather than a per-platform branch in this file.
+const readAll = fd_io.readAll;
 
-            read += n;
-        }
-        return;
-    }
-
-    var read: usize = 0;
-    while (read < buf.len) {
-        const chunk = buf[read..];
-        const rc = linux.read(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-        read += rc;
-    }
-}
-
-pub fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
-
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const chunk = bytes[written..];
-        const rc = linux.write(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        written += rc;
-    }
-}
+pub const writeAllFD = fd_io.writeAll;

@@ -35,7 +35,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (kernel_backlog=4096, max_recv_buf=4096, workers=0, pool_size=0) with dispatch_model required (set explicitly), `TcpClientConfig` defaults (max_recv_buf=4096) |
+| `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (kernel_backlog=4096, max_recv_buf=4096, workers=0) with dispatch_model required (set explicitly), `DispatchModel` gapless backing values with only the three maintained models, the dropped POOL / MIXED names resolving to nothing, `TcpClientConfig` defaults (max_recv_buf=4096) |
 | `tcp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -60,7 +60,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query |
-| `tcp/http1/server.zig` | `refAllDecls` + behavioral: config validation (POOL / EPOLL), serveEpollConn answers a pipelined burst in order, EPOLL cache miss-then-hit + effectiveCacheEntries memory ceiling, ConnTable slab lifecycle + ws_recv_buf sizing, serveEpollWs drains to EAGAIN, parseGetFastPath (GET / query / rejects POST and HTTP/1.0 / raw headers), initUringRing yields a usable ring, URING finishClose rings the close (`prep_close`) and recycles the slot |
+| `tcp/http1/server.zig` | `refAllDecls` + behavioral: config validation (ASYNC / EPOLL / URING), serveEpollConn answers a pipelined burst in order, EPOLL cache miss-then-hit + effectiveCacheEntries memory ceiling, ConnTable slab lifecycle + ws_recv_buf sizing, serveEpollWs drains to EAGAIN, parseGetFastPath (GET / query / rejects POST and HTTP/1.0 / raw headers), initUringRing yields a usable ring, URING finishClose rings the close (`prep_close`) and recycles the slot |
 | `tcp/http1/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, buildFrame/parseFrame round-trip, SIMD unmask matches scalar (and tail bytes), buildHeader prefix, pump echoes over a socketpair, pumpRing stages then reports close, broadcast fan-out (+ dead-fd skip, empty list) |
 | `tcp/http1/router.zig` | `refAllDecls` + behavioral: matchParam, comptime router |
 | `tcp/http1/config.zig` | `refAllDecls` (default values exercised by `tests/behaviour/http1/config_test.zig`) |
@@ -86,10 +86,11 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent=`zon_options.user_agent`) |
-| `tcp/http/client.zig` | `refAllDecls` |
-| `tcp/http/sse_client.zig` | `refAllDecls` + behavioral: `splitField` (data / event / retry / bare field name / name mismatch / no leading space preserved), `parseHttpUrl` (basic, default port 80, https returns `TlsNotSupported`) |
-| `tcp/http/ws_client.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, `parseWsUrl` (basic, no path defaults to /, default port 80, wss returns `TlsNotSupported`, non-ws returns `InvalidUrl`) |
+| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, h2_max_read_rounds=4096, user_agent=`zon_options.user_agent`, version=HTTP_1, tls_verify=true, tls_ca_path=null) |
+| `tcp/http/client.zig` | `refAllDecls` + behavioral: `.HTTP_2` over a non-https URL is rejected before connecting, `.HTTP_3` yields `UnsupportedVersion`, a server that never answers yields `ResponseTimeout`, a complete reply is not cut short by an idle bound, a body that goes quiet mid-transfer yields `ReadTimeout` |
+| `tcp/http/h2_client.zig` | `refAllDecls` + behavioral: `methodHasBody` + `skipRequestHeader`, `putFrame` round-trips through the frame parser, `putWindowUpdate` encodes the increment big-endian, `headerBlock` strips PADDED and PRIORITY prefixes, `dataPayload` strips DATA padding, a peer that accepts and never speaks yields `ResponseTimeout` |
+| `tcp/http/sse_client.zig` | `refAllDecls` + behavioral: `splitField` (data / event / retry / bare field name / name mismatch / no leading space preserved), `parseHttpUrl` (basic, default port 80, https returns `TlsNotSupported`), a server that never answers yields `ResponseTimeout`, a stream that goes quiet yields `ReadTimeout` (not a clean close) |
+| `tcp/http/ws_client.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, `parseWsUrl` (basic, no path defaults to /, default port 80, wss returns `TlsNotSupported`, non-ws returns `InvalidUrl`), a server that never answers yields `ResponseTimeout`, a peer that sends no frame yields `ReadTimeout` |
 
 ### zix.Channel
 
@@ -101,7 +102,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model required (set explicitly), workers/pool_size default to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0, `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
+| `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model required (set explicitly), workers defaults to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0, `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + behavioral: `parseFields` round-trip, `getField` lookup and null case, `computeChecksum` known vector, `verifyChecksum` valid/truncated/bad, `findMessageEnd` complete/partial/no-terminator, `buildMessage` produces valid checksum |
 | `tcp/fix/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
 | `tcp/fix/client.zig` | `refAllDecls` + behavioral: `FixClient.connect` port zero -> `error.PortNotConfigured` |
@@ -114,7 +115,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http2/frame.zig` | `refAllDecls` + behavioral: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, `writeFrameHeader`/`readFrameHeader` roundtrip via pipe, PREFACE starts with `PRI`, `sendSettings` writes a valid 9-byte SETTINGS frame via pipe |
 | `tcp/http2/hpack.zig` | `refAllDecls` + behavioral: Huffman encode/decode roundtrip, `HpackEncoder.writeHeader` produces indexed entry from static table, `HpackDecoder.decode` decodes indexed `:method GET`, dynamic table eviction respects max_size, `HPACK_STATIC` index 8 is `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
-| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers/pool_size default to 0, max_streams=128 and max_frame_size=16384 |
+| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers defaults to 0, max_streams=128 and max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe |
 | `tcp/http2/static.zig` | `refAllDecls` + behavioral: zero copy is refused for a coalescing batch and the sentinel fd, a file is framed as HEADERS plus DATA with END_STREAM, traversal / a missing file / an oversize path are rejected, a body past the max frame size is chunked, an empty file closes the stream on HEADERS, the brotli sibling is picked from the cache |
 
@@ -163,7 +164,9 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `utils/multipart.zig` | `refAllDecls` + behavioral: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + behavioral: store-then-lookup returns identical bytes, miss on absent key, expired entry refetches, oversize value bypasses store, ttl 0 never fresh, distinct keys coexist via probing, `max_entries` rounded down to power of two, `hashKey` separates by query |
 | `utils/static_cache.zig` | `refAllDecls` + behavioral: path join rejects traversal / absolute / oversize, header carries `Vary` and only encodes when compressed, entry count clamped and rounded to a power of two, second request reuses the same open file, a miss caches nothing, ttl 0 never touches the table, `.br` / `.gz` siblings picked up and negotiated, a file with no sibling serves identity, an expired entry is reclaimed and re-opened, a pinned slot survives reclaim, a full table degrades to null, a sweep frees room, `install` is process-wide and `shutdown` clears it |
+| `utils/dispatch_support.zig` | `refAllDecls` + behavioral: `.ASYNC` is supported on every platform, `.EPOLL` / `.URING` support follows the target os tag, `rejectedName` reports the model tag, `Error` carries the single canonical reject error |
 | `utils/static_send.zig` | `refAllDecls` + behavioral: the copy path writes the whole body through the engine write, honours an offset and a partial length, a zero-length range never touches the socket, a body larger than the copy buffer loops, a failing engine write surfaces as BrokenPipe. Linux only: the zero-copy path delivers exact bytes over a real socket, honours an offset, and reports BrokenPipe on a closed peer |
+| `utils/socket_poll.zig` | `refAllDecls` + behavioral: `readableWithin` skips the wait when the budget is zero, `waitReady` reports a datagram already queued on the socket, `waitReady` reports not ready when nothing arrives in the budget |
 
 ### multiplexers (src/multiplexers/, internal)
 
@@ -239,8 +242,7 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | Test | What it verifies |
 | :- | :- |
 | `Http1Server.init` valid config, deinit is safe | init succeeds and deinit does not error |
-| `Http1Server.init` POOL dispatch model | the model is accepted and stored |
-| `Http1Server.init` MIXED dispatch model | the model is accepted and stored |
+| `Http1Server.init` URING dispatch model | the model is accepted and stored |
 | `Http1Server.init` EPOLL dispatch model | the model is accepted and stored |
 | `Http1Server.init` URING dispatch model | the model is accepted and stored |
 
@@ -260,8 +262,8 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | Dual listener EPOLL serves TLS on tls_port with the same routes | the TLS leg serves the same route table |
 | Dual listener URING serves cleartext on port | cleartext leg answers under the ring |
 | Dual listener URING serves TLS on-ring on tls_port | the TLS leg runs on the ring |
-| Dual listener POOL serves cleartext on port | cleartext leg answers on the thread model |
-| Dual listener POOL serves TLS via the extra accept thread | the TLS leg gets its own accept thread |
+| Dual listener ASYNC serves cleartext on port | cleartext leg answers on the thread model |
+| Dual listener ASYNC serves TLS via the extra accept thread | the TLS leg gets its own accept thread |
 | `tls_port` equal to `port` is rejected at run | returns `error.TlsPortConflict` |
 
 #### `static_cache_test.zig`
@@ -418,6 +420,24 @@ Ports: 18200-18206.
 
 Source: `tests/behaviour/`. Each file verifies observable API contracts that callers rely on: the "what does this always do" properties.
 
+### tests/behaviour/dispatch/
+
+#### `platform_gate_test.zig`
+
+The cross-engine `DispatchModel` platform contract (ADR-065), asserted once for the whole tree.
+
+| Test | What it verifies |
+| :- | :- |
+| `DispatchModel` is one shared type | every engine namespace (Tcp, Http, Http1, Http2, Grpc, Fix, Udp, Http3) re-exports the same type |
+| `DispatchModel` carries exactly ASYNC, EPOLL, URING | an exhaustive switch with no else prong, so a fourth variant breaks the build |
+| the dropped POOL and MIXED names resolve to nothing | `std.meta.stringToEnum` returns null for both |
+| backing values are gapless with ASYNC as zero | 0 / 1 / 2, and a zero-init config lands on the portable model |
+| `isSupported` accepts ASYNC everywhere | the portable model is never rejected |
+| `isSupported` gates EPOLL and URING on the target os | true only on a Linux target |
+| the rejected model is named in the log line | `rejectedName` returns the model tag, so an operator sees which one was refused |
+| ASYNC config is accepted by every engine | init stores the portable model without starting an accept loop |
+| the grpc engine takes the shared model on its Router-typed server | `Grpc.Server.init(Router(&routes), ...)` stores `.ASYNC` |
+
 ### tests/behaviour/tcp/
 
 #### `config_test.zig`
@@ -428,7 +448,6 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | `TcpServerConfig` kernel_backlog default | 4096 |
 | `TcpServerConfig` max_recv_buf default | 4096 |
 | `TcpServerConfig` workers default | 0 (auto) |
-| `TcpServerConfig` pool_size default | 0 (auto) |
 | `TcpClientConfig` max_recv_buf default | 4096 |
 | TCP frame length header | 4-byte big-endian u32 encodes and decodes correctly |
 | TCP frame zero-length payload | encodes as four zero bytes |
@@ -483,7 +502,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
 | `dispatch_model` is required (no default) | caller must set it in `HttpServerConfig` |
-| Worker pool defaults to auto-size | `workers == 0`, `pool_size == 0` |
+| `workers` defaults to auto-size | `workers == 0` |
 | `max_request_headers` defaults to `.LARGE` | enum variant and `.value()` == 64 |
 | `RequestHeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64 |
 | `RequestHeaderSize.CUSTOM(N)` capped at 64 | values above 64 silently return 64 |
@@ -506,7 +525,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 | Test | What it verifies |
 | :- | :- |
 | `dispatch_model` is required and stored as set | the field round-trips |
-| `workers` and `pool_size` default to zero (auto) | zero means auto-size |
+| `workers` defaults to zero (auto) | zero means auto-size |
 | `kernel_backlog` default is 1024 | the shipped default |
 | Buffer size defaults | `max_recv_buf` 6 KiB, `compression_max_out` 256 KiB |
 | Compression defaults | off, `min_size` 256, `max_out` 256 KiB |
@@ -643,7 +662,7 @@ Source: `tests/behaviour/`. Each file verifies observable API contracts that cal
 
 | Test | What it verifies |
 | :- | :- |
-| `GrpcServerConfig` defaults | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, pool_size=0, max_streams=128, max_frame_size=16384, max_body=16384 |
+| `GrpcServerConfig` defaults | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, max_streams=128, max_frame_size=16384, max_body=16384 |
 | `GrpcClientConfig` basic fields | ip and port fields preserved |
 | `GrpcStatus` enum values | OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
 | `GrpcContext.recvMessage` empty body | returns null immediately |
@@ -677,7 +696,8 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | Test | What it verifies |
 | :- | :- |
 | `TcpServer.init` port zero | returns `error.PortNotConfigured` |
-| `DispatchModel` backing values stable | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 |
+| `DispatchModel` backing values stable | ASYNC=0, EPOLL=1, URING=2 |
+| `DispatchModel` dropped names gone | `stringToEnum` returns null for POOL and MIXED |
 | TCP frame max u32 length | `maxInt(u32)` encodes and decodes correctly via big-endian |
 
 ### tests/edge/http/

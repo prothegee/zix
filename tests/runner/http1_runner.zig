@@ -55,6 +55,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
     });
     defer client.deinit();

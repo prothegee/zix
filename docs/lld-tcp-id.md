@@ -22,7 +22,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type        // .init(config) -> er
 fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type   // .init(config); .deinit(); .run() -> ring di .URING, selain itu fallback frameAdapter
 
 // Worker dispatch bebas (handler disimpan sebagai nilai runtime, bentuk sama seperti zix.Http1):
-fn serveDispatch(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) !void  // switch ASYNC/POOL/MIXED/EPOLL
+fn serveDispatch(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn) !void  // switch ASYNC/EPOLL, menolak model khusus Linux di luar Linux
 fn runEpoll(cfg: TcpServerConfig, io: std.Io, handler: HandlerFn, cpu: usize) !void
 ```
 
@@ -41,31 +41,6 @@ Handler (atau callback per-frame) diketahui comptime di batas tipe, tetapi fungs
 ```
 
 Satu accept thread. Setiap koneksi didispatch sebagai task `io.async()`. Accept loop tidak pernah memblokir pada penanganan koneksi.
-
-### serveDispatch jalur POOL
-
-```
-1. worker_count = cfg.workers  (0 -> cpu_count)
-   pool_count   = cfg.pool_size (0 -> max(10, cpu_count * 2))
-2. var queue = ConnQueue{}
-3. spawn pool_count pool threads: poolEntry(&queue, io, handler)
-4. spawn worker_count accept threads: workerEntry(cfg, &queue, io)
-5. join accept threads
-6. queue.close(io)   <- memberi sinyal ke pool thread untuk menguras antrian dan keluar
-7. join pool threads
-```
-
-Accept thread dan pool thread berbagi handle `io` yang sama (diteruskan sebagai nilai, `std.Io.Threaded` bersifat thread-safe).
-
-### serveDispatch jalur MIXED
-
-```
-1. worker_count = cfg.workers (0 -> cpu_count)
-2. spawn worker_count accept threads: asyncWorkerEntry(cfg, io, handler)
-3. join accept threads
-```
-
-Setiap accept thread mendengarkan pada port yang sama (SO_REUSEPORT melalui `.reuse_address = true`) dan mendispatch melalui `io.async()`. Tidak ada antrian bersama.
 
 ### runEpoll (jalur EPOLL, dispatch/epoll.zig)
 
@@ -166,37 +141,6 @@ fn dispatchConn(task: ConnTask) void {
 
 `dispatchConn` adalah fungsi yang diketahui pada comptime yang diteruskan ke `io.async()`. Function pointer runtime (`handler`) disimpan di dalam `ConnTask` dan dipanggil saat runtime.
 
-### workerEntry (accept thread POOL)
-
-```
-resolve ip:port
-listen with .reuse_address = true
-loop:
-    stream = accept(io)
-    if err != ConnectionAborted: break
-    queue.push(stream, io)
-```
-
-### poolEntry (pool thread POOL)
-
-```
-loop:
-    stream = queue.pop(io)   <- memblokir hingga ada koneksi atau antrian ditutup
-    if null: break
-    handler(stream, io)      <- blocking I/O sinkron
-```
-
-### asyncWorkerEntry (accept thread MIXED)
-
-```
-resolve ip:port
-listen with .reuse_address = true
-loop:
-    stream = accept(io)
-    if err != ConnectionAborted: break
-    io.async(dispatchConn, ConnTask{ stream, io, handler })
-```
-
 ### echoHandler()
 
 ```
@@ -290,11 +234,9 @@ Pola yang sama digunakan oleh `TcpServer.initArgs` dan `TcpClient.connectArgs`. 
 
 ```zig
 pub const DispatchModel = enum(u8) {
-    ASYNC = 0,
-    POOL  = 1,
-    MIXED = 2,
-    EPOLL = 3,   // Linux-only, native
-    URING = 4,   // Linux-only, native hanya untuk jalur framed (initFramed)
+    ASYNC = 0,   // satu-satunya model portabel
+    EPOLL = 1,   // Linux-only, native
+    URING = 2,   // Linux-only, native hanya untuk jalur framed (initFramed)
 };
 
 pub const TcpServerConfig = struct {
@@ -304,7 +246,6 @@ pub const TcpServerConfig = struct {
     dispatch_model:             DispatchModel,
     kernel_backlog:             u31   = 4096,
     workers:                    usize = 0,
-    pool_size:                  usize = 0,
     worker_stack_size_bytes:    usize = 512 * 1024,
     reuseport_cbpf:             bool  = false,
     max_recv_buf:               usize = 4096,

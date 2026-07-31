@@ -17,6 +17,17 @@ const zix = @import("zix");
 const IP: []const u8 = "127.0.0.1";
 const TLS_PORT: u16 = 9250;
 const URING_TLS_PORT: u16 = 9251;
+
+const is_linux = builtin.target.os.tag == .linux;
+
+/// Dispatch model behind TLS_PORT, the port the record-splitting tests use.
+///
+/// Note:
+/// - EPOLL on Linux, the production path there. ASYNC elsewhere, because ADR-065 makes EPOLL and
+///   URING Linux-only: run() rejects them off Linux, which left the server thread exiting at once
+///   and every test here failing with ServerNotUp. ADR-066 puts TLS on ASYNC for all platforms,
+///   so the record splitting under test is genuinely exercised rather than skipped.
+const SPLIT_MODEL: zix.Http1.DispatchModel = if (is_linux) .EPOLL else .ASYNC;
 const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
 const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
 
@@ -89,11 +100,15 @@ fn startServersOnce() !void {
         .alpn = &.{.HTTP_1_1},
     });
 
-    const epoll_thread = try std.Thread.spawn(.{}, serveTls, .{ io, tls, logger, ServeArgs{
+    const split_thread = try std.Thread.spawn(.{}, serveTls, .{ io, tls, logger, ServeArgs{
         .port = TLS_PORT,
-        .dispatch_model = .EPOLL,
+        .dispatch_model = SPLIT_MODEL,
     } });
-    epoll_thread.detach();
+    split_thread.detach();
+
+    // No URING server off Linux: run() would reject the model and the thread would exit, leaving
+    // a port nothing listens on. The one test that drives it skips there instead.
+    if (comptime !is_linux) return;
 
     const uring_thread = try std.Thread.spawn(.{}, serveTls, .{ io, tls, logger, ServeArgs{
         .port = URING_TLS_PORT,
@@ -252,8 +267,6 @@ fn expectBody(session: *Session, allocator: std.mem.Allocator, want: usize) !usi
 // --------------------------------------------------------- //
 
 test "zix integration: TLS serves a body spanning one two three and four records" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     try startServersOnce();
 
     const gpa = std.testing.allocator;
@@ -282,8 +295,6 @@ test "zix integration: TLS serves a body spanning one two three and four records
 }
 
 test "zix integration: TLS keeps answering after a multi-record response" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
-
     try startServersOnce();
 
     const gpa = std.testing.allocator;
@@ -308,7 +319,8 @@ test "zix integration: TLS keeps answering after a multi-record response" {
 }
 
 test "zix integration: TLS on the URING model splits a large response the same way" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    // URING dispatch is Linux-only.
+    if (comptime !is_linux) return error.SkipZigTest;
 
     try startServersOnce();
 

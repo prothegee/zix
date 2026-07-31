@@ -7,16 +7,15 @@ const FixServerConfig = @import("config.zig").FixServerConfig;
 const FixServeOpts = core.FixServeOpts;
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
-const pool_model = @import("dispatch/pool.zig");
-const mixed_model = @import("dispatch/mixed.zig");
 const epoll_model = @import("dispatch/epoll.zig");
 const uring_model = @import("dispatch/uring.zig");
 const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
+const dispatch_support = @import("../../utils/dispatch_support.zig");
 
 // --------------------------------------------------------- //
 
-/// FIX 4.x session server. Dispatches connections via POOL, ASYNC, MIXED,
-/// or EPOLL / URING (Linux-only: non-Linux falls back to POOL).
+/// FIX 4.x session server. Dispatches connections via ASYNC, or EPOLL / URING
+/// (Linux-only: run() rejects them elsewhere with error.DispatchModelUnsupported).
 /// Session messages (Logon, Logout, Heartbeat, TestRequest) are handled internally.
 /// Application messages are dispatched to the handler.
 ///
@@ -64,6 +63,14 @@ pub const FixServer = struct {
         ignoreSigpipe();
 
         const cfg = self.config;
+
+        // Reject an unrunnable model before binding, so a rejected config leaves nothing behind (ADR-065).
+        if (!dispatch_support.isSupported(cfg.dispatch_model)) {
+            common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+
+            return error.DispatchModelUnsupported;
+        }
+
         const conn_opts = FixServeOpts{
             .logger = cfg.logger,
             .default_heartbeat_secs = cfg.default_heartbeat_secs,
@@ -73,25 +80,19 @@ pub const FixServer = struct {
             .handler = self.handler,
         };
 
+        // The comptime guards stay because those loops only compile on Linux: the check above
+        // already rejected the model there, so the else arms never run.
         return switch (cfg.dispatch_model) {
             .ASYNC => async_model.runAsync(cfg, conn_opts),
-            .POOL => pool_model.runPool(cfg, conn_opts),
-            .MIXED => mixed_model.runMixed(cfg, conn_opts),
             .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
                 epoll_model.runEpoll(cfg, conn_opts)
-            else blk: {
-                common.logSystem(cfg, "EPOLL is Linux-only. Falling back to POOL.", .{});
-
-                break :blk pool_model.runPool(cfg, conn_opts);
-            },
+            else
+                error.DispatchModelUnsupported,
             // Native io_uring ring path (ADR-037 Phase 4 extension).
             .URING => if (comptime @import("builtin").target.os.tag == .linux)
                 uring_model.runUring(cfg, conn_opts)
-            else blk: {
-                common.logSystem(cfg, "URING is Linux-only. Falling back to POOL.", .{});
-
-                break :blk pool_model.runPool(cfg, conn_opts);
-            },
+            else
+                error.DispatchModelUnsupported,
         };
     }
 };
@@ -128,7 +129,7 @@ test "zix fix: FixServer.init with EPOLL dispatch model succeeds" {
     server.deinit();
 }
 
-test "zix fix: FixServer EPOLL uses workers field for worker count, pool_size is ignored" {
+test "zix fix: FixServer EPOLL uses the workers field for worker count" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -140,8 +141,6 @@ test "zix fix: FixServer EPOLL uses workers field for worker count, pool_size is
         .comp_id = "SERVER",
         .dispatch_model = .EPOLL,
         .workers = 4,
-        .pool_size = 99,
     });
     try std.testing.expectEqual(@as(usize, 4), server.config.workers);
-    try std.testing.expectEqual(@as(usize, 99), server.config.pool_size);
 }

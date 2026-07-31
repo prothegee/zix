@@ -115,6 +115,42 @@ fn testRunStep(b: *std.Build, exe: *std.Build.Step.Compile, foreign: bool) *std.
     return &run.step;
 }
 
+/// Wire one docker-free suite: a test root that drives the in-process server
+/// endpoint under tests/inproc, so it needs no container and no daemon and runs
+/// on every supported target.
+///
+/// Note:
+/// - The server binds port 0 and each test starts its own, so several of these
+///   suites can run at once without a port agreement between them.
+///
+/// Param:
+/// prometheuz - *std.Build.Module (the driver under test, imported as "prometheuz")
+/// foreign - bool (compile only, do not execute)
+/// step_name - []const u8 (the `zig build <name>` step to create)
+/// root_path - []const u8 (test root, relative to this package)
+fn addInprocSuite(
+    b: *std.Build,
+    prometheuz: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    foreign: bool,
+    step_name: []const u8,
+    root_path: []const u8,
+    description: []const u8,
+) void {
+    const suite_module = b.createModule(.{
+        .root_source_file = b.path(root_path),
+        .target = target,
+        .optimize = optimize,
+    });
+    suite_module.addImport("prometheuz", prometheuz);
+
+    const suite_tests = b.addTest(.{ .root_module = suite_module });
+
+    const step = b.step(step_name, description);
+    step.dependOn(testRunStep(b, suite_tests, foreign));
+}
+
 // --------------------------------------------------------- //
 
 pub fn build(b: *std.Build) void {
@@ -147,6 +183,34 @@ pub fn build(b: *std.Build) void {
 
     const unit_step = b.step("test-unit", "Run prometheuz unit tests (no server needed)");
     unit_step.dependOn(module_run_step);
+
+    // --------------------------------------------------------- //
+
+    // Docker-free suites: the driver against the in-process endpoint, so
+    // they run everywhere the container-backed runner cannot. One endpoint
+    // stands in for all three servers the driver talks to: the exporter it
+    // scrapes,
+    // the receiver it writes to, and the query API it reads from.
+    addInprocSuite(
+        b,
+        prometheuz,
+        target,
+        optimize,
+        foreign_target,
+        "test-behaviour",
+        "tests/behaviour.zig",
+        "Run prometheuz behaviour tests against the in-process endpoint (no container)",
+    );
+    addInprocSuite(
+        b,
+        prometheuz,
+        target,
+        optimize,
+        foreign_target,
+        "test-edge",
+        "tests/edge.zig",
+        "Run prometheuz edge tests against the in-process endpoint (no container)",
+    );
 
     // --------------------------------------------------------- //
 

@@ -9,7 +9,9 @@
 //   payload back. A raw datagram client is used (no typed Packet struct).
 
 const std = @import("std");
+const zix = @import("zix");
 const common = @import("common.zig");
+const socket_poll = zix.utils.socket_poll;
 
 const SERVER_PORT: u16 = 9064;
 const BIND_PORT: u16 = 9192;
@@ -51,12 +53,11 @@ fn run(io: std.Io, server_path: []const u8) !void {
     const server = try std.Io.net.IpAddress.parse("127.0.0.1", SERVER_PORT);
     try sock.send(io, &server, PAYLOAD);
 
-    const timeout: std.Io.Timeout = .{ .duration = .{
-        .raw = std.Io.Duration.fromMilliseconds(3000),
-        .clock = .awake,
-    } };
+    // Readiness first, then a plain receive: a timed std.Io receive needs the Io to run the receive
+    // and a timer concurrently, which the Windows backend cannot do for a socket.
+    if (!try socket_poll.waitReady(sock.handle, socket_poll.READABLE, 3000)) return error.EchoTimeout;
 
     var buf: [64]u8 = undefined;
-    const msg = try sock.receiveTimeout(io, &buf, timeout);
+    const msg = try sock.receive(io, &buf);
     if (!std.mem.eql(u8, msg.data, PAYLOAD)) return error.EchoMismatch;
 }

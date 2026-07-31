@@ -1,10 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 // Dual listener (config.tls_port): ONE server serves cleartext http/1.1 on PORT and https/1.1 on
 // TLS_PORT from the same worker fleet. No second launch, no second fd table, no duplicate caches:
-// the TLS side rides the same .EPOLL / .URING loop as cleartext (ADR-060). The thread models
-// (.ASYNC / .POOL / .MIXED) serve the TLS side with one extra accept thread instead.
+// the TLS side rides the same .EPOLL / .URING loop as cleartext (ADR-060). The thread model
+// (.ASYNC) serves the TLS side with one extra accept thread instead.
 
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9076;
@@ -46,7 +47,9 @@ pub fn main(process: std.process.Init) !void {
         .port = PORT,
         .tls = &tls,
         .tls_port = TLS_PORT,
-        .dispatch_model = .EPOLL,
+        // Picked per target at comptime (ADR-065): .EPOLL / .URING terminate TLS in the
+        // epoll-mux worker on Linux, .ASYNC in the thread-per-connection path elsewhere.
+        .dispatch_model = if (builtin.os.tag == .linux) .URING else .ASYNC,
         .workers = 1,
     });
     defer server.deinit();

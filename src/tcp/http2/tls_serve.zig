@@ -8,14 +8,13 @@
 //!   hook that seals them into TLS records, so there is NO socketpair and NO second thread per
 //!   connection (one thread per connection, not two). This is what lets the TLS path scale to high
 //!   connection counts instead of livelocking on a per-connection socketpair relay.
-//! - The cleartext dispatch models (ASYNC / POOL / MIXED / EPOLL / URING) are untouched. https is a
+//! - The cleartext dispatch models (ASYNC / EPOLL / URING) are untouched. https is a
 //!   separate path on its own perf band.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
 const posix = std.posix;
-const win_io = @import("../../utils/windows_io.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const core = @import("core.zig");
 const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
@@ -148,11 +147,9 @@ const TlsConn = struct {
     };
 
     fn entry(conn_ctx: Ctx) void {
-        defer if (comptime builtin.os.tag == .windows) win_io.close(conn_ctx.fd) else {
-            _ = linux.close(conn_ctx.fd);
-        };
+        defer fd_io.close(conn_ctx.fd);
 
-        terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, MuxDriver{ .opts = conn_ctx.opts, .handler = conn_ctx.handler, .io = conn_ctx.io }) catch {};
+        terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, conn_ctx.io, MuxDriver{ .opts = conn_ctx.opts, .handler = conn_ctx.handler, .io = conn_ctx.io }) catch {};
     }
 };
 
@@ -179,11 +176,7 @@ pub fn runTls(handler: core.HandlerFn, config: Http2ServerConfig) !void {
             // Spawn failed (thread / pids limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole
             // lifetime, wedging every other pending connection. The client retries the dropped one.
-            if (comptime builtin.os.tag == .windows) {
-                win_io.close(conn_fd);
-            } else {
-                _ = linux.close(conn_fd);
-            }
+            fd_io.close(conn_fd);
 
             continue;
         };

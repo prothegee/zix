@@ -35,7 +35,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (kernel_backlog=4096, max_recv_buf=4096, workers=0, pool_size=0) dengan dispatch_model wajib (disetel eksplisit), default `TcpClientConfig` (max_recv_buf=4096) |
+| `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (kernel_backlog=4096, max_recv_buf=4096, workers=0) dengan dispatch_model wajib (disetel eksplisit), nilai backing `DispatchModel` gapless dengan hanya tiga model yang dirawat, nama POOL / MIXED yang dilepas tidak lagi resolve, default `TcpClientConfig` (max_recv_buf=4096) |
 | `tcp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman, konfigurasi EPOLL valid berhasil dan deinit aman |
 | `tcp/client.zig` | `refAllDecls` |
 
@@ -60,7 +60,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | Modul | Cakupan |
 | :- | :- |
 | `tcp/http1/core.zig` | `refAllDecls` + perilaku: parseHead (field GET, pemisahan query dari path, POST Content-Length, default keep_alive HTTP/1.0 + override Connection, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD ke RespSink aktif tanpa bounce buffer, cache no-op / store-lalu-hit / pemisahan key per path dan query |
-| `tcp/http1/server.zig` | `refAllDecls` + perilaku: validasi config (POOL / EPOLL), serveEpollConn menjawab burst pipelined secara berurutan, cache EPOLL miss-lalu-hit + plafon memori effectiveCacheEntries, siklus hidup slab ConnTable + sizing ws_recv_buf, serveEpollWs men-drain ke EAGAIN, parseGetFastPath (GET / query / menolak POST dan HTTP/1.0 / raw headers), initUringRing menghasilkan ring yang dapat dipakai |
+| `tcp/http1/server.zig` | `refAllDecls` + perilaku: validasi config (ASYNC / EPOLL / URING), serveEpollConn menjawab burst pipelined secara berurutan, cache EPOLL miss-lalu-hit + plafon memori effectiveCacheEntries, siklus hidup slab ConnTable + sizing ws_recv_buf, serveEpollWs men-drain ke EAGAIN, parseGetFastPath (GET / query / menolak POST dan HTTP/1.0 / raw headers), initUringRing menghasilkan ring yang dapat dipakai |
 | `tcp/http1/websocket.zig` | `refAllDecls` + perilaku: acceptKey vektor RFC 6455, round-trip buildFrame/parseFrame, SIMD unmask cocok dengan scalar (dan tail bytes), prefix buildHeader, pump echo lewat socketpair, pumpRing stage lalu melaporkan close, broadcast fan-out (+ skip fd mati, list kosong) |
 | `tcp/http1/router.zig` | `refAllDecls` + perilaku: matchParam, router comptime |
 | `tcp/http1/config.zig` | `refAllDecls` (nilai default diuji oleh `tests/behaviour/http1/config_test.zig`) |
@@ -86,10 +86,11 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http/client_config.zig` | `refAllDecls` + default: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, user_agent=`zon_options.user_agent`) |
-| `tcp/http/client.zig` | `refAllDecls` |
-| `tcp/http/sse_client.zig` | `refAllDecls` + perilaku: `splitField` (data / event / retry / nama field telanjang / nama tidak cocok / tanpa spasi depan dipertahankan), `parseHttpUrl` (dasar, port default 80, https menghasilkan `TlsNotSupported`) |
-| `tcp/http/ws_client.zig` | `refAllDecls` + perilaku: vektor acceptKey RFC 6455, `parseWsUrl` (dasar, tanpa path default ke /, port default 80, wss menghasilkan `TlsNotSupported`, non-ws menghasilkan `InvalidUrl`) |
+| `tcp/http/client_config.zig` | `refAllDecls` + default: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, h2_max_read_rounds=4096, user_agent=`zon_options.user_agent`, version=HTTP_1, tls_verify=true, tls_ca_path=null) |
+| `tcp/http/client.zig` | `refAllDecls` + perilaku: `.HTTP_2` pada URL non-https ditolak sebelum connect, `.HTTP_3` menghasilkan `UnsupportedVersion`, server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, reply lengkap tidak terpotong oleh bound idle, body yang diam di tengah transfer menghasilkan `ReadTimeout` |
+| `tcp/http/h2_client.zig` | `refAllDecls` + perilaku: `methodHasBody` + `skipRequestHeader`, `putFrame` round-trip melalui parser frame, `putWindowUpdate` meng-encode increment big-endian, `headerBlock` melepas prefix PADDED dan PRIORITY, `dataPayload` melepas padding DATA, peer yang menerima koneksi lalu tidak pernah bicara menghasilkan `ResponseTimeout` |
+| `tcp/http/sse_client.zig` | `refAllDecls` + perilaku: `splitField` (data / event / retry / nama field telanjang / nama tidak cocok / tanpa spasi depan dipertahankan), `parseHttpUrl` (dasar, port default 80, https menghasilkan `TlsNotSupported`), server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, stream yang diam menghasilkan `ReadTimeout` (bukan close bersih) |
+| `tcp/http/ws_client.zig` | `refAllDecls` + perilaku: vektor acceptKey RFC 6455, `parseWsUrl` (dasar, tanpa path default ke /, port default 80, wss menghasilkan `TlsNotSupported`, non-ws menghasilkan `InvalidUrl`), server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, peer yang tidak mengirim frame menghasilkan `ReadTimeout` |
 
 ### zix.Channel
 
@@ -101,7 +102,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/fix/config.zig` | `refAllDecls` + perilaku: field wajib `FixServerConfig` (ip, port, comp_id), dispatch_model wajib (disetel eksplisit), workers/pool_size default 0, kernel_backlog default 1024, heartbeat_timeout_ms default 0, field wajib `FixClientConfig` (ip, port, comp_id, target_comp_id) |
+| `tcp/fix/config.zig` | `refAllDecls` + perilaku: field wajib `FixServerConfig` (ip, port, comp_id), dispatch_model wajib (disetel eksplisit), workers default 0, kernel_backlog default 1024, heartbeat_timeout_ms default 0, field wajib `FixClientConfig` (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + perilaku: round-trip `parseFields`, pencarian `getField` dan kasus null, vektor `computeChecksum` yang diketahui, `verifyChecksum` valid/terpotong/salah, `findMessageEnd` lengkap/parsial/tanpa-terminator, `buildMessage` menghasilkan checksum valid |
 | `tcp/fix/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil, deinit aman |
 | `tcp/fix/client.zig` | `refAllDecls` + perilaku: `FixClient.connect` port nol menghasilkan `error.PortNotConfigured` |
@@ -114,7 +115,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http2/frame.zig` | `refAllDecls` + perilaku: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, round-trip `writeFrameHeader`/`readFrameHeader` melalui pipe, PREFACE dimulai dengan `PRI`, `sendSettings` menulis frame SETTINGS 9-byte valid melalui pipe |
 | `tcp/http2/hpack.zig` | `refAllDecls` + perilaku: round-trip encode/decode Huffman, `HpackEncoder.writeHeader` menghasilkan entri terindeks dari static table, `HpackDecoder.decode` mendekode `:method GET` terindeks, eviksi dynamic table menghormati max_size, indeks `HPACK_STATIC` ke-8 adalah `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + perilaku: default struct `ServeOpts`, `HandlerFn` adalah tipe function pointer |
-| `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers/pool_size default 0, max_streams=128 dan max_frame_size=16384 |
+| `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers default 0, max_streams=128 dan max_frame_size=16384 |
 | `tcp/http2/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman |
 | `tcp/http2/static.zig` | `refAllDecls` + perilaku: zero copy ditolak untuk batch coalescing dan fd sentinel, file dibingkai sebagai HEADERS plus DATA dengan END_STREAM, traversal / file hilang / path kepanjangan ditolak, body melebihi max frame size dipotong, file kosong menutup stream di HEADERS, sibling brotli dipilih dari cache |
 
@@ -163,7 +164,9 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `utils/multipart.zig` | `refAllDecls` + perilaku: `Parser` parse + getField |
 | `utils/response_cache.zig` | `refAllDecls` + perilaku: store-lalu-lookup mengembalikan byte identik, miss pada key yang tidak ada, entry kedaluwarsa refetch, value oversize melewati store, ttl 0 tidak pernah fresh, key berbeda hidup berdampingan via probing, `max_entries` dibulatkan turun ke power of two, `hashKey` memisahkan berdasarkan query |
 | `utils/static_cache.zig` | `refAllDecls` + perilaku: penggabungan path menolak traversal / absolut / kepanjangan, header membawa `Vary` dan hanya menyebut encoding bila terkompresi, jumlah entry di-clamp dan dibulatkan ke power of two, request kedua memakai file terbuka yang sama, miss tidak menyimpan apa pun, ttl 0 tidak pernah menyentuh tabel, sibling `.br` / `.gz` diambil dan dinegosiasi, file tanpa sibling menyajikan identity, entry kedaluwarsa di-reclaim dan dibuka ulang, slot yang di-pin selamat dari reclaim, tabel penuh turun ke null, sweep membebaskan ruang, `install` process-wide dan `shutdown` membersihkannya |
+| `utils/dispatch_support.zig` | `refAllDecls` + perilaku: `.ASYNC` didukung di semua platform, dukungan `.EPOLL` / `.URING` mengikuti os tag target, `rejectedName` melaporkan tag model, `Error` membawa satu error penolakan kanonik |
 | `utils/static_send.zig` | `refAllDecls` + perilaku: jalur copy menulis seluruh body lewat fungsi tulis engine, menghormati offset dan panjang parsial, range nol-panjang tidak pernah menyentuh socket, body lebih besar dari buffer copy melakukan loop, kegagalan tulis engine muncul sebagai BrokenPipe. Khusus Linux: jalur zero-copy mengirim byte persis lewat socket sungguhan, menghormati offset, dan melaporkan BrokenPipe saat peer tertutup |
+| `utils/socket_poll.zig` | `refAllDecls` + perilaku: `readableWithin` melewati penantian saat budget nol, `waitReady` melaporkan datagram yang sudah antre di socket, `waitReady` melaporkan belum siap saat tidak ada yang datang dalam budget |
 
 ### multiplexers (src/multiplexers/, internal)
 
@@ -239,8 +242,7 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | Tes | Yang diverifikasi |
 | :- | :- |
 | `Http1Server.init` config valid, deinit aman | init berhasil dan deinit tidak error |
-| `Http1Server.init` dispatch model POOL | model diterima dan disimpan |
-| `Http1Server.init` dispatch model MIXED | model diterima dan disimpan |
+| `Http1Server.init` dispatch model URING | model diterima dan disimpan |
 | `Http1Server.init` dispatch model EPOLL | model diterima dan disimpan |
 | `Http1Server.init` dispatch model URING | model diterima dan disimpan |
 
@@ -260,8 +262,8 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | Dual listener EPOLL melayani TLS di tls_port dengan route yang sama | kaki TLS melayani tabel route yang sama |
 | Dual listener URING melayani cleartext di port | kaki cleartext menjawab di bawah ring |
 | Dual listener URING melayani TLS on-ring di tls_port | kaki TLS berjalan di ring |
-| Dual listener POOL melayani cleartext di port | kaki cleartext menjawab di model thread |
-| Dual listener POOL melayani TLS via accept thread tambahan | kaki TLS mendapat accept thread sendiri |
+| Dual listener ASYNC melayani cleartext di port | kaki cleartext menjawab di model thread |
+| Dual listener ASYNC melayani TLS via accept thread tambahan | kaki TLS mendapat accept thread sendiri |
 | `tls_port` sama dengan `port` ditolak saat run | mengembalikan `error.TlsPortConflict` |
 
 #### `static_cache_test.zig`
@@ -418,17 +420,34 @@ Port: 18200-18206.
 
 Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat diamati yang diandalkan oleh pemanggil: properti "apa yang selalu dilakukan ini".
 
+### tests/behaviour/dispatch/
+
+#### `platform_gate_test.zig`
+
+Kontrak platform `DispatchModel` lintas-engine (ADR-065), dipastikan sekali untuk seluruh tree.
+
+| Pengujian | Yang diverifikasi |
+| :- | :- |
+| `DispatchModel` adalah satu tipe bersama | setiap namespace engine (Tcp, Http, Http1, Http2, Grpc, Fix, Udp, Http3) mengekspor ulang tipe yang sama |
+| `DispatchModel` berisi tepat ASYNC, EPOLL, URING | switch exhaustive tanpa arm else, jadi varian keempat merusak build |
+| nama POOL dan MIXED yang dilepas tidak lagi resolve | `std.meta.stringToEnum` mengembalikan null untuk keduanya |
+| nilai backing gapless dengan ASYNC sebagai nol | 0 / 1 / 2, dan config zero-init mendarat di model portabel |
+| `isSupported` menerima ASYNC di mana pun | model portabel tidak pernah ditolak |
+| `isSupported` menggerbangi EPOLL dan URING pada os target | true hanya pada target Linux |
+| model yang ditolak dinamai di baris log | `rejectedName` mengembalikan tag model, jadi operator melihat mana yang ditolak |
+| config ASYNC diterima setiap engine | init menyimpan model portabel tanpa memulai accept loop |
+| engine grpc menerima model bersama di server ber-tipe Router | `Grpc.Server.init(Router(&routes), ...)` menyimpan `.ASYNC` |
+
 ### tests/behaviour/tcp/
 
 #### `config_test.zig`
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Default dispatch_model `TcpServerConfig` | `.POOL` (nilai nol) |
+| Default dispatch_model `TcpServerConfig` | `.ASYNC` (nilai nol) |
 | Default kernel_backlog `TcpServerConfig` | 4096 |
 | Default max_recv_buf `TcpServerConfig` | 4096 |
 | Default workers `TcpServerConfig` | 0 (otomatis) |
-| Default pool_size `TcpServerConfig` | 0 (otomatis) |
 | Default max_recv_buf `TcpClientConfig` | 4096 |
 | Header panjang frame TCP | u32 big-endian 4-byte di-encode dan di-decode dengan benar |
 | Payload panjang nol frame TCP | di-encode sebagai empat byte nol |
@@ -483,7 +502,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Default timeout dinonaktifkan | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
 | Penyajian static dinonaktifkan secara default | `public_dir == ""`, `public_dir_upload == "u"` |
 | `dispatch_model` wajib (tidak ada default) | pemanggil harus menyetelnya di `HttpServerConfig` |
-| Default worker pool ukuran otomatis | `workers == 0`, `pool_size == 0` |
+| Default `workers` ukuran otomatis | `workers == 0` |
 | `max_request_headers` default ke `.LARGE` | varian enum dan `.value()` == 64 |
 | Nilai tier `RequestHeaderSize` | MINIMAL=16, COMMON=32, LARGE=64 |
 | `RequestHeaderSize.CUSTOM(N)` dibatasi di 64 | nilai di atas 64 diam-diam mengembalikan 64 |
@@ -506,7 +525,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 | Tes | Yang diverifikasi |
 | :- | :- |
 | `dispatch_model` wajib dan disimpan apa adanya | field round-trip |
-| `workers` dan `pool_size` default nol (auto) | nol berarti auto-size |
+| `workers` default nol (auto) | nol berarti auto-size |
 | Default `kernel_backlog` 1024 | default bawaan |
 | Default ukuran buffer | `max_recv_buf` 6 KiB, `compression_max_out` 256 KiB |
 | Default kompresi | mati, `min_size` 256, `max_out` 256 KiB |
@@ -643,7 +662,7 @@ Sumber: `tests/behaviour/`. Setiap berkas memverifikasi kontrak API yang dapat d
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Default `GrpcServerConfig` | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, pool_size=0, max_streams=128, max_frame_size=16384, max_body=16384 |
+| Default `GrpcServerConfig` | dispatch_model=ASYNC, kernel_backlog=1024, workers=0, max_streams=128, max_frame_size=16384, max_body=16384 |
 | Field dasar `GrpcClientConfig` | field ip dan port tersimpan |
 | Nilai enum `GrpcStatus` | OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
 | `GrpcContext.recvMessage` body kosong | menghasilkan null segera |
@@ -677,7 +696,8 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | `TcpServer.init` port nol | menghasilkan `error.PortNotConfigured` |
-| Nilai backing `DispatchModel` stabil | ASYNC=0, POOL=1, MIXED=2, EPOLL=3 |
+| Nilai backing `DispatchModel` stabil | ASYNC=0, EPOLL=1, URING=2 |
+| Nama `DispatchModel` yang dilepas hilang | `stringToEnum` mengembalikan null untuk POOL dan MIXED |
 | Panjang frame TCP maksimum u32 | `maxInt(u32)` di-encode dan di-decode dengan benar melalui big-endian |
 
 ### tests/edge/http/

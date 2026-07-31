@@ -5,6 +5,36 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const zix = @import("zix");
 
+/// Descriptor reads and writes go through zix's own portable layer, which carries a backend for
+/// Windows, Linux and the other POSIX targets. These helpers used raw Linux syscalls, which forced
+/// a Windows skip and issued Linux syscall numbers at the BSD and macOS kernels.
+const fd_io = zix.utils.fd_io;
+
+/// Readiness deadline for one raw-descriptor read in the TLS and SSE checks. A silent server must
+/// fail the check, never hang it, and this replaces the Linux-only SO_RCVTIMEO the helpers used to
+/// set on the socket.
+const SSE_READ_TIMEOUT_MS: i32 = 5000;
+
+// --------------------------------------------------------- //
+
+/// Wall-clock seconds since the Unix epoch, for a certificate validity check.
+///
+/// Note:
+/// - std.Io carries the clock, so this reads correctly on every target. linux.clock_gettime
+///   compiles anywhere but issues a Linux syscall number, so off Linux it filled nothing and the
+///   caller verified a certificate against a garbage instant.
+///
+/// Param:
+/// io - std.Io (supplies the real-time clock)
+///
+/// Return:
+/// - i64 seconds since 1970-01-01T00:00:00Z
+pub fn realtimeSeconds(io: std.Io) i64 {
+    const now = std.Io.Timestamp.now(io, .real);
+
+    return @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+}
+
 // --------------------------------------------------------- //
 
 /// Args iterator that also works on Windows: std's Iterator.init is POSIX-only
@@ -20,23 +50,40 @@ pub fn argsIterator(args: std.process.Args) std.process.Args.Iterator {
     return std.process.Args.Iterator.init(args);
 }
 
-/// Whether an EPOLL / URING scenario must be skipped on this host: those
-/// dispatch models are Linux-only, elsewhere the server would silently run the
-/// POOL fallback instead of the model under test. Prints a PASS line with a
-/// warn so the suite stays green and the skip stays visible.
+/// Scenario labels whose observable behaviour exists on Linux only, so the runner reports them as
+/// a visible skip off Linux instead of a failure.
+///
+/// Note:
+/// - Empty on purpose. Compression, the engine-owned WebSocket pump, the response cache, the
+///   over-large body drain and HTTP/3 all run under `.ASYNC` now, so every scenario is expected
+///   to pass on every platform.
+/// - Add a label here only with a reason that is about the PLATFORM, not about the model. A
+///   scenario that merely picks `.URING` on Linux does not belong.
+const linux_only_labels = [_][]const u8{};
+
+/// Whether a scenario must be skipped on this host because its behaviour is Linux-only. Prints a
+/// PASS line with a warn so the suite stays green and the skip stays visible.
+///
+/// Note:
+/// - Matches the label EXACTLY against `linux_only_labels`, which is currently empty. It used to
+///   substring-match "epoll" / "uring", which silently stopped matching anything once the
+///   per-model runner rows collapsed and their labels lost those words. An exact list cannot rot
+///   that way unnoticed.
+///
+/// Param:
+/// label - []const u8 (the scenario label, argv[2] for a standalone runner or Check.label in all_runner)
 ///
 /// Return:
 /// - true when the scenario was reported and the caller must return
 pub fn skipDispatchOffPlatform(label: []const u8) bool {
     if (comptime builtin.os.tag == .linux) return false;
 
-    const is_uring = std.mem.indexOf(u8, label, "uring") != null;
-    const is_epoll = std.mem.indexOf(u8, label, "epoll") != null;
-    if (!is_epoll and !is_uring) return false;
+    for (linux_only_labels) |name| {
+        if (std.mem.eql(u8, label, name)) break;
+    } else return false;
 
-    std.debug.print("PASS {s} (WARN: {s} is Linux-only, scenario skipped on {s})\n", .{
+    std.debug.print("PASS {s} (WARN: Linux-only scenario, skipped on {s})\n", .{
         label,
-        if (is_uring) "URING" else "EPOLL",
         @tagName(builtin.os.tag),
     });
 
@@ -47,6 +94,16 @@ pub fn skipDispatchOffPlatform(label: []const u8) bool {
 /// the polls return the instant a port accepts, so a high ceiling costs a fast server nothing and
 /// only buys headroom for the heavy TLS / QUIC servers that boot slower when many start at once.
 pub const START_TIMEOUT_MS = 12000;
+
+/// Ceiling for a check client waiting on the server it just probed, covering both the first
+/// response byte and any quiet stretch inside the body.
+///
+/// Note:
+/// - A healthy check answers in well under a second, so this only fires when a server accepted the
+///   connection and then went silent. Without it that wait has no end, and an infinite park is not
+///   an error the retry layer can see.
+/// - Sized to leave room for three attempts inside one child's isolate.CHECK_TIMEOUT_MS.
+pub const RESPONSE_TIMEOUT_MS = 5000;
 
 // --------------------------------------------------------- //
 // Runtime fallback note captured from a server's startup stderr (e.g. a server
@@ -115,19 +172,24 @@ pub fn printPass(label: []const u8) void {
 /// fd is switched to non-blocking and read once (the startup lines are already in
 /// the pipe by the time the listener accepts).
 fn captureFallbackNote(child: *std.process.Child) void {
-    // Non-blocking stderr peek uses fcntl: skipped on Windows, no note captured.
-    if (comptime builtin.os.tag == .windows) return;
+    // The note this captures is the io_uring fallback line, which only a Linux host can emit, and
+    // the non-blocking switch needs the raw fcntl convention. Both make this Linux-only. It used to
+    // run everywhere except Windows while calling std.os.linux.fcntl, so off Linux it aimed a Linux
+    // syscall number at a foreign kernel for a note that could not exist there anyway.
+    if (comptime builtin.os.tag != .linux) return;
 
     const f = child.stderr orelse return;
     const fd = f.handle;
     const linux = std.os.linux;
 
     const cur = linux.fcntl(fd, std.posix.F.GETFL, 0);
+    if (std.posix.errno(cur) != .SUCCESS) return;
+
     const nonblock: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
     _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
 
     var buf: [4096]u8 = undefined;
-    const n = std.posix.read(fd, &buf) catch return;
+    const n = fd_io.readOnce(fd, &buf) catch return;
     if (n == 0) return;
 
     const data = buf[0..n];
@@ -251,6 +313,8 @@ pub fn multipartUploadRoundTrip(io: std.Io, port: u16, upload_path: []const u8) 
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
     });
     defer client.deinit();
@@ -304,19 +368,16 @@ const TlsClientConn = struct {
 
 /// Open a TCP connection to 127.0.0.1:port and run the TLS 1.3 handshake with the native zix.Tls
 /// client. The caller owns the fd (close it) and drives application data over the returned connection.
-fn tlsConnect(port: u16) !TlsClientConn {
-    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
-    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+fn tlsConnect(io: std.Io, port: u16) !TlsClientConn {
+    const fd = try sseConnectLocal(io, port);
+    errdefer fd_io.close(fd);
 
-    const linux = std.os.linux;
-
-    const fd = try sseConnectLocal(port);
-    errdefer _ = linux.close(fd);
-
+    // io.random is the portable entropy source. linux.getrandom would tie the handshake to one
+    // kernel, which is what kept this check Linux-only.
     var client_random: [32]u8 = undefined;
     var ephemeral: [32]u8 = undefined;
-    _ = linux.getrandom(&client_random, client_random.len, 0);
-    _ = linux.getrandom(&ephemeral, ephemeral.len, 0);
+    io.random(&client_random);
+    io.random(&ephemeral);
 
     var ch_out: [512]u8 = undefined;
     const started = try zix.Tls.Client.start(.{ .client_random = client_random, .ephemeral_secret = ephemeral }, &ch_out);
@@ -351,17 +412,15 @@ fn tlsConnect(port: u16) !TlsClientConn {
 /// so it works for a bounded stream (the arena example) and an unbounded one (the http1 example).
 ///
 /// Param:
+/// io - std.Io (performs the connect, must outlive the check)
 /// port - u16 (server port the https example listens on)
 ///
 /// Return:
 /// - void on a confirmed SSE-over-TLS stream
 /// - error.NoSseOverTls when the markers never appear, plus the handshake / socket errors
-pub fn tlsSseFirstEvent(port: u16) !void {
-    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
-    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
-
-    var tc = try tlsConnect(port);
-    defer _ = std.os.linux.close(tc.fd);
+pub fn tlsSseFirstEvent(io: std.Io, port: u16) !void {
+    var tc = try tlsConnect(io, port);
+    defer fd_io.close(tc.fd);
 
     var enc: [512]u8 = undefined;
     try sseWriteAll(tc.fd, tc.connection.writeAppData(SSE_TLS_REQUEST, &enc));
@@ -395,17 +454,15 @@ pub fn tlsSseFirstEvent(port: u16) !void {
 /// echoed server frame and confirm the payload survives the round trip.
 ///
 /// Param:
+/// io - std.Io (performs the connect, must outlive the check)
 /// port - u16 (server port the wss example listens on)
 ///
 /// Return:
 /// - void on a confirmed echo
 /// - error.NoWsAccept / error.NoWsEcho on a missing handshake or echo, plus handshake / socket errors
-pub fn tlsWsEcho(port: u16) !void {
-    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
-    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
-
-    var tc = try tlsConnect(port);
-    defer _ = std.os.linux.close(tc.fd);
+pub fn tlsWsEcho(io: std.Io, port: u16) !void {
+    var tc = try tlsConnect(io, port);
+    defer fd_io.close(tc.fd);
 
     var enc: [512]u8 = undefined;
     try sseWriteAll(tc.fd, tc.connection.writeAppData(WS_TLS_UPGRADE, &enc));
@@ -447,31 +504,26 @@ pub fn tlsWsEcho(port: u16) !void {
     if (std.mem.indexOf(u8, data, payload) == null) return error.NoWsEcho;
 }
 
-/// Open a blocking TCP connection to 127.0.0.1:port with a receive timeout, so a stuck read fails
-/// the check rather than hanging it.
-fn sseConnectLocal(port: u16) !posix.fd_t {
-    // Raw Linux sockets drive the TLS / SSE wire checks: not ported to Windows.
-    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+/// Open a blocking TCP connection to 127.0.0.1:port.
+///
+/// Note:
+/// - std.Io.net does the connect, so this works on every target. The previous raw-socket form
+///   issued Linux syscalls and had to refuse Windows outright.
+/// - A stuck read is bounded by waitReadable in sseReadAll rather than by SO_RCVTIMEO, because the
+///   socket option does not have one portable shape across these platforms.
+///
+/// Param:
+/// io - std.Io (performs the connect, must outlive the returned descriptor)
+/// port - u16 (server port on the loopback address)
+///
+/// Return:
+/// - posix.fd_t the caller owns and must close with fd_io.close
+/// - error.ConnectFailed when the connection could not be established
+fn sseConnectLocal(io: std.Io, port: u16) !posix.fd_t {
+    const addr = std.Io.net.IpAddress.resolve(io, "127.0.0.1", port) catch return error.ConnectFailed;
+    const stream = addr.connect(io, .{ .mode = .stream }) catch return error.ConnectFailed;
 
-    const linux = std.os.linux;
-
-    const fd: posix.fd_t = @intCast(linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0));
-
-    var addr = std.mem.zeroes(linux.sockaddr.in);
-    addr.family = linux.AF.INET;
-    addr.port = std.mem.nativeToBig(u16, port);
-    addr.addr = std.mem.nativeToBig(u32, 0x7f000001); // 127.0.0.1
-
-    if (posix.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
-        _ = linux.close(fd);
-
-        return error.ConnectFailed;
-    }
-
-    const timeout = linux.timeval{ .sec = 5, .usec = 0 };
-    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.RCVTIMEO, @ptrCast(&timeout), @sizeOf(linux.timeval));
-
-    return fd;
+    return stream.socket.handle;
 }
 
 const SseRecord = struct {
@@ -490,39 +542,21 @@ fn sseReadRecord(fd: posix.fd_t, buf: []u8) !SseRecord {
     return .{ .full = buf[0 .. 5 + length], .len = 5 + length };
 }
 
+/// Read exactly buf.len bytes, bounding the wait so a silent server fails the check instead of
+/// hanging it. fd_io carries the per-platform read, this adds only the readiness deadline.
 fn sseReadAll(fd: posix.fd_t, buf: []u8) !void {
-    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
+    var filled: usize = 0;
 
-    const linux = std.os.linux;
+    while (filled < buf.len) {
+        if (!fd_io.waitReadable(fd, SSE_READ_TIMEOUT_MS)) return error.ReadTimeout;
 
-    var read: usize = 0;
-    while (read < buf.len) {
-        const chunk = buf[read..];
-        const rc = linux.read(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-        read += rc;
+        const got = try fd_io.readOnce(fd, buf[filled..]);
+        if (got == 0) return error.ConnectionClosed;
+
+        filled += got;
     }
 }
 
 fn sseWriteAll(fd: posix.fd_t, bytes: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return error.PlatformNotSupported;
-
-    const linux = std.os.linux;
-
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const chunk = bytes[written..];
-        const rc = linux.write(fd, chunk.ptr, chunk.len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        written += rc;
-    }
+    return fd_io.writeAll(fd, bytes);
 }

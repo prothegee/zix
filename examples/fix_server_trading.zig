@@ -11,9 +11,10 @@ const ORDERS_FILE: []const u8 = "orders.jsonl";
 // --------------------------------------------------------- //
 
 fn isoTimestamp(buf: []u8) []const u8 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
-    const total_secs: u64 = @intCast(ts.sec);
+    // zix.Fix.wallClockNs is the portable wall clock. A raw std.os.linux.clock_gettime compiles for
+    // every target but issues a Linux syscall number, so off Linux it leaves the timespec untouched
+    // and the seconds read back as garbage, which takes the process down on the cast below.
+    const total_secs: u64 = zix.Fix.wallClockNs() / std.time.ns_per_s;
     const sod = total_secs % 86400;
     var days = total_secs / 86400;
     const hour = sod / 3600;

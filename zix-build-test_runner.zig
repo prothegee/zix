@@ -25,17 +25,9 @@ pub fn addSteps(
     // argv[4]: route/filename/ws-route. argv[5]: origin/file-content. argv[6]: expected substr.
     // Unused argv are passed as empty string and ignored by the runner.
     const runner_table = .{
-        // basic dispatch-model runners
-        .{ "test-runner-http-async", "tests/runner/http_runner.zig", "tr-server-http-async", "examples/http_basic_1_async.zig", "9000", "", "", "" },
-        .{ "test-runner-http-pool", "tests/runner/http_runner.zig", "tr-server-http-pool", "examples/http_basic_2_pool.zig", "9001", "", "", "" },
-        .{ "test-runner-http-mixed", "tests/runner/http_runner.zig", "tr-server-http-mixed", "examples/http_basic_3_mixed.zig", "9002", "", "", "" },
-        .{ "test-runner-http-epoll", "tests/runner/http_runner.zig", "tr-server-http-epoll", "examples/http_basic_4_epoll.zig", "9003", "", "", "" },
-        .{ "test-runner-http-uring", "tests/runner/http_runner.zig", "tr-server-http-uring", "examples/http_basic_5_uring.zig", "9004", "", "", "" },
-        .{ "test-runner-http1-async", "tests/runner/http1_runner.zig", "tr-server-http1-async", "examples/http1_basic_1_async.zig", "9015", "", "", "" },
-        .{ "test-runner-http1-pool", "tests/runner/http1_runner.zig", "tr-server-http1-pool", "examples/http1_basic_2_pool.zig", "9016", "", "", "" },
-        .{ "test-runner-http1-mixed", "tests/runner/http1_runner.zig", "tr-server-http1-mixed", "examples/http1_basic_3_mixed.zig", "9017", "", "", "" },
-        .{ "test-runner-http1-epoll", "tests/runner/http1_runner.zig", "tr-server-http1-epoll", "examples/http1_basic_4_epoll.zig", "9018", "", "", "" },
-        .{ "test-runner-http1-uring", "tests/runner/http1_runner.zig", "tr-server-http1-uring", "examples/http1_basic_5_uring.zig", "9019", "", "", "" },
+        // basic per-engine runners (one unified example each, dispatch model picked per target)
+        .{ "test-runner-http", "tests/runner/http_runner.zig", "tr-server-http", "examples/http_basic.zig", "9000", "", "", "" },
+        .{ "test-runner-http1", "tests/runner/http1_runner.zig", "tr-server-http1", "examples/http1_basic.zig", "9015", "", "", "" },
         .{ "test-runner-http1-compression", "tests/runner/http1_compression_runner.zig", "tr-server-http1-compression", "examples/http1_compression.zig", "9058", "", "", "" },
         .{ "test-runner-http-compression", "tests/runner/http1_compression_runner.zig", "tr-server-http-compression", "examples/http_compression.zig", "9059", "", "", "" },
         .{ "test-runner-tls-http1", "tests/runner/tls_http1_basic_runner.zig", "tr-server-tls-http1", "examples/tls/tls_http1_basic.zig", "9060", "", "", "" },
@@ -49,27 +41,11 @@ pub fn addSteps(
         // websocket over tls runners (ADR-055): native zix.Tls client echoes one frame over TLS
         .{ "test-runner-tls-http1-ws", "tests/runner/tls_ws_runner.zig", "tr-server-tls-http1-ws", "examples/tls/tls_http1_ws.zig", "9074", "", "", "" },
         .{ "test-runner-tls-http-ws", "tests/runner/tls_ws_runner.zig", "tr-server-tls-http-ws", "examples/tls/tls_http_ws.zig", "9075", "", "", "" },
-        .{ "test-runner-http2-async", "tests/runner/http2_runner.zig", "tr-server-http2-async", "examples/http2_basic_1_async.zig", "9065", "", "", "" },
-        .{ "test-runner-http2-pool", "tests/runner/http2_runner.zig", "tr-server-http2-pool", "examples/http2_basic_2_pool.zig", "9066", "", "", "" },
-        .{ "test-runner-http2-mixed", "tests/runner/http2_runner.zig", "tr-server-http2-mixed", "examples/http2_basic_3_mixed.zig", "9067", "", "", "" },
-        .{ "test-runner-http2-epoll", "tests/runner/http2_runner.zig", "tr-server-http2-epoll", "examples/http2_basic_4_epoll.zig", "9068", "", "", "" },
-        .{ "test-runner-http2-uring", "tests/runner/http2_runner.zig", "tr-server-http2-uring", "examples/http2_basic_5_uring.zig", "9069", "", "", "" },
-        .{ "test-runner-grpc-async", "tests/runner/grpc_runner.zig", "tr-server-grpc-async", "examples/grpc_server_1_async.zig", "9032", "", "", "" },
-        .{ "test-runner-grpc-pool", "tests/runner/grpc_runner.zig", "tr-server-grpc-pool", "examples/grpc_server_2_pool.zig", "9033", "", "", "" },
-        .{ "test-runner-grpc-mixed", "tests/runner/grpc_runner.zig", "tr-server-grpc-mixed", "examples/grpc_server_3_mixed.zig", "9034", "", "", "" },
-        .{ "test-runner-grpc-epoll", "tests/runner/grpc_runner.zig", "tr-server-grpc-epoll", "examples/grpc_server_4_epoll.zig", "9035", "", "", "" },
-        .{ "test-runner-grpc-uring", "tests/runner/grpc_runner.zig", "tr-server-grpc-uring", "examples/grpc_server_5_uring.zig", "9036", "", "", "" },
-        .{ "test-runner-grpc-stream-uring", "tests/runner/grpc_stream_runner.zig", "tr-server-grpc-stream-uring", "examples/grpc_server_5_uring.zig", "9036", "", "", "" },
-        .{ "test-runner-tcp-async", "tests/runner/tcp_runner.zig", "tr-server-tcp-async", "examples/tcp_server_1_async.zig", "9043", "", "", "" },
-        .{ "test-runner-tcp-pool", "tests/runner/tcp_runner.zig", "tr-server-tcp-pool", "examples/tcp_server_2_pool.zig", "9044", "", "", "" },
-        .{ "test-runner-tcp-mixed", "tests/runner/tcp_runner.zig", "tr-server-tcp-mixed", "examples/tcp_server_3_mixed.zig", "9045", "", "", "" },
-        .{ "test-runner-tcp-epoll", "tests/runner/tcp_runner.zig", "tr-server-tcp-epoll", "examples/tcp_server_4_epoll.zig", "9046", "", "", "" },
-        .{ "test-runner-tcp-uring", "tests/runner/tcp_runner.zig", "tr-server-tcp-uring", "examples/tcp_server_5_uring.zig", "9047", "", "", "" },
-        .{ "test-runner-fix-async", "tests/runner/fix_runner.zig", "tr-server-fix-async", "examples/fix_server_1_async.zig", "9048", "", "", "" },
-        .{ "test-runner-fix-pool", "tests/runner/fix_runner.zig", "tr-server-fix-pool", "examples/fix_server_2_pool.zig", "9049", "", "", "" },
-        .{ "test-runner-fix-mixed", "tests/runner/fix_runner.zig", "tr-server-fix-mixed", "examples/fix_server_3_mixed.zig", "9050", "", "", "" },
-        .{ "test-runner-fix-epoll", "tests/runner/fix_runner.zig", "tr-server-fix-epoll", "examples/fix_server_4_epoll.zig", "9051", "", "", "" },
-        .{ "test-runner-fix-uring", "tests/runner/fix_runner.zig", "tr-server-fix-uring", "examples/fix_server_5_uring.zig", "9052", "", "", "" },
+        .{ "test-runner-http2", "tests/runner/http2_runner.zig", "tr-server-http2", "examples/http2_basic.zig", "9065", "", "", "" },
+        .{ "test-runner-grpc", "tests/runner/grpc_runner.zig", "tr-server-grpc", "examples/grpc_server.zig", "9032", "", "", "" },
+        .{ "test-runner-grpc-stream", "tests/runner/grpc_stream_runner.zig", "tr-server-grpc-stream", "examples/grpc_server.zig", "9032", "", "", "" },
+        .{ "test-runner-tcp", "tests/runner/tcp_runner.zig", "tr-server-tcp", "examples/tcp_server.zig", "9043", "", "", "" },
+        .{ "test-runner-fix", "tests/runner/fix_runner.zig", "tr-server-fix", "examples/fix_server.zig", "9048", "", "", "" },
         .{ "test-runner-udp", "tests/runner/udp_runner.zig", "tr-server-udp", "examples/udp_server.zig", "9054", "", "", "" },
         .{ "test-runner-udp-raw", "tests/runner/udp_raw_runner.zig", "tr-server-udp-raw", "examples/udp_server_raw.zig", "9064", "", "", "" },
         .{ "test-runner-http3", "tests/runner/http3_runner.zig", "tr-server-http3", "examples/tls/http3_basic.zig", "9063", "", "", "" },
@@ -103,18 +79,14 @@ pub fn addSteps(
         // http1 websocket runner
         .{ "test-runner-http1-websocket", "tests/runner/ws_runner.zig", "tr-server-http1-websocket", "examples/http1_websocket.zig", "9028", "/ws/lobby", "", "" },
         // http1 websocket runner on the io_uring (.URING) dispatch model
-        .{ "test-runner-http1-websocket-uring", "tests/runner/ws_runner.zig", "tr-server-http1-websocket-uring", "examples/http1_websocket_uring.zig", "9029", "/ws", "", "" },
+        .{ "test-runner-http1-websocket-echo", "tests/runner/ws_runner.zig", "tr-server-http1-websocket-echo", "examples/http1_websocket.zig", "9028", "/ws", "", "" },
         // http1 response-cache runner (unique port, small body so the GET is bounded)
         .{ "test-runner-http1-cache", "tests/runner/http_get_runner.zig", "tr-server-http1-cache", "examples/http1_cache.zig", "9031", "/cache?kb=1", "", "ok" },
-        // http1 over-large request-body drain runners (EPOLL + URING only, the
-        // other models truncate the body instead of draining it)
-        .{ "test-runner-http1-drain-epoll", "tests/runner/http1_drain_runner.zig", "tr-server-http1-drain-epoll", "examples/http1_basic_4_epoll.zig", "9018", "", "", "" },
-        .{ "test-runner-http1-drain-uring", "tests/runner/http1_drain_runner.zig", "tr-server-http1-drain-uring", "examples/http1_basic_5_uring.zig", "9019", "", "", "" },
+        // http1 over-large request-body drain runner. Only the multiplexed models drain the
+        // body instead of truncating it, so this rides the unified example's Linux pick (.URING).
+        .{ "test-runner-http1-drain", "tests/runner/http1_drain_runner.zig", "tr-server-http1-drain", "examples/http1_basic.zig", "9015", "", "", "" },
         // grpc location runners
-        .{ "test-runner-grpc-location-async", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-async", "examples/grpc_location_server_1_async.zig", "9038", "", "", "" },
-        .{ "test-runner-grpc-location-pool", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-pool", "examples/grpc_location_server_2_pool.zig", "9039", "", "", "" },
-        .{ "test-runner-grpc-location-mixed", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-mixed", "examples/grpc_location_server_3_mixed.zig", "9040", "", "", "" },
-        .{ "test-runner-grpc-location-epoll", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location-epoll", "examples/grpc_location_server_4_epoll.zig", "9041", "", "", "" },
+        .{ "test-runner-grpc-location", "tests/runner/grpc_location_runner.zig", "tr-server-grpc-location", "examples/grpc_location_server.zig", "9038", "", "", "" },
         // grpc multi and timeout runners
         .{ "test-runner-grpc-multi", "tests/runner/grpc_multi_runner.zig", "tr-server-grpc-multi", "examples/grpc_multi_server.zig", "9042", "", "", "" },
         .{ "test-runner-grpc-timeout", "tests/runner/grpc_timeout_runner.zig", "tr-server-grpc-timeout", "examples/grpc_timeout.zig", "9037", "", "", "" },
@@ -263,32 +235,12 @@ pub fn addSteps(
     {
         const all_server_srcs = .{
             // basic dispatch-model servers (23)
-            .{ "tr-all-server-http-async", "examples/http_basic_1_async.zig" },
-            .{ "tr-all-server-http-pool", "examples/http_basic_2_pool.zig" },
-            .{ "tr-all-server-http-mixed", "examples/http_basic_3_mixed.zig" },
-            .{ "tr-all-server-http-epoll", "examples/http_basic_4_epoll.zig" },
-            .{ "tr-all-server-http1-async", "examples/http1_basic_1_async.zig" },
-            .{ "tr-all-server-http1-pool", "examples/http1_basic_2_pool.zig" },
-            .{ "tr-all-server-http1-mixed", "examples/http1_basic_3_mixed.zig" },
-            .{ "tr-all-server-http1-epoll", "examples/http1_basic_4_epoll.zig" },
-            .{ "tr-all-server-http1-uring", "examples/http1_basic_5_uring.zig" },
-            .{ "tr-all-server-grpc-async", "examples/grpc_server_1_async.zig" },
-            .{ "tr-all-server-grpc-pool", "examples/grpc_server_2_pool.zig" },
-            .{ "tr-all-server-grpc-mixed", "examples/grpc_server_3_mixed.zig" },
-            .{ "tr-all-server-grpc-epoll", "examples/grpc_server_4_epoll.zig" },
-            .{ "tr-all-server-tcp-async", "examples/tcp_server_1_async.zig" },
-            .{ "tr-all-server-tcp-pool", "examples/tcp_server_2_pool.zig" },
-            .{ "tr-all-server-tcp-mixed", "examples/tcp_server_3_mixed.zig" },
-            .{ "tr-all-server-tcp-epoll", "examples/tcp_server_4_epoll.zig" },
-            .{ "tr-all-server-fix-async", "examples/fix_server_1_async.zig" },
-            .{ "tr-all-server-fix-pool", "examples/fix_server_2_pool.zig" },
-            .{ "tr-all-server-fix-mixed", "examples/fix_server_3_mixed.zig" },
-            .{ "tr-all-server-fix-epoll", "examples/fix_server_4_epoll.zig" },
-            .{ "tr-all-server-http2-async", "examples/http2_basic_1_async.zig" },
-            .{ "tr-all-server-http2-pool", "examples/http2_basic_2_pool.zig" },
-            .{ "tr-all-server-http2-mixed", "examples/http2_basic_3_mixed.zig" },
-            .{ "tr-all-server-http2-epoll", "examples/http2_basic_4_epoll.zig" },
-            .{ "tr-all-server-http2-uring", "examples/http2_basic_5_uring.zig" },
+            .{ "tr-all-server-http", "examples/http_basic.zig" },
+            .{ "tr-all-server-http1", "examples/http1_basic.zig" },
+            .{ "tr-all-server-grpc", "examples/grpc_server.zig" },
+            .{ "tr-all-server-tcp", "examples/tcp_server.zig" },
+            .{ "tr-all-server-fix", "examples/fix_server.zig" },
+            .{ "tr-all-server-http2", "examples/http2_basic.zig" },
             .{ "tr-all-server-udp", "examples/udp_server.zig" },
             .{ "tr-all-server-udp-raw", "examples/udp_server_raw.zig" },
             .{ "tr-all-server-uds", "examples/uds_server.zig" },
@@ -318,10 +270,7 @@ pub fn addSteps(
             .{ "tr-all-server-http1-cache", "examples/http1_cache.zig" },
             .{ "tr-all-server-http1-compression", "examples/http1_compression.zig" },
             // grpc location + multi + timeout (6)
-            .{ "tr-all-server-grpc-location-async", "examples/grpc_location_server_1_async.zig" },
-            .{ "tr-all-server-grpc-location-pool", "examples/grpc_location_server_2_pool.zig" },
-            .{ "tr-all-server-grpc-location-mixed", "examples/grpc_location_server_3_mixed.zig" },
-            .{ "tr-all-server-grpc-location-epoll", "examples/grpc_location_server_4_epoll.zig" },
+            .{ "tr-all-server-grpc-location", "examples/grpc_location_server.zig" },
             .{ "tr-all-server-grpc-multi", "examples/grpc_multi_server.zig" },
             .{ "tr-all-server-grpc-timeout", "examples/grpc_timeout.zig" },
             // fix trading (1)
