@@ -193,6 +193,7 @@ pub fn addSteps(
         "tests/edge/http/sse_client_test.zig",
         // http1
         "tests/edge/http1/core_test.zig",
+        "tests/edge/http1/body_test.zig",
         "tests/edge/http1/static_cache_test.zig",
         // http2
         "tests/edge/http2/server_test.zig",
