@@ -95,6 +95,16 @@ pub fn skipDispatchOffPlatform(label: []const u8) bool {
 /// only buys headroom for the heavy TLS / QUIC servers that boot slower when many start at once.
 pub const START_TIMEOUT_MS = 12000;
 
+/// Ceiling for a check client waiting on the server it just probed, covering both the first
+/// response byte and any quiet stretch inside the body.
+///
+/// Note:
+/// - A healthy check answers in well under a second, so this only fires when a server accepted the
+///   connection and then went silent. Without it that wait has no end, and an infinite park is not
+///   an error the retry layer can see.
+/// - Sized to leave room for three attempts inside one child's isolate.CHECK_TIMEOUT_MS.
+pub const RESPONSE_TIMEOUT_MS = 5000;
+
 // --------------------------------------------------------- //
 // Runtime fallback note captured from a server's startup stderr (e.g. a server
 // configured for io_uring that found io_uring unusable and fell back to EPOLL).
@@ -303,6 +313,8 @@ pub fn multipartUploadRoundTrip(io: std.Io, port: u16, upload_path: []const u8) 
         .allocator = arena.allocator(),
         .io = io,
         .connect_timeout_ms = 3000,
+        .response_timeout_ms = RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
     });
     defer client.deinit();
