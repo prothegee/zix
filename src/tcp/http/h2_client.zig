@@ -19,6 +19,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win_io = @import("../../utils/windows_io.zig");
+const fd_io = @import("../../utils/fd_io.zig");
 const socket_poll = @import("../../utils/socket_poll.zig");
 const Config = @import("client_config.zig");
 const HttpClientConfig = Config.HttpClientConfig;
@@ -150,7 +151,7 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
         try finished.verifyServerCert(anchor_der, host, nowSec());
     }
 
-    try writeAllFD(fd, finished.client_finished);
+    try fd_io.writeAll(fd, finished.client_finished);
 
     return finished.connection;
 }
@@ -208,7 +209,7 @@ fn sendRequestFD(
     n += putWindowUpdate(out[n..], 1, WINDOW_INCREMENT);
 
     var send_buf: [H2_SEND_BUF]u8 = undefined;
-    try writeAllFD(fd, conn.writeAppData(out[0..n], &send_buf));
+    try fd_io.writeAll(fd, conn.writeAppData(out[0..n], &send_buf));
 
     if (has_body) try sendBodyFD(fd, conn, body.?);
 }
@@ -225,7 +226,7 @@ fn sendBodyFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, body: []const 
         const len = putFrame(&frame, Http2.FRAME_TYPE_DATA, flags, 1, body[sent..end]);
 
         var enc_buf: [chunk_max + 128]u8 = undefined;
-        try writeAllFD(fd, conn.writeAppData(frame[0..len], &enc_buf));
+        try fd_io.writeAll(fd, conn.writeAppData(frame[0..len], &enc_buf));
 
         sent = end;
     }
@@ -410,7 +411,7 @@ fn sendControlFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, frame_type:
     const len = putFrame(&frame, frame_type, flags, stream_id, payload);
 
     var enc_buf: [Http2.FRAME_HEADER_LEN + 128]u8 = undefined;
-    try writeAllFD(fd, conn.writeAppData(frame[0..len], &enc_buf));
+    try fd_io.writeAll(fd, conn.writeAppData(frame[0..len], &enc_buf));
 }
 
 // --------------------------------------------------------- //
@@ -477,8 +478,8 @@ fn writeRecordFD(fd: posix.fd_t, content_type: u8, msg: []const u8) !void {
     header[2] = 0x03;
     std.mem.writeInt(u16, header[3..5], @intCast(msg.len), .big);
 
-    try writeAllFD(fd, &header);
-    try writeAllFD(fd, msg);
+    try fd_io.writeAll(fd, &header);
+    try fd_io.writeAll(fd, msg);
 }
 
 /// Read one TLS record: the 5-byte header, then the body it declares. Both reads carry the caller's
@@ -500,51 +501,17 @@ fn readRecordInto(fd: posix.fd_t, buf: []u8, idle_ms: u32) !usize {
 ///   the stream completes, and a silent peer never advances that counter at all.
 /// - An idle_ms of 0 keeps the original blocking read, so an unconfigured caller is unaffected.
 fn readAll(fd: posix.fd_t, buf: []u8, idle_ms: u32) !void {
-    if (comptime builtin.os.tag == .windows) {
-        var read: usize = 0;
-        while (read < buf.len) {
-            if (!socket_poll.readableWithin(fd, idle_ms)) return error.ReadTimeout;
-
-            const n = win_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
-            if (n == 0) return error.ConnectionClosed;
-
-            read += n;
-        }
-        return;
-    }
-
-    const linux = std.os.linux;
     var read: usize = 0;
+
     while (read < buf.len) {
         // Inside the loop, not above it: a peer that sends one byte and then stops would clear a
         // single gate at the top and park on the next read with nothing left to bound it.
         if (!socket_poll.readableWithin(fd, idle_ms)) return error.ReadTimeout;
 
-        const rc = linux.read(fd, buf[read..].ptr, buf.len - read);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-        if (rc == 0) return error.ConnectionClosed;
-        read += rc;
-    }
-}
+        const n = fd_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
+        if (n == 0) return error.ConnectionClosed;
 
-fn writeAllFD(fd: posix.fd_t, bytes: []const u8) !void {
-    if (comptime builtin.os.tag == .windows) return win_io.writeAll(fd, bytes) catch error.WriteFailed;
-
-    const linux = std.os.linux;
-    var written: usize = 0;
-    while (written < bytes.len) {
-        const rc = linux.write(fd, bytes[written..].ptr, bytes.len - written);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.WriteFailed,
-        }
-        if (rc == 0) return error.WriteFailed;
-        written += rc;
+        read += n;
     }
 }
 
