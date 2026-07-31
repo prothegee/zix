@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Method = @import("method.zig");
+const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 
 pub const MAX_HEADERS: usize = 64;
 pub const MAX_HEADERS_U8: u8 = MAX_HEADERS;
@@ -47,6 +48,9 @@ pub const ParsedHead = struct {
     keep_alive: bool, // false when Connection: close was sent, true otherwise (HTTP/1.1 default)
     content_length: u64,
     chunked: bool, // true when Transfer-Encoding: chunked
+    /// True when the client sent Expect: 100-continue and is waiting for the
+    /// interim response before it sends the body.
+    expect_continue: bool,
 };
 
 pub const ParseError = error{
@@ -131,6 +135,7 @@ fn parseGetFast(buf: []const u8, header_end: usize) ?ParsedHead {
         .keep_alive = true,
         .content_length = 0,
         .chunked = false,
+        .expect_continue = false,
     };
 }
 
@@ -186,6 +191,7 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     var keep_alive = true; // HTTP/1.1 default
     var content_length: u64 = 0;
     var chunked = false;
+    var expect_continue = false;
 
     var pos: usize = headers_start;
     while (pos < head_buf.len) {
@@ -214,6 +220,9 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
         const name = line[0..colon];
         const value = line[val_off..];
         switch (name.len) {
+            6 => if (std.ascii.eqlIgnoreCase(name, "expect")) {
+                if (std.ascii.eqlIgnoreCase(value, "100-continue")) expect_continue = true;
+            },
             10 => if (std.ascii.eqlIgnoreCase(name, "connection")) {
                 if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
             },
@@ -221,7 +230,16 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
                 content_length = std.fmt.parseInt(u64, value, 10) catch 0;
             },
             17 => if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-                if (std.ascii.eqlIgnoreCase(value, "chunked")) chunked = true;
+                // RFC 9112 allows a coding list, so "gzip, chunked" is a chunked
+                // request. An exact compare framed it as bodyless and let the
+                // body become the next request. Same search zix.Http1 uses, one
+                // pass over one header value inside this walk.
+                const chunked_pos = if (comptime ZIG_SEMVER.MINOR == 16)
+                    std.ascii.indexOfIgnoreCase(value, "chunked")
+                else
+                    std.ascii.findIgnoreCase(value, "chunked");
+
+                if (chunked_pos != null) chunked = true;
             },
             else => {},
         }
@@ -241,6 +259,7 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
         .keep_alive = keep_alive,
         .content_length = content_length,
         .chunked = chunked,
+        .expect_continue = expect_continue,
     };
 }
 
@@ -279,15 +298,73 @@ pub fn getHeader(head: ParsedHead, buf: []const u8, name: []const u8) ?[]const u
     return null;
 }
 
-/// Decode HTTP/1.1 chunked transfer encoding.
-/// raw: complete raw chunked body (including chunk framing).
-/// out: destination buffer, must be at least raw.len bytes (decoded is always <= raw).
-/// Stops at the terminal chunk (size 0) or when raw is exhausted.
-/// Chunk extensions ("; name=value" on the size line) are ignored.
+/// Walk the chunk framing in raw and report where the body ends.
+///
+/// Note:
+/// - Steps over chunk data by its declared size, so the cost is one step per
+///   chunk rather than one per byte. Data that happens to spell the terminal
+///   chunk cannot be mistaken for it, which a byte search cannot promise.
+/// - The reader calls this after each read to decide whether to read again, and
+///   carries scan_from between calls so each chunk is walked once no matter how
+///   many segments the body arrives in.
+///
+/// Param:
+/// raw - []const u8 (chunked bytes received so far, framing included)
+/// scan_from - *usize (last verified chunk boundary, start at 0 and reuse the same variable)
 ///
 /// Return:
-/// - number of decoded bytes written to out
-pub fn dechunk(raw: []const u8, out: []u8) DechunkError!usize {
+/// - usize (bytes of raw the body occupies, terminal chunk and trailers included)
+/// - null when the body has not fully arrived
+/// - error.InvalidChunkSize when a size line is not hex
+pub fn chunkedEnd(raw: []const u8, scan_from: *usize) DechunkError!?usize {
+    var pos: usize = scan_from.*;
+
+    while (true) {
+        scan_from.* = pos;
+
+        const crlf = std.mem.indexOfPos(u8, raw, pos, "\r\n") orelse return null;
+        const size_line = raw[pos..crlf];
+
+        const ext_pos = std.mem.indexOfScalar(u8, size_line, ';') orelse size_line.len;
+        const size_hex = std.mem.trim(u8, size_line[0..ext_pos], " \t");
+        if (size_hex.len == 0) return error.InvalidChunkSize;
+
+        const chunk_size = std.fmt.parseInt(usize, size_hex, 16) catch return error.InvalidChunkSize;
+
+        if (chunk_size == 0) {
+            // Terminal chunk. The trailer section runs to the first blank line.
+            var trailer_pos = crlf + 2;
+            while (true) {
+                const trailer_end = std.mem.indexOfPos(u8, raw, trailer_pos, "\r\n") orelse return null;
+                if (trailer_end == trailer_pos) return trailer_end + 2;
+
+                trailer_pos = trailer_end + 2;
+            }
+        }
+
+        const data_end = crlf + 2 + chunk_size;
+        if (data_end + 2 > raw.len) return null;
+
+        pos = data_end + 2;
+    }
+}
+
+/// Decode chunked bytes over themselves, no second buffer.
+///
+/// Note:
+/// - Decoding only ever removes framing, so the output is never longer than the
+///   input and every byte moves left. That makes the destination a prefix of the
+///   source, and a forward copy correct even where the two ranges overlap.
+///   @memcpy cannot be used here, it requires disjoint ranges.
+/// - Saves the allocation and the full-body copy a separate output buffer costs.
+///
+/// Param:
+/// raw - []u8 (chunked bytes, overwritten with the decoded body)
+///
+/// Return:
+/// - usize (decoded bytes, living at raw[0..returned])
+/// - error.InvalidChunkSize when a size line is not hex
+pub fn dechunkInPlace(raw: []u8) DechunkError!usize {
     var pos: usize = 0;
     var written: usize = 0;
 
@@ -306,10 +383,8 @@ pub fn dechunk(raw: []const u8, out: []u8) DechunkError!usize {
         const data_end = data_start + chunk_size;
         if (data_end > raw.len) break;
 
-        if (written + chunk_size <= out.len) {
-            @memcpy(out[written..][0..chunk_size], raw[data_start..data_end]);
-            written += chunk_size;
-        }
+        std.mem.copyForwards(u8, raw[written..][0..chunk_size], raw[data_start..data_end]);
+        written += chunk_size;
 
         pos = data_end + 2;
     }
@@ -445,47 +520,6 @@ test "zix http: parser chunked flag false when Transfer-Encoding absent" {
     try std.testing.expect(!h.chunked);
 }
 
-test "zix http: dechunk single chunk" {
-    const raw = "5\r\nhello\r\n0\r\n\r\n";
-    var out: [64]u8 = undefined;
-    const n = try dechunk(raw, &out);
-    try std.testing.expectEqualStrings("hello", out[0..n]);
-}
-
-test "zix http: dechunk multiple chunks" {
-    const raw = "3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n";
-    var out: [64]u8 = undefined;
-    const n = try dechunk(raw, &out);
-    try std.testing.expectEqualStrings("foobarr", out[0..n]);
-}
-
-test "zix http: dechunk terminal only returns empty" {
-    const raw = "0\r\n\r\n";
-    var out: [64]u8 = undefined;
-    const n = try dechunk(raw, &out);
-    try std.testing.expectEqual(@as(usize, 0), n);
-}
-
-test "zix http: dechunk chunk extension ignored" {
-    const raw = "5;name=value\r\nhello\r\n0\r\n\r\n";
-    var out: [64]u8 = undefined;
-    const n = try dechunk(raw, &out);
-    try std.testing.expectEqualStrings("hello", out[0..n]);
-}
-
-test "zix http: dechunk invalid hex returns error" {
-    const raw = "zz\r\nhello\r\n0\r\n\r\n";
-    var out: [64]u8 = undefined;
-    try std.testing.expectError(error.InvalidChunkSize, dechunk(raw, &out));
-}
-
-test "zix http: dechunk uppercase hex accepted" {
-    const raw = "A\r\n0123456789\r\n0\r\n\r\n";
-    var out: [64]u8 = undefined;
-    const n = try dechunk(raw, &out);
-    try std.testing.expectEqualStrings("0123456789", out[0..n]);
-}
-
 test "zix http: parseGetFast serves a plain keep-alive GET with query and headers" {
     // No Connection / Content-Length / Transfer-Encoding header, so the fast path applies.
     const raw = "GET /search?q=zig HTTP/1.1\r\nHost: x\r\nAccept: */*\r\n\r\n";
@@ -534,4 +568,82 @@ test "zix http: parseGetFast declines non-GET and HTTP/1.0 (full parse handles t
     const h10 = (try parse(v10, 64)).?;
     try std.testing.expectEqual(Method.Code.GET, h10.method);
     try std.testing.expectEqualStrings("/", v10[h10.path_start..][0..h10.path_len]);
+}
+
+test "zix http: chunkedEnd reports the body length once the terminator arrived" {
+    const raw = "5\r\nhello\r\n0\r\n\r\n";
+    var scan_from: usize = 0;
+    try std.testing.expectEqual(@as(?usize, raw.len), try chunkedEnd(raw, &scan_from));
+}
+
+test "zix http: chunkedEnd is null while the body is still arriving" {
+    var scan_from: usize = 0;
+    try std.testing.expectEqual(@as(?usize, null), try chunkedEnd("5\r\nhel", &scan_from));
+
+    scan_from = 0;
+    try std.testing.expectEqual(@as(?usize, null), try chunkedEnd("5\r\nhello\r\n", &scan_from));
+
+    scan_from = 0;
+    try std.testing.expectEqual(@as(?usize, null), try chunkedEnd("5\r\nhello\r\n0\r\n", &scan_from));
+}
+
+test "zix http: chunkedEnd resumes from the watermark across segments" {
+    const raw = "3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n";
+    var scan_from: usize = 0;
+
+    // One chunk in hand: the walk stops at the second chunk's size line.
+    try std.testing.expectEqual(@as(?usize, null), try chunkedEnd(raw[0..8], &scan_from));
+    try std.testing.expectEqual(@as(usize, 8), scan_from);
+
+    // The rest arrives and the walk carries on from there, not from byte zero.
+    try std.testing.expectEqual(@as(?usize, raw.len), try chunkedEnd(raw, &scan_from));
+}
+
+test "zix http: chunkedEnd steps over data that spells the terminator" {
+    // The chunk data is the terminator byte-for-byte. A byte search would stop
+    // inside it and cut the body short, the framing walk steps past it.
+    const raw = "5\r\n0\r\n\r\n\r\n0\r\n\r\n";
+    var scan_from: usize = 0;
+    try std.testing.expectEqual(@as(?usize, raw.len), try chunkedEnd(raw, &scan_from));
+}
+
+test "zix http: chunkedEnd counts the trailer section into the body length" {
+    const raw = "3\r\nabc\r\n0\r\nX-Sum: 1\r\n\r\n";
+    var scan_from: usize = 0;
+    try std.testing.expectEqual(@as(?usize, raw.len), try chunkedEnd(raw, &scan_from));
+}
+
+test "zix http: chunkedEnd stops at the pipelined request behind the terminator" {
+    const body = "3\r\nabc\r\n0\r\n\r\n";
+    const raw = body ++ "GET /next HTTP/1.1\r\n\r\n";
+    var scan_from: usize = 0;
+    try std.testing.expectEqual(@as(?usize, body.len), try chunkedEnd(raw, &scan_from));
+}
+
+test "zix http: chunkedEnd rejects a size line that is not hex" {
+    var scan_from: usize = 0;
+    try std.testing.expectError(error.InvalidChunkSize, chunkedEnd("zz\r\nabc\r\n0\r\n\r\n", &scan_from));
+}
+
+test "zix http: dechunkInPlace decodes over the source buffer" {
+    var raw = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n".*;
+    const len = try dechunkInPlace(&raw);
+    try std.testing.expectEqualStrings("hello world", raw[0..len]);
+}
+
+test "zix http: dechunkInPlace moves a chunk longer than its own framing" {
+    // Source and destination ranges overlap here (the chunk is far longer than
+    // the framing it replaces), which is exactly what @memcpy may not do.
+    const filler: [32]u8 = @splat('A');
+    var raw = "20\r\n".* ++ filler ++ "\r\n0\r\n\r\n".*;
+
+    const len = try dechunkInPlace(&raw);
+    try std.testing.expectEqual(@as(usize, 32), len);
+    try std.testing.expectEqualStrings(&filler, raw[0..len]);
+}
+
+test "zix http: dechunkInPlace joins every chunk in order" {
+    var raw = "4\r\nzero\r\n3\r\nsix\r\n0\r\n\r\n".*;
+    const got = try dechunkInPlace(&raw);
+    try std.testing.expectEqualStrings("zerosix", raw[0..got]);
 }
