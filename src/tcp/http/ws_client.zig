@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win_io = @import("../../utils/windows_io.zig");
+const socket_poll = @import("../../utils/socket_poll.zig");
 
 /// WebSocket client send chunk buffer.
 const WS_SEND_CHUNK: usize = 4096;
@@ -68,6 +69,17 @@ pub const WsClientConfig = struct {
     io: std.Io,
     /// TCP connect timeout in milliseconds. 0 = no timeout.
     connect_timeout_ms: u32 = 0,
+    /// Time allowed to receive the upgrade response after the handshake request is sent, in
+    /// milliseconds. 0 = no timeout. Yields error.ResponseTimeout when a server accepts and then
+    /// never answers.
+    response_timeout_ms: u32 = 0,
+    /// Idle bound between frames, in milliseconds. The budget restarts on every frame.
+    /// 0 = no timeout. Yields error.ReadTimeout when the peer goes quiet.
+    ///
+    /// Note:
+    /// - Defaults to no bound on purpose. A live socket is expected to sit idle between frames, so
+    ///   only a caller that knows its peer is chatty (a test, a health probe) should set this.
+    read_timeout_ms: u32 = 0,
 };
 
 // --------------------------------------------------------- //
@@ -78,6 +90,10 @@ pub const WsConn = struct {
     const Self = @This();
 
     fd: std.posix.fd_t,
+    /// Idle bound carried over from WsClientConfig, applied per socket read in recvExact.
+    /// Defaults to no bound so a hand-built connection reads exactly as it did before the field
+    /// existed.
+    read_timeout_ms: u32 = 0,
 
     // --------------------------------------------------------- //
 
@@ -151,7 +167,7 @@ pub const WsConn = struct {
     /// - error.ConnectionClosed (EOF mid-frame)
     pub fn recv(self: Self, payload_buf: []u8) !?Frame {
         var header: [2]u8 = undefined;
-        if (!try recvExact(self.fd, &header)) return null;
+        if (!try recvExact(self.fd, &header, self.read_timeout_ms)) return null;
 
         const fin = (header[0] & 0x80) != 0;
         const opcode: Opcode = @enumFromInt(header[0] & 0x0F);
@@ -160,22 +176,22 @@ pub const WsConn = struct {
 
         if (payload_len == ws_len_16bit_marker) {
             var ext: [2]u8 = undefined;
-            if (!try recvExact(self.fd, &ext)) return error.ConnectionClosed;
+            if (!try recvExact(self.fd, &ext, self.read_timeout_ms)) return error.ConnectionClosed;
             payload_len = (@as(u64, ext[0]) << 8) | ext[1];
         } else if (payload_len == ws_len_64bit_marker) {
             var ext: [ws_len_64bit_field_size]u8 = undefined;
-            if (!try recvExact(self.fd, &ext)) return error.ConnectionClosed;
+            if (!try recvExact(self.fd, &ext, self.read_timeout_ms)) return error.ConnectionClosed;
             payload_len = 0;
             for (0..ws_len_64bit_field_size) |i| payload_len = (payload_len << 8) | ext[i];
         }
 
         var mask: [ws_mask_len]u8 = .{ 0, 0, 0, 0 };
         if (masked) {
-            if (!try recvExact(self.fd, &mask)) return error.ConnectionClosed;
+            if (!try recvExact(self.fd, &mask, self.read_timeout_ms)) return error.ConnectionClosed;
         }
 
         const capped_len: usize = @intCast(@min(payload_len, payload_buf.len));
-        if (!try recvExact(self.fd, payload_buf[0..capped_len])) return error.ConnectionClosed;
+        if (!try recvExact(self.fd, payload_buf[0..capped_len], self.read_timeout_ms)) return error.ConnectionClosed;
 
         if (masked) {
             for (0..capped_len) |i| payload_buf[i] ^= mask[i % ws_mask_len];
@@ -265,6 +281,8 @@ pub const WsClient = struct {
         var header_end: usize = 0;
 
         while (resp_len < resp_buf.len) {
+            if (!socket_poll.readableWithin(fd, self.config.response_timeout_ms)) return error.ResponseTimeout;
+
             const n = readOnceFD(fd, resp_buf[resp_len..]) catch return error.HandshakeFailed;
             if (n == 0) return error.HandshakeFailed;
             resp_len += n;
@@ -285,7 +303,7 @@ pub const WsClient = struct {
             return error.HandshakeFailed;
         }
 
-        return WsConn{ .fd = fd };
+        return WsConn{ .fd = fd, .read_timeout_ms = self.config.read_timeout_ms };
     }
 };
 
@@ -378,10 +396,12 @@ fn writeAllFD(fd: std.posix.fd_t, data: []const u8) !void {
     }
 }
 
-fn recvExact(fd: std.posix.fd_t, buf: []u8) !bool {
+fn recvExact(fd: std.posix.fd_t, buf: []u8, idle_ms: u32) !bool {
     if (buf.len == 0) return true;
     var received: usize = 0;
     while (received < buf.len) {
+        if (!socket_poll.readableWithin(fd, idle_ms)) return error.ReadTimeout;
+
         const n = readOnceFD(fd, buf[received..]) catch return error.ConnectionClosed;
         if (n == 0) return if (received == 0) false else error.ConnectionClosed;
         received += n;
@@ -434,4 +454,99 @@ test "zix http ws client: parseWsUrl wss returns TlsNotSupported" {
 
 test "zix http ws client: parseWsUrl non-ws scheme returns InvalidUrl" {
     try std.testing.expectError(error.InvalidUrl, parseWsUrl("http://example.com/"));
+}
+
+test "zix http ws client: a server that never answers yields ResponseTimeout" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Never accepted on purpose. The handshake request goes out and the upgrade reply never comes.
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9081);
+    var silent = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer silent.deinit(io);
+
+    const client = WsClient.init(.{
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = 150,
+    });
+
+    try std.testing.expectError(error.ResponseTimeout, client.connect("ws://127.0.0.1:9081/ws"));
+}
+
+test "zix http ws client: a peer that sends no frame yields ReadTimeout" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", 9082);
+    var listener = try addr.listen(io, .{ .mode = .stream, .protocol = .tcp, .kernel_backlog = 8, .reuse_address = true });
+    defer listener.deinit(io);
+
+    // Completes a real upgrade (the client verifies Sec-WebSocket-Accept, so the key has to be
+    // echoed through acceptKey) and then sends no frame at all. Held open, because closing would
+    // give ConnectionClosed instead of the stall under test.
+    const Mute = struct {
+        fn serve(listen_srv: *std.Io.net.Server, srv_io: std.Io, release: *std.atomic.Value(bool)) void {
+            const stream = listen_srv.accept(srv_io) catch return;
+            defer stream.close(srv_io);
+
+            var scratch: [2048]u8 = undefined;
+            var reader = stream.reader(srv_io, &scratch);
+
+            var key_buf: [128]u8 = undefined;
+            var key_len: usize = 0;
+            while (reader.interface.takeDelimiterInclusive('\n') catch null) |line| {
+                if (line.len <= 2) break;
+
+                const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+                const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
+                if (!std.ascii.eqlIgnoreCase(trimmed[0..colon], "sec-websocket-key")) continue;
+
+                const value = std.mem.trim(u8, trimmed[colon + 1 ..], " \t");
+                key_len = @min(value.len, key_buf.len);
+                @memcpy(key_buf[0..key_len], value[0..key_len]);
+            }
+
+            var accept_out: [64]u8 = undefined;
+            const accept = acceptKey(key_buf[0..key_len], &accept_out) catch return;
+
+            var sink: [512]u8 = undefined;
+            var writer = stream.writer(srv_io, &sink);
+            writer.interface.print(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n",
+                .{accept},
+            ) catch return;
+            writer.interface.flush() catch return;
+
+            var rounds: usize = 0;
+            while (!release.load(.acquire) and rounds < 5000) : (rounds += 1) {
+                std.Io.sleep(srv_io, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+            }
+        }
+    };
+
+    var release: std.atomic.Value(bool) = .init(false);
+    const serve_thread = try std.Thread.spawn(.{}, Mute.serve, .{ &listener, io, &release });
+    defer serve_thread.join();
+
+    const client = WsClient.init(.{
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = 3000,
+        .read_timeout_ms = 150,
+    });
+
+    var conn = client.connect("ws://127.0.0.1:9082/ws") catch |err| {
+        release.store(true, .release);
+        return err;
+    };
+    defer conn.deinit();
+
+    var buf: [1024]u8 = undefined;
+    const outcome = conn.recv(&buf);
+    release.store(true, .release);
+
+    try std.testing.expectError(error.ReadTimeout, outcome);
 }
