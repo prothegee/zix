@@ -1,9 +1,8 @@
 //! Edge tests: zix.Http QUERY method boundary conditions (RFC 10008).
 //!
-//! This engine matches the method token exactly, where the raw engine folds
-//! case. Both bounds are pinned here so the difference stays a decision rather
-//! than a surprise, alongside the Content-Type and framing limits a query body
-//! runs into.
+//! Both HTTP/1 engines match the method token exactly, reading one shared
+//! method table. That bound is pinned here alongside the Content-Type and
+//! framing limits a query body runs into.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -11,9 +10,9 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix edge: Http matches the QUERY token exactly, as it does every method" {
-    // RFC 9110 section 9.1 makes method names case-sensitive, and this engine's
-    // request-line parser has always compared them that way. A lowercase token is
-    // not the QUERY method, so it reads as a method this engine does not implement.
+    // RFC 9110 section 9.1 makes method names case-sensitive. A lowercase token
+    // is not the QUERY method, so it reads as a method this engine does not
+    // implement.
     try std.testing.expectError(
         error.UnknownMethod,
         zix.Http.Request.fromRaw("query /search HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
