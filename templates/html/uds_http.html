@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>zix UDS + Channel</title></head>
+<body>
+<h2>zix UDS + Channel demo</h2>
+<button onclick="fetchData()">GET /data (one-shot)</button>
+<pre id="data" style="font-family:monospace"></pre>
+<h3>SSE stream (/stream)</h3>
+<pre id="stream-val" style="font-family:monospace">waiting...</pre>
+<script>
+async function fetchData() {
+  const r = await fetch('/data');
+  document.getElementById('data').textContent = await r.text();
+}
+const es = new EventSource('/stream');
+es.onmessage = e => { document.getElementById('stream-val').textContent = e.data; };
+es.onerror = () => { document.getElementById('stream-val').textContent = '[reconnecting...]'; };
+</script>
+</body>
+</html>
