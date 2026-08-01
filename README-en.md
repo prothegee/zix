@@ -204,8 +204,6 @@ __*Maintained Platforms:*__
 
 [Open an issue.](https://codeberg.org/prothegee/zix/issues/new)
 
-[Open a discussion.](https://github.com/prothegee/zix/discussions)
-
 <br>
 
 ## Repositories

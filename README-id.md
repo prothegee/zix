@@ -204,8 +204,6 @@ __*Maintained Platforms:*__
 
 [Buka isu.](https://codeberg.org/prothegee/zix/issues/new)
 
-[Buka diskusi.](https://github.com/prothegee/zix/discussions)
-
 <br>
 
 ## Repositori
