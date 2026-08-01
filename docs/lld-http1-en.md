@@ -20,7 +20,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `dispatch_model` | `run()` switch |
 | `workers` | .EPOLL and .URING worker count, ignored by .ASYNC |
 | `handler_timeout_ms` | armed before every dispatch in all models |
-| `max_recv_buf` | .EPOLL per-connection buffer size (`ConnTable.alloc`) |
+| `max_recv_buf` | per-connection buffer size on every model: .EPOLL / .URING slots (`ConnTable.alloc`), the .ASYNC pool-thread pair (`threadConnBufs`) |
 | `large_body_rcvbuf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
 | `ws_recv_buf` | WebSocket per-connection buffer size, 0 falls back to `max_recv_buf`. .EPOLL sizes the recv buffer, .URING sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch |
 | `send_date_header` | managed write helpers: include or omit the `Date` header |
@@ -36,7 +36,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 ### Constants
 
 ```
-BUF_SIZE      = 16 * 1024   // receive buffer (serveConn stack, EPOLL worker scratch)
+BUF_SIZE      = 16 * 1024   // shared scratch size (direct serveConn default, chunked reader, TLS payload buffers)
 GZIP_OUT_SIZE = 256 * 1024  // sendGzipFD output buffer
 ```
 
@@ -190,7 +190,7 @@ The IMF-fixdate string is reformatted at most once per second per thread, and th
 
 ### serveConn(): blocking keep-alive loop
 
-Used by .ASYNC. Stack state: `recv_buf[16 KB]`, `body_buf[8 KB]`, `leftover: usize`.
+Used by .ASYNC. Per-connection state: the pool thread's `recv_buf` + `body_buf` pair (`threadConnBufs`, each `max_recv_buf` bytes, `BUF_SIZE` 16 KB for a direct caller that passes 0) and `leftover: usize`.
 
 ```
 0. TCP_NODELAY (opts.nodelay, skipped on Windows)
@@ -204,7 +204,7 @@ loop:
                           MALFORMED -> 400, return. TOO_LARGE -> 413, return.
                           NEED_MORE (peer quit mid-body) -> return
         content_length -> declared length > max_request_body -> 413, return
-                          copy peeked bytes, read until min(content_length, 8192),
+                          copy peeked bytes, read until min(content_length, body_buf.len),
                           drainBody the remainder (counted, never touches body_buf)
   5. bodyReceived = every body byte the socket gave up, bodyComplete = whether
         the declared or framed end was reached, handed over before the invoke
@@ -215,7 +215,7 @@ loop:
         (a chunked read carries its own leftover to the front the same way)
 ```
 
-The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (8 KB) hands the handler the first 8 KB and drains the remainder off the socket before the invoke (widening the receive window via `large_body_rcvbuf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `req.bodyReceived()` for the counted total and `req.bodyComplete()` to tell a finished upload from one the peer cut short, instead of trusting `head.content_length`.
+The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (`max_recv_buf` bytes) hands the handler what fits and drains the remainder off the socket before the invoke (widening the receive window via `large_body_rcvbuf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `req.bodyReceived()` for the counted total and `req.bodyComplete()` to tell a finished upload from one the peer cut short, instead of trusting `head.content_length`.
 
 ### serveConnOne(): EPOLL one-shot fallback
 
@@ -304,7 +304,8 @@ Conn = {
 ```
 1. private listener (reuse_address) -> setNonBlock(listener_fd)
 2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
-3. per-worker scratch: body_buf[16 KB] + out_buf[16 KB] (smp_allocator)
+3. per-worker scratch (smp_allocator): body_buf sized from the recv-slot knob
+   (ws_recv_buf, else max_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
 4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       listener event       -> acceptAll
       HUP/ERR              -> close
