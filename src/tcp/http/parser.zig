@@ -167,7 +167,7 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     const first_space = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
     // The line tokenized, so an unmatched token is an unimplemented method rather
     // than a malformed request. The caller turns this into a 501.
-    const method_code = parseMethod(req_line[0..first_space]) orelse return error.UnknownMethod;
+    const method_code = Method.codeFromString(req_line[0..first_space]) orelse return error.UnknownMethod;
 
     const after_method = req_line[first_space + 1 ..];
     const second_space = std.mem.indexOfScalar(u8, after_method, ' ') orelse return error.InvalidRequest;
@@ -395,17 +395,6 @@ pub fn dechunkInPlace(raw: []u8) DechunkError!usize {
     }
 
     return written;
-}
-
-fn parseMethod(str: []const u8) ?Method.Code {
-    return switch (str.len) {
-        3 => if (std.mem.eql(u8, str, "GET")) .GET else if (std.mem.eql(u8, str, "PUT")) .PUT else null,
-        4 => if (std.mem.eql(u8, str, "HEAD")) .HEAD else if (std.mem.eql(u8, str, "POST")) .POST else null,
-        5 => if (std.mem.eql(u8, str, "PATCH")) .PATCH else if (std.mem.eql(u8, str, "TRACE")) .TRACE else if (std.mem.eql(u8, str, "QUERY")) .QUERY else null,
-        6 => if (std.mem.eql(u8, str, "DELETE")) .DELETE else null,
-        7 => if (std.mem.eql(u8, str, "OPTIONS")) .OPTIONS else if (std.mem.eql(u8, str, "CONNECT")) .CONNECT else null,
-        else => null,
-    };
 }
 
 // --------------------------------------------------------- //

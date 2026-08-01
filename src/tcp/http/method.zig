@@ -22,97 +22,53 @@ pub const Code = enum(u8) {
 
     // --------------------------------------------------------- //
 
-    /// Get self object string from enum
+    /// Get self object as a string
     ///
     /// Note:
-    /// - exhaustive
-    ///
-    /// Param:
-    /// self - zix.Tcp.Method.Code
-    ///
-    /// Return:
-    /// - []const u8
-    fn toString(self: Code) []const u8 {
-        return switch (self) {
-            .GET => "GET",
-            .HEAD => "HEAD",
-            .POST => "POST",
-            .PUT => "PUT",
-            .DELETE => "DELETE",
-            .PATCH => "PATCH",
-            .OPTIONS => "OPTIONS",
-            .TRACE => "TRACE",
-            .CONNECT => "CONNECT",
-            .QUERY => "QUERY",
-        };
-    }
-    /// Get self object as a string
+    /// - The method-call spelling of stringFromEnum. One switch backs
+    ///   both, so the two forms cannot report different strings
     ///
     /// Return:
     /// - []const u8
     pub fn asString(self: Self) []const u8 {
-        return Self.toString(self);
+        return stringFromEnum(self);
     }
 };
 
 // --------------------------------------------------------- //
 
 /// Longest method token this engine knows, in bytes ("OPTIONS", "CONNECT").
-/// A token longer than this names no known method, so it never needs lowering.
+/// A token longer than this names no known method.
 pub const MAX_TOKEN_LEN: usize = 7;
 
 /// Get enum from string, reporting no match
 ///
 /// Note:
+/// - This is the one method table for this engine. The request-line parser
+///   calls it rather than keeping its own copy, so an engine cannot drift from
+///   the table it publishes
+/// - RFC 9110 section 9.1 makes method names case-sensitive, so the match is
+///   exact. A lowercase token names no method and reports null
 /// - Returns null when the token names no method this engine knows, which lets
 ///   a caller answer 501 Not Implemented instead of acting on a wrong method
-/// - A token longer than MAX_TOKEN_LEN is rejected before any copy, so an
-///   oversized token from the wire cannot overrun the lowercase buffer
+/// - The length switch rejects an oversized token before any compare, so a
+///   token from the wire costs one length test and one compare
 ///
 /// Param:
-/// method_string - []const u8 (insensitive, forced to lowercase)
+/// method_string - []const u8 (the raw token, matched exactly)
 ///
 /// Return:
 /// - zix.Tcp.Http.Method.Code
 /// - null when the token matches no known method
 pub fn codeFromString(method_string: []const u8) ?Code {
-    if (method_string.len > MAX_TOKEN_LEN) return null;
-
-    var data: [MAX_TOKEN_LEN]u8 = undefined;
-    const mod = std.ascii.lowerString(&data, method_string);
-
-    if (std.mem.eql(u8, mod, "get")) {
-        return Code.GET;
-    }
-    if (std.mem.eql(u8, mod, "head")) {
-        return Code.HEAD;
-    }
-    if (std.mem.eql(u8, mod, "post")) {
-        return Code.POST;
-    }
-    if (std.mem.eql(u8, mod, "put")) {
-        return Code.PUT;
-    }
-    if (std.mem.eql(u8, mod, "delete")) {
-        return Code.DELETE;
-    }
-    if (std.mem.eql(u8, mod, "patch")) {
-        return Code.PATCH;
-    }
-    if (std.mem.eql(u8, mod, "options")) {
-        return Code.OPTIONS;
-    }
-    if (std.mem.eql(u8, mod, "trace")) {
-        return Code.TRACE;
-    }
-    if (std.mem.eql(u8, mod, "connect")) {
-        return Code.CONNECT;
-    }
-    if (std.mem.eql(u8, mod, "query")) {
-        return Code.QUERY;
-    }
-
-    return null;
+    return switch (method_string.len) {
+        3 => if (std.mem.eql(u8, method_string, "GET")) Code.GET else if (std.mem.eql(u8, method_string, "PUT")) Code.PUT else null,
+        4 => if (std.mem.eql(u8, method_string, "HEAD")) Code.HEAD else if (std.mem.eql(u8, method_string, "POST")) Code.POST else null,
+        5 => if (std.mem.eql(u8, method_string, "PATCH")) Code.PATCH else if (std.mem.eql(u8, method_string, "TRACE")) Code.TRACE else if (std.mem.eql(u8, method_string, "QUERY")) Code.QUERY else null,
+        6 => if (std.mem.eql(u8, method_string, "DELETE")) Code.DELETE else null,
+        7 => if (std.mem.eql(u8, method_string, "OPTIONS")) Code.OPTIONS else if (std.mem.eql(u8, method_string, "CONNECT")) Code.CONNECT else null,
+        else => null,
+    };
 }
 
 /// Get enum from string
@@ -123,7 +79,7 @@ pub fn codeFromString(method_string: []const u8) ?Code {
 ///   codeFromString instead, which reports the no-match case as null
 ///
 /// Param:
-/// method_string - []const u8 (insensitive, forced to lowercase)
+/// method_string - []const u8 (the raw token, matched exactly)
 ///
 /// Return:
 /// - zix.Tcp.Http.Method.Code
@@ -160,7 +116,7 @@ pub fn stringFromEnum(method_enum: Code) []const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix http: tcp http method" {
+test "zix http: method every code round-trips through its string" {
     const all_codes = [_]Code{
         Code.GET,
         Code.HEAD,
@@ -174,16 +130,11 @@ test "zix http: tcp http method" {
         Code.QUERY,
     };
 
-    for (all_codes) |e| {
-        const e_str = stringFromEnum(e);
+    for (all_codes) |code| {
+        const code_string = stringFromEnum(code);
 
-        try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));
-
-        const expected1 = enumFromString(e_str);
-        try std.testing.expect(expected1 == e);
-
-        const expected2 = stringFromEnum(e);
-        try std.testing.expect(std.mem.eql(u8, e_str, expected2));
+        try std.testing.expectEqualStrings(code_string, code.asString());
+        try std.testing.expectEqual(code, codeFromString(code_string).?);
     }
 }
 
@@ -198,9 +149,14 @@ test "zix http: method QUERY is not reported as GET" {
     try std.testing.expect(enumFromString("QUERY") != Code.GET);
 }
 
-test "zix http: method QUERY token matching is case-insensitive" {
-    try std.testing.expectEqual(Code.QUERY, enumFromString("query"));
-    try std.testing.expectEqual(Code.QUERY, enumFromString("QuErY"));
+test "zix http: method token matching is case-sensitive" {
+    // RFC 9110 section 9.1 makes method names case-sensitive, so a lowercase
+    // token names no method. Both HTTP/1 engines read this one table, so a
+    // fold here would put them back out of step with each other.
+    try std.testing.expect(codeFromString("query") == null);
+    try std.testing.expect(codeFromString("QuErY") == null);
+    try std.testing.expect(codeFromString("get") == null);
+    try std.testing.expect(codeFromString("Post") == null);
 }
 
 test "zix http: method codeFromString reports an unknown token as null" {
@@ -209,8 +165,8 @@ test "zix http: method codeFromString reports an unknown token as null" {
 }
 
 test "zix http: method codeFromString rejects a token past MAX_TOKEN_LEN" {
-    // Longer than any known method, so it is refused before the lowercase copy.
-    // Without the length guard this overruns the stack buffer.
+    // Longer than any known method, so the length switch refuses it before any
+    // compare rather than reading past the tokens it knows.
     try std.testing.expect(codeFromString("PROPPATCH") == null);
     try std.testing.expect(codeFromString("QUERYQUERYQUERY") == null);
 }
