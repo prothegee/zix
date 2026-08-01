@@ -20,7 +20,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `dispatch_model` | switch di `run()` |
 | `workers` | jumlah worker .EPOLL dan .URING, diabaikan oleh .ASYNC |
 | `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
-| `max_recv_buf` | ukuran buffer per-connection .EPOLL (`ConnTable.alloc`) |
+| `max_recv_buf` | ukuran buffer per-connection pada semua model: slot .EPOLL / .URING (`ConnTable.alloc`), pasangan pool-thread .ASYNC (`threadConnBufs`) |
 | `large_body_rcvbuf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
 | `ws_recv_buf` | ukuran buffer per-connection WebSocket, 0 jatuh ke `max_recv_buf`. .EPOLL menentukan ukuran buffer recv, .URING menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask |
 | `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
@@ -36,7 +36,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 ### Konstanta
 
 ```
-BUF_SIZE      = 16 * 1024   // receive buffer (stack serveConn, scratch worker EPOLL)
+BUF_SIZE      = 16 * 1024   // ukuran scratch bersama (default serveConn langsung, reader chunked, buffer payload TLS)
 GZIP_OUT_SIZE = 256 * 1024  // buffer output sendGzipFD
 ```
 
@@ -190,7 +190,7 @@ String IMF-fixdate diformat ulang paling banyak sekali per detik per thread, dan
 
 ### serveConn(): loop keep-alive blocking
 
-Dipakai .ASYNC. State stack: `recv_buf[16 KB]`, `body_buf[8 KB]`, `leftover: usize`.
+Dipakai .ASYNC. State per-koneksi: pasangan `recv_buf` + `body_buf` milik pool thread (`threadConnBufs`, masing-masing `max_recv_buf` byte, `BUF_SIZE` 16 KB untuk pemanggil langsung yang memberi 0) dan `leftover: usize`.
 
 ```
 0. TCP_NODELAY (opts.nodelay, dilewati di Windows)
@@ -204,7 +204,7 @@ loop:
                           MALFORMED -> 400, return. TOO_LARGE -> 413, return.
                           NEED_MORE (peer berhenti di tengah body) -> return
         content_length -> panjang yang dideklarasikan > max_request_body -> 413, return
-                          salin byte peeked, baca sampai min(content_length, 8192),
+                          salin byte peeked, baca sampai min(content_length, body_buf.len),
                           drainBody sisanya (terhitung, tidak pernah menyentuh body_buf)
   5. bodyReceived = setiap byte body yang diberikan socket, bodyComplete = apakah
         akhir yang dideklarasikan atau ter-framing tercapai, diserahkan sebelum invoke
@@ -215,7 +215,7 @@ loop:
         (pembacaan chunked membawa leftover pipelined-nya ke depan dengan cara yang sama)
 ```
 
-Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (8 KB) memberi handler 8 KB pertama dan membuang sisanya dari socket sebelum invoke (melebarkan receive window via `large_body_rcvbuf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `req.bodyReceived()` untuk total terhitung dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer, alih-alih mempercayai `head.content_length`.
+Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (`max_recv_buf` byte) memberi handler bagian yang muat dan membuang sisanya dari socket sebelum invoke (melebarkan receive window via `large_body_rcvbuf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `req.bodyReceived()` untuk total terhitung dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer, alih-alih mempercayai `head.content_length`.
 
 ### serveConnOne(): fallback one-shot EPOLL
 
@@ -304,7 +304,8 @@ Conn = {
 ```
 1. listener pribadi (reuse_address) -> setNonBlock(listener_fd)
 2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
-3. scratch per-worker: body_buf[16 KB] + out_buf[16 KB] (smp_allocator)
+3. scratch per-worker (smp_allocator): body_buf berukuran dari knob slot recv
+   (ws_recv_buf, selain itu max_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
 4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       event listener       -> acceptAll
       HUP/ERR              -> close
