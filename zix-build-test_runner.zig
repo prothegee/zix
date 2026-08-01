@@ -55,6 +55,7 @@ pub fn addSteps(
         .{ "test-runner-http-middleware", "tests/runner/http_get_runner.zig", "tr-server-http-middleware", "examples/http_middleware.zig", "9006", "/public", "http://127.0.0.1", "public" },
         .{ "test-runner-http-params", "tests/runner/http_get_runner.zig", "tr-server-http-params", "examples/http_params.zig", "9007", "/echo?foo=bar", "", "foo" },
         .{ "test-runner-http-paths", "tests/runner/http_get_runner.zig", "tr-server-http-paths", "examples/http_paths.zig", "9008", "/path", "", "" },
+        .{ "test-runner-http-query", "tests/runner/http_query_runner.zig", "tr-server-http-query", "examples/http_query.zig", "9080", "", "", "" },
         .{ "test-runner-http-timeout-resp", "tests/runner/http_get_runner.zig", "tr-server-http-timeout-resp", "examples/http_timeout_resp.zig", "9010", "/ping", "", "pong" },
         .{ "test-runner-http-xtra-headers", "tests/runner/http_get_runner.zig", "tr-server-http-xtra-headers", "examples/http_xtra_headers.zig", "9011", "/info", "", "" },
         .{ "test-runner-http-manual-concurrent", "tests/runner/http_get_runner.zig", "tr-server-http-manual-concurrent", "examples/http_manual_concurrent.zig", "9014", "/", "", "hello" },
@@ -69,6 +70,7 @@ pub fn addSteps(
         .{ "test-runner-http1-middleware", "tests/runner/http_get_runner.zig", "tr-server-http1-middleware", "examples/http1_middleware.zig", "9021", "/public", "http://127.0.0.1", "public" },
         .{ "test-runner-http1-params", "tests/runner/http_get_runner.zig", "tr-server-http1-params", "examples/http1_params.zig", "9022", "/echo?foo=bar", "", "foo" },
         .{ "test-runner-http1-paths", "tests/runner/http_get_runner.zig", "tr-server-http1-paths", "examples/http1_paths.zig", "9023", "/path", "", "" },
+        .{ "test-runner-http1-query", "tests/runner/http_query_runner.zig", "tr-server-http1-query", "examples/http1_query.zig", "9079", "", "", "" },
         .{ "test-runner-http1-timeout-resp", "tests/runner/http_get_runner.zig", "tr-server-http1-timeout-resp", "examples/http1_timeout_resp.zig", "9025", "/ping", "", "pong" },
         .{ "test-runner-http1-xtra-headers", "tests/runner/http_get_runner.zig", "tr-server-http1-xtra-headers", "examples/http1_xtra_headers.zig", "9026", "/info", "", "" },
         .{ "test-runner-http1-manual-concurrent", "tests/runner/http_get_runner.zig", "tr-server-http1-manual-concurrent", "examples/http1_manual_concurrent.zig", "9030", "/", "", "hello" },
@@ -244,11 +246,12 @@ pub fn addSteps(
             .{ "tr-all-server-udp", "examples/udp_server.zig" },
             .{ "tr-all-server-udp-raw", "examples/udp_server_raw.zig" },
             .{ "tr-all-server-uds", "examples/uds_server.zig" },
-            // http feature servers (11)
+            // http feature servers (12)
             .{ "tr-all-server-http-json", "examples/http_json.zig" },
             .{ "tr-all-server-http-middleware", "examples/http_middleware.zig" },
             .{ "tr-all-server-http-params", "examples/http_params.zig" },
             .{ "tr-all-server-http-paths", "examples/http_paths.zig" },
+            .{ "tr-all-server-http-query", "examples/http_query.zig" },
             .{ "tr-all-server-http-timeout-resp", "examples/http_timeout_resp.zig" },
             .{ "tr-all-server-http-xtra-headers", "examples/http_xtra_headers.zig" },
             .{ "tr-all-server-http-manual-concurrent", "examples/http_manual_concurrent.zig" },
@@ -256,11 +259,12 @@ pub fn addSteps(
             .{ "tr-all-server-http-sse", "examples/http_sse.zig" },
             .{ "tr-all-server-http-websocket", "examples/http_websocket.zig" },
             .{ "tr-all-server-http-compression", "examples/http_compression.zig" },
-            // http1 feature servers (12)
+            // http1 feature servers (13)
             .{ "tr-all-server-http1-json", "examples/http1_json.zig" },
             .{ "tr-all-server-http1-middleware", "examples/http1_middleware.zig" },
             .{ "tr-all-server-http1-params", "examples/http1_params.zig" },
             .{ "tr-all-server-http1-paths", "examples/http1_paths.zig" },
+            .{ "tr-all-server-http1-query", "examples/http1_query.zig" },
             .{ "tr-all-server-http1-timeout-resp", "examples/http1_timeout_resp.zig" },
             .{ "tr-all-server-http1-xtra-headers", "examples/http1_xtra_headers.zig" },
             .{ "tr-all-server-http1-manual-concurrent", "examples/http1_manual_concurrent.zig" },
