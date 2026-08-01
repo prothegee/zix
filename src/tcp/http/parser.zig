@@ -56,6 +56,9 @@ pub const ParsedHead = struct {
 pub const ParseError = error{
     InvalidRequest,
     TooManyHeaders,
+    /// Well-formed request line naming a method this engine does not implement.
+    /// Distinct from InvalidRequest so the caller can answer 501 rather than 400.
+    UnknownMethod,
 };
 
 const DechunkError = error{
@@ -162,7 +165,9 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     const req_line = head_buf[0..first_crlf];
 
     const first_space = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
-    const method_code = parseMethod(req_line[0..first_space]) orelse return error.InvalidRequest;
+    // The line tokenized, so an unmatched token is an unimplemented method rather
+    // than a malformed request. The caller turns this into a 501.
+    const method_code = parseMethod(req_line[0..first_space]) orelse return error.UnknownMethod;
 
     const after_method = req_line[first_space + 1 ..];
     const second_space = std.mem.indexOfScalar(u8, after_method, ' ') orelse return error.InvalidRequest;
@@ -396,7 +401,7 @@ fn parseMethod(str: []const u8) ?Method.Code {
     return switch (str.len) {
         3 => if (std.mem.eql(u8, str, "GET")) .GET else if (std.mem.eql(u8, str, "PUT")) .PUT else null,
         4 => if (std.mem.eql(u8, str, "HEAD")) .HEAD else if (std.mem.eql(u8, str, "POST")) .POST else null,
-        5 => if (std.mem.eql(u8, str, "PATCH")) .PATCH else if (std.mem.eql(u8, str, "TRACE")) .TRACE else null,
+        5 => if (std.mem.eql(u8, str, "PATCH")) .PATCH else if (std.mem.eql(u8, str, "TRACE")) .TRACE else if (std.mem.eql(u8, str, "QUERY")) .QUERY else null,
         6 => if (std.mem.eql(u8, str, "DELETE")) .DELETE else null,
         7 => if (std.mem.eql(u8, str, "OPTIONS")) .OPTIONS else if (std.mem.eql(u8, str, "CONNECT")) .CONNECT else null,
         else => null,
@@ -465,9 +470,17 @@ test "zix http: parser all methods" {
     }
 }
 
-test "zix http: parser invalid method" {
-    const raw = "BREW / HTTP/1.1\r\n\r\n";
-    try std.testing.expectError(error.InvalidRequest, parse(raw, 64));
+test "zix http: parser an unimplemented method is UnknownMethod, not InvalidRequest" {
+    // The request line tokenized fine, so the caller owes a 501 rather than a 400.
+    try std.testing.expectError(error.UnknownMethod, parse("BREW / HTTP/1.1\r\n\r\n", 64));
+    try std.testing.expectError(error.UnknownMethod, parse("QUERX / HTTP/1.1\r\n\r\n", 64));
+}
+
+test "zix http: parser a malformed request line stays InvalidRequest" {
+    // No space at all, then only one space. Neither tokenizes, so neither is a
+    // statement about the method.
+    try std.testing.expectError(error.InvalidRequest, parse("GET\r\n\r\n", 64));
+    try std.testing.expectError(error.InvalidRequest, parse("GET /x\r\n\r\n", 64));
 }
 
 test "zix http: parser chunked flag set when Transfer-Encoding: chunked" {
