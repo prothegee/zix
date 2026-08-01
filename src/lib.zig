@@ -229,6 +229,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/socket_poll.zig"));
     std.testing.refAllDecls(@import("utils/async_cache.zig"));
     std.testing.refAllDecls(@import("utils/socket_path.zig"));
+    std.testing.refAllDecls(@import("utils/counter_scale.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate.zig"));
     std.testing.refAllDecls(@import("utils/compression/flate_fast.zig"));
     std.testing.refAllDecls(@import("utils/compression/brotli.zig"));
