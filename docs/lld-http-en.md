@@ -46,50 +46,46 @@ epollWorker():
                epoll_ctl(DEL, conn_fd)
                linux.close(conn_fd)
        conn fd (readable):
-               result = handleOneRequest(conn_fd, buf, arena, self)
+               read to EAGAIN into the connection buffer
+               result = processRequest(conn_fd, buf, arena, self)
                .keep_alive -> stay registered (level-triggered, no re-arm)
                .close      -> epoll_ctl(DEL, conn_fd) + linux.close(conn_fd)
 ```
 
-No shared state between workers. `handleOneRequest` is called directly on the worker thread;
-it does a synchronous blocking recv/parse/dispatch/send. The arena is reset between requests.
+No shared state between workers. The worker thread calls `processRequest` (dispatch/common.zig) directly: a synchronous parse/dispatch/send over the delivered bytes. The same pipeline serves every dispatch model, so body behaviour is identical on all three:
+
+- `Expect: 100-continue` with a declared body is answered before the handler runs.
+- A body past `max_request_body` is refused inside `body()` and answered `413`, a chunk framing that cannot be parsed is `error.InvalidChunkedBody` and answered `400` (both only when the handler wrote nothing yet).
+- After the handler, the connection closes when a declared body was not fully consumed: the handler never called `body()`, the peer stopped early, or a chunked body fell short. Leftover body bytes would otherwise be parsed as the next request.
+
+The arena is reset between requests.
 
 ### handleConnection()
 
+The `.ASYNC` per-connection entry (dispatch/common.zig). One call owns the whole keep-alive lifetime:
+
 ```
-1. setsockopt TCP_NODELAY           // disable Nagle, send each response immediately
-2. Layer D: if conn_timeout_ms > 0:
+1. defer stream.close, setsockopt TCP_NODELAY   // disable Nagle, send each response immediately
+2. install the per-connection thread-locals: compression settings, response cache
+      (the multiplexed models install these once per worker, .ASYNC has no worker:
+      io.async hands each connection to whichever pool thread is free)
+3. Layer D: if conn_timeout_ms > 0:
       register ConnEntry{ stream, deadline = now + conn_timeout_ms } with self.registry
-      defer deregister on return (marks done=true, removes from registry)
-3. stack_read [stack_read_buf_max]u8 on stack (stack_read_buf_max = 4096, dispatch/common)
+      defer deregister on return
+4. stack_read [stack_read_buf_max]u8 on stack (stack_read_buf_max = 4096, dispatch/common)
    read_buf  = if max_recv_buf <= stack_read_buf_max: stack slice
-               else smp_allocator.alloc(u8, max_recv_buf)
-4. defer: heap-free if heap-allocated stream.close()
-5. std.http.Server.init(&reader.interface, &writer.interface)
-6. ArenaAllocator.init(smp_allocator), pre-warm with max_allocator_size, reset(.retain_capacity)
-7. keep-alive loop:
-      a. arena.reset(.retain_capacity)
-      b. receiveHead() // breaks on HttpConnectionClosing / ConnectionResetByPeer / ReadFailed
-            ReadFailed: Layer D timer thread called stream.shutdown(.both) -> connection expired
-      c. build Request(inner, &reader, allocator)
-         build Response(inner, io, allocator, max_response_headers.value())
-         build Context(io, allocator, stream)  // ctx.stream = stream (raw TCP, for WS/SSE)
-      d. Layer B: if handler_timeout_ms > 0: ctx = ctx.withTimeout(handler_timeout_ms)
-            sets ctx.deadline, handler calls ctx.timedOut() between steps to check budget
-      e. load global atomic date cache: idx = g_date_active.load(.acquire), res.date_cache = g_date_bufs[idx]
-      f. router.dispatch(req, res, ctx)
-      g. if res.streaming: break  // SSE handler opened a stream, connection closes on handler return
-      h. if public_dir and not dispatched: static.serve(...)
-      i. if not served: 404
-      j. if cfg.logger: lg.access(method_str, req.path(), status_code, res.bytes_written, ua, origin)
-            method_str: stringFromEnum(req.method())
-            ua:     req.header("user-agent") orelse ""
-            origin: req.header("origin") orelse ""
+               else smp_allocator.alloc(u8, max_recv_buf), freed when the connection closes
+5. ArenaAllocator.init(smp_allocator), pre-warm with max_allocator_size, reset(.retain_capacity)
+6. keep-alive loop: handleOneRequest until it returns .close
 ```
+
+`handleOneRequest` resets the arena, then recv-loops until the header terminator is found (each scan resumes 3 bytes back, so a CRLFCRLF split across reads is still caught): a full buffer with no terminator answers `431` and closes, EOF or a read error closes silently. The buffered request then goes through `processRequest`, the same pipeline the event-driven models call, so body behaviour (100-continue, the `413` / `400` mapping, the close-on-unconsumed-body rule) is identical: see the `.EPOLL` section above.
+
+Inside `processRequest`: `Request` / `Response` / `Context` are built over the buffered bytes (`ctx.stream` carries the raw TCP stream for WS/SSE), Layer B (`ctx.withTimeout`) arms the handler budget when `handler_timeout_ms` > 0, the Date header is one atomic load from the global double-buffered cache, the router dispatch owns the static-file fallback and the 404 (`ctx.public_dir`), a streaming response (`res.streaming`) closes the connection after the handler returns, and the access log line is written when a logger is configured.
 
 Stack buffers live on the pool-thread stack for the duration of the connection. Heap buffers are freed on connection close. The arena is reset between requests and deinited when `handleConnection` returns.
 
-Layer D (ConnRegistry) is active in model 2 only: the timer thread that calls `registry.evict()` exists only in model 2. Layer B (`ctx.withTimeout`) is active in both models.
+Layer D (ConnRegistry) is active under `.ASYNC` only: the timer thread that calls `registry.evict()` exists only there. Layer B (`ctx.withTimeout`) is active on every dispatch model.
 
 ---
 
@@ -153,7 +149,13 @@ path starts with prefix AND (path.len == prefix.len OR path[prefix.len] == '/')
 body_cache: ?[]const u8 = null,
 ```
 
-`body()` reads `Content-Length` bytes on the first call and stores in `body_cache`. Subsequent calls return `body_cache` directly. Reading happens via `*std.Io.Reader` which holds the underlying stream reference.
+`body()` is lazy: the first call pulls the body off the socket and stores it in `body_cache`, later calls return the cache directly.
+
+For a Content-Length body, a declared length past `max_request_body` is refused with `error.RequestBodyTooLarge` before the allocation is even reserved (the engine answers `413`), so a client cannot make the server allocate by claiming a size it never sends. The read loop then pulls until the declared length, waiting out `body_read_timeout_ms` between segments on a non-blocking fd. A peer that stops early leaves the returned slice short and `bodyComplete()` false.
+
+A chunked body is framed by walking the chunk framing (`parser.chunkedEnd`) and decoded in place over its own read buffer: a size line that is not hex is `error.InvalidChunkedBody` (the engine answers `400`), and a body that outgrows the limit is `error.RequestBodyTooLarge` (`413`). Chunked declares no length up front, so the buffer grows toward the limit only as bytes actually arrive.
+
+`bodyReceived()` counts what the reads consumed (not what the header claimed), and `bodyComplete()` whether the declared or framed end was reached.
 
 ### Path params
 
@@ -250,7 +252,7 @@ keep-alive  if keep_alive == true  AND  req.head.keep_alive == true
 close       if keep_alive == false OR   req.head.keep_alive == false
 ```
 
-`keep_alive: ?bool = null` by default. `req.head.keep_alive` is parsed by `std.http` from the incoming request headers (no manual scanning). Connection header is only written when the handler opts in via `setKeepAlive()`.
+`keep_alive: ?bool = null` by default. `req.head.keep_alive` is set by the engine's own head parse (`parser.zig`) from the incoming request headers. Connection header is only written when the handler opts in via `setKeepAlive()`.
 
 ### Date header logic
 
