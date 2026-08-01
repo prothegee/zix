@@ -43,7 +43,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http/method.zig` | `refAllDecls` + round-trip semua code termasuk `QUERY` (RFC 10008), QUERY diselesaikan dari token wire-nya dan tidak pernah dilaporkan sebagai GET, pencocokan case-insensitive, `codeFromString` melaporkan token tak dikenal sebagai null, token melebihi `MAX_TOKEN_LEN` ditolak sebelum penyalinan huruf kecil, `enumFromString` mempertahankan fallback GET |
+| `tcp/http/method.zig` | `refAllDecls` + round-trip semua code termasuk `QUERY` (RFC 10008), QUERY diselesaikan dari token wire-nya dan tidak pernah dilaporkan sebagai GET, pencocokan case-sensitive, `codeFromString` melaporkan token tak dikenal sebagai null, token melebihi `MAX_TOKEN_LEN` ditolak oleh length switch, `enumFromString` mempertahankan fallback GET |
 | `tcp/http/status.zig` | `refAllDecls` |
 | `tcp/http/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` untuk setiap varian enum, pelepasan parameter `typeFromHeader`, nilai tidak dikenal atau kepanjangan melaporkan tidak ada kecocokan |
 | `tcp/http/parser.zig` | `refAllDecls` + perilaku: input tidak lengkap menghasilkan null, offset GET minimal, pemisahan path+query, offset header, flag keep_alive, semua method, method tidak diimplementasikan melaporkan UnknownMethod (501) terpisah dari request line yang rusak (400), flag chunked aktif/nonaktif, coding list chunked, chunkedEnd lengkap/parsial/resume-watermark/terminator-di-data/trailer/pipelined/hex-tidak-valid, dechunkInPlace di buffer sendiri/pemindahan overlap/urutan chunk |
@@ -59,7 +59,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http1/method.zig` | `refAllDecls` + round-trip semua code termasuk `QUERY` (RFC 10008), QUERY diselesaikan dari token wire-nya dan tidak pernah dilaporkan sebagai GET, pencocokan case-insensitive, `codeFromString` melaporkan token tak dikenal sebagai null, token melebihi `MAX_TOKEN_LEN` ditolak sebelum penyalinan huruf kecil, `enumFromString` mempertahankan fallback GET |
+| `tcp/http1/method.zig` | `refAllDecls` + round-trip semua code termasuk `QUERY` (RFC 10008), QUERY diselesaikan dari token wire-nya dan tidak pernah dilaporkan sebagai GET, pencocokan case-sensitive, `codeFromString` melaporkan token tak dikenal sebagai null, token melebihi `MAX_TOKEN_LEN` ditolak oleh length switch, `enumFromString` mempertahankan fallback GET |
 | `tcp/http1/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` untuk setiap varian enum, query type RFC 10008 diselesaikan dari string-nya, media type terpanjang 33 byte muat di buffer huruf kecil, nilai melebihi `MAX_TYPE_LEN` melaporkan tidak ada kecocokan alih-alih panic, `typeFromHeader` melepas parameter dan tetap case-insensitive |
 | `tcp/http1/core.zig` | `refAllDecls` + perilaku: parseHead (field GET, pemisahan query dari path, POST Content-Length, default keep_alive HTTP/1.0 + override Connection, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD ke RespSink aktif tanpa bounce buffer, cache no-op / store-lalu-hit / pemisahan key per path dan query, walk chunkedFrame (minta lebih di tengah body, panjang terminator, malformed vs too-large vs belum selesai, data yang mengeja terminator, berhenti di request pipelined), decodeChunkedInBuf (decode di tempat, source tak tersentuh selama belum selesai), jalur body ASYNC serveConn (pengantaran body muat dan over-large dengan pelaporan bodyReceived / bodyComplete, awal body dan bukan sisa drain, drain menjaga request pipelined, 413 dideklarasikan dan chunked melewati buffer, 400 chunked malformed, 100 Continue, chunked tiba setelah head, request pipelined di belakang body chunked) |
 | `tcp/http1/request.zig` | `refAllDecls` + perilaku: body mengembalikan slice yang diantar engine, bodyReceived default ke panjang slice dan menerima override engine, bodyComplete default true dan menerima override engine, fromRaw mem-parse buffer mentah dengan body |
@@ -785,11 +785,11 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 
 #### `query_test.zig`
 
-Kondisi batas QUERY di engine `zix.Http`, termasuk tempat ia sengaja berbeda dari raw engine.
+Kondisi batas QUERY di engine `zix.Http`.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Mencocokkan token QUERY persis, seperti semua method | RFC 9110 section 9.1, nama method case-sensitive di sini |
+| Mencocokkan token QUERY persis, seperti semua method | RFC 9110 section 9.1, nama method case-sensitive |
 | Token lima byte yang bukan QUERY tetap ditolak | lengan length bukan catch-all |
 | Method tak terimplementasi menjawab 501, request line rusak menjawab 400 | status berasal dari error-nya |
 | QUERY dengan Content-Length nol di-framing tanpa body | framing |
@@ -934,8 +934,9 @@ Kondisi batas QUERY: dua nilai yang dikendalikan peer, yang dibawa QUERY ke jalu
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Pencocokan token QUERY mengikuti kontrak case-insensitive engine | engine ini melipat case untuk setiap method, QUERY tidak jadi pengecualian |
-| Token method melebihi maksimum yang dikenal ditolak, bukan dipotong | dibatasi sebelum penyalinan huruf kecil |
+| Token method huruf kecil ditolak, bukan dilipat | RFC 9110 section 9.1, nama method case-sensitive |
+| Http1 dan Http menjawab method huruf kecil dengan cara yang sama | satu tabel method bersama, jadi kedua engine tidak bisa berpisah lagi |
+| Token method melebihi maksimum yang dikenal ditolak, bukan dipotong | dibatasi oleh length switch |
 | Method tak terimplementasi menjawab 501, request line rusak menjawab 400 | dua kegagalan tetap terpisah |
 | Request line rusak tidak dilaporkan sebagai method tak dikenal | baris yang tidak pernah ter-tokenisasi tidak berkata apa pun soal method |
 | QUERY dengan target minimal tetap di-parse | target root |

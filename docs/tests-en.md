@@ -43,7 +43,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http/method.zig` | `refAllDecls` + round-trip over every code including `QUERY` (RFC 10008), QUERY resolving from its wire token and never reported as GET, case-insensitive matching, `codeFromString` reporting an unknown token as null, a token past `MAX_TOKEN_LEN` refused before the lowercase copy, `enumFromString` keeping its GET fallback |
+| `tcp/http/method.zig` | `refAllDecls` + round-trip over every code including `QUERY` (RFC 10008), QUERY resolving from its wire token and never reported as GET, case-sensitive matching, `codeFromString` reporting an unknown token as null, a token past `MAX_TOKEN_LEN` refused by the length switch, `enumFromString` keeping its GET fallback |
 | `tcp/http/status.zig` | `refAllDecls` |
 | `tcp/http/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` for every enum variant, `typeFromHeader` parameter stripping, an unknown or oversized value reporting no match |
 | `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, an unimplemented method reporting UnknownMethod (501) apart from a malformed request line (400), chunked flag set/false, chunked coding list, chunkedEnd complete/partial/watermark-resume/terminator-in-data/trailers/pipelined/invalid-hex, dechunkInPlace over its own buffer/overlapping move/chunk order |
@@ -59,7 +59,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http1/method.zig` | `refAllDecls` + round-trip over every code including `QUERY` (RFC 10008), QUERY resolving from its wire token and never reported as GET, case-insensitive matching, `codeFromString` reporting an unknown token as null, a token past `MAX_TOKEN_LEN` refused before the lowercase copy, `enumFromString` keeping its GET fallback |
+| `tcp/http1/method.zig` | `refAllDecls` + round-trip over every code including `QUERY` (RFC 10008), QUERY resolving from its wire token and never reported as GET, case-sensitive matching, `codeFromString` reporting an unknown token as null, a token past `MAX_TOKEN_LEN` refused by the length switch, `enumFromString` keeping its GET fallback |
 | `tcp/http1/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` for every enum variant, the RFC 10008 query types resolving from their strings, the 33-byte longest media type fitting the lowercase buffer, a value past `MAX_TYPE_LEN` reporting no match instead of panicking, `typeFromHeader` dropping parameters and staying case-insensitive |
 | `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query, chunkedFrame walk (asks for more mid-body, terminator length, malformed vs too-large vs unfinished, data that spells the terminator, pipelined stop), decodeChunkedInBuf (in-place decode, source untouched while unfinished), ASYNC serveConn body path (fitting and over-large delivery with bodyReceived / bodyComplete reporting, the start of the body rather than drain leftovers, drain keeps the pipelined request, 413 declared and chunked past the buffer, 400 malformed chunked, 100 Continue, chunked arriving after the head, pipelined request behind a chunked body) |
 | `tcp/http1/request.zig` | `refAllDecls` + behavioral: body returns the engine-delivered slice, bodyReceived defaults to the slice length and takes the engine override, bodyComplete defaults true and takes the engine override, fromRaw parses a raw buffer with body |
@@ -785,11 +785,11 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 
 #### `query_test.zig`
 
-QUERY boundary conditions on the `zix.Http` engine, including where it deliberately differs from the raw engine.
+QUERY boundary conditions on the `zix.Http` engine.
 
 | Test | What it verifies |
 | :- | :- |
-| Matches the QUERY token exactly, as it does every method | RFC 9110 section 9.1, method names are case-sensitive here |
+| Matches the QUERY token exactly, as it does every method | RFC 9110 section 9.1, method names are case-sensitive |
 | A five-byte token that is not QUERY is still refused | the length arm is not a catch-all |
 | An unimplemented method answers 501, a broken line answers 400 | the status comes from the error |
 | A QUERY with zero Content-Length frames as bodyless | framing |
@@ -934,8 +934,9 @@ QUERY boundary conditions: the two peer-controlled values a QUERY puts on paths 
 
 | Test | What it verifies |
 | :- | :- |
-| QUERY token matching follows the engine's case-insensitive contract | this engine folds case for every method, QUERY carries no exception |
-| A method token past the known maximum is refused, not truncated | bounded before the lowercase copy |
+| A lowercase method token is refused, not folded | RFC 9110 section 9.1, method names are case-sensitive |
+| Http1 and Http answer a lowercase method the same way | one shared method table, so the two engines cannot drift apart again |
+| A method token past the known maximum is refused, not truncated | bounded by the length switch |
 | An unimplemented method answers 501, a broken line answers 400 | the two failures stay apart |
 | A malformed request line is not reported as an unknown method | a line that never tokenized says nothing about the method |
 | A QUERY with an empty method-adjacent target still parses | root target |
