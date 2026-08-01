@@ -45,6 +45,7 @@ pub const setTimeout = core.setTimeout;
 pub const isExpired = core.isExpired;
 
 pub const parseHead = core.parseHead;
+pub const parseErrorResponse = core.parseErrorResponse;
 pub const getHeader = core.getHeader;
 pub const acceptEncoding = core.acceptEncoding;
 pub const queryParam = core.queryParam;
