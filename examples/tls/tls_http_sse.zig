@@ -18,6 +18,11 @@
 const std = @import("std");
 const zix = @import("zix");
 
+// Served page. Loaded per request so editing the file shows up on a browser refresh with
+// no rebuild. The path is relative, so run this example from the repository root.
+const PAGE_PATH: []const u8 = "templates/html/tls_http_sse.html";
+const MAX_PAGE_BYTES: usize = 64 * 1024;
+
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9072;
 // Demo fixtures. For a real domain, point CERT / KEY at your certbot files:
@@ -52,25 +57,13 @@ fn eventsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http
 // browser: https://localhost:9072/
 fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
-    _ = ctx;
+
+    const page = try zix.utils.file.load(ctx.io, ctx.allocator, PAGE_PATH, MAX_PAGE_BYTES);
+    defer ctx.allocator.free(page);
+
     res.setContentType(.TEXT_HTML);
-    try res.send(
-        \\<!DOCTYPE html>
-        \\<html>
-        \\<head><meta charset="utf-8"><title>zix SSE over TLS</title></head>
-        \\<body>
-        \\<h2>zix Server-Sent Events over TLS</h2>
-        \\<pre id="stream-val" style="font-family:monospace"></pre>
-        \\<script>
-        \\const el = document.getElementById('stream-val');
-        \\const es = new EventSource('/events');
-        \\es.onopen = () => { el.textContent = '[connected]'; };
-        \\es.onmessage = e => { el.textContent = e.data; };
-        \\es.onerror = () => { el.textContent = '[stream closed, reconnecting]'; };
-        \\</script>
-        \\</body>
-        \\</html>
-    );
+
+    try res.send(page);
 }
 
 // --------------------------------------------------------- //
