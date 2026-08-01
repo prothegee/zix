@@ -86,7 +86,7 @@ pub const Http2Server = struct {
 
             const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch .DISABLED;
             if (installed == .MISMATCHED) {
-                std.log.warn("zix http2: a static cache is already installed in this process with different settings, keeping it", .{});
+                std.log.info("zix http2: a static cache is already installed in this process with different settings, keeping it", .{});
             }
         }
 

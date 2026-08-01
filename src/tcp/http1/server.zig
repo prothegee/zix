@@ -59,7 +59,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
 
                 const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch .DISABLED;
                 if (installed == .MISMATCHED) {
-                    std.log.warn("zix http1: a static cache is already installed in this process with different settings, keeping it", .{});
+                    std.log.info("zix http1: a static cache is already installed in this process with different settings, keeping it", .{});
                 }
             }
 

@@ -125,7 +125,7 @@ pub const Server = struct {
 
             const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch .DISABLED;
             if (installed == .MISMATCHED) {
-                std.log.warn("zix http: a static cache is already installed in this process with different settings, keeping it", .{});
+                std.log.info("zix http: a static cache is already installed in this process with different settings, keeping it", .{});
             }
         }
 

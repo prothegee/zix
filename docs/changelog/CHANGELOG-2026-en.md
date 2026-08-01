@@ -48,6 +48,8 @@ __*Fix:*__
 
 __*Update:*__
 
+- The Windows monotonic clock overflowed after about half an hour of machine uptime. `zix.utils` and the postgrez executor both turned the performance counter into a time unit with `counter * scale / frequency`, which multiplies before it divides, so the product leaves u64 once the counter passes `u64 max / scale`. Windows reports a 10 MHz counter, which puts that at roughly 31 minutes of uptime for nanoseconds and 21 days for microseconds. A safe build panicked with `integer overflow` and took the calling thread down with it, a release build wrapped and reported nonsense elapsed times. New `src/utils/counter_scale.zig` divides first, so the surviving multiply is always bounded by the frequency, and the postgrez executor carries the same shape locally because a driver module cannot import zix's utils. Both counter queries also stopped discarding their status: a refused query answers 0 instead of dividing by a reading that was never written.
+
 - The `Method`, `Status`, and `Content` tables each carried their enum-to-string switch twice: a private `toString` behind `asString`, and an identical public `stringFromEnum`. That is 122 duplicated arms per engine, and the only thing keeping the two copies honest was a test asserting they agreed. `stringFromEnum` is now the one switch and `asString` calls it, so the two spellings cannot disagree. No caller changes: both names stay public and return what they always did.
 
 - HTTP QUERY method support on both HTTP/1 engines (RFC 10008):

@@ -173,6 +173,7 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `utils/dispatch_support.zig` | `refAllDecls` + perilaku: `.ASYNC` didukung di semua platform, dukungan `.EPOLL` / `.URING` mengikuti os tag target, `rejectedName` melaporkan tag model, `Error` membawa satu error penolakan kanonik |
 | `utils/static_send.zig` | `refAllDecls` + perilaku: jalur copy menulis seluruh body lewat fungsi tulis engine, menghormati offset dan panjang parsial, range nol-panjang tidak pernah menyentuh socket, body lebih besar dari buffer copy melakukan loop, kegagalan tulis engine muncul sebagai BrokenPipe. Khusus Linux: jalur zero-copy mengirim byte persis lewat socket sungguhan, menghormati offset, dan melaporkan BrokenPipe saat peer tertutup |
 | `utils/socket_poll.zig` | `refAllDecls` + perilaku: `readableWithin` melewati penantian saat budget nol, `waitReady` melaporkan datagram yang sudah antre di socket, `waitReady` melaporkan belum siap saat tidak ada yang datang dalam budget |
+| `utils/counter_scale.zig` | `refAllDecls` + perilaku: `scaleCounter` mengonversi pembacaan di bawah satu detik penuh, tetap benar melewati titik di mana bentuk langsung overflow u64 dalam nanosecond dan lagi dalam microsecond, menjaga sisa sub-detik alih-alih memotongnya ke detik penuh, mengonversi pada frequency yang tidak membagi habis counter maupun scale, dan tetap naik saat melewati batas overflow |
 
 ### multiplexers (src/multiplexers/, internal)
 

@@ -349,7 +349,9 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
 
             self.finishBatch(&batch);
 
-            if (self.stats_on) self.recordBatch(jobs.len, nowNanos() - started);
+            // saturating: nowNanos answers 0 when the platform clock is refused,
+            // and a plain subtract would panic on that rather than report no time
+            if (self.stats_on) self.recordBatch(jobs.len, nowNanos() -| started);
         }
 
         /// Take a connection and claim its statement table, returning the
@@ -499,6 +501,29 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
 
 // --------------------------------------------------------- //
 
+/// Express a raw performance counter reading in a time unit, without overflow.
+///
+/// Note:
+/// - The direct form, counter * scale / frequency, overflows u64 once the
+///   counter passes u64 max / scale. Windows reports a 10 MHz counter, so for
+///   nanoseconds that limit is about 31 minutes of machine uptime.
+/// - Dividing first keeps both multiplies small: the remainder is always below
+///   frequency, and whole seconds only overflow after several centuries.
+///
+/// Param:
+/// counter - u64 (raw counter reading)
+/// frequency - u64 (counter ticks per second, must not be 0)
+/// scale - u64 (units per second, 1_000_000_000 for nanoseconds)
+///
+/// Return:
+/// - u64 (the reading expressed in the requested unit)
+fn scaleCounter(counter: u64, frequency: u64, scale: u64) u64 {
+    const seconds = counter / frequency;
+    const rest = counter % frequency;
+
+    return seconds * scale + rest * scale / frequency;
+}
+
 fn nowNanos() u64 {
     if (comptime builtin.target.os.tag == .linux) {
         var time_spec: std.os.linux.timespec = undefined;
@@ -510,14 +535,21 @@ fn nowNanos() u64 {
     if (comptime builtin.target.os.tag == .windows) {
         // postgrez is its own Zig module (build.zig cannot import across into zix's src/utils),
         // so this mirrors windows_io.zig's monotonicUs() locally instead of reaching across.
+        // A refused query answers 0 rather than dividing by an unread frequency.
         const windows = std.os.windows;
+
         var frequency: windows.LARGE_INTEGER = undefined;
-        _ = windows.ntdll.RtlQueryPerformanceFrequency(&frequency);
+        if (!windows.ntdll.RtlQueryPerformanceFrequency(&frequency).toBool()) return 0;
+
         var counter: windows.LARGE_INTEGER = undefined;
-        _ = windows.ntdll.RtlQueryPerformanceCounter(&counter);
+        if (!windows.ntdll.RtlQueryPerformanceCounter(&counter).toBool()) return 0;
+
         const frequency_u64: u64 = @bitCast(frequency);
         const counter_u64: u64 = @bitCast(counter);
-        return counter_u64 * 1_000_000_000 / frequency_u64;
+
+        if (frequency_u64 == 0) return 0;
+
+        return scaleCounter(counter_u64, frequency_u64, 1_000_000_000);
     }
 
     var time_spec: std.posix.timespec = undefined;
@@ -694,4 +726,34 @@ test "postgrez: executor submit sheds when the queue is full" {
     executor.lockRing();
     executor.count = 0;
     executor.unlockRing();
+}
+
+test "postgrez: scaleCounter holds past the direct-form overflow point" {
+    // the frequency Windows reports on the CI runners
+    const frequency: u64 = 10_000_000;
+    const nanos: u64 = 1_000_000_000;
+
+    try testing.expectEqual(@as(u64, 0), scaleCounter(0, frequency, nanos));
+    try testing.expectEqual(@as(u64, 100), scaleCounter(1, frequency, nanos));
+    try testing.expectEqual(@as(u64, nanos), scaleCounter(frequency, frequency, nanos));
+
+    // 2000 seconds of uptime: the direct counter * nanos form overflows u64
+    // above 18_446_744_073 ticks, roughly 31 minutes at this frequency
+    try testing.expectEqual(@as(u64, 2_000 * nanos), scaleCounter(2_000 * frequency, frequency, nanos));
+
+    // a whole day, well beyond anything the direct form survives
+    const day_ticks: u64 = 86_400 * frequency;
+    try testing.expectEqual(@as(u64, 86_400 * nanos), scaleCounter(day_ticks, frequency, nanos));
+
+    // the sub-tick remainder still lands, it is not truncated to whole seconds
+    try testing.expectEqual(@as(u64, 86_400 * nanos + 100), scaleCounter(day_ticks + 1, frequency, nanos));
+}
+
+test "postgrez: scaleCounter converts under an odd frequency and other units" {
+    // a frequency that divides neither the counter nor the scale evenly
+    try testing.expectEqual(@as(u64, 1_000_000_000), scaleCounter(3_579_545, 3_579_545, 1_000_000_000));
+    try testing.expectEqual(@as(u64, 2_000_000_000), scaleCounter(7_159_090, 3_579_545, 1_000_000_000));
+
+    // microseconds, the unit windows_io.zig's monotonicUs uses
+    try testing.expectEqual(@as(u64, 86_400_000_000), scaleCounter(86_400 * 10_000_000, 10_000_000, 1_000_000));
 }

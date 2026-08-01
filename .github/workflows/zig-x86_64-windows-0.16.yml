@@ -59,25 +59,25 @@ jobs:
       - name: zix unit tests
         timeout-minutes: 3
         shell: pwsh
-        run: zig build unit-test --summary all --test-timeout 15s
+        run: zig build unit-test --summary failures --test-timeout 15s
 
       - name: zix integration tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build integration-test --summary all --test-timeout 15s
+        run: zig build integration-test --summary failures --test-timeout 15s
 
       - name: zix behaviour tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build behaviour-test --summary all --test-timeout 15s
+        run: zig build behaviour-test --summary failures --test-timeout 15s
 
       - name: zix edge tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build edge-test --summary all --test-timeout 15s
+        run: zig build edge-test --summary failures --test-timeout 15s
 
       # examples is compile-plus-install only (no execution). test-runner-all then drives
       # every zix protocol end to end over real sockets, so unlike the cross-build matrix
@@ -89,62 +89,62 @@ jobs:
         if: always()
         timeout-minutes: 6
         shell: pwsh
-        run: zig build examples --summary all
+        run: zig build examples --summary failures
 
       - name: zix protocol runners
         if: always()
         timeout-minutes: 6
         shell: pwsh
-        run: zig build test-runner-all --summary all
+        run: zig build test-runner-all --summary failures
 
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
         timeout-minutes: 3
         shell: pwsh
-        run: zig build postgrez-test-unit --summary all
+        run: zig build postgrez-test-unit --summary failures
 
       - name: rediz unit tests
         timeout-minutes: 3
         shell: pwsh
-        run: zig build rediz-test-unit --summary all
+        run: zig build rediz-test-unit --summary failures
 
       - name: prometheuz unit tests
         timeout-minutes: 3
         shell: pwsh
-        run: zig build prometheuz-test-unit --summary all
+        run: zig build prometheuz-test-unit --summary failures
 
       # driver behaviour and edge suites drive an in-process server, so they need
       # no container and run here even though test-integration cannot.
       - name: postgrez behaviour tests
         timeout-minutes: 5
         shell: pwsh
-        run: zig build postgrez-test-behaviour --summary all
+        run: zig build postgrez-test-behaviour --summary failures
 
       - name: postgrez edge tests
         timeout-minutes: 5
         shell: pwsh
-        run: zig build postgrez-test-edge --summary all
+        run: zig build postgrez-test-edge --summary failures
 
       - name: rediz behaviour tests
         timeout-minutes: 5
         shell: pwsh
-        run: zig build rediz-test-behaviour --summary all
+        run: zig build rediz-test-behaviour --summary failures
 
       - name: rediz edge tests
         timeout-minutes: 5
         shell: pwsh
-        run: zig build rediz-test-edge --summary all
+        run: zig build rediz-test-edge --summary failures
 
       - name: prometheuz behaviour tests
         timeout-minutes: 5
         shell: pwsh
-        run: zig build prometheuz-test-behaviour --summary all
+        run: zig build prometheuz-test-behaviour --summary failures
 
       - name: prometheuz edge tests
         timeout-minutes: 5
         shell: pwsh
-        run: zig build prometheuz-test-edge --summary all
+        run: zig build prometheuz-test-edge --summary failures
 
       # no Linux container support on this runner, so postgrez and rediz
       # test-integration (container lifecycle) are skipped here.

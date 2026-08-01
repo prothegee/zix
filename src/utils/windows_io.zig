@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const windows = std.os.windows;
+const counter_scale = @import("counter_scale.zig");
 
 /// Per-call completion event for the NT I/O helpers below.
 ///
@@ -202,19 +203,26 @@ pub fn wallClockNs() u64 {
 /// Monotonic microseconds from the performance counter, never steps backward.
 /// Mirrors clock_gettime(CLOCK_MONOTONIC).
 ///
+/// Note:
+/// - A 0 return means the platform answered no performance counter at all,
+///   which no supported Windows does. The guards are there so a failed query
+///   cannot divide by zero or read an uninitialized reading.
+///
 /// Return:
 /// - u64 (microseconds since an arbitrary reference point)
 pub fn monotonicUs() u64 {
     var frequency: windows.LARGE_INTEGER = undefined;
-    _ = windows.ntdll.RtlQueryPerformanceFrequency(&frequency);
+    if (!windows.ntdll.RtlQueryPerformanceFrequency(&frequency).toBool()) return 0;
 
     var counter: windows.LARGE_INTEGER = undefined;
-    _ = windows.ntdll.RtlQueryPerformanceCounter(&counter);
+    if (!windows.ntdll.RtlQueryPerformanceCounter(&counter).toBool()) return 0;
 
     const frequency_u64: u64 = @bitCast(frequency);
     const counter_u64: u64 = @bitCast(counter);
 
-    return counter_u64 * std.time.us_per_s / frequency_u64;
+    if (frequency_u64 == 0) return 0;
+
+    return counter_scale.scaleCounter(counter_u64, frequency_u64, std.time.us_per_s);
 }
 
 // --------------------------------------------------------- //

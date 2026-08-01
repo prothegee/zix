@@ -89,10 +89,10 @@ fn Http3ServerImpl(comptime handler: HandlerFn) type {
                 // caching off, the router falls through to 404 instead.
                 const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch .DISABLED;
                 if (installed == .DISABLED) {
-                    std.log.warn("zix http3: public_dir is set but public_dir_cache_ttl_ms is 0, so static serving stays off", .{});
+                    std.log.info("zix http3: public_dir is set but public_dir_cache_ttl_ms is 0, so static serving stays off", .{});
                 }
                 if (installed == .MISMATCHED) {
-                    std.log.warn("zix http3: a static cache is already installed in this process with different settings, keeping it", .{});
+                    std.log.info("zix http3: a static cache is already installed in this process with different settings, keeping it", .{});
                 }
             }
 

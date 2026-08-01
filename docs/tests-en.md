@@ -173,6 +173,7 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `utils/dispatch_support.zig` | `refAllDecls` + behavioral: `.ASYNC` is supported on every platform, `.EPOLL` / `.URING` support follows the target os tag, `rejectedName` reports the model tag, `Error` carries the single canonical reject error |
 | `utils/static_send.zig` | `refAllDecls` + behavioral: the copy path writes the whole body through the engine write, honours an offset and a partial length, a zero-length range never touches the socket, a body larger than the copy buffer loops, a failing engine write surfaces as BrokenPipe. Linux only: the zero-copy path delivers exact bytes over a real socket, honours an offset, and reports BrokenPipe on a closed peer |
 | `utils/socket_poll.zig` | `refAllDecls` + behavioral: `readableWithin` skips the wait when the budget is zero, `waitReady` reports a datagram already queued on the socket, `waitReady` reports not ready when nothing arrives in the budget |
+| `utils/counter_scale.zig` | `refAllDecls` + behavioral: `scaleCounter` converts a reading below one whole second, holds past the point where the direct form overflows u64 in nanoseconds and again in microseconds, keeps the sub-second remainder instead of truncating to whole seconds, converts under a frequency that divides neither the counter nor the scale evenly, and keeps rising across the overflow boundary |
 
 ### multiplexers (src/multiplexers/, internal)
 
