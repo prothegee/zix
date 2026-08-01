@@ -18,12 +18,12 @@ SRV=$!
 # 2. TLS 1.2 handshake + request
 printf 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' \
   | openssl s_client -connect 127.0.0.1:9060 -tls1_2 -servername localhost \
-      -CAfile examples/tls/certs/ecdsa_p256_cert.pem -verify_return_error -quiet
+      -CAfile examples/certs/ecdsa_p256_cert.pem -verify_return_error -quiet
 
 # 3. regression: confirm 1.3 still works
 printf 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' \
   | openssl s_client -connect 127.0.0.1:9060 -tls1_3 -servername localhost \
-      -CAfile examples/tls/certs/ecdsa_p256_cert.pem -verify_return_error -quiet
+      -CAfile examples/certs/ecdsa_p256_cert.pem -verify_return_error -quiet
 
 kill $SRV
 ```

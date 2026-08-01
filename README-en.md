@@ -1640,8 +1640,8 @@ The Http1 and Http2 servers serve cleartext by default. Attach a `zix.Tls.Contex
 
 ```zig
 var tls = try zix.Tls.Context.init(allocator, io, .{
-    .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
-    .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    .cert_path = "examples/certs/ecdsa_p256_cert.pem",
+    .key_path  = "examples/certs/ecdsa_p256_key.pem",
     .alpn      = &.{ .HTTP_1_1 }, // .H2 for the Http2 server
 });
 defer tls.deinit();
@@ -2087,8 +2087,8 @@ const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
 
 pub fn main(process: std.process.Init) !void {
     var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
-        .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
-        .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+        .cert_path = "examples/certs/ecdsa_p256_cert.pem",
+        .key_path  = "examples/certs/ecdsa_p256_key.pem",
     });
     defer tls.deinit();
 

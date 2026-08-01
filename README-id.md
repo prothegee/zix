@@ -1649,8 +1649,8 @@ Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls
 
 ```zig
 var tls = try zix.Tls.Context.init(allocator, io, .{
-    .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
-    .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    .cert_path = "examples/certs/ecdsa_p256_cert.pem",
+    .key_path  = "examples/certs/ecdsa_p256_key.pem",
     .alpn      = &.{ .HTTP_1_1 }, // .H2 untuk server Http2
 });
 defer tls.deinit();
@@ -2096,8 +2096,8 @@ const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
 
 pub fn main(process: std.process.Init) !void {
     var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
-        .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
-        .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+        .cert_path = "examples/certs/ecdsa_p256_cert.pem",
+        .key_path  = "examples/certs/ecdsa_p256_key.pem",
     });
     defer tls.deinit();
 

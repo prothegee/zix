@@ -16,7 +16,7 @@ set -u
 
 PORT=9060
 BIN=./zig-out/bin/example-tls_http1_basic
-CA=examples/tls/certs/ecdsa_p256_cert.pem
+CA=examples/certs/ecdsa_p256_cert.pem
 
 if [ ! -x "$BIN" ]; then
     echo "missing $BIN, run: zig build example-tls_http1_basic"

@@ -11,7 +11,7 @@ const common = @import("common.zig");
 
 const WAIT_MS: u64 = 5000;
 const EXPECTED_BODY: []const u8 = "hello over tls 1.3";
-const CA_PATH: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
+const CA_PATH: []const u8 = "examples/certs/ecdsa_p256_cert.pem";
 
 // --------------------------------------------------------- //
 

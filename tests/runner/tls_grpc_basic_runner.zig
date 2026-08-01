@@ -174,7 +174,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 
 // the fixture cert the example server presents, loaded as the trust anchor (out-of-band, from disk,
 // not from the cert the server sent). The example runs from the repo root, so the path is relative.
-const CERT_ANCHOR_PATH = "examples/tls/certs/ecdsa_p256_cert.pem";
+const CERT_ANCHOR_PATH = "examples/certs/ecdsa_p256_cert.pem";
 
 fn verifyServerTrust(io: std.Io, finished: *const Tls.Client.FinishResult) !void {
     var pem_buf: [8192]u8 = undefined;

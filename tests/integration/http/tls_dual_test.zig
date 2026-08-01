@@ -11,8 +11,8 @@ const EPOLL_PORT: u16 = 9230;
 const EPOLL_TLS_PORT: u16 = 9231;
 const URING_PORT: u16 = 9232;
 const URING_TLS_PORT: u16 = 9233;
-const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
-const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
+const CERT: []const u8 = "examples/certs/ecdsa_p256_cert.pem";
+const KEY: []const u8 = "examples/certs/ecdsa_p256_key.pem";
 
 fn rootHandler(_: *zix.Http.Request, res: *zix.Http.Response, _: *zix.Http.Context) !void {
     res.setContentType(.TEXT_PLAIN);

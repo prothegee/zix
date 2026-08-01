@@ -13,8 +13,8 @@ const URING_PORT: u16 = 9213;
 const URING_TLS_PORT: u16 = 9214;
 const ASYNC_PORT: u16 = 9215;
 const ASYNC_TLS_PORT: u16 = 9216;
-const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
-const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
+const CERT: []const u8 = "examples/certs/ecdsa_p256_cert.pem";
+const KEY: []const u8 = "examples/certs/ecdsa_p256_key.pem";
 
 /// The exact bytes okHandler writes, so reads can be exact (a short read on a live TCP socket
 /// blocks, so the tests never read more than the server will send).
