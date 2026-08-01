@@ -418,10 +418,12 @@ fn sendControlFD(fd: posix.fd_t, conn: *Tls.Client.ClientConnection, frame_type:
 // request header helpers.
 
 /// Methods that carry a request body (mirrors the HTTP/1 path: POST / PUT / PATCH send a body, the
-/// rest do not, RFC 9110). Combined with a non-null body to decide whether to send a DATA frame.
+/// rest do not, RFC 9110). QUERY joins them because its content is the request (RFC 10008 section 2),
+/// so dropping it would send a question with nothing asked. Combined with a non-null body to decide
+/// whether to send a DATA frame.
 fn methodHasBody(method: Method.Code) bool {
     return switch (method) {
-        .POST, .PUT, .PATCH => true,
+        .POST, .PUT, .PATCH, .QUERY => true,
         else => false,
     };
 }
@@ -533,6 +535,13 @@ test "zix http: h2 client, methodHasBody and skipRequestHeader" {
     try std.testing.expect(skipRequestHeader("User-Agent"));
     try std.testing.expect(!skipRequestHeader("accept"));
     try std.testing.expect(!skipRequestHeader("x-custom"));
+}
+
+test "zix http: h2 client, QUERY carries a body and names itself in the method pseudo-header" {
+    // The content is the request for QUERY (RFC 10008 section 2). Treating it as
+    // bodyless would send the pseudo-headers and no DATA frame, asking nothing.
+    try std.testing.expect(methodHasBody(.QUERY));
+    try std.testing.expectEqualStrings("QUERY", Method.stringFromEnum(.QUERY));
 }
 
 test "zix http: h2 client, putFrame round-trips through the frame parser" {
