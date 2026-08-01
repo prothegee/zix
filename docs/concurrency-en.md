@@ -113,7 +113,8 @@ Workers (workers, default cpu_count):
           epoll_ctl(DEL, fd)
           close(fd)
         else:
-          handleOneRequest(fd)   <- blocking read/write, no fiber
+          read, then serve every complete buffered request   <- on the worker, no fiber
+          (Http: read to EAGAIN + processRequest, Http1: serveEpollConn)
           if keep-alive: stay registered (level-triggered, re-fires on next data)
           if close: epoll_ctl(DEL, fd) + close(fd)
 ```
@@ -124,7 +125,7 @@ occupy only one entry in the per-worker epoll set.
 
 **When to use:**
 - Linux production deployments of `zix.Http` or `zix.Http1` under high connection counts.
-- Short-lived requests (REST, API) where `handleOneRequest` finishes quickly and returns the
+- Short-lived requests (REST, API) where a request pass finishes quickly and returns the
   worker to `epoll_wait`.
 - You want to avoid `io.async()` fiber scheduler overhead entirely.
 - `dispatch_model = .EPOLL` in `HttpServerConfig` or `Http1ServerConfig`.
