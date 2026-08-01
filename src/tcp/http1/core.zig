@@ -382,11 +382,56 @@ pub fn cacheLookup(head: *const ParsedHead) ?[]const u8 {
     return c.lookup(key, cache.nowMillis());
 }
 
+/// Response to answer a failed request-line parse with
+///
+/// Note:
+/// - A method the engine does not implement is 501, not 400: the request line
+///   was well formed and only the method is unsupported (RFC 9110 section
+///   15.6.2). QUERY reached this path before RFC 10008 support, and answering
+///   400 told a client the request was broken when it was merely unhandled
+/// - Every other parse failure is a malformed request line, which stays 400
+/// - Reached only on the error path, so no request that parses pays for it
+///
+/// Param:
+/// err - anyerror (from parseHead or parseHeadAt)
+///
+/// Return:
+/// - []const u8 (a complete response, ready to write)
+pub fn parseErrorResponse(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UnknownMethod => "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
+        else => "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
+    };
+}
+
+/// Whether a response to this request may be stored under its request key
+///
+/// Note:
+/// - The key is hash(method, path, query) and carries no request content. Two
+///   QUERY requests to one path with different bodies would therefore share a
+///   key, and one query's answer could be served for another
+/// - RFC 10008 section 2.7 requires a cache key that incorporates the request
+///   content, and makes caching a QUERY response a MAY. Refusing to store is
+///   the conformant answer for a key this shape
+/// - Only the store path checks this. Nothing is ever written under a QUERY
+///   key, so the lookup path stays untouched and keeps its cost
+///
+/// Param:
+/// head - *const ParsedHead
+///
+/// Return:
+/// - bool
+fn storableUnderRequestKey(head: *const ParsedHead) bool {
+    return !std.mem.eql(u8, head.method, "QUERY");
+}
+
 /// Store full response bytes as this request's cached response for ttl_ms.
-/// No-op when caching is disabled, the bytes exceed the per-slot cap, or the
-/// table is full. The bytes must be a complete HTTP response.
+/// No-op when caching is disabled, the request is a QUERY, the bytes exceed the
+/// per-slot cap, or the table is full. The bytes must be a complete HTTP response.
 pub fn cacheStore(head: *const ParsedHead, bytes: []const u8, ttl_ms: u32) void {
     const c = tl_cache orelse return;
+    if (!storableUnderRequestKey(head)) return;
+
     const key = cache.hashKey(head.method, head.path, head.query);
 
     _ = c.store(key, bytes, ttl_ms, cache.nowMillis());
@@ -406,6 +451,8 @@ pub fn cacheLookupEncoded(head: *const ParsedHead, encoding: []const u8) ?[]cons
 /// complete HTTP response (status line + headers + the encoded body).
 pub fn cacheStoreEncoded(head: *const ParsedHead, encoding: []const u8, bytes: []const u8, ttl_ms: u32) void {
     const c = tl_cache orelse return;
+    if (!storableUnderRequestKey(head)) return;
+
     const key = cache.hashKeyEncoded(head.method, head.path, head.query, encoding);
 
     _ = c.store(key, bytes, ttl_ms, cache.nowMillis());
@@ -1837,8 +1884,8 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
             return;
         };
 
-        const result = parseHead(recv_buf[0..hdr.filled]) catch {
-            writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+        const result = parseHead(recv_buf[0..hdr.filled]) catch |err| {
+            writeAllFD(fd, parseErrorResponse(err)) catch {};
             return;
         };
         const head = result.head;
