@@ -112,7 +112,8 @@ Worker (workers, default cpu_count):
           epoll_ctl(DEL, fd)
           close(fd)
         else:
-          handleOneRequest(fd)   <- blocking read/write, tanpa fiber
+          read, lalu layani setiap request ter-buffer yang lengkap   <- di worker, tanpa fiber
+          (Http: read sampai EAGAIN + processRequest, Http1: serveEpollConn)
           if keep-alive: tetap terdaftar (level-triggered, re-fires saat data baru tiba)
           if close: epoll_ctl(DEL, fd) + close(fd)
 ```
@@ -123,7 +124,7 @@ dan hanya menempati satu entri di epoll set per-worker.
 
 **Kapan menggunakan:**
 - Deployment produksi Linux untuk `zix.Http` atau `zix.Http1` dengan jumlah koneksi tinggi.
-- Request berumur pendek (REST, API) di mana `handleOneRequest` selesai cepat dan mengembalikan
+- Request berumur pendek (REST, API) di mana satu pass request selesai cepat dan mengembalikan
   worker ke `epoll_wait`.
 - Ingin menghindari overhead fiber scheduler `io.async()` sepenuhnya.
 - `dispatch_model = .EPOLL` di `HttpServerConfig` atau `Http1ServerConfig`.

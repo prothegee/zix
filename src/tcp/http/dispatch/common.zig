@@ -576,13 +576,30 @@ pub fn processRequest(
         return .close;
     } orelse return .close;
 
+    // A declared length past the limit is refused here, before a Request is even
+    // built, so nothing is allocated for a body the engine will not accept. The
+    // connection closes with it: the body is still on the socket and would be
+    // read as the next request.
+    if (cfg.max_request_body != 0 and head.content_length > cfg.max_request_body) {
+        writeAllFD(fd, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+        return .close;
+    }
+
     var req = Request{
         .buf = buf,
         .head = head,
         .fd = fd,
         .buf_filled = buf.len,
         .allocator = allocator,
+        .body_limit = cfg.max_request_body,
     };
+    // The client said it would not send the body until the server agreed to take
+    // it. Without this it waits out its own timeout on every such request, and
+    // zix.Http1 has answered it since the beginning while this engine did not.
+    if (head.expect_continue and (head.content_length > 0 or head.chunked)) {
+        writeAllFD(fd, "HTTP/1.1 100 Continue\r\n\r\n") catch return .close;
+    }
+
     var res = Response.init(fd, head.keep_alive, io, allocator, cfg.max_response_headers.value());
 
     // Zero-syscall Date: one atomic load from the global double-buffered cache.
@@ -603,9 +620,24 @@ pub fn processRequest(
     // the router's dispatch itself (ctx.public_dir), same as zix.Http1.
     server.handler(&req, &res, &ctx) catch {
         if (!res.sent) {
-            res.setStatus(.INTERNAL_SERVER_ERROR);
-            res.setContentType(.TEXT_PLAIN);
-            res.send("Internal Server Error") catch {};
+            // A body that crossed the limit is the client's error, not the
+            // server's, so it gets 413 rather than the generic 500. Only reachable
+            // for a chunked body, a declared length was refused before the handler.
+            if (req.body_too_large) {
+                res.setStatus(.PAYLOAD_TOO_LARGE);
+                res.setContentType(.TEXT_PLAIN);
+                res.send("Payload Too Large") catch {};
+            } else if (req.body_malformed) {
+                // The chunk framing could not be parsed, so where the body ends
+                // is unknowable. That is the client's error, not the server's.
+                res.setStatus(.BAD_REQUEST);
+                res.setContentType(.TEXT_PLAIN);
+                res.send("Bad Request") catch {};
+            } else {
+                res.setStatus(.INTERNAL_SERVER_ERROR);
+                res.setContentType(.TEXT_PLAIN);
+                res.send("Internal Server Error") catch {};
+            }
         }
     };
     if (res.streaming) return .close;
@@ -630,9 +662,19 @@ pub fn processRequest(
         );
     }
 
-    // Keep-alive: if there is a body and the handler did not consume it,
-    // close rather than risk misaligned reads on the next request.
-    if (head.content_length > 0 and req.body_cache == null) return .close;
+    // Keep-alive needs the body gone from the socket, all of it. Three ways it
+    // is not, and every one leaves bytes behind that the next parse would read
+    // as a request:
+    //
+    // - the handler never called body(), so nothing was read
+    // - the peer stopped before the declared length
+    // - the body is chunked, which carries content_length == 0 and so was never
+    //   covered by the old length-only check
+    //
+    // bodyComplete() answers all three, because the read loops set it from what
+    // they actually consumed rather than from the header.
+    const declared_body = head.content_length > 0 or head.chunked;
+    if (declared_body and !req.bodyComplete()) return .close;
 
     return if (head.keep_alive) .keep_alive else .close;
 }

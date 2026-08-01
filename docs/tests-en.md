@@ -46,21 +46,24 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http/method.zig` | `refAllDecls` |
 | `tcp/http/status.zig` | `refAllDecls` |
 | `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` for every enum variant |
-| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, invalid method, chunked flag set/false, dechunk single/multiple/terminal/extension/invalid-hex/uppercase hex |
-| `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams, header lookup (case-insensitive) |
+| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, invalid method, chunked flag set/false, chunked coding list, chunkedEnd complete/partial/watermark-resume/terminator-in-data/trailers/pipelined/invalid-hex, dechunkInPlace over its own buffer/overlapping move/chunk order |
+| `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams, header lookup (case-insensitive), body delivery (segmented Content-Length and chunked arrival over a non-blocking fd, a body far larger than the read buffer, short read reported when the peer closes early) |
 | `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF), TooManyHeaders, `SseWriter` wire formats, `Response.streaming` default |
 | `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam, route registration (kind + path preserved) |
 | `tcp/http/static.zig` | `refAllDecls` + behavioral: mimeType, parseRangeHeader |
 | `tcp/http/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC vector, buildFrame + parseFrame round-trip, masked frame |
 | `tcp/http/context.zig` | `refAllDecls` + behavioral: `timedOut` null deadline returns false, `isExpired` null deadline returns false |
-| `tcp/http/server.zig` | `refAllDecls` + behavioral: `EpollConnTable` slab alloc / free lifecycle, filled-bytes accounting, out-of-range fd returns null, `getAvailableCpuCount` returns at least 1, `effectiveCacheEntries` honors the memory ceiling, EPOLL `processRequest` serves a cache miss then a hit |
+| `tcp/http/server.zig` | `refAllDecls` + behavioral: `EpollConnTable` slab alloc / free lifecycle, filled-bytes accounting, out-of-range fd returns null, `getAvailableCpuCount` returns at least 1, `effectiveCacheEntries` honors the memory ceiling, EPOLL `processRequest` serves a cache miss then a hit, `processRequest` body outcomes (bodyComplete true for a fully-read Content-Length or chunked body and false when the handler never reads, 413 for a declared or chunked body past the limit, 100 Continue sent for a body-carrying Expect and skipped without one, close when a plain or coding-list chunked body is left unread or the peer stops early, a chunked body arriving after the head is delivered) |
 
 ### zix.Http1
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query |
+| `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query, chunkedFrame walk (asks for more mid-body, terminator length, malformed vs too-large vs unfinished, data that spells the terminator, pipelined stop), decodeChunkedInBuf (in-place decode, source untouched while unfinished), ASYNC serveConn body path (fitting and over-large delivery with bodyReceived / bodyComplete reporting, the start of the body rather than drain leftovers, drain keeps the pipelined request, 413 declared and chunked past the buffer, 400 malformed chunked, 100 Continue, chunked arriving after the head, pipelined request behind a chunked body) |
+| `tcp/http1/request.zig` | `refAllDecls` + behavioral: body returns the engine-delivered slice, bodyReceived defaults to the slice length and takes the engine override, bodyComplete defaults true and takes the engine override, fromRaw parses a raw buffer with body |
 | `tcp/http1/server.zig` | `refAllDecls` + behavioral: config validation (ASYNC / EPOLL / URING), serveEpollConn answers a pipelined burst in order, EPOLL cache miss-then-hit + effectiveCacheEntries memory ceiling, ConnTable slab lifecycle + ws_recv_buf sizing, serveEpollWs drains to EAGAIN, parseGetFastPath (GET / query / rejects POST and HTTP/1.0 / raw headers), initUringRing yields a usable ring, URING finishClose rings the close (`prep_close`) and recycles the slot |
+| `tcp/http1/dispatch/epoll.zig` (Linux) | behavioral body path: drain-then-serve reports the counted total, exact drain leaves the pipelined request intact, a peer that quits mid-drain is never served, a fitting body waits for the full count, 413 for a declared body past the limit and a chunked body past the body buffer, 400 on malformed chunked, one 100 Continue while the body is still arriving |
+| `tcp/http1/dispatch/uring.zig` (Linux) | behavioral body path: a fully-present chunked body decodes, an oversized body is deferred and served with the counted total, a deferred request stays parked while its drain is unfinished, a fitting body waits for the full count, 413 declared and chunked, 400 malformed chunked, 100 Continue while the body is still arriving |
 | `tcp/http1/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, buildFrame/parseFrame round-trip, SIMD unmask matches scalar (and tail bytes), buildHeader prefix, pump echoes over a socketpair, pumpRing stages then reports close, broadcast fan-out (+ dead-fd skip, empty list) |
 | `tcp/http1/router.zig` | `refAllDecls` + behavioral: matchParam, comptime router |
 | `tcp/http1/config.zig` | `refAllDecls` (default values exercised by `tests/behaviour/http1/config_test.zig`) |
@@ -709,7 +712,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `queryParam` key present with empty value | `"?k="` -> `""` (not null) |
 | `queryParam` key absent returns null | key not in query string |
 | `queryParam` no query string at all returns null | target has no `?` |
-| `body()` chunked invalid hex returns empty string | `"zz"` chunk size -> `""` (dechunk error -> 0 bytes) |
+| `body()` chunked invalid hex is an error, not an empty body | `"zz"` chunk size -> `error.InvalidChunkedBody`, `bodyComplete()` false (the engine answers 400) |
 | `body()` chunked missing terminal chunk returns partial data | no `0\r\n\r\n` -> partial data returned |
 | `body()` chunked single-byte chunks | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
 
@@ -818,6 +821,25 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | Bad checksum causes server to close without server-side error propagation | corrupted message byte closes connection `ctx.err == null` |
 
 ### tests/edge/http1/
+
+#### `body_test.zig`
+
+Content-Length is what every dispatch model uses to decide whether a body is delivered whole, waited for, or drained, so a value the parser rejects changes which path a request takes.
+
+| Test | What it verifies |
+| :- | :- |
+| absent Content-Length frames the request as bodyless | no header -> `content_length` 0, chunked flag false |
+| zero Content-Length frames the request as bodyless | `Content-Length: 0` -> 0 |
+| non-numeric Content-Length falls back to zero | `abc` -> 0 |
+| Content-Length with a trailing space falls back to zero | `5 ` -> 0 |
+| Content-Length past u64 falls back to zero | 23-digit value -> 0 |
+| Content-Length is read case-insensitively | `cOnTeNt-LeNgTh` honored |
+| chunked request sets the chunked flag beside Content-Length | both header values are kept |
+| Expect 100-continue is flagged for a body-carrying request | `expect_continue` true |
+| Request bodyReceived is zero for a bodyless request | and `body()` returns empty |
+| Request bodyReceived tracks the delivered slice by default | 4-byte slice -> 4 |
+| Request bodyComplete is true for a bodyless request | nothing declared, nothing could fall short |
+| Request bodyComplete is independent of the delivered length | a short delivered slice stays complete, the engine override makes it false |
 
 #### `core_test.zig`
 

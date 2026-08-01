@@ -66,9 +66,15 @@ Semua slice di `ParsedHead` yang dikembalikan menunjuk ke `buf` (zero copy). Men
 
 Bulk-read ke `buf` sampai `\r\n\r\n` ditemukan. `pre_filled` byte sisa iterasi keep-alive sebelumnya dipindai lebih dulu. Setiap kali membaca, pemindaian diulang dari `filled - 3` sehingga CRLFCRLF yang terbelah antar read tetap ditemukan. `error.HeaderTooLarge` saat `buf` penuh tanpa baris kosong, `error.Closed` saat EOF atau read gagal.
 
-### readChunkedBody()
+### chunkedFrame() / decodeChunkedInBuf() / readChunkedBody()
 
-Decoder chunked streaming (RFC 9112 7.1) untuk jalur blocking. Reader refill inline 16 KB di-seed dengan byte yang sudah terbaca melewati header. Per chunk: baca baris ukuran (ekstensi setelah `;` diabaikan), salin `chunk_size` byte ke `out` (dibatasi diam-diam di `out.len`, kelebihan dikonsumsi dan dibuang), harapkan CRLF. Chunk nol melompati bagian trailer sampai baris kosong terakhirnya. Mengembalikan jumlah byte hasil decode.
+Satu chunked walk yang dipakai semua dispatch model untuk mem-framing body (RFC 9112 7.1), sehingga body chunked berarti hal yang sama di ketiganya.
+
+`chunkedFrame(src, out_cap)` menjalani framing chunk tanpa memindahkan satu byte pun: per chunk ia membaca baris ukuran (ekstensi setelah `;` diabaikan) dan melangkahi data sebesar ukuran yang dideklarasikan, sehingga data yang kebetulan mengeja terminal chunk tidak bisa dikira terminator. Ia mengembalikan `ChunkedFrame` yang `stop`-nya memisahkan hasil: `.COMPLETE` (panjang decode + byte wire yang dikonsumsi), `.NEED_MORE` (berhenti di tengah body, baca lagi), `.MALFORMED` (baris ukuran bukan hex, engine menjawab `400`), `.TOO_LARGE` (body hasil decode tidak muat `out_cap`, engine menjawab `413`). Satu null untuk semuanya adalah yang dulu membuat koneksi menggantung alih-alih dijawab.
+
+`decodeChunkedInBuf(src, out)` men-decode body yang sudah lengkap setelah walk berkata `.COMPLETE`: framing dibuang dengan salinan maju, dan `out` boleh alias `src` karena setiap byte hanya bergerak ke kiri. Body parsial membiarkan `src` tak tersentuh sehingga pemanggil bisa membaca lebih banyak ke dalamnya.
+
+`readChunkedBody(fd, buf, seeded)` menarik body chunked dari socket blocking (`.ASYNC`), di-seed dengan byte body yang datang bersama head, dan men-decode di tempat. Ia melaporkan `received` (byte wire yang diambil dari socket) dan leftover pipelined (`buf[leftover_off..][0..leftover]`) alih-alih membuangnya. Body yang melampaui `buf` berhenti dengan `.TOO_LARGE` alih-alih dipotong seukuran yang muat, karena handler tidak bisa membedakan body terpotong dari yang utuh.
 
 ### Deadline handler thread-local
 
@@ -194,16 +200,22 @@ loop:
   2. parseHead -> gagal: tulis 400, return
   3. expect_continue dan ada body -> send100ContinueFD
   4. body:
-        chunked        -> readChunkedBody(peeked, body_buf)
-        content_length -> salin byte peeked, baca sampai min(content_length, 8192)
-  5. setTimeout(handler_timeout_ms), handler(head, body, fd)
-  6. takeWebSocket() != null -> return   // promosi tidak dihormati di sini
-  7. !keep_alive -> return
-  8. pipelining: byte setelah request_end digeser ke depan recv_buf, leftover diperbarui
-        request chunked me-reset leftover ke 0
+        chunked        -> readChunkedBody(fd, body_buf, peeked):
+                          MALFORMED -> 400, return. TOO_LARGE -> 413, return.
+                          NEED_MORE (peer berhenti di tengah body) -> return
+        content_length -> panjang yang dideklarasikan > max_request_body -> 413, return
+                          salin byte peeked, baca sampai min(content_length, 8192),
+                          drainBody sisanya (terhitung, tidak pernah menyentuh body_buf)
+  5. bodyReceived = setiap byte body yang diberikan socket, bodyComplete = apakah
+        akhir yang dideklarasikan atau ter-framing tercapai, diserahkan sebelum invoke
+  6. setTimeout(handler_timeout_ms), handler(head, body, fd)
+  7. takeWebSocket() != null -> return   // promosi tidak dihormati di sini
+  8. !keep_alive -> return
+  9. pipelining: byte setelah request_end digeser ke depan recv_buf, leftover diperbarui
+        (pembacaan chunked membawa leftover pipelined-nya ke depan dengan cara yang sama)
 ```
 
-Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (8 KB) memberi handler 8 KB pertama, lalu `serveConn` membuang sisanya dari socket (dan melebarkan receive window via `large_body_rcvbuf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `head.content_length`, bukan byte-nya.
+Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (8 KB) memberi handler 8 KB pertama dan membuang sisanya dari socket sebelum invoke (melebarkan receive window via `large_body_rcvbuf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `req.bodyReceived()` untuk total terhitung dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer, alih-alih mempercayai `head.content_length`.
 
 ### serveConnOne(): fallback one-shot EPOLL
 
@@ -278,8 +290,10 @@ Hanya Linux (`run()` jatuh kembali ke `runPool` di tempat lain, dengan notice di
 Conn = {
     fd, buf, filled,                  // buf: max_recv_buf byte, filled: jumlah byte hidup
     ws: ?WsFrameFn = null,            // diisi saat promosi WebSocket
-    drain: usize = 0,                 // byte body oversize yang masih harus dibuang
-    drain_close: bool = false,        // tutup setelah drain selesai
+    drain: usize = 0,                 // byte body oversize yang masih harus dikonsumsi dari socket
+    drain_received: usize = 0,        // byte body yang sudah terkonsumsi, disajikan sebagai received count
+    pending_head_len: usize = 0,      // byte head diparkir di depan buf untuk invoke yang ditunda
+    continue_sent: bool = false,      // 100 Continue sudah dijawab untuk request yang sedang di-parse
 }
 ```
 
@@ -294,7 +308,7 @@ Conn = {
 4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       event listener       -> acceptAll
       HUP/ERR              -> close
-      conn.drain > 0       -> serveEpollDrain
+      conn.drain > 0       -> serveEpollDrainThenServe
       conn.ws != null      -> serveEpollWs
       selain itu           -> serveEpollConn
       outcome == .close    -> CTL_DEL + table.free + close(fd)
@@ -317,12 +331,19 @@ Pass dalam:
 2. loop parse atas conn.buf[consumed..filled]:
       tanpa "\r\n\r\n" -> break (head parsial, tunggu byte berikutnya)
       parseHead gagal -> 400, .close
+      Expect: 100-continue dengan body -> 100 Continue, sekali per request (continue_sent)
       body:
-        chunked        -> decodeChunkedInBuf (seluruh body harus ter-buffer, selain itu break)
+        chunked        -> decodeChunkedInBuf: COMPLETE -> body = slice hasil decode,
+                          NEED_MORE -> break, MALFORMED -> 400 .close,
+                          TOO_LARGE -> 413 .close
+        panjang yang dideklarasikan > max_request_body -> 413, .close (sebelum
+                          satu byte body pun dibaca)
         muat di rem    -> body = slice, request_len = need
-        need > buf.len -> oversize: dispatch dengan body kosong, set conn.drain ke sisa
-                          yang belum terbaca, conn.drain_close = !keep_alive,
-                          reset filled, return .keep_alive
+        drain selesai  -> request yang ditunda masuk kembali: total terhitung di
+                          bodyReceived, slice body kosong, bodyComplete = true
+        need > buf.len -> oversize: parkir head di depan buf (pending_head_len),
+                          hitung byte body yang sudah ada (drain_received), set
+                          conn.drain ke sisa yang belum terbaca, tunda handler, break
         selain itu     -> break (body masih berdatangan)
       setTimeout + handler(head, body, fd)
       takeWebSocket() -> conn.ws = callback, break  // byte setelah ini adalah frame
@@ -334,15 +355,15 @@ Satu readable event karenanya melayani setiap request pipelined lengkap yang dib
 
 #### decodeChunkedInBuf()
 
-Varian non-streaming dari decoder chunked untuk jalur ter-buffer: mensyaratkan seluruh body chunked (sampai CRLF terakhir trailer) ada di `src`, mengembalikan `{ panjang decode, consumed }` atau null untuk menunggu byte berikutnya. Kehabisan ruang juga mengembalikan null (diperlakukan sebagai belum lengkap, koneksi akhirnya 431 atau tertutup).
+Varian non-streaming dari chunked walk bersama (`core.chunkedFrame`) untuk jalur ter-buffer: mensyaratkan seluruh body chunked (sampai CRLF terakhir trailer) ada di `src`. `stop` yang dikembalikan menggerakkan pass parse: `.COMPLETE` membawa panjang decode dan byte wire yang dikonsumsi, `.NEED_MORE` menunggu readable event berikutnya, dan `.MALFORMED` / `.TOO_LARGE` tidak akan pernah lengkap, sehingga engine menjawab `400` / `413` dan menutup alih-alih menahan koneksi sampai buffer penuh dan peer tampak menggantung.
 
 #### serveEpollWs()
 
 Satu read (level-triggered, byte tersisa memicu ulang event), lalu `ws.pump` atas byte yang ter-buffer, lalu penggeseran standar byte yang belum dikonsumsi. Menutup saat EOF peer, close frame, write gagal, atau frame yang lebih lebar dari seluruh buffer (tidak pernah bisa lengkap, akan berputar tanpa kemajuan).
 
-#### serveEpollDrain()
+#### serveEpollDrain() / serveEpollDrainThenServe()
 
-Membuang `conn.drain` byte dengan `recvfrom(MSG_TRUNC)`: kernel menjatuhkan byte di tempat, tanpa salinan ke `conn.buf`, ukuran per panggilan tidak dibatasi buffer (dibatasi 1 GB per panggilan). Membaca sampai EAGAIN, tidak pernah melewati `conn.drain`, sehingga byte request pipelined berikutnya tidak tersentuh. Saat drain mencapai nol: `.close` bila `drain_close`, selain itu kembali ke parsing HTTP normal.
+Membuang `conn.drain` byte dengan `recvfrom(MSG_TRUNC)`: kernel menjatuhkan byte di tempat, tanpa salinan ke `conn.buf`, ukuran per panggilan tidak dibatasi buffer (dibatasi 1 GB per panggilan). Membaca sampai EAGAIN, tidak pernah melewati `conn.drain`, sehingga byte request pipelined berikutnya tidak tersentuh. Setiap byte yang dibuang dihitung ke `conn.drain_received`, karena hitungan itulah yang akan diberitahukan ke handler yang menunggu. Saat drain mencapai nol, `serveEpollDrainThenServe` masuk kembali ke pass parse atas byte head yang diparkir (`conn.filled = pending_head_len`) dan menyajikan request yang ditunda dengan total terhitung di `req.bodyReceived()`. Peer yang hangup di tengah drain menutup koneksi tanpa handler pernah berjalan.
 
 ### Engine URING
 
@@ -393,7 +414,7 @@ Langkah 2 sampai 4 adalah wakeup coalescing adaptif: loop yang panas (reap besar
 
 #### armRecv() / handleRecv() / dispatch()
 
-`armRecv` memposting SQE `recv` biasa ke `conn.buf[filled..]`, sehingga data mendarat di tempat tanpa salinan. `handleRecv` menambahkan `cqe.res` byte, lalu `dispatch` menjalankan loop parse, mencerminkan `serveEpollConnInner` tanpa pembacaan. Body chunked yang sepenuhnya ada di `conn.buf` di-decode di tempat via `decodeChunkedInBuf` ke `body_buf` per-worker. Body yang lebih besar dari `conn.buf` menunda handler-nya: byte head tetap di depan `conn.buf`, `conn.drain` di-set ke sisa yang belum dibaca, dan drain (di bawah) menghitungnya dari socket sebelum handler berjalan dengan `req.bodyReceived()` berisi total terhitung (slice body tetap kosong). Response di-stage ke `conn.send_buf` melalui `RespSink`, sehingga burst pipelined menyatu menjadi satu `submitSend`. Jendela ter-stage adalah `send_buf[staged_off..][0..staged]`: response hasil reserve-commit mulai di `off` milik sink, dan short send memajukan jendela di tempat alih-alih menggeser sisa ke depan.
+`armRecv` memposting SQE `recv` biasa ke `conn.buf[filled..]`, sehingga data mendarat di tempat tanpa salinan. `handleRecv` menambahkan `cqe.res` byte, lalu `dispatch` menjalankan loop parse, mencerminkan `serveEpollConnInner` tanpa pembacaan. Body chunked yang sepenuhnya ada di `conn.buf` di-decode di tempat via `decodeChunkedInBuf` ke `body_buf` per-worker, dengan hasil yang sama seperti pass EPOLL: chunk frame yang malformed dijawab `400`, body chunked melewati buffer `413`, Content-Length yang dideklarasikan melewati `max_request_body` `413` sebelum satu byte body pun dikonsumsi, dan `Expect: 100-continue` dengan body tertunda dijawab sekali selagi body masih berdatangan. Body yang lebih besar dari `conn.buf` menunda handler-nya: byte head tetap di depan `conn.buf`, `conn.drain` di-set ke sisa yang belum dibaca, dan drain (di bawah) menghitungnya dari socket sebelum handler berjalan dengan `req.bodyReceived()` berisi total terhitung (slice body tetap kosong). Response di-stage ke `conn.send_buf` melalui `RespSink`, sehingga burst pipelined menyatu menjadi satu `submitSend`. Jendela ter-stage adalah `send_buf[staged_off..][0..staged]`: response hasil reserve-commit mulai di `off` milik sink, dan short send memajukan jendela di tempat alih-alih menggeser sisa ke depan.
 
 #### armDrainRecv()
 

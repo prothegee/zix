@@ -278,6 +278,407 @@ test "zix http: effectiveCacheEntries honors the memory ceiling" {
     try std.testing.expectEqual(@as(u32, 1), common.effectiveCacheEntries(tiny));
 }
 
+/// What bodyComplete() answered on the last request either test handler served.
+var test_seen_body_complete: bool = false;
+
+/// Answer without touching the body, the shape a handler takes when it only
+/// cares about the route. The body stays on the socket, which is what makes
+/// bodyComplete() false here.
+fn testBodyIgnoringHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    test_seen_body_complete = req.bodyComplete();
+
+    try res.send("ok");
+}
+
+/// Body size the last testBodyReadingHandler call was given.
+var test_seen_body_len: usize = 0;
+
+fn testBodyReadingHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    const seen = try req.body();
+    test_seen_body_len = seen.len;
+    test_seen_body_complete = req.bodyComplete();
+
+    try res.send("ok");
+}
+
+test "zix http: bodyComplete is true once a Content-Length body is fully read" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // The guard tests below read the connection outcome, which would still look
+    // right if the flag were stuck false. This asserts the flag itself.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    test_seen_body_complete = false;
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nabcd";
+
+    var buf: [160]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    try std.testing.expect(test_seen_body_complete);
+    try std.testing.expectEqual(@as(usize, 4), test_seen_body_len);
+    try std.testing.expectEqual(common.ReqOutcome.keep_alive, outcome);
+}
+
+test "zix http: bodyComplete is true once a chunked body reaches its terminator" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    test_seen_body_complete = false;
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    // Chunked carries no declared length, so completeness is the terminator and
+    // nothing else.
+    const chunked_body = "5\r\nhello\r\n0\r\n\r\n";
+    try std.testing.expectEqual(chunked_body.len, std.os.linux.write(fds[0], chunked_body, chunked_body.len));
+
+    var buf: [160]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    try std.testing.expect(test_seen_body_complete);
+    try std.testing.expectEqual(@as(usize, 5), test_seen_body_len);
+    try std.testing.expectEqual(common.ReqOutcome.keep_alive, outcome);
+}
+
+test "zix http: bodyComplete is false when the handler never reads the body" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // zix.Http reads lazily, so an untouched body is an unread body. This is the
+    // case zix.Http1 cannot have, since its engine reads before the handler runs.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyIgnoringHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    test_seen_body_complete = true;
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nabcd";
+
+    var buf: [160]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    try std.testing.expect(!test_seen_body_complete);
+    try std.testing.expectEqual(common.ReqOutcome.close, outcome);
+}
+
+test "zix http: processRequest refuses a declared body past the limit with 413" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // The allocation for a Content-Length body was sized straight from the header,
+    // so a claimed length was a claim on server memory. The limit is checked before
+    // a Request is even built.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .max_request_body = 8 });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nContent-Length: 4096\r\n\r\n";
+
+    var buf: [160]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+    try std.testing.expectEqual(common.ReqOutcome.close, outcome);
+
+    var resp: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &resp);
+    try std.testing.expectStringStartsWith(resp[0..n], "HTTP/1.1 413 ");
+}
+
+test "zix http: processRequest refuses a chunked body past the limit with 413" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // Chunked declares no length, so the limit has to be a running total the read
+    // loop aborts on rather than a check before it starts.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .max_request_body = 16 });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    const oversized: [64]u8 = @splat('A');
+    const chunked_body = "40\r\n".* ++ oversized ++ "\r\n0\r\n\r\n".*;
+    try std.testing.expectEqual(chunked_body.len, std.os.linux.write(fds[0], &chunked_body, chunked_body.len));
+
+    var buf: [160]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+    try std.testing.expectEqual(common.ReqOutcome.close, outcome);
+
+    var resp: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &resp);
+    try std.testing.expectStringStartsWith(resp[0..n], "HTTP/1.1 413 ");
+}
+
+test "zix http: processRequest sends 100 Continue before reading a body that expects it" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // The client will not send the body until the server agrees to take it. This
+    // engine never parsed the header, so every such request paid the client's own
+    // timeout before the body moved. zix.Http1 has answered it from the start.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\nabcd";
+
+    var buf: [160]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+    try std.testing.expectEqual(common.ReqOutcome.keep_alive, outcome);
+
+    var resp: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &resp);
+    try std.testing.expectStringStartsWith(resp[0..n], "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 Ok");
+}
+
+test "zix http: processRequest sends no 100 Continue for a request without a body" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyIgnoringHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "GET /sink HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\r\n";
+
+    var buf: [160]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    _ = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    var resp: [512]u8 = undefined;
+    const n = try std.posix.read(fds[0], &resp);
+    try std.testing.expectStringStartsWith(resp[0..n], "HTTP/1.1 200 Ok");
+}
+
+test "zix http: processRequest closes when a chunked body is left unread" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // The unconsumed-body guard keys on content_length, which a chunked request
+    // leaves at zero. Keeping the connection alive hands the unread chunked body
+    // to the next parse, where it is read as a second request.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyIgnoringHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    // The chunked body waits on the socket, unread by the handler.
+    const chunked_body = "4\r\nabcd\r\n0\r\n\r\n";
+    try std.testing.expectEqual(chunked_body.len, std.os.linux.write(fds[0], chunked_body, chunked_body.len));
+
+    var buf: [128]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    try std.testing.expectEqual(common.ReqOutcome.close, outcome);
+}
+
+test "zix http: processRequest closes when a coding-list chunked body is left unread" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // Same hazard reached through the Transfer-Encoding coding list: the parser
+    // has to see chunked past the leading codings, otherwise the request frames
+    // as bodyless and the body becomes the next request.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyIgnoringHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+
+    const chunked_body = "4\r\nabcd\r\n0\r\n\r\n";
+    try std.testing.expectEqual(chunked_body.len, std.os.linux.write(fds[0], chunked_body, chunked_body.len));
+
+    var buf: [128]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    try std.testing.expectEqual(common.ReqOutcome.close, outcome);
+}
+
+test "zix http: processRequest delivers a chunked body that arrives after the head" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // readChunkedBody sizes its raw buffer from the bytes that happened to
+    // arrive with the head, not from max_recv_buf. A body that lands in a later
+    // segment has almost no room, so it is silently cut short.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    // One 64-byte chunk plus the terminator, all waiting on the socket.
+    var chunked_buf: [96]u8 = undefined;
+    var chunked_len: usize = 0;
+    const opener = "40\r\n";
+    @memcpy(chunked_buf[0..opener.len], opener);
+    chunked_len += opener.len;
+    @memset(chunked_buf[chunked_len..][0..64], 'A');
+    chunked_len += 64;
+    const closer = "\r\n0\r\n\r\n";
+    @memcpy(chunked_buf[chunked_len..][0..closer.len], closer);
+    chunked_len += closer.len;
+    try std.testing.expectEqual(chunked_len, std.os.linux.write(fds[0], &chunked_buf, chunked_len));
+
+    test_seen_body_len = 0;
+    var buf: [128]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    _ = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    try std.testing.expectEqual(@as(usize, 64), test_seen_body_len);
+}
+
+test "zix http: processRequest closes when the peer stops before Content-Length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // A body cut short still caches a slice, so the unconsumed-body guard reads
+    // it as consumed. The request was never completed, so the connection cannot
+    // be trusted for another one.
+    const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
+    const router = @import("router.zig").Router(&routes);
+    var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
+    defer server.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[1]);
+
+    const stream = std.Io.net.Stream{ .socket = .{ .handle = fds[1], .address = undefined } };
+    const raw = "POST /sink HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n";
+
+    // Three of the ten declared bytes, then the peer goes away.
+    try std.testing.expectEqual(@as(usize, 3), std.os.linux.write(fds[0], "abc", 3));
+    _ = std.os.linux.close(fds[0]);
+
+    test_seen_body_len = 0;
+    var buf: [128]u8 = undefined;
+    @memcpy(buf[0..raw.len], raw);
+    const outcome = server.processRequest(stream, fds[1], undefined, buf[0..raw.len], &arena);
+
+    try std.testing.expectEqual(@as(usize, 3), test_seen_body_len);
+    try std.testing.expectEqual(common.ReqOutcome.close, outcome);
+}
+
 fn cacheRouteHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
     if (res.sendFromCache(req)) return;
 

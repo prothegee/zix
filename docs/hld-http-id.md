@@ -33,11 +33,11 @@ flowchart TD
     D --> E["io.async(handleConnection)"]
     E --> D
     E --> F["handleConnection()"]
-    F --> G["stack/heap read_buf + write_buf"]
-    G --> H["std.http.Server.init()"]
+    F --> G["stack/heap read_buf"]
+    G --> H["pasang thread-local kompresi + cache"]
     H --> I["ArenaAllocator per-connection"]
-    I --> J["keep-alive loop"]
-    J --> K["receiveHead()"]
+    I --> J["keep-alive loop\nhandleOneRequest"]
+    J --> K["recv sampai terminator header"]
     K -->|close or reset| Z["stream.close()"]
     K --> L["build Request + Response + Context"]
     L --> M["Router.dispatch()"]
@@ -67,7 +67,7 @@ flowchart TD
     W1 --> EL["event loop\nepoll_wait(1024)"]
     EL -->|listener fd| ACC["drain accept4(SOCK_CLOEXEC)\nsetNoDelay\nepoll_ctl ADD EPOLLIN+RDHUP"]
     EL -->|conn fd RDHUP/ERR| CLOSE["epoll_ctl DEL\nclose(fd)"]
-    EL -->|conn fd readable| SERVE["handleOneRequest(fd)\nblocking read/write"]
+    EL -->|conn fd readable| SERVE["read sampai EAGAIN\nprocessRequest(fd)\nparse + dispatch + send"]
     SERVE -->|keep-alive| EL
     SERVE -->|close| CLOSE
     ACC --> EL
@@ -75,7 +75,7 @@ flowchart TD
 
 - Setiap worker memiliki satu `SO_REUSEPORT` listener dan satu `epoll` instance. Kernel mendistribusikan koneksi baru ke worker tanpa antrian bersama.
 - Level-triggered `EPOLLIN`: koneksi tetap terdaftar setelah setiap request dan re-fires saat data baru tiba. Tidak perlu re-arm eksplisit.
-- Fd blocking: `handleOneRequest` melakukan recv/parse/send secara sinkron, lalu mengembalikan worker ke `epoll_wait`.
+- Fd non-blocking: worker membaca sampai EAGAIN ke buffer koneksi, lalu `processRequest` melakukan parse/dispatch/send secara sinkron dan mengembalikan worker ke `epoll_wait`.
 - `workers` mengontrol jumlah worker (0 = cpu_count).
 - Terbaik untuk request berumur pendek throughput tinggi di Linux. Tidak cocok untuk SSE atau WebSocket (blocking read akan menahan worker).
 - Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
@@ -173,7 +173,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http.ClientConfig` | struct | Konfigurasi client (lihat bagian HttpClientConfig) |
 | `zix.Http.ClientResponse` | struct | Response yang telah di-parse: `status` / `header` / `iterateHeaders` / `body` / `deinit` |
 | `zix.Http.ClientRequestOpts` | struct | Opsi per-request: `headers`, `body`, override `connect_timeout_ms` |
-| `zix.Http.Request` | struct | Reader per-request: method, path, query, header, body |
+| `zix.Http.Request` | struct | Reader per-request: method, path, query, header, body, bodyReceived, bodyComplete |
 | `zix.Http.Response` | struct | Writer per-request: send, sendJson, noContent, addHeader, stream |
 | `zix.Http.SseWriter` | struct | Penulis event SSE yang dikembalikan oleh `res.sendStream()`: writeEvent, writeNamedEvent, comment |
 | `zix.Http.Context` | struct | Konteks per-request: io, allocator, stream (TCP mentah), deadline (anggaran handler opsional), logger (pointer logger opsional) |
@@ -219,6 +219,7 @@ pub const HttpServerConfig = struct {
     kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
     large_body_rcvbuf:    usize             = 0,          // SO_RCVBUF pada jalur large-body/upload, 0 = default kernel
+    max_request_body:     usize             = 8 * 1024 * 1024, // batas body request, body() menolak melewatinya dengan 413 (0 = tanpa cek Content-Length)
     compress:             bool              = false,      // negosiasi gzip / deflate / brotli, opt-in via resp.sendNegotiated (semua model)
     compression_min_size: usize             = 256,        // lewati body di bawah floor ini
     compression_max_out:  usize             = 256 * 1024, // cap output terkompresi codec-agnostic
@@ -265,12 +266,12 @@ sequenceDiagram
     Queue->>Pool: queue.pop() unblocks
     Note over Accept: immediately back to accept()
 
-    Pool->>Pool: alloc read_buf + write_buf
+    Pool->>Pool: alloc read_buf
     Pool->>Pool: ArenaAllocator init
 
     loop keep-alive
         Client->>Pool: HTTP request
-        Pool->>Pool: receiveHead()
+        Pool->>Pool: recv sampai terminator header
         Pool->>Pool: build Request + Response + Context
         Pool->>Router: dispatch(req, res, ctx)
 
@@ -298,7 +299,7 @@ sequenceDiagram
 
 ## Request
 
-Membungkus `*std.http.Server.Request` dan `*std.Io.Reader` untuk pembacaan body.
+View zero-copy atas head request yang sudah di-parse dan fd koneksi, tempat `body()` membaca.
 
 | Method | Mengembalikan | Catatan |
 | :- | :- | :- |
@@ -310,7 +311,9 @@ Membungkus `*std.http.Server.Request` dan `*std.Io.Reader` untuk pembacaan body.
 | `pathSegments(allocator)` | `![][]const u8` | Segmen tidak kosong yang dipisahkan oleh `/` |
 | `pathParam(name)` | `?[]const u8` | Capture bernama dari param route. null bila tidak ditangkap |
 | `header(name)` | `?[]const u8` | Pencarian case-insensitive. Indeks O(1) dibangun pada pemanggilan pertama |
-| `body()` | `![]const u8` | Membaca body: bytes `Content-Length` atau chunked transfer yang sudah di-decode. Di-cache setelah pemanggilan pertama. |
+| `body()` | `![]const u8` | Membaca body: bytes `Content-Length` atau chunked transfer yang sudah di-decode, dibatasi `max_request_body` (`error.RequestBodyTooLarge` dijawab `413`, chunked malformed `error.InvalidChunkedBody` dijawab `400`). Di-cache setelah pemanggilan pertama. |
+| `bodyReceived()` | `u64` | Byte body yang benar-benar dikonsumsi pembacaan, bukan yang diklaim header |
+| `bodyComplete()` | `bool` | Apakah akhir body yang dideklarasikan atau ter-framing tercapai. False berarti peer memutus body, atau handler tidak pernah membacanya |
 
 ---
 

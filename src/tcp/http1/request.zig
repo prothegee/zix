@@ -23,12 +23,22 @@ pub const Request = struct {
     /// threadlocal directly.
     path_params: []const router.PathParam = &.{},
     /// Body bytes consumed off the socket for this request, counted by the
-    /// engine. Equals body().len when the body fit the receive buffer. For a
-    /// body larger than the buffer the .URING dispatch counts the drained
-    /// remainder here as well. Handlers read it through bodyReceived().
+    /// engine from the reads that took them. Equals body().len when the body fit
+    /// the receive buffer. Past that every dispatch model counts the drained
+    /// remainder here too. Handlers read it through bodyReceived().
     body_received: u64 = 0,
+    /// Whether the engine read the body to its end. True for a request that
+    /// declared no body, since there was nothing to fall short of. Handlers read
+    /// it through bodyComplete().
+    body_complete: bool = true,
 
     /// Build a request view over a parsed head, body, and fd.
+    ///
+    /// Note:
+    /// - The defaults describe a body that arrived whole and fits the delivered
+    ///   slice, which is every request the engine did not have to measure. A
+    ///   dispatch model that drained or cut a body overrides both fields through
+    ///   core.tl_body_info.
     ///
     /// Param:
     /// head - *const core.ParsedHead (borrows the receive buffer)
@@ -80,8 +90,17 @@ pub const Request = struct {
         return router.pathParam(name);
     }
 
-    /// The request body. Identical call shape to zix.Http. The engine drained
-    /// the body before the handler ran, so this never reads the socket.
+    /// The body bytes handed to this handler. Identical call shape to zix.Http.
+    /// The engine already took the body off the socket before the handler ran,
+    /// so this never reads the socket and never blocks.
+    ///
+    /// Note:
+    /// - This is the DATA. bodyReceived() is the COUNT of what came off the
+    ///   socket. They answer different questions, see bodyReceived().
+    /// - The slice borrows the connection receive buffer and is only valid for
+    ///   the duration of the handler call. Copy it to keep it.
+    /// - Empty when the request declared no body, and also when the engine
+    ///   could not deliver one (a body past the receive buffer is discarded).
     ///
     /// Return:
     /// - []const u8 (the engine-delivered body slice, empty when none)
@@ -89,20 +108,68 @@ pub const Request = struct {
         return self.body_bytes;
     }
 
-    /// Bytes of this request's body consumed off the socket, counted by the
-    /// engine from the reads that received it, never taken from the
-    /// Content-Length header.
+    /// How many body bytes the engine took off the socket for this request.
+    /// Counted from the reads that received them, never read from the
+    /// Content-Length header, so a lying header cannot inflate it.
     ///
     /// Note:
-    /// - Equals body().len when the body fit the receive buffer.
-    /// - For a body larger than the buffer the .URING dispatch counts the
-    ///   drained remainder too. Other dispatch models report only the
-    ///   delivered slice length there.
+    /// - This is the COUNT. body() is the DATA. A handler that only needs the
+    ///   size (an upload receipt, a metric) reads this and skips the bytes.
+    /// - bodyReceived() == body().len means the handler was given everything.
+    ///   A larger count means bytes arrived that body() does not contain, so
+    ///   any parse of body() is working on a fragment.
+    /// - The two are equal whenever the body fit the receive buffer.
+    /// - Past the receive buffer every dispatch model counts the drained
+    ///   remainder as well, so the same request reports the same number on all
+    ///   three and one handler can be written against any of them.
+    /// - For a chunked body this counts the wire bytes, framing included, so it
+    ///   is larger than body().len by the size of that framing.
     ///
     /// Return:
     /// - u64 (counted received body bytes)
     pub fn bodyReceived(self: Request) u64 {
         return self.body_received;
+    }
+
+    /// Whether the engine read this request's body all the way to its end: the
+    /// declared Content-Length, or the chunked terminator.
+    ///
+    /// Note:
+    /// - False means the peer stopped sending part way. The bytes in body() are
+    ///   real, there are just fewer of them than the request promised, so an
+    ///   upload that looks small may be a large one that was cut off.
+    /// - True for a request that declared no body, since there was nothing to
+    ///   fall short of.
+    /// - True does not mean the handler was given every byte. A body past the
+    ///   receive buffer arrives complete and is delivered short, which is what
+    ///   bodyReceived() against body().len tells apart.
+    /// - Connection safety does not depend on this. A body only falls short when
+    ///   the peer stopped sending, and the serve loop ends on the next read.
+    ///   This is for the handler's own decision: reject the upload, log it, bill
+    ///   the bytes that did arrive.
+    /// - zix.Http answers the same question with the same name, with one extra
+    ///   case: there the body is read lazily, so a handler that never calls
+    ///   body() leaves it unread and this reads false.
+    ///
+    /// Usage:
+    /// ```zig
+    /// fn uploadHandler(req: *Request, res: *Response, _: *Context) !void {
+    ///     if (!req.bodyComplete()) {
+    ///         res.setStatus(.BAD_REQUEST);
+    ///         try res.send("incomplete body");
+    ///
+    ///         return;
+    ///     }
+    ///
+    ///     var buf: [32]u8 = undefined;
+    ///     try res.send(try std.fmt.bufPrint(&buf, "{d}", .{req.bodyReceived()}));
+    /// }
+    /// ```
+    ///
+    /// Return:
+    /// - bool
+    pub fn bodyComplete(self: Request) bool {
+        return self.body_complete;
     }
 
     /// Whether the connection is keep-alive.
@@ -252,6 +319,28 @@ test "zix http1: Request bodyReceived defaults to the body length and takes an e
 
     const raw = try Request.fromRaw("POST /u HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc", arena.allocator());
     try std.testing.expectEqual(@as(u64, 3), raw.bodyReceived());
+}
+
+test "zix http1: Request bodyComplete defaults true and takes an engine override" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
+    const parsed = try core.parseHead("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\n");
+
+    // The default describes a body that arrived whole, which is every request
+    // the engine had no reason to measure.
+    var req = Request.init(&parsed.head, "hello", -1);
+    try std.testing.expect(req.bodyComplete());
+
+    // A peer that stopped part way is the only thing that clears it.
+    req.body_complete = false;
+    try std.testing.expect(!req.bodyComplete());
+
+    // A delivered slice shorter than the count is a delivery cap, not a cut
+    // upload, so the two answers stay independent.
+    req.body_complete = true;
+    req.body_received = 100000;
+    try std.testing.expect(req.bodyComplete());
+    try std.testing.expect(req.bodyReceived() != (try req.body()).len);
 }
 
 test "zix http1: Request pathSegments splits non-empty segments" {

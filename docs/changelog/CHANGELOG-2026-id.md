@@ -48,6 +48,18 @@ __*Fix:*__
 
 __*Update:*__
 
+- Body request kini berarti hal yang sama di setiap engine dan dispatch model (14 defect diperbaiki di `zix.Http` dan `zix.Http1`):
+    - Baru di kedua request view: `bodyReceived()` dan `bodyComplete()`. Hitungan berasal dari pembacaan yang mengonsumsi body, tidak pernah dari header Content-Length yang bisa dibohongi client, dan flag-nya membedakan upload yang selesai dari yang diputus peer. Sebelumnya, upload yang sama melaporkan batas pengantaran pada `.ASYNC` dan 0 pada `.EPOLL`.
+    - Satu decoder chunked bersama di `http1/core.zig` (`chunkedFrame` / `decodeChunkedInBuf` / `readChunkedBody`), sehingga body chunked di-framing identik di ketiga model. Walk-nya memisahkan "belum tiba" dari "rusak" dari "terlalu besar": chunk frame yang malformed kini menjawab `400` dan body chunked melewati buffer `413`, yang dulu keduanya terbaca sebagai "terus menunggu" sampai koneksi penuh dan mati tanpa jawaban.
+    - Field config baru `max_request_body` di kedua engine (default 8 MiB, 0 menghapus cek): Content-Length yang dideklarasikan melewatinya ditolak dengan `413` sebelum satu byte body pun dibaca atau dialokasikan, sehingga client tidak bisa membuat worker mengonsumsi byte sebanyak apa pun hanya dengan mengklaim ukuran. Chunked tidak mendeklarasikan panjang di muka, jadi dibatasi body buffer di `zix.Http1` dan tumbuh menuju limit hanya saat byte tiba di `zix.Http`.
+    - `.EPOLL` `zix.Http1` kini menunda handler sampai body over-large selesai di-drain, lalu menyajikannya dengan total terhitung, urutan yang sudah dipakai `.URING`. `.ASYNC` memberi handler awal body dan bukan sisa drain, menjaga request yang pipelined di belakang body chunked, dan menutup setelah decode chunked gagal alih-alih salah mem-parse sisa byte body sebagai request berikutnya.
+    - `Expect: 100-continue` dijawab di setiap model kedua engine. Dulu hanya `.ASYNC` di `zix.Http1` dan `zix.Http` tidak pernah mengirimnya, sehingga client seperti itu menunggu timeout-nya sendiri di setiap request.
+    - `zix.Http`: coding list `Transfer-Encoding` yang berakhir `chunked` dikenali sebagai chunked, `body()` menunggu body tersegmen di fd non-blocking alih-alih memotong di short read pertama, body chunked yang tiba setelah head sampai ke handler alih-alih tiba kosong, dan koneksi yang body-nya tidak pernah dibaca (atau diputus peer) ditutup alih-alih bertahan keep-alive dengan byte body masih di socket.
+    - Perubahan perilaku: baris ukuran chunked yang bukan hex kini `error.InvalidChunkedBody` dijawab `400`, yang dulu menghasilkan body kosong dan 200.
+    - Cakupan: sekitar 80 tes unit dan edge baru, termasuk suite framing `tests/edge/http1/body_test.zig`.
+
+    ---
+
 - Breaking: dispatch model `.POOL` dan `.MIXED` dihapus (ADR-065):
     - `DispatchModel` kini `ASYNC = 0`, `EPOLL = 1`, `URING = 2` di kedelapan engine. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` untuk `.EPOLL` dan `.URING` alih-alih diam-diam turun ke `.POOL`, dan mencatat model mana yang ditolak. Fallback lama mengubah profil throughput, memori, dan latency pemanggil hanya dengan satu baris log sebagai penanda, dan server tanpa logger terkonfigurasi tidak berkata apa-apa.
     - `pool_size` dihapus dari kedelapan config, dan `pool_stack_size_bytes` dari `zix.Fix`. Di `zix.Http2` dan `zix.Grpc`, `pool_size` adalah jumlah worker `.EPOLL` / `.URING` sementara `workers` hanya milik POOL dan MIXED, jadi keduanya dialihkan ke `workers`. Keduanya default 0, jadi perilaku default tidak berubah.

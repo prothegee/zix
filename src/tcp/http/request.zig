@@ -7,6 +7,16 @@ const fd_io = @import("../../utils/fd_io.zig");
 const Method = @import("method.zig");
 const parser = @import("parser.zig");
 
+/// First size of the raw buffer a chunked body reads into. It doubles from here as bytes
+/// arrive, so a small chunked request pays one allocation of this size and a large one pays
+/// a handful of grows instead of reserving the ceiling up front.
+const CHUNKED_RAW_START: usize = 8 * 1024;
+
+/// Ceiling for a chunked body when config.max_request_body is 0. Chunked declares no length,
+/// so the read loop has nothing to check a limit against and needs a stop of its own. A
+/// configured max_request_body replaces this.
+const CHUNKED_RAW_MAX: usize = 64 * 1024 * 1024;
+
 /// SO_RCVBUF (bytes) applied while reading a large request body. Installed per worker from
 /// config.large_body_rcvbuf. 0 leaves the kernel default. Threadlocal because body() runs on the
 /// worker without a config handle.
@@ -72,6 +82,20 @@ pub const Request = struct {
     buf_filled: usize,
     allocator: std.mem.Allocator,
     body_cache: ?[]const u8 = null,
+    /// Largest body this request may take off the socket, from config.max_request_body.
+    /// 0 removes the limit.
+    body_limit: usize = 0,
+    /// Body bytes taken off the socket for this request, counted by the read loops
+    /// in body(). Never taken from the Content-Length header. Read it through
+    /// bodyReceived().
+    body_received: u64 = 0,
+    /// Whether the body read reached the end of the body: the declared
+    /// Content-Length, or the chunked terminator. Read it through bodyComplete().
+    body_complete: bool = false,
+    /// Set when the body crossed body_limit, so the caller can answer 413.
+    body_too_large: bool = false,
+    /// Set when the chunked framing could not be parsed, so the caller can answer 400.
+    body_malformed: bool = false,
     path_params: []const PathParam = &.{},
 
     /// Get HTTP method.
@@ -95,21 +119,43 @@ pub const Request = struct {
         return parser.getHeader(self.head, self.buf, name);
     }
 
-    /// Read and return the full request body.
-    /// Cached after first call. Handles both Content-Length and Transfer-Encoding: chunked.
-    /// Bytes already in the read buffer are used directly. Remaining bytes are recv'd from fd.
+    /// Read and return the request body bytes.
+    ///
+    /// Note:
+    /// - Lazy, unlike zix.Http1 where the engine drains before the handler
+    ///   runs. The first call is what pulls the body off the socket, so a
+    ///   handler that never calls this leaves the body unread.
+    /// - Cached after the first call, so calling it twice costs nothing.
+    /// - Handles both Content-Length and Transfer-Encoding: chunked. Bytes
+    ///   already in the read buffer are used directly, the rest are recv'd.
+    /// - The returned length is what was actually read, which can be short of
+    ///   the declared Content-Length when the peer stops early.
     ///
     /// Return:
-    /// - empty string when Content-Length is absent/zero and not chunked
+    /// - []const u8 (the body bytes)
+    /// - empty when Content-Length is absent or zero and the request is not chunked
     pub fn body(self: *Request) ![]const u8 {
-        if (self.body_cache) |b| return b;
+        if (self.body_cache) |cached| return cached;
 
         if (self.head.chunked) return self.readChunkedBody();
 
-        const content_len = self.head.content_length;
-        if (content_len == 0) {
+        const declared = self.head.content_length;
+        if (declared == 0) {
             self.body_cache = "";
+            self.body_complete = true;
             return "";
+        }
+
+        // The declared length decides the allocation, so it is checked against the
+        // limit before anything is reserved. A client cannot make the server
+        // allocate by claiming a size it never sends.
+        const content_len = std.math.cast(usize, declared) orelse {
+            self.body_too_large = true;
+            return error.RequestBodyTooLarge;
+        };
+        if (self.body_limit != 0 and content_len > self.body_limit) {
+            self.body_too_large = true;
+            return error.RequestBodyTooLarge;
         }
 
         // Bytes already pulled into buf during the header read loop.
@@ -135,24 +181,67 @@ pub const Request = struct {
             if (n == 0) break;
             total += n;
         }
+
+        // Counted from the reads, so a peer that stops early leaves the two
+        // disagreeing and bodyComplete() false. The caller closes on that.
+        self.body_received = total;
+        self.body_complete = total == content_len;
         self.body_cache = out[0..total];
+
         return self.body_cache.?;
     }
 
+    /// Read a chunked body off the socket, decoded in place.
+    ///
+    /// Note:
+    /// - The raw buffer is sized from what still has to be read, not from the
+    ///   bytes that happened to arrive with the head. It starts at one window and
+    ///   doubles, so a body spanning many segments costs a few grows.
+    /// - Completion is decided by walking the chunk framing, not by searching for
+    ///   the terminator bytes, which chunk data can spell by accident.
+    /// - Decoding runs over the raw buffer itself, so the second buffer and the
+    ///   full-body copy the old path paid are both gone.
     fn readChunkedBody(self: *Request) ![]const u8 {
-        const max_raw = self.buf.len;
-        const raw_buf = try self.allocator.alloc(u8, max_raw);
-
         const in_buf_end = @min(self.buf_filled, self.buf.len);
         const already_slice = self.buf[@min(self.head.body_offset, in_buf_end)..in_buf_end];
-        @memcpy(raw_buf[0..already_slice.len], already_slice);
-        var raw_total: usize = already_slice.len;
 
-        // Read from fd until terminal chunk found or buffer full.
-        // Note: "0\r\n\r\n" pattern match is a heuristic, the dechunker handles correctness.
-        while (raw_total < max_raw) {
-            if (std.mem.indexOf(u8, raw_buf[0..raw_total], "0\r\n\r\n") != null) break;
-            const n = readOnceFD(self.fd, raw_buf[raw_total..max_raw]) catch |err| {
+        // Chunked declares no length, so the ceiling is the configured limit and
+        // the buffer grows toward it only as bytes actually arrive.
+        const cap_limit = @max(if (self.body_limit == 0) CHUNKED_RAW_MAX else self.body_limit, already_slice.len);
+        var cap = @max(already_slice.len, @min(CHUNKED_RAW_START, cap_limit));
+
+        var raw = try self.allocator.alloc(u8, cap);
+        @memcpy(raw[0..already_slice.len], already_slice);
+        var raw_total = already_slice.len;
+
+        if (raw_total < cap) setRecvBuf(self.fd, tl_large_body_rcvbuf);
+
+        var scan_from: usize = 0;
+        var body_end: ?usize = null;
+        while (true) {
+            body_end = parser.chunkedEnd(raw[0..raw_total], &scan_from) catch {
+                self.body_malformed = true;
+                self.body_received = raw_total;
+                self.body_cache = "";
+
+                return error.InvalidChunkedBody;
+            };
+            if (body_end != null) break;
+
+            if (raw_total == cap) {
+                if (cap >= cap_limit) {
+                    self.body_too_large = true;
+                    self.body_received = raw_total;
+                    self.body_cache = "";
+
+                    return error.RequestBodyTooLarge;
+                }
+
+                cap = @min(cap * 2, cap_limit);
+                raw = try self.allocator.realloc(raw, cap);
+            }
+
+            const n = readOnceFD(self.fd, raw[raw_total..cap]) catch |err| {
                 // Non-blocking fd between chunks: wait for the next one instead of truncating.
                 if (err == error.WouldBlock and waitReadable(self.fd, tl_body_read_timeout_ms)) continue;
 
@@ -162,10 +251,48 @@ pub const Request = struct {
             raw_total += n;
         }
 
-        const decoded = try self.allocator.alloc(u8, raw_total);
-        const decoded_len = parser.dechunk(raw_buf[0..raw_total], decoded) catch 0;
-        self.body_cache = decoded[0..decoded_len];
+        // A body that never terminated still decodes what arrived, and leaves
+        // bodyComplete() false so the caller closes instead of reusing the socket.
+        const end = body_end orelse raw_total;
+        const decoded_len = parser.dechunkInPlace(raw[0..end]) catch 0;
+
+        self.body_received = end;
+        self.body_complete = body_end != null;
+        self.body_cache = raw[0..decoded_len];
+
         return self.body_cache.?;
+    }
+
+    /// How many body bytes this request took off the socket, counted by the read
+    /// loops in body() and never read from the Content-Length header.
+    ///
+    /// Note:
+    /// - This is the COUNT. body() is the DATA. A handler that only needs the
+    ///   size reads this and skips the bytes.
+    /// - Zero until body() is called, because zix.Http reads the body lazily.
+    /// - For a chunked body this counts the wire bytes, framing included, so it
+    ///   is larger than body().len by the size of that framing.
+    ///
+    /// Return:
+    /// - u64 (counted received body bytes)
+    pub fn bodyReceived(self: Request) u64 {
+        return self.body_received;
+    }
+
+    /// Whether the body was read all the way to its end: the declared
+    /// Content-Length, or the chunked terminator.
+    ///
+    /// Note:
+    /// - False when body() was never called, when the peer stopped early, and
+    ///   when the body crossed the configured limit.
+    /// - The engine closes the connection rather than reuse it whenever this is
+    ///   false for a request that declared a body, because the unread remainder
+    ///   would otherwise be parsed as the next request.
+    ///
+    /// Return:
+    /// - bool
+    pub fn bodyComplete(self: Request) bool {
+        return self.body_complete;
     }
 
     /// Whether the connection is keep-alive.
@@ -408,6 +535,77 @@ test "zix http: request chunked body must not truncate when chunks arrive in seg
     const body = try req.body();
 
     try std.testing.expectEqualStrings("abcdefghij", body);
+}
+
+test "zix http: request body delivers a body far larger than the read buffer" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    // zix.Http sizes the body allocation from Content-Length and reads until it
+    // is filled, so the read buffer never caps what the handler sees. The .ASYNC
+    // path of zix.Http1 truncates the delivered slice at its body chunk instead,
+    // and the multiplexed models drop the body entirely, so this is the contract
+    // that separates the two engines.
+    const linux = std.os.linux;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+    defer _ = linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const body_len: usize = 64 * 1024;
+    const payload = try arena.allocator().alloc(u8, body_len);
+    @memset(payload, 'A');
+    try std.testing.expectEqual(body_len, linux.write(fds[1], payload.ptr, body_len));
+
+    const raw = "POST /upload HTTP/1.1\r\nContent-Length: 65536\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
+    var req = Request{
+        .buf = raw,
+        .head = head,
+        .fd = fds[0],
+        .buf_filled = raw.len,
+        .allocator = arena.allocator(),
+    };
+
+    const body = try req.body();
+
+    try std.testing.expectEqual(body_len, body.len);
+    try std.testing.expectEqual(@as(usize, body_len), std.mem.count(u8, body, "A"));
+}
+
+test "zix http: request body reports a short read when the peer closes before Content-Length" {
+    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    // The returned slice is what the keep-alive decision reads: a body shorter
+    // than Content-Length still comes back as a successful read, so a caller
+    // that trusts the length alone cannot tell the request was cut off.
+    const linux = std.os.linux;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
+
+    try std.testing.expectEqual(@as(usize, 3), linux.write(fds[1], "abc", 3));
+    _ = linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const raw = "POST /upload HTTP/1.1\r\nContent-Length: 10\r\n\r\n";
+    const head = (try parser.parse(raw, parser.MAX_HEADERS_U8)).?;
+    var req = Request{
+        .buf = raw,
+        .head = head,
+        .fd = fds[0],
+        .buf_filled = raw.len,
+        .allocator = arena.allocator(),
+    };
+
+    const body = try req.body();
+
+    try std.testing.expectEqualStrings("abc", body);
+    try std.testing.expect(body.len < head.content_length);
 }
 
 test "zix http: request keepAlive reflects the parsed head" {

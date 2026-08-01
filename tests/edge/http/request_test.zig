@@ -33,7 +33,7 @@ test "zix edge: queryParam, no query string at all returns null" {
     try std.testing.expect(req.queryParam("k") == null);
 }
 
-test "zix edge: body(), chunked invalid hex returns empty string" {
+test "zix edge: body(), chunked invalid hex is an error, not an empty body" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var req = try zix.Http.Request.fromRaw(
@@ -41,8 +41,11 @@ test "zix edge: body(), chunked invalid hex returns empty string" {
             "zz\r\nbaddata\r\n0\r\n\r\n",
         arena.allocator(),
     );
-    const b = try req.body();
-    try std.testing.expectEqualStrings("", b);
+
+    // An empty body reads as "the client sent nothing", which is a different
+    // request from one the server could not frame. The engine answers 400 on it.
+    try std.testing.expectError(error.InvalidChunkedBody, req.body());
+    try std.testing.expect(!req.bodyComplete());
 }
 
 test "zix edge: body(), chunked missing terminal chunk returns partial data" {

@@ -46,50 +46,46 @@ epollWorker():
                epoll_ctl(DEL, conn_fd)
                linux.close(conn_fd)
        conn fd (readable):
-               result = handleOneRequest(conn_fd, buf, arena, self)
+               read sampai EAGAIN ke buffer koneksi
+               result = processRequest(conn_fd, buf, arena, self)
                .keep_alive -> tetap terdaftar (level-triggered, tidak perlu re-arm)
                .close      -> epoll_ctl(DEL, conn_fd) + linux.close(conn_fd)
 ```
 
-Tidak ada state bersama antar worker. `handleOneRequest` dipanggil langsung di thread worker
-yang melakukan recv/parse/dispatch/send secara blocking sinkron. Arena di-reset antar request.
+Tidak ada state bersama antar worker. Thread worker memanggil `processRequest` (dispatch/common.zig) langsung: parse/dispatch/send sinkron atas byte yang diantar event. Pipeline yang sama melayani semua dispatch model, sehingga perilaku body identik di ketiganya:
+
+- `Expect: 100-continue` dengan body yang dideklarasikan dijawab sebelum handler berjalan.
+- Body melewati `max_request_body` ditolak di dalam `body()` dan dijawab `413`, framing chunk yang tidak bisa di-parse adalah `error.InvalidChunkedBody` dan dijawab `400` (keduanya hanya saat handler belum menulis apa pun).
+- Setelah handler, koneksi ditutup saat body yang dideklarasikan tidak dikonsumsi seluruhnya: handler tidak pernah memanggil `body()`, peer berhenti lebih awal, atau body chunked tidak sampai akhir. Sisa byte body kalau tidak akan ter-parse sebagai request berikutnya.
+
+Arena di-reset antar request.
 
 ### handleConnection()
 
+Entry per-koneksi `.ASYNC` (dispatch/common.zig). Satu panggilan memiliki seluruh umur keep-alive:
+
 ```
-1. setsockopt TCP_NODELAY           // nonaktifkan Nagle, kirim setiap respons langsung
-2. Layer D: if conn_timeout_ms > 0:
+1. defer stream.close, setsockopt TCP_NODELAY   // nonaktifkan Nagle, kirim setiap respons langsung
+2. pasang thread-local per-koneksi: pengaturan kompresi, response cache
+      (model multiplexed memasangnya sekali per worker, .ASYNC tidak punya worker:
+      io.async menyerahkan tiap koneksi ke pool thread mana pun yang bebas)
+3. Layer D: if conn_timeout_ms > 0:
       daftarkan ConnEntry{ stream, deadline = now + conn_timeout_ms } ke self.registry
-      defer deregister saat return (tandai done=true, hapus dari registry)
-3. stack_read [stack_read_buf_max]u8 pada stack (stack_read_buf_max = 4096, dispatch/common)
+      defer deregister saat return
+4. stack_read [stack_read_buf_max]u8 pada stack (stack_read_buf_max = 4096, dispatch/common)
    read_buf  = if max_recv_buf <= stack_read_buf_max: slice stack
-               else smp_allocator.alloc(u8, max_recv_buf)
-4. defer: bebaskan heap jika dialokasi di heap, stream.close()
-5. std.http.Server.init(&reader.interface, &writer.interface)
-6. ArenaAllocator.init(smp_allocator), pre-warm dengan max_allocator_size, reset(.retain_capacity)
-7. keep-alive loop:
-      a. arena.reset(.retain_capacity)
-      b. receiveHead() // break pada HttpConnectionClosing / ConnectionResetByPeer / ReadFailed
-            ReadFailed: timer thread Layer D memanggil stream.shutdown(.both) -> koneksi kedaluwarsa
-      c. bangun Request(inner, &reader, allocator)
-         bangun Response(inner, io, allocator, max_response_headers.value())
-         bangun Context(io, allocator, stream)  // ctx.stream = stream (TCP mentah, untuk WS/SSE)
-      d. Layer B: if handler_timeout_ms > 0: ctx = ctx.withTimeout(handler_timeout_ms)
-            mengatur ctx.deadline, handler memanggil ctx.timedOut() antar langkah untuk memeriksa sisa waktu
-      e. muat atomic date cache global: idx = g_date_active.load(.acquire), res.date_cache = g_date_bufs[idx]
-      f. router.dispatch(req, res, ctx)
-      g. if res.streaming: break  // handler SSE membuka stream, koneksi tutup saat handler return
-      h. if public_dir dan belum dispatched: static.serve(...)
-      i. if belum dilayani: 404
-      j. if cfg.logger: lg.access(method_str, req.path(), status_code, res.bytes_written, ua, origin)
-            method_str: stringFromEnum(req.method())
-            ua:     req.header("user-agent") orelse ""
-            origin: req.header("origin") orelse ""
+               else smp_allocator.alloc(u8, max_recv_buf), dibebaskan saat koneksi tutup
+5. ArenaAllocator.init(smp_allocator), pre-warm dengan max_allocator_size, reset(.retain_capacity)
+6. keep-alive loop: handleOneRequest sampai mengembalikan .close
 ```
+
+`handleOneRequest` me-reset arena, lalu recv-loop sampai terminator header ditemukan (tiap scan mundur 3 byte, sehingga CRLFCRLF yang terbelah antar read tetap tertangkap): buffer penuh tanpa terminator menjawab `431` dan menutup, EOF atau error baca menutup tanpa jawaban. Request yang ter-buffer lalu melewati `processRequest`, pipeline yang sama yang dipanggil model event-driven, sehingga perilaku body (100-continue, pemetaan `413` / `400`, aturan tutup saat body tidak dikonsumsi) identik: lihat bagian `.EPOLL` di atas.
+
+Di dalam `processRequest`: `Request` / `Response` / `Context` dibangun di atas byte yang ter-buffer (`ctx.stream` membawa stream TCP mentah untuk WS/SSE), Layer B (`ctx.withTimeout`) memasang budget handler saat `handler_timeout_ms` > 0, header Date adalah satu atomic load dari date cache global double-buffered, dispatch router memiliki fallback static-file dan 404 (`ctx.public_dir`), response streaming (`res.streaming`) menutup koneksi setelah handler return, dan baris access log ditulis saat logger dikonfigurasi.
 
 Buffer stack hidup di stack pool thread selama durasi koneksi. Buffer heap dibebaskan saat koneksi ditutup. Arena direset di antara request dan dideinisilisasi saat `handleConnection` return.
 
-Layer D (ConnRegistry) aktif hanya di model 2: timer thread yang memanggil `registry.evict()` hanya ada di model 2. Layer B (`ctx.withTimeout`) aktif di kedua model.
+Layer D (ConnRegistry) aktif hanya pada `.ASYNC`: timer thread yang memanggil `registry.evict()` hanya ada di sana. Layer B (`ctx.withTimeout`) aktif di semua dispatch model.
 
 ---
 
@@ -153,7 +149,13 @@ path diawali prefix DAN (path.len == prefix.len ATAU path[prefix.len] == '/')
 body_cache: ?[]const u8 = null,
 ```
 
-`body()` membaca byte `Content-Length` pada panggilan pertama dan menyimpannya di `body_cache`. Panggilan berikutnya langsung return `body_cache`. Pembacaan terjadi melalui `*std.Io.Reader` yang memegang referensi stream yang mendasarinya.
+`body()` lazy: panggilan pertama menarik body dari socket dan menyimpannya di `body_cache`, panggilan berikutnya langsung return cache.
+
+Untuk body Content-Length, panjang yang dideklarasikan melewati `max_request_body` ditolak dengan `error.RequestBodyTooLarge` bahkan sebelum alokasi dipesan (engine menjawab `413`), sehingga client tidak bisa membuat server mengalokasikan dengan mengklaim ukuran yang tidak pernah dikirim. Loop baca lalu menarik sampai panjang yang dideklarasikan, menunggu `body_read_timeout_ms` antar segmen pada fd non-blocking. Peer yang berhenti lebih awal meninggalkan slice yang dikembalikan lebih pendek dan `bodyComplete()` false.
+
+Body chunked di-framing dengan menjalani framing chunk (`parser.chunkedEnd`) dan di-decode di tempat di atas read buffer-nya sendiri: baris ukuran yang bukan hex adalah `error.InvalidChunkedBody` (engine menjawab `400`), dan body yang melampaui limit adalah `error.RequestBodyTooLarge` (`413`). Chunked tidak mendeklarasikan panjang di muka, jadi buffer tumbuh menuju limit hanya saat byte benar-benar tiba.
+
+`bodyReceived()` menghitung yang dikonsumsi pembacaan (bukan yang diklaim header), dan `bodyComplete()` apakah akhir yang dideklarasikan atau ter-framing tercapai.
 
 ### Path Param
 
@@ -250,7 +252,7 @@ keep-alive    jika keep_alive == true  DAN  req.head.keep_alive == true
 close         jika keep_alive == false ATAU req.head.keep_alive == false
 ```
 
-`keep_alive: ?bool = null` secara default. `req.head.keep_alive` di-parse oleh `std.http` dari header request yang masuk (tanpa scan manual). Header Connection hanya ditulis saat handler mengaktifkannya melalui `setKeepAlive()`.
+`keep_alive: ?bool = null` secara default. `req.head.keep_alive` di-set oleh parse head milik engine sendiri (`parser.zig`) dari header request yang masuk. Header Connection hanya ditulis saat handler mengaktifkannya melalui `setKeepAlive()`.
 
 ### Logika header Date
 

@@ -52,6 +52,13 @@ pub const HttpServerConfig = struct {
     /// non-blocking .EPOLL / .URING fd (upload path), bounding a stalled client. Default 30000 covers
     /// a slow upload. The hot GET path returns early (no body) and never waits here.
     body_read_timeout_ms: i32 = 30000,
+    /// Largest request body in bytes the engine will take, counted from what actually arrives and
+    /// not from the Content-Length header. A declared length past this is refused with 413 before
+    /// anything is allocated, and a chunked body is stopped at the byte that crosses it, since
+    /// chunked declares no length up front. 0 removes the check on Content-Length and restores the
+    /// old behaviour of sizing the allocation from whatever the client claimed. A chunked body keeps
+    /// an internal ceiling either way, since there is no declared length to check.
+    max_request_body: usize = 8 * 1024 * 1024,
     /// Per-connection send buffer size in bytes for the .URING dispatch model. The send
     /// half of the per-connection footprint (max_recv_buf covers recv). No effect under
     /// the other dispatch models.

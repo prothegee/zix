@@ -20,7 +20,7 @@ const logSystem = common.logSystem;
 const setNoDelay = common.setNoDelay;
 const pinToCpu = common.pinToCpu;
 const getAvailableCpuCount = common.getAvailableCpuCount;
-const decodeChunkedInBuf = common.decodeChunkedInBuf;
+const decodeChunkedInBuf = core.decodeChunkedInBuf;
 const parseGetFastPath = common.parseGetFastPath;
 const effectiveCacheEntries = common.effectiveCacheEntries;
 const MAX_FD = common.MAX_FD;
@@ -210,6 +210,10 @@ const UringConn = struct {
     /// Head bytes kept at the front of buf while the body drains. > 0 marks a
     /// request whose handler invoke is deferred to drain completion.
     pending_head_len: usize = 0,
+    /// Whether 100 Continue was already sent for the request currently being
+    /// parsed. The parse pass re-runs on every recv completion while a body is
+    /// still arriving, and the client only needs to be told once.
+    continue_sent: bool = false,
     ws: ?core.WsFrameFn = null,
 };
 
@@ -990,13 +994,57 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
                 };
                 const head = parsed.head;
 
+                // The client is holding its body back until the server agrees to
+                // take it. Answering here rather than after the body means the
+                // wait is one round trip instead of the client's own timeout.
+                // .ASYNC has always done this.
+                if (head.expect_continue and !conn.continue_sent and (head.content_length > 0 or head.chunked_request)) {
+                    core.writeAllFD(fd, "HTTP/1.1 100 Continue\r\n\r\n") catch {
+                        keep_alive = false;
+
+                        break;
+                    };
+                    conn.continue_sent = true;
+                }
+
                 var body: []const u8 = &.{};
                 var request_len = parsed.body_offset;
                 if (head.chunked_request) {
-                    const decoded = decodeChunkedInBuf(rem[parsed.body_offset..], self.body_buf) orelse break;
+                    const decoded = decodeChunkedInBuf(rem[parsed.body_offset..], self.body_buf);
+                    switch (decoded.stop) {
+                        .COMPLETE => {},
+                        // Still arriving: keep the bytes and resume on the next
+                        // recv completion.
+                        .NEED_MORE => break,
+                        // Neither of these can ever complete, so waiting for more
+                        // bytes would hold the connection until the buffer filled
+                        // and the peer looked like it hung up. Answer the client.
+                        .MALFORMED => {
+                            core.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+                            keep_alive = false;
+
+                            break;
+                        },
+                        .TOO_LARGE => {
+                            core.writeAllFD(fd, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+                            keep_alive = false;
+
+                            break;
+                        },
+                    }
+
                     body = self.body_buf[0..decoded.len];
                     request_len = parsed.body_offset + decoded.consumed;
                 } else if (head.content_length > 0) {
+                    // Refused before a byte of it is read or discarded, so a declared
+                    // length cannot make this worker consume an arbitrary body.
+                    if (core.tl_max_request_body != 0 and head.content_length > core.tl_max_request_body) {
+                        core.writeAllFD(fd, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+                        keep_alive = false;
+
+                        break;
+                    }
+
                     const content_length: usize = @intCast(head.content_length);
                     const need = parsed.body_offset + content_length;
 
@@ -1007,7 +1055,9 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
                         // Deferred request re-entering after its drain: the body
                         // was consumed off the socket and counted, serve it with
                         // the counted total and the empty body slice.
-                        core.tl_body_received = conn.drain_received;
+                        // The drain ran to zero before this branch was reached, so the body
+                        // is whole even though none of it can be handed over.
+                        core.tl_body_info = .{ .received = conn.drain_received, .complete = true };
                         conn.pending_head_len = 0;
                         conn.drain_received = 0;
                         request_len = parsed.body_offset;
@@ -1042,6 +1092,7 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
 
                 consumed += request_len;
                 self.requests_served += 1;
+                conn.continue_sent = false;
 
                 // WebSocket upgrade: stop parsing HTTP and switch to the frame
                 // loop. The 101 is already staged in the sink. Bytes the client
@@ -1430,6 +1481,7 @@ fn uringWorkerFn(comptime handler_fn: HandlerFn) fn (UringWorkerCtx) void {
 
             core.setDateHeader(config.send_date_header);
             core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
+            core.setMaxRequestBody(config.max_request_body);
             core.setStatic(config.public_dir, io);
             core.setMaxResponseHeaders(config.max_response_headers.value());
 
@@ -1647,8 +1699,8 @@ pub fn runUring(config: Config, comptime handler_fn: HandlerFn) !void {
 fn testEchoLenHandler(req: *core.Request, res: *core.Response, ctx: *core.Context) anyerror!void {
     _ = ctx;
 
-    var buf: [24]u8 = undefined;
-    const out = std.fmt.bufPrint(&buf, "{d}", .{req.bodyReceived()}) catch return;
+    var buf: [48]u8 = undefined;
+    const out = std.fmt.bufPrint(&buf, "{d}:{s}", .{ req.bodyReceived(), if (req.bodyComplete()) "whole" else "cut" }) catch return;
 
     res.setContentType(.TEXT_PLAIN);
 
@@ -1705,7 +1757,134 @@ test "zix http1: URING dispatch decodes a fully-present chunked body" {
     // The handler saw a 2-byte decoded body, so it echoes "2".
     const resp = send_buf[0..conn.staged];
     try std.testing.expect(std.mem.indexOf(u8, resp, "HTTP/1.1 200 OK") != null);
-    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n2"));
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n2:whole"));
+}
+
+test "zix http1: URING dispatch refuses a declared body past the limit with 413" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [4096]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
+
+    core.setMaxRequestBody(1024);
+    defer core.setMaxRequestBody(0);
+
+    // The declared length alone is enough to refuse, so the worker never defers
+    // the request or arms a drain for a body it was never going to accept.
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 65536\r\n\r\n";
+    var conn_buf: [4096]u8 = undefined;
+    @memcpy(conn_buf[0..head.len], head);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = head.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.close, outcome);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_head_len);
+    try std.testing.expectStringStartsWith(send_buf[0..conn.staged], "HTTP/1.1 413 ");
+}
+
+test "zix http1: URING dispatch sends 100 Continue while the body is still arriving" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [4096]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
+
+    // Head only: the client is waiting for the interim response before it sends
+    // the body, so the request cannot complete until that answer goes out.
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n";
+    var conn_buf: [4096]u8 = undefined;
+    @memcpy(conn_buf[0..head.len], head);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = head.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expect(conn.continue_sent);
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", send_buf[0..conn.staged]);
+}
+
+test "zix http1: URING dispatch answers 400 on a malformed chunked body instead of waiting" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [4096]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
+
+    // A chunk size that is not hex can never become valid by waiting. Treating it
+    // as "not arrived yet" held the connection until the buffer filled and the
+    // peer read as a hangup, with no answer sent.
+    const req = "POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nab\r\n0\r\n\r\n";
+    var conn_buf: [4096]u8 = undefined;
+    @memcpy(conn_buf[0..req.len], req);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = req.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.close, outcome);
+
+    // The ring stages responses into send_buf, the worker submits them, so the
+    // answer is read from there rather than off the socket.
+    const resp = send_buf[0..conn.staged];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 400 "));
+}
+
+test "zix http1: URING dispatch answers 413 for a chunked body past the body buffer" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // The decoded body is larger than the per-worker body buffer, so it can never
+    // be served. That is a client error with an answer, not a body still on its way.
+    var body_buf: [16]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
+
+    const oversized: [64]u8 = @splat('A');
+    const req = "POST /u HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n40\r\n".* ++ oversized ++ "\r\n0\r\n\r\n".*;
+    var conn_buf: [4096]u8 = undefined;
+    @memcpy(conn_buf[0..req.len], &req);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = req.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.close, outcome);
+
+    const resp = send_buf[0..conn.staged];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 413 "));
 }
 
 test "zix http1: URING dispatch adopts a reserve-committed response with its staged offset" {
@@ -1836,7 +2015,87 @@ test "zix http1: URING dispatch defers an oversized body and serves the counted 
     try std.testing.expectEqual(@as(usize, 0), conn.filled);
 
     const resp = send_buf[0..conn.staged];
-    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n100000"));
+    try std.testing.expect(std.mem.endsWith(u8, resp, "\r\n\r\n100000:whole"));
+}
+
+test "zix http1: URING dispatch waits for a body that fits the buffer and then reports the full count" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [256]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
+
+    // Content-Length fits conn.buf, so this is the wait path rather than the
+    // drain path: dispatch holds the head until the body lands.
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\n";
+    var conn_buf: [256]u8 = undefined;
+    @memcpy(conn_buf[0..head.len], head);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = head.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const first = worker.dispatch(&conn);
+
+    // Nothing answered and nothing drained: the head is still buffered whole.
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(@as(usize, 0), conn.staged);
+    try std.testing.expectEqual(head.len, conn.filled);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_head_len);
+
+    @memset(conn_buf[head.len..][0..100], 'A');
+    conn.filled = head.len + 100;
+
+    const second = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+    try std.testing.expect(std.mem.endsWith(u8, send_buf[0..conn.staged], "\r\n\r\n100:whole"));
+}
+
+test "zix http1: URING keeps a deferred request parked while its drain is unfinished" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    // The counterpart to .ASYNC reporting an incomplete body: this model does not
+    // report one, it holds the request until the drain finishes and serves
+    // nothing if it never does. Nothing pinned that the parked request stays
+    // parked.
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var body_buf: [256]u8 = undefined;
+    var worker = testUringWorker(testEchoLenHandler, &body_buf, &arena);
+
+    const head = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 100000\r\n\r\n";
+    const partial = "abcdef";
+    var conn_buf: [256]u8 = undefined;
+    @memcpy(conn_buf[0..head.len], head);
+    @memcpy(conn_buf[head.len..][0..partial.len], partial);
+    var send_buf: [4096]u8 = undefined;
+    var conn = UringConn{ .fd = fds[1], .gen = 0, .buf = &conn_buf, .filled = head.len + partial.len, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    const served_before = worker.requests_served;
+    const outcome = worker.dispatch(&conn);
+
+    // Parked: a drain still owing, a head held, nothing staged, nothing counted
+    // as served. Only a drain that reaches zero releases it, which is what
+    // finishDrainedRequest waits for.
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
+    try std.testing.expect(conn.drain > 0);
+    try std.testing.expectEqual(head.len, conn.pending_head_len);
+    try std.testing.expectEqual(@as(usize, 0), conn.staged);
+    try std.testing.expectEqual(served_before, worker.requests_served);
 }
 
 test "zix http1: URING dispatch compacts the deferred head behind a pipelined request" {
@@ -1869,7 +2128,7 @@ test "zix http1: URING dispatch compacts the deferred head behind a pipelined re
     // The small POST staged its "2" echo, the oversized one deferred with its
     // head moved to the buffer front.
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, outcome);
-    try std.testing.expect(std.mem.endsWith(u8, send_buf[0..conn.staged], "\r\n\r\n2"));
+    try std.testing.expect(std.mem.endsWith(u8, send_buf[0..conn.staged], "\r\n\r\n2:whole"));
     try std.testing.expectEqual(@as(usize, 50000), conn.drain);
     try std.testing.expectEqual(@as(usize, 0), conn.drain_received);
     try std.testing.expectEqual(head.len, conn.pending_head_len);
@@ -1886,7 +2145,7 @@ test "zix http1: URING dispatch compacts the deferred head behind a pipelined re
     const second = worker.dispatch(&conn);
 
     try std.testing.expectEqual(core.ConnOutcome.keep_alive, second);
-    try std.testing.expect(std.mem.endsWith(u8, send_buf[0..conn.staged], "\r\n\r\n50000"));
+    try std.testing.expect(std.mem.endsWith(u8, send_buf[0..conn.staged], "\r\n\r\n50000:whole"));
 }
 
 fn testOkHandler(_: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {

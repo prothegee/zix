@@ -48,6 +48,18 @@ __*Fix:*__
 
 __*Update:*__
 
+- Request bodies now mean the same thing on every engine and dispatch model (14 defects fixed across `zix.Http` and `zix.Http1`):
+    - New on both request views: `bodyReceived()` and `bodyComplete()`. The count comes from the reads that consumed the body, never from the Content-Length header a client can lie about, and the flag tells a finished upload from one the peer cut short. Before, the same upload reported the delivery cap under `.ASYNC` and 0 under `.EPOLL`.
+    - One shared chunked decoder in `http1/core.zig` (`chunkedFrame` / `decodeChunkedInBuf` / `readChunkedBody`), so a chunked body is framed identically on all three models. The walk separates "not arrived yet" from "broken" from "too big": a malformed chunk frame now answers `400` and a chunked body past the buffer `413`, where both used to read as "keep waiting" until the connection filled and died with no answer.
+    - New config field `max_request_body` on both engines (default 8 MiB, 0 removes the check): a declared Content-Length past it is refused with `413` before a byte of the body is read or allocated, so a client cannot make a worker consume an arbitrary number of bytes by claiming a size. Chunked declares no length up front, so it is bounded by the body buffer on `zix.Http1` and grows toward the limit only as bytes arrive on `zix.Http`.
+    - `zix.Http1` `.EPOLL` now defers the handler until an over-large body has drained, then serves it with the counted total, the ordering `.URING` already used. `.ASYNC` hands the handler the start of the body rather than drain leftovers, keeps a request pipelined behind a chunked body, and closes after a failed chunked decode instead of misparsing leftover body bytes as the next request.
+    - `Expect: 100-continue` is answered on every model of both engines. It was `.ASYNC`-only on `zix.Http1` and `zix.Http` never sent it, so such a client waited out its own timeout on every request.
+    - `zix.Http`: a `Transfer-Encoding` coding list ending in `chunked` is recognized as chunked, `body()` waits for a segmented body on a non-blocking fd instead of truncating at the first short read, a chunked body arriving after the head reaches the handler instead of arriving empty, and a connection whose body was never read (or cut short by the peer) closes instead of staying keep-alive with body bytes still on the socket.
+    - Behaviour change: a chunked size line that is not hex is now `error.InvalidChunkedBody` answered with `400`, where it used to yield an empty body and a 200.
+    - Coverage: about 80 new unit and edge tests, including the `tests/edge/http1/body_test.zig` framing suite.
+
+    ---
+
 - Breaking: the `.POOL` and `.MIXED` dispatch models are removed (ADR-065):
     - `DispatchModel` is now `ASYNC = 0`, `EPOLL = 1`, `URING = 2` on all eight engines. Off Linux, `run()` returns `error.DispatchModelUnsupported` for `.EPOLL` and `.URING` instead of silently downgrading to `.POOL`, and logs which model was rejected. The old fallback changed a caller's throughput, memory, and latency profile with nothing but a log line to say so, and a server with no logger configured said nothing at all.
     - `pool_size` is removed from all eight configs, and `pool_stack_size_bytes` from `zix.Fix`. On `zix.Http2` and `zix.Grpc` `pool_size` was the `.EPOLL` / `.URING` worker count while `workers` was POOL and MIXED only, so both are repointed onto `workers`. Both defaulted to 0, so default behaviour is unchanged.

@@ -44,6 +44,11 @@ pub const Http1ServerConfig = struct {
     /// default plus receive autotuning, which already sizes the upload window well. An explicit value
     /// caps the window AND disables autotuning, set it only to FORCE a window larger than autotuning.
     large_body_rcvbuf: usize = 0,
+    /// Largest request body in bytes the engine will take. A declared Content-Length past this is
+    /// refused with 413 and the connection closes, before the body is read or discarded, so a client
+    /// cannot make a worker consume an arbitrary number of bytes. A chunked body declares no length
+    /// and is bounded by max_recv_buf instead. 0 removes the check.
+    max_request_body: usize = 8 * 1024 * 1024,
     /// Per-connection receive buffer for WebSocket connections in bytes. 0 falls back to max_recv_buf.
     /// Set it larger to give WS connections room to accumulate pipelined frames without a compact-and-reread
     /// each fill. Under .EPOLL it sizes the WS recv buffer, under .URING the frame-accumulation buffer (conn.buf).
