@@ -327,7 +327,7 @@ Dua hal khusus engine ini:
 
 | Hal | Rincian |
 | :- | :- |
-| Token method dicocokkan persis | RFC 9110 section 9.1 menetapkan nama method case-sensitive, dan parser ini memang selalu membandingkannya begitu. `query` huruf kecil bukan method QUERY, melainkan method yang tidak diimplementasikan engine ini (501) |
+| Token method dicocokkan persis | RFC 9110 section 9.1 menetapkan nama method case-sensitive. Kedua engine HTTP/1 membaca tabel yang sama (`Method.codeFromString`), jadi `query` huruf kecil bukan method QUERY di keduanya: ia menamai method yang tidak diimplementasikan kedua engine (501) |
 | Response QUERY tidak pernah di-cache | `sendCached` jatuh ke pengiriman biasa untuk QUERY, karena request key-nya `hash(method, path, query)` dan tidak membawa content (RFC 10008 section 2.7) |
 
 ---

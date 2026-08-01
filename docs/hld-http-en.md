@@ -328,7 +328,7 @@ Two points specific to this engine:
 
 | Point | Detail |
 | :- | :- |
-| Method tokens are matched exactly | RFC 9110 section 9.1 makes method names case-sensitive, and this parser has always compared them that way. `query` in lowercase is not the QUERY method, it is a method this engine does not implement (501) |
+| Method tokens are matched exactly | RFC 9110 section 9.1 makes method names case-sensitive. Both HTTP/1 engines read the same table (`Method.codeFromString`), so `query` in lowercase is not the QUERY method on either one: it names a method neither engine implements (501) |
 | A QUERY response is never cached | `sendCached` falls back to a plain send for a QUERY, because the request key is `hash(method, path, query)` and carries no content (RFC 10008 section 2.7) |
 
 ---
