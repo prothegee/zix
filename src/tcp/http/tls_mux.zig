@@ -161,7 +161,12 @@ pub fn Worker(comptime Server: type) type {
             var response_buf: [RESPONSE_BUF_SIZE]u8 = undefined;
 
             while (conn.rlen > 0) {
-                const maybe_head = parser.parse(conn.rbuf[0..conn.rlen], cfg.max_request_headers.value()) catch {
+                // Answer before closing, the same way the 421 branch below does. A
+                // silent drop leaves the client unable to tell a refused method from
+                // a dead connection, and the session is established, so the status
+                // can be sent.
+                const maybe_head = parser.parse(conn.rbuf[0..conn.rlen], cfg.max_request_headers.value()) catch |err| {
+                    _ = sendPlain(conn, resp.parseErrorResponse(err));
                     conn.transport.wclose = true;
                     return true;
                 };
