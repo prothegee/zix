@@ -51,12 +51,11 @@ pub const Range = struct { start: u64, end: u64 };
 /// Whether the request-line method token names a method this engine implements
 ///
 /// Note:
-/// - Exact match first. That is what real traffic sends and what RFC 9110
-///   section 9.1 defines, so a normal request costs one length switch and one
-///   compare, with no copy
-/// - Only a token that fails the exact match pays for the case-folded retry.
-///   The fold is kept because this engine has always resolved methods
-///   case-insensitively, and adding a 501 is not the place to change that
+/// - Method.codeFromString is the single table. Keeping a second copy here is
+///   what let the two HTTP/1 engines disagree on method case, so the check
+///   defers to the table it publishes
+/// - The match is exact, per RFC 9110 section 9.1, so a normal request costs
+///   one length switch and one compare, with no copy
 /// - A keep-alive GET never reaches here at all: the EPOLL and URING loops
 ///   resolve it in parseGetFastPath before parseHeadAt is called
 ///
@@ -66,17 +65,6 @@ pub const Range = struct { start: u64, end: u64 };
 /// Return:
 /// - bool
 fn methodImplemented(method: []const u8) bool {
-    const exact = switch (method.len) {
-        3 => std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "PUT"),
-        4 => std.mem.eql(u8, method, "HEAD") or std.mem.eql(u8, method, "POST"),
-        5 => std.mem.eql(u8, method, "PATCH") or std.mem.eql(u8, method, "TRACE") or
-            std.mem.eql(u8, method, "QUERY"),
-        6 => std.mem.eql(u8, method, "DELETE"),
-        7 => std.mem.eql(u8, method, "OPTIONS") or std.mem.eql(u8, method, "CONNECT"),
-        else => false,
-    };
-    if (exact) return true;
-
     return Method.codeFromString(method) != null;
 }
 
