@@ -43,10 +43,10 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http/method.zig` | `refAllDecls` |
+| `tcp/http/method.zig` | `refAllDecls` + round-trip semua code termasuk `QUERY` (RFC 10008), QUERY diselesaikan dari token wire-nya dan tidak pernah dilaporkan sebagai GET, pencocokan case-insensitive, `codeFromString` melaporkan token tak dikenal sebagai null, token melebihi `MAX_TOKEN_LEN` ditolak sebelum penyalinan huruf kecil, `enumFromString` mempertahankan fallback GET |
 | `tcp/http/status.zig` | `refAllDecls` |
-| `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` untuk setiap varian enum |
-| `tcp/http/parser.zig` | `refAllDecls` + perilaku: input tidak lengkap menghasilkan null, offset GET minimal, pemisahan path+query, offset header, flag keep_alive, semua method, method tidak valid, flag chunked aktif/nonaktif, coding list chunked, chunkedEnd lengkap/parsial/resume-watermark/terminator-di-data/trailer/pipelined/hex-tidak-valid, dechunkInPlace di buffer sendiri/pemindahan overlap/urutan chunk |
+| `tcp/http/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` untuk setiap varian enum, pelepasan parameter `typeFromHeader`, nilai tidak dikenal atau kepanjangan melaporkan tidak ada kecocokan |
+| `tcp/http/parser.zig` | `refAllDecls` + perilaku: input tidak lengkap menghasilkan null, offset GET minimal, pemisahan path+query, offset header, flag keep_alive, semua method, method tidak diimplementasikan melaporkan UnknownMethod (501) terpisah dari request line yang rusak (400), flag chunked aktif/nonaktif, coding list chunked, chunkedEnd lengkap/parsial/resume-watermark/terminator-di-data/trailer/pipelined/hex-tidak-valid, dechunkInPlace di buffer sendiri/pemindahan overlap/urutan chunk |
 | `tcp/http/request.zig` | `refAllDecls` + perilaku: method, path, query string, queryParam (ada / tidak ada / flag), pathSegments, queryParams, pencarian header (case-insensitive), pengantaran body (Content-Length dan chunked yang tiba tersegmen di fd non-blocking, body jauh lebih besar dari read buffer, short read dilaporkan saat peer menutup lebih awal) |
 | `tcp/http/response.zig` | `refAllDecls` + perilaku: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, penjaga injeksi (CR/LF), TooManyHeaders, format wire `SseWriter`, default `Response.streaming` |
 | `tcp/http/router.zig` | `refAllDecls` + perilaku: matchParam, registrasi route (kind + path tersimpan) |
@@ -59,6 +59,8 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
+| `tcp/http1/method.zig` | `refAllDecls` + round-trip semua code termasuk `QUERY` (RFC 10008), QUERY diselesaikan dari token wire-nya dan tidak pernah dilaporkan sebagai GET, pencocokan case-insensitive, `codeFromString` melaporkan token tak dikenal sebagai null, token melebihi `MAX_TOKEN_LEN` ditolak sebelum penyalinan huruf kecil, `enumFromString` mempertahankan fallback GET |
+| `tcp/http1/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` untuk setiap varian enum, query type RFC 10008 diselesaikan dari string-nya, media type terpanjang 33 byte muat di buffer huruf kecil, nilai melebihi `MAX_TYPE_LEN` melaporkan tidak ada kecocokan alih-alih panic, `typeFromHeader` melepas parameter dan tetap case-insensitive |
 | `tcp/http1/core.zig` | `refAllDecls` + perilaku: parseHead (field GET, pemisahan query dari path, POST Content-Length, default keep_alive HTTP/1.0 + override Connection, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD ke RespSink aktif tanpa bounce buffer, cache no-op / store-lalu-hit / pemisahan key per path dan query, walk chunkedFrame (minta lebih di tengah body, panjang terminator, malformed vs too-large vs belum selesai, data yang mengeja terminator, berhenti di request pipelined), decodeChunkedInBuf (decode di tempat, source tak tersentuh selama belum selesai), jalur body ASYNC serveConn (pengantaran body muat dan over-large dengan pelaporan bodyReceived / bodyComplete, awal body dan bukan sisa drain, drain menjaga request pipelined, 413 dideklarasikan dan chunked melewati buffer, 400 chunked malformed, 100 Continue, chunked tiba setelah head, request pipelined di belakang body chunked) |
 | `tcp/http1/request.zig` | `refAllDecls` + perilaku: body mengembalikan slice yang diantar engine, bodyReceived default ke panjang slice dan menerima override engine, bodyComplete default true dan menerima override engine, fromRaw mem-parse buffer mentah dengan body |
 | `tcp/http1/server.zig` | `refAllDecls` + perilaku: validasi config (ASYNC / EPOLL / URING), serveEpollConn menjawab burst pipelined secara berurutan, cache EPOLL miss-lalu-hit + plafon memori effectiveCacheEntries, siklus hidup slab ConnTable + sizing ws_recv_buf, serveEpollWs men-drain ke EAGAIN, parseGetFastPath (GET / query / menolak POST dan HTTP/1.0 / raw headers), initUringRing menghasilkan ring yang dapat dipakai |
@@ -165,6 +167,7 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | :- | :- |
 | `utils/file.zig` | `refAllDecls` + perilaku: extension, save |
 | `utils/multipart.zig` | `refAllDecls` + perilaku: `Parser` parse + getField |
+| `utils/media_type.zig` | `refAllDecls` + perilaku: `stripParameters` melepas parameter charset, membiarkan nilai polos apa adanya, memangkas spasi sebelum parameter, menjaga boundary multipart keluar dari hasil, menangani lebih dari satu parameter, menghasilkan kosong untuk nilai kosong atau titik koma tunggal. `equalIgnoreParameters` mengabaikan case, menolak subtype berbeda, dan menolak prefix yang bukan keseluruhan type |
 | `utils/response_cache.zig` | `refAllDecls` + perilaku: store-lalu-lookup mengembalikan byte identik, miss pada key yang tidak ada, entry kedaluwarsa refetch, value oversize melewati store, ttl 0 tidak pernah fresh, key berbeda hidup berdampingan via probing, `max_entries` dibulatkan turun ke power of two, `hashKey` memisahkan berdasarkan query |
 | `utils/static_cache.zig` | `refAllDecls` + perilaku: penggabungan path menolak traversal / absolut / kepanjangan, header membawa `Vary` dan hanya menyebut encoding bila terkompresi, jumlah entry di-clamp dan dibulatkan ke power of two, request kedua memakai file terbuka yang sama, miss tidak menyimpan apa pun, ttl 0 tidak pernah menyentuh tabel, sibling `.br` / `.gz` diambil dan dinegosiasi, file tanpa sibling menyajikan identity, entry kedaluwarsa di-reclaim dan dibuka ulang, slot yang di-pin selamat dari reclaim, tabel penuh turun ke null, sweep membebaskan ruang, `install` process-wide dan `shutdown` membersihkannya |
 | `utils/dispatch_support.zig` | `refAllDecls` + perilaku: `.ASYNC` didukung di semua platform, dukungan `.EPOLL` / `.URING` mengikuti os tag target, `rejectedName` melaporkan tag model, `Error` membawa satu error penolakan kanonik |
@@ -521,6 +524,23 @@ Kontrak platform `DispatchModel` lintas-engine (ADR-065), dipastikan sekali untu
 | `ContentType.TEXT_EVENT_STREAM.asString()` | mengembalikan `"text/event-stream"` |
 | `Response.streaming` default ke false | invarian `init()` |
 
+#### `query_test.zig`
+
+Dukungan QUERY RFC 10008 di engine `zix.Http`, dipegang pada kontrak yang sama dengan raw engine.
+
+| Pengujian | Yang diverifikasi |
+| :- | :- |
+| Menerima request line QUERY | parser dulu menolak QUERY mentah-mentah |
+| Request QUERY bisa dibedakan dari GET | kode bertipe-nya berbeda |
+| Request QUERY membawa content-nya seperti POST | pengantaran body chunked |
+| Request QUERY memaparkan Content-Type yang dideklarasikan | section 2 |
+| QUERY tanpa Content-Type melaporkan tidak ada type | kasus 400 |
+| Query content type yang tidak didukung melaporkan tidak ada kecocokan, tidak pernah ditebak | section 2.1 |
+| Semua query content type yang disebut RFC 10008 dikenali | tabelnya sama dengan raw engine |
+| Http dan Http1 sepakat tentang apa itu request QUERY | satu jawaban dari kedua engine |
+| Method yang tidak diimplementasikan menarik 501, bukan 400 | request line ter-tokenisasi, jadi request-nya tidak rusak |
+| Http dan Http1 menjawab method tak terimplementasi secara identik | response byte-identik |
+
 ### tests/behaviour/http1/
 
 #### `config_test.zig`
@@ -546,6 +566,26 @@ Kontrak platform `DispatchModel` lintas-engine (ADR-065), dipastikan sekali untu
 | `parseHead` `Connection: close` mematikan keep_alive | header menimpa default |
 | `getHeader` mengembalikan nilai tanpa peduli kapitalisasi | lookup header mengabaikan case |
 | `queryParam` mengembalikan nilai untuk param bernama | parsing query berdasarkan nama |
+
+#### `query_test.zig`
+
+Dukungan QUERY RFC 10008 lewat permukaan publik `zix.Http1`.
+
+| Pengujian | Yang diverifikasi |
+| :- | :- |
+| `parseHead` membaca QUERY dari request line | token method bertahan melewati parse |
+| `Request.method` menyelesaikan request QUERY menjadi QUERY | kode bertipe, bukan fallback |
+| Request QUERY bisa dibedakan dari GET | defect yang ditutup: token tak dikenal dulu jatuh ke GET |
+| Request QUERY membawa content-nya seperti POST | framing Content-Length dan pengantaran `body()` |
+| Request QUERY memaparkan Content-Type yang dideklarasikan | section 2 butuh handler bisa membacanya |
+| QUERY tanpa Content-Type melaporkan tidak ada type | kasus 400 |
+| Query content type yang tidak didukung melaporkan tidak ada kecocokan, tidak pernah ditebak | section 2.1 melarang menebak dari body |
+| Semua query content type yang disebut RFC 10008 dikenali | sql, jsonpath, graphql, x-www-form-urlencoded, multipart/form-data |
+| Response QUERY tidak pernah masuk request cache key | section 2.7, key-nya tidak membawa content |
+| Menolak QUERY tidak membuat GET di path sama ikut tidak bisa di-cache | penolakan hanya untuk method itu |
+| Query content type menyusun nilai Accept-Query yang valid | section 3, sf-list RFC 9651 berisi bare item |
+| Method yang tidak diimplementasikan menarik 501, bukan jawaban salah | RFC 9110 section 15.6.2 |
+| QUERY diimplementasikan, jadi ia di-parse dan bukan menarik 501 | gate yang menolak method tak dikenal meloloskan QUERY |
 
 ### tests/behaviour/websocket/
 
@@ -743,6 +783,24 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | String kosong menghasilkan `APPLICATION_OCTET_STREAM` | `typeFromExtension("")` |
 | `fromExtension` tidak dikenal menghasilkan `"application/octet-stream"` | bentuk string dari fallback |
 
+#### `query_test.zig`
+
+Kondisi batas QUERY di engine `zix.Http`, termasuk tempat ia sengaja berbeda dari raw engine.
+
+| Pengujian | Yang diverifikasi |
+| :- | :- |
+| Mencocokkan token QUERY persis, seperti semua method | RFC 9110 section 9.1, nama method case-sensitive di sini |
+| Token lima byte yang bukan QUERY tetap ditolak | lengan length bukan catch-all |
+| Method tak terimplementasi menjawab 501, request line rusak menjawab 400 | status berasal dari error-nya |
+| QUERY dengan Content-Length nol di-framing tanpa body | framing |
+| Body QUERY chunked menghasilkan byte sama dengan Content-Length | kedua framing sepakat |
+| QUERY menyimpan query string dan content sekaligus | parameter target bertahan |
+| Query content type terpanjang dicocokkan, bukan dipotong | 33 byte |
+| Content-Type absurd melaporkan tidak ada kecocokan alih-alih melampaui buffer | dibatasi |
+| Nilai Content-Type kosong melaporkan tidak ada kecocokan | kosong, titik koma tunggal, spasi |
+| Parameter boundary QUERY multipart tidak menggagalkan pencocokan | parameter dilepas |
+| Kedua engine menjawab sama untuk query type berparameter | dua tabel content tetap sejalan |
+
 ### tests/edge/websocket/
 
 #### `websocket_test.zig`
@@ -869,6 +927,29 @@ Setiap kasus di sini berakhir dengan hit null, yang oleh engine diperlakukan seb
 | Tetap melayani setelah tabel penuh oleh entry yang di-pin | tabel penuh menolak path baru dan membiarkan entry yang ditahan utuh |
 | Negosiasi jatuh ke identity ketika klien menolak semuanya | menyajikan file polos lebih baik daripada menolaknya |
 | Init selamat dari permintaan entry yang absurd | di-clamp terhadap budget descriptor, tetap power of two |
+
+#### `query_test.zig`
+
+Kondisi batas QUERY: dua nilai yang dikendalikan peer, yang dibawa QUERY ke jalur yang tak pernah dilewati method tanpa body.
+
+| Pengujian | Yang diverifikasi |
+| :- | :- |
+| Pencocokan token QUERY mengikuti kontrak case-insensitive engine | engine ini melipat case untuk setiap method, QUERY tidak jadi pengecualian |
+| Token method melebihi maksimum yang dikenal ditolak, bukan dipotong | dibatasi sebelum penyalinan huruf kecil |
+| Method tak terimplementasi menjawab 501, request line rusak menjawab 400 | dua kegagalan tetap terpisah |
+| Request line rusak tidak dilaporkan sebagai method tak dikenal | baris yang tidak pernah ter-tokenisasi tidak berkata apa pun soal method |
+| QUERY dengan target minimal tetap di-parse | target root |
+| Content-Length nol dan tidak ada sama-sama di-framing tanpa body | tidak ada yang dideklarasikan berarti tidak ada yang dibaca |
+| QUERY chunked menyalakan flag chunked | framing chunked tidak bergantung method |
+| QUERY boleh membawa Expect 100-continue | handshake untuk body besar |
+| Body QUERY melebihi receive buffer melaporkan yang sudah tiba | `bodyReceived` vs `content_length`, kasus yang tidak bisa diungkapkan GET |
+| QUERY menyimpan query string dan content sekaligus | parameter target tidak digantikan body |
+| Query content type terpanjang dicocokkan, bukan dipotong | 33 byte, nilai yang dulu melampaui buffer |
+| Content-Type absurd melaporkan tidak ada kecocokan alih-alih melampaui buffer | header ini dikendalikan peer |
+| Nilai Content-Type kosong melaporkan tidak ada kecocokan | kosong, titik koma tunggal, spasi |
+| Parameter boundary QUERY multipart tidak menggagalkan pencocokan | parameter dilepas lebih dulu |
+| Penyimpanan QUERY ditolak walau response-nya muat di cache | bukan efek ukuran |
+| Penyimpanan QUERY ter-encode juga ditolak di jalur terkompresi | slot per-encoding membawa penolakan yang sama |
 
 ### tests/edge/http2/
 
