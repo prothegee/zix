@@ -48,6 +48,8 @@ __*Fix:*__
 
 __*Update:*__
 
+- The `Method`, `Status`, and `Content` tables each carried their enum-to-string switch twice: a private `toString` behind `asString`, and an identical public `stringFromEnum`. That is 122 duplicated arms per engine, and the only thing keeping the two copies honest was a test asserting they agreed. `stringFromEnum` is now the one switch and `asString` calls it, so the two spellings cannot disagree. No caller changes: both names stay public and return what they always did.
+
 - HTTP QUERY method support on both HTTP/1 engines (RFC 10008):
     - QUERY is safe and idempotent like GET and carries content like POST, for a question too large or too structured to fit a URL query string. `Method.Code` gains `QUERY` on `zix.Http` and `zix.Http1`, and `req.method()` returns it on both.
     - Before this, `zix.Http1` parsed a QUERY request fine and then reported it as `GET`, because `enumFromString` answered `GET` for any token it did not recognise, so a handler could not tell a question carried in the content from a plain GET. `zix.Http` rejected the request line outright with `error.InvalidRequest`, so it never reached a route at all.
@@ -60,6 +62,9 @@ __*Update:*__
     - `zix.Http.Client` cannot put a QUERY on the wire over TCP, because it wraps `std.http.Client` and `std.http.Method` is a closed set that predates RFC 10008. It now reports `error.UnsupportedMethod` before opening a socket instead of after connecting. `requestUds` writes its own request line, so that path does carry QUERY. The HTTP/2 client sends it with its body, where `methodHasBody` listed only POST, PUT, and PATCH and would have sent a question with nothing asked.
     - A parse failure over TLS now answers before closing. `tls_serve.zig` and `tls_mux.zig` dropped the connection with no status, so an unimplemented method or a malformed request over https was indistinguishable from a dead connection. Both now write the status the way the existing 421 branch does. This path has no wire-level test yet.
     - Content-Type enforcement stays handler policy rather than engine policy: the engine cannot know which types a route accepts without new config, and a rare method must not add a branch to the hot path. `Accept-Query` (section 3) is a plain header value the handler writes, so no RFC 9651 parser was added.
+    - Breaking: `Method.codeFromString` is now an exact match and is the single method table for each engine. Both HTTP/1 request-line parsers kept a private copy of that table, one folding case and one not, so `query` in lowercase was accepted by `zix.Http1` and answered 501 by `zix.Http`. RFC 9110 section 9.1 makes method names case-sensitive, so both engines now refuse it. `zix.Http1` previously accepted any method in any case (`get`, `Post`, `delete`), and no longer does. The duplicate tables in `http1/parser.zig` and `http/parser.zig` are deleted, and the lowercase copy the lookup used to make is gone with them.
+    - `examples/http1_query.zig` (port 9079) and `examples/http_query.zig` (port 9080) carry the handler-side pattern: the 400 / 415 / 422 / 406 map, the `Accept-Query` header, and a route accepting two content types while answering one.
+    - New `tests/runner/checks_query.zig` drives ten cases against a running example over a raw socket, including a lowercase `query` token that both engines answer with 501. It is the first wire-level check for QUERY, and `zig build test-runner-http1-query` / `test-runner-http-query` plus `test-runner-all` all run it.
     - Coverage: 86 new unit, behaviour, and edge tests, including `tests/behaviour/http/query_test.zig`, `tests/behaviour/http1/query_test.zig`, `tests/edge/http/query_test.zig`, and `tests/edge/http1/query_test.zig`.
 
     ---
