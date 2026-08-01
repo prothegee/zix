@@ -172,7 +172,7 @@ pub const Http1ServerConfig = struct {
     port:               u16,                   // must be non-zero
     dispatch_model:     DispatchModel,
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
-    max_recv_buf:       usize = 6 * 1024,      // per-connection buffer (.EPOLL / .URING, see note)
+    max_recv_buf:       usize = 6 * 1024,      // per-connection buffer, every model (see note)
     large_body_rcvbuf:  usize = 0,             // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
     max_request_body:   usize = 8 * 1024 * 1024, // declared Content-Length cap, past it the engine answers 413 (0 = no check)
     ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
@@ -191,7 +191,7 @@ pub const Http1ServerConfig = struct {
 
 The listing above is abbreviated: the full field reference (cache, uring tuning, TLS dual listener, steering) lives in [`docs/zix-config-en.md`](zix-config-en.md).
 
-Note: under `.ASYNC` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
+Note: under `.ASYNC` the connection loop borrows the pool thread's receive + body buffer pair (`core.threadConnBufs`), each `max_recv_buf` bytes, reused by every connection that thread serves. `max_recv_buf` therefore sizes the per-connection buffer under every dispatch model (a direct `core.serveConn` caller that leaves `ServeOpts.max_recv_buf` at 0 gets `core.BUF_SIZE` = 16 KB). `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
 
 Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
@@ -410,7 +410,7 @@ Per-request access logging is the handler's responsibility: the response bytes g
 | Scope | Storage | Lifetime |
 | :- | :- | :- |
 | Route table | comptime (zero heap cost) | Process |
-| Receive + body buffers (.ASYNC) | stack of the serving task (16 KB + 8 KB) | Connection |
+| Receive + body buffers (.ASYNC) | pool-thread pair (`threadConnBufs`), each `max_recv_buf` bytes, grown only, reused across the thread's connections | Pool thread |
 | Per-connection buffer (.EPOLL) | per-worker slab, compact page-aligned slots, `max_recv_buf` bytes usable | Connection |
 | Per-connection recv + send buffers (.URING) | per-worker mmap'd stride slab, compact slots, THP opted out | Connection |
 | Body + output staging (.EPOLL) | `smp_allocator`, per worker | Worker thread |
@@ -424,8 +424,8 @@ Per-request access logging is the handler's responsibility: the response bytes g
 
 | Limit | Behaviour |
 | :- | :- |
-| Header block size | Max 16 KB (`core.BUF_SIZE`, or `max_recv_buf` under .EPOLL). Exceeding returns `431` and closes |
-| Body under .ASYNC | The handler sees the first 8 KB (`ASYNC_BODY_CHUNK`). A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable: `req.bodyReceived()` reports the counted total, `req.bodyComplete()` whether the peer sent it all |
+| Header block size | Max `max_recv_buf` bytes on every dispatch model (default 6 KB, a direct `serveConn` caller gets `core.BUF_SIZE` = 16 KB). Exceeding returns `431` and closes |
+| Body under .ASYNC | The handler sees at most `max_recv_buf` bytes of body. A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable: `req.bodyReceived()` reports the counted total, `req.bodyComplete()` whether the peer sent it all |
 | Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body keeps the connection usable by draining the remainder off the socket (`MSG_TRUNC`): both models defer the handler until the drain finishes, then run it with the counted total in `req.bodyReceived()` and an empty body slice |
 | Declared body past `max_request_body` | Refused with `413` before any body byte is read or drained, on every dispatch model (default 8 MiB, 0 disables the check) |
 | Large request body (uploads) | The drain widens the receive window via `large_body_rcvbuf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
