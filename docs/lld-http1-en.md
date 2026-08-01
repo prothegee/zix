@@ -66,9 +66,15 @@ All slices in the returned `ParsedHead` point into `buf` (zero copy). Returns `.
 
 Bulk-read into `buf` until `\r\n\r\n` is found. `pre_filled` bytes carried over from the previous keep-alive iteration are scanned first. On each read the scan restarts at `filled - 3` so a CRLFCRLF split across reads is still found. `error.HeaderTooLarge` when `buf` fills without a blank line, `error.Closed` on EOF or read failure.
 
-### readChunkedBody()
+### chunkedFrame() / decodeChunkedInBuf() / readChunkedBody()
 
-Streaming chunked decoder (RFC 9112 7.1) for the blocking path. An inline 16 KB refill reader is seeded with the bytes already read past the header. Per chunk: read the size line (extensions after `;` ignored), copy `chunk_size` bytes into `out` (silently capped at `out.len`, excess consumed and discarded), expect CRLF. A zero chunk skips the trailer section to its final blank line. Returns decoded byte count.
+The one chunked walk every dispatch model frames a body with (RFC 9112 7.1), so a chunked body means the same thing on all three.
+
+`chunkedFrame(src, out_cap)` walks the chunk framing without moving a byte: per chunk it reads the size line (extensions after `;` ignored) and steps over the data by its declared size, so data that happens to spell the terminal chunk cannot be mistaken for it. It returns a `ChunkedFrame` whose `stop` separates the outcomes: `.COMPLETE` (decoded length + wire bytes consumed), `.NEED_MORE` (ends mid-body, read more), `.MALFORMED` (a size line is not hex, the engine answers `400`), `.TOO_LARGE` (the decoded body cannot fit `out_cap`, the engine answers `413`). One null for all of these is what used to stall a connection instead of drawing an answer.
+
+`decodeChunkedInBuf(src, out)` decodes a fully-present body after the walk says `.COMPLETE`: framing is removed with forward copies, and `out` may alias `src` since every byte only moves left. A partial body leaves `src` untouched so the caller can read more into it.
+
+`readChunkedBody(fd, buf, seeded)` pulls a chunked body off the blocking socket (`.ASYNC`), seeded with the body bytes that arrived alongside the head, and decodes in place. It reports `received` (wire bytes taken off the socket) and the pipelined leftover (`buf[leftover_off..][0..leftover]`) instead of discarding it. A body that outgrows `buf` stops with `.TOO_LARGE` rather than being cut to what fits, because a handler cannot tell a cut body from a whole one.
 
 ### Thread-local handler deadline
 
@@ -194,16 +200,22 @@ loop:
   2. parseHead -> failure: write 400, return
   3. expect_continue and body present -> send100ContinueFD
   4. body:
-        chunked        -> readChunkedBody(peeked, body_buf)
-        content_length -> copy peeked bytes, read until min(content_length, 8192)
-  5. setTimeout(handler_timeout_ms), handler(head, body, fd)
-  6. takeWebSocket() != null -> return   // promotion not honored here
-  7. !keep_alive -> return
-  8. pipelining: bytes past request_end shifted to recv_buf front, leftover updated
-        chunked requests reset leftover to 0
+        chunked        -> readChunkedBody(fd, body_buf, peeked):
+                          MALFORMED -> 400, return. TOO_LARGE -> 413, return.
+                          NEED_MORE (peer quit mid-body) -> return
+        content_length -> declared length > max_request_body -> 413, return
+                          copy peeked bytes, read until min(content_length, 8192),
+                          drainBody the remainder (counted, never touches body_buf)
+  5. bodyReceived = every body byte the socket gave up, bodyComplete = whether
+        the declared or framed end was reached, handed over before the invoke
+  6. setTimeout(handler_timeout_ms), handler(head, body, fd)
+  7. takeWebSocket() != null -> return   // promotion not honored here
+  8. !keep_alive -> return
+  9. pipelining: bytes past request_end shifted to recv_buf front, leftover updated
+        (a chunked read carries its own leftover to the front the same way)
 ```
 
-The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (8 KB) hands the handler the first 8 KB, then `serveConn` drains the remainder off the socket (and widens the receive window via `large_body_rcvbuf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `head.content_length`, not the bytes.
+The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (8 KB) hands the handler the first 8 KB and drains the remainder off the socket before the invoke (widening the receive window via `large_body_rcvbuf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `req.bodyReceived()` for the counted total and `req.bodyComplete()` to tell a finished upload from one the peer cut short, instead of trusting `head.content_length`.
 
 ### serveConnOne(): EPOLL one-shot fallback
 
@@ -278,8 +290,10 @@ Linux only (`run()` falls back to `runPool` elsewhere, with a logged notice). Sh
 Conn = {
     fd, buf, filled,                  // buf: max_recv_buf bytes, filled: live byte count
     ws: ?WsFrameFn = null,            // set on WebSocket promotion
-    drain: usize = 0,                 // oversize-body bytes still to discard
-    drain_close: bool = false,        // close once the drain finishes
+    drain: usize = 0,                 // oversize-body bytes still to consume off the socket
+    drain_received: usize = 0,        // body bytes consumed so far, served as the received count
+    pending_head_len: usize = 0,      // head bytes parked at the buf front for the deferred invoke
+    continue_sent: bool = false,      // 100 Continue already answered for the request being parsed
 }
 ```
 
@@ -294,7 +308,7 @@ Conn = {
 4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       listener event       -> acceptAll
       HUP/ERR              -> close
-      conn.drain > 0       -> serveEpollDrain
+      conn.drain > 0       -> serveEpollDrainThenServe
       conn.ws != null      -> serveEpollWs
       else                 -> serveEpollConn
       outcome == .close    -> CTL_DEL + table.free + close(fd)
@@ -317,12 +331,18 @@ Inner pass:
 2. parse loop over conn.buf[consumed..filled]:
       no "\r\n\r\n" -> break (partial head, wait for more)
       parseHead failure -> 400, .close
+      Expect: 100-continue with a body -> 100 Continue, once per request (continue_sent)
       body:
-        chunked        -> decodeChunkedInBuf (whole body must be buffered, else break)
+        chunked        -> decodeChunkedInBuf: COMPLETE -> body = decoded slice,
+                          NEED_MORE -> break, MALFORMED -> 400 .close,
+                          TOO_LARGE -> 413 .close
+        declared length > max_request_body -> 413, .close (before reading any body byte)
         fits in rem    -> body = slice, request_len = need
-        need > buf.len -> oversize: dispatch with empty body, set conn.drain to the
-                          unread remainder, conn.drain_close = !keep_alive,
-                          reset filled, return .keep_alive
+        drain finished -> deferred request re-entering: counted total in
+                          bodyReceived, empty body slice, bodyComplete = true
+        need > buf.len -> oversize: park the head at the buf front (pending_head_len),
+                          count the body bytes already here (drain_received), set
+                          conn.drain to the unread remainder, defer the handler, break
         else           -> break (body still arriving)
       setTimeout + handler(head, body, fd)
       takeWebSocket() -> conn.ws = callback, break  // bytes after this are frames
@@ -334,15 +354,15 @@ One readable event therefore serves every complete pipelined request it delivere
 
 #### decodeChunkedInBuf()
 
-Non-streaming variant of the chunked decoder for the buffered path: requires the full chunked body (through the trailer's final CRLF) to be present in `src`, returns `{ decoded len, consumed }` or null to wait for more bytes. Out-of-space also returns null (treated as incomplete, the connection eventually 431s or closes).
+Non-streaming variant of the shared chunked walk (`core.chunkedFrame`) for the buffered path: requires the full chunked body (through the trailer's final CRLF) to be present in `src`. The returned `stop` drives the parse pass: `.COMPLETE` carries the decoded length and consumed wire bytes, `.NEED_MORE` waits for the next readable event, and `.MALFORMED` / `.TOO_LARGE` can never complete, so the engine answers `400` / `413` and closes instead of holding the connection until the buffer fills and the peer looks hung up.
 
 #### serveEpollWs()
 
 One read (level-triggered, remaining bytes re-fire the event), then `ws.pump` over the buffered bytes, then the standard shift of unconsumed bytes. Closes on peer EOF, close frame, write failure, or a frame wider than the whole buffer (can never complete, would spin otherwise).
 
-#### serveEpollDrain()
+#### serveEpollDrain() / serveEpollDrainThenServe()
 
-Discards `conn.drain` bytes with `recvfrom(MSG_TRUNC)`: the kernel drops the bytes in place, no copy into `conn.buf`, chunk size not capped by the buffer (capped at 1 GB per call). Reads to EAGAIN, never past `conn.drain`, so the next pipelined request's bytes are untouched. When the drain hits zero: `.close` if `drain_close`, else back to normal HTTP parsing.
+Discards `conn.drain` bytes with `recvfrom(MSG_TRUNC)`: the kernel drops the bytes in place, no copy into `conn.buf`, chunk size not capped by the buffer (capped at 1 GB per call). Reads to EAGAIN, never past `conn.drain`, so the next pipelined request's bytes are untouched. Every discarded byte counts into `conn.drain_received`, because that count is what the waiting handler is told it received. When the drain hits zero, `serveEpollDrainThenServe` re-enters the parse pass over the parked head bytes (`conn.filled = pending_head_len`) and serves the deferred request with the counted total in `req.bodyReceived()`. A peer that hangs up mid-drain closes without the handler ever running.
 
 ### URING engine
 
@@ -394,7 +414,7 @@ Steps 2 to 4 are the adaptive wakeup coalescing: a hot loop (large reaps) waits 
 
 #### armRecv() / handleRecv() / dispatch()
 
-`armRecv` posts a plain `recv` SQE into `conn.buf[filled..]`, so data lands in place with no copy. `handleRecv` adds `cqe.res` bytes, then `dispatch` runs the parse loop, mirroring `serveEpollConnInner` without the read. A chunked body fully present in `conn.buf` decodes in place via `decodeChunkedInBuf` into the per-worker `body_buf`. A body larger than `conn.buf` defers its handler: the head bytes stay at the front of `conn.buf`, `conn.drain` is set to the unread remainder, and the drain (below) counts it off the socket before the handler runs with `req.bodyReceived()` set to the counted total (the body slice stays empty). Responses stage into `conn.send_buf` through the `RespSink`, so a pipelined burst coalesces into one `submitSend`. The staged window is `send_buf[staged_off..][0..staged]`: a reserve-committed response starts at the sink's `off`, and a short send advances the window in place instead of shifting the remainder to the front.
+`armRecv` posts a plain `recv` SQE into `conn.buf[filled..]`, so data lands in place with no copy. `handleRecv` adds `cqe.res` bytes, then `dispatch` runs the parse loop, mirroring `serveEpollConnInner` without the read. A chunked body fully present in `conn.buf` decodes in place via `decodeChunkedInBuf` into the per-worker `body_buf`, with the same outcomes as the EPOLL pass: a malformed chunk frame answers `400`, a chunked body past the buffer `413`, a declared Content-Length past `max_request_body` `413` before any body byte is consumed, and `Expect: 100-continue` with a pending body is answered once while the body is still arriving. A body larger than `conn.buf` defers its handler: the head bytes stay at the front of `conn.buf`, `conn.drain` is set to the unread remainder, and the drain (below) counts it off the socket before the handler runs with `req.bodyReceived()` set to the counted total (the body slice stays empty). Responses stage into `conn.send_buf` through the `RespSink`, so a pipelined burst coalesces into one `submitSend`. The staged window is `send_buf[staged_off..][0..staged]`: a reserve-committed response starts at the sink's `off`, and a short send advances the window in place instead of shifting the remainder to the front.
 
 #### armDrainRecv()
 
