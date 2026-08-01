@@ -174,6 +174,10 @@ pub const HttpClient = struct {
             .HTTP_3 => return error.UnsupportedVersion,
         }
 
+        // Settled before anything is opened, so a method this transport cannot put
+        // on the wire costs no socket and no DNS lookup.
+        const std_method = try methodToStd(method);
+
         const gpa = self.config.allocator;
 
         const uri = std.Uri.parse(url) catch return error.InvalidUrl;
@@ -224,7 +228,6 @@ pub const HttpClient = struct {
         else
             std.http.Client.Request.RedirectBehavior.init(@as(u16, self.config.max_redirects));
 
-        const std_method = methodToStd(method);
         var req = try self.inner.request(std_method, uri, .{
             .connection = conn,
             .redirect_behavior = redirect_behavior,
@@ -492,7 +495,22 @@ pub const HttpClient = struct {
 
     // --------------------------------------------------------- //
 
-    fn methodToStd(method: Method.Code) std.http.Method {
+    /// Map a zix method onto the std.http method this transport takes
+    ///
+    /// Note:
+    /// - std.http.Method is a closed set of the nine methods RFC 9110 defines.
+    ///   QUERY (RFC 10008) has no member there, so this transport cannot put one
+    ///   on the wire. It reports that rather than substituting a method with
+    ///   different semantics and different body framing
+    /// - requestUds writes the request line itself, so that path does carry QUERY
+    ///
+    /// Param:
+    /// method - Method.Code
+    ///
+    /// Return:
+    /// - std.http.Method
+    /// - error.UnsupportedMethod when std names no equivalent
+    fn methodToStd(method: Method.Code) error{UnsupportedMethod}!std.http.Method {
         return switch (method) {
             .GET => .GET,
             .HEAD => .HEAD,
@@ -503,6 +521,7 @@ pub const HttpClient = struct {
             .OPTIONS => .OPTIONS,
             .TRACE => .TRACE,
             .CONNECT => .CONNECT,
+            .QUERY => error.UnsupportedMethod,
         };
     }
 };
@@ -520,6 +539,7 @@ fn udsMethodStr(method: Method.Code) []const u8 {
         .OPTIONS => "OPTIONS",
         .TRACE => "TRACE",
         .CONNECT => "CONNECT",
+        .QUERY => "QUERY",
     };
 }
 
@@ -802,4 +822,34 @@ test "zix http: http client, a body that goes quiet mid-transfer yields ReadTime
     release.store(true, .release);
 
     try std.testing.expectError(error.ReadTimeout, outcome);
+}
+
+test "zix http: http client, QUERY is refused before a socket is opened" {
+    // std.http.Method is a closed set that predates RFC 10008, so this transport
+    // has no QUERY to map onto. The refusal happens before any connect, so io is
+    // never touched (undefined is safe here).
+    var client = HttpClient.init(.{
+        .allocator = std.testing.allocator,
+        .io = undefined,
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedMethod,
+        client.request(.QUERY, "http://localhost:9061/search", .{}),
+    );
+}
+
+test "zix http: http client, methodToStd maps the nine std names and refuses QUERY" {
+    try std.testing.expectEqual(std.http.Method.GET, try HttpClient.methodToStd(.GET));
+    try std.testing.expectEqual(std.http.Method.POST, try HttpClient.methodToStd(.POST));
+    try std.testing.expectEqual(std.http.Method.PATCH, try HttpClient.methodToStd(.PATCH));
+
+    try std.testing.expectError(error.UnsupportedMethod, HttpClient.methodToStd(.QUERY));
+}
+
+test "zix http: http client, the uds path does name QUERY on its request line" {
+    // requestUds writes the request line itself rather than handing the method to
+    // std, so it is the one client path that can put a QUERY on the wire.
+    try std.testing.expectEqualStrings("QUERY", udsMethodStr(.QUERY));
 }

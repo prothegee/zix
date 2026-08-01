@@ -17,6 +17,8 @@ pub const Code = enum(u8) {
     OPTIONS,
     TRACE,
     CONNECT,
+    /// RFC 10008. Safe and idempotent like GET, carries content like POST.
+    QUERY,
 
     // --------------------------------------------------------- //
 
@@ -41,6 +43,7 @@ pub const Code = enum(u8) {
             .OPTIONS => "OPTIONS",
             .TRACE => "TRACE",
             .CONNECT => "CONNECT",
+            .QUERY => "QUERY",
         };
     }
     /// Get self object as a string
@@ -54,18 +57,28 @@ pub const Code = enum(u8) {
 
 // --------------------------------------------------------- //
 
-/// Get enum from string
+/// Longest method token this engine knows, in bytes ("OPTIONS", "CONNECT").
+/// A token longer than this names no known method, so it never needs lowering.
+pub const MAX_TOKEN_LEN: usize = 7;
+
+/// Get enum from string, reporting no match
 ///
 /// Note:
-/// - If not match, it will return GET
+/// - Returns null when the token names no method this engine knows, which lets
+///   a caller answer 501 Not Implemented instead of acting on a wrong method
+/// - A token longer than MAX_TOKEN_LEN is rejected before any copy, so an
+///   oversized token from the wire cannot overrun the lowercase buffer
 ///
 /// Param:
 /// method_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
 /// - zix.Tcp.Http.Method.Code
-pub fn enumFromString(method_string: []const u8) Code {
-    var data: [8]u8 = undefined;
+/// - null when the token matches no known method
+pub fn codeFromString(method_string: []const u8) ?Code {
+    if (method_string.len > MAX_TOKEN_LEN) return null;
+
+    var data: [MAX_TOKEN_LEN]u8 = undefined;
     const mod = std.ascii.lowerString(&data, method_string);
 
     if (std.mem.eql(u8, mod, "get")) {
@@ -95,8 +108,27 @@ pub fn enumFromString(method_string: []const u8) Code {
     if (std.mem.eql(u8, mod, "connect")) {
         return Code.CONNECT;
     }
+    if (std.mem.eql(u8, mod, "query")) {
+        return Code.QUERY;
+    }
 
-    return Code.GET;
+    return null;
+}
+
+/// Get enum from string
+///
+/// Note:
+/// - If not match, it will return GET
+/// - Callers that must tell an unknown method apart from a real GET use
+///   codeFromString instead, which reports the no-match case as null
+///
+/// Param:
+/// method_string - []const u8 (insensitive, forced to lowercase)
+///
+/// Return:
+/// - zix.Tcp.Http.Method.Code
+pub fn enumFromString(method_string: []const u8) Code {
+    return codeFromString(method_string) orelse Code.GET;
 }
 
 /// Get string from enum
@@ -121,6 +153,7 @@ pub fn stringFromEnum(method_enum: Code) []const u8 {
         .OPTIONS => "OPTIONS",
         .TRACE => "TRACE",
         .CONNECT => "CONNECT",
+        .QUERY => "QUERY",
     };
 }
 
@@ -138,6 +171,7 @@ test "zix http: tcp http method" {
         Code.OPTIONS,
         Code.TRACE,
         Code.CONNECT,
+        Code.QUERY,
     };
 
     for (all_codes) |e| {
@@ -151,4 +185,37 @@ test "zix http: tcp http method" {
         const expected2 = stringFromEnum(e);
         try std.testing.expect(std.mem.eql(u8, e_str, expected2));
     }
+}
+
+test "zix http: method QUERY resolves from its wire token" {
+    try std.testing.expectEqual(Code.QUERY, enumFromString("QUERY"));
+    try std.testing.expectEqual(Code.QUERY, codeFromString("QUERY").?);
+}
+
+test "zix http: method QUERY is not reported as GET" {
+    // The pre-RFC-10008 behaviour answered GET for every unknown token, which
+    // made a QUERY request indistinguishable from a GET to every handler.
+    try std.testing.expect(enumFromString("QUERY") != Code.GET);
+}
+
+test "zix http: method QUERY token matching is case-insensitive" {
+    try std.testing.expectEqual(Code.QUERY, enumFromString("query"));
+    try std.testing.expectEqual(Code.QUERY, enumFromString("QuErY"));
+}
+
+test "zix http: method codeFromString reports an unknown token as null" {
+    try std.testing.expect(codeFromString("BREW") == null);
+    try std.testing.expect(codeFromString("") == null);
+}
+
+test "zix http: method codeFromString rejects a token past MAX_TOKEN_LEN" {
+    // Longer than any known method, so it is refused before the lowercase copy.
+    // Without the length guard this overruns the stack buffer.
+    try std.testing.expect(codeFromString("PROPPATCH") == null);
+    try std.testing.expect(codeFromString("QUERYQUERYQUERY") == null);
+}
+
+test "zix http: method enumFromString keeps its GET fallback for unknown tokens" {
+    try std.testing.expectEqual(Code.GET, enumFromString("BREW"));
+    try std.testing.expectEqual(Code.GET, enumFromString("PROPPATCH"));
 }
