@@ -46,6 +46,7 @@ GZIP_OUT_SIZE = 256 * 1024  // sendGzipFD output buffer
 1. indexOf "\r\n\r\n"            -> error.IncompleteHeader if absent
 2. request line: split on first ' ' (method), last ' ' (version)
       version must be "HTTP/1.1" (minor 1) or "HTTP/1.0" (minor 0), else error.InvalidRequest
+      method must be one this engine implements, else error.UnknownMethod
 3. target split at '?'           -> path, query
 4. raw_headers = slice from after the request-line CRLF through the final header CRLF
       (no count cap, looked up lazily by getHeader, empty when there are no headers)
@@ -60,7 +61,9 @@ GZIP_OUT_SIZE = 256 * 1024  // sendGzipFD output buffer
 
 All slices in the returned `ParsedHead` point into `buf` (zero copy). Returns `.{ head, body_offset }` where `body_offset` is the first byte after the blank line. `getHeader(head, name)` does the case-insensitive on-demand lookup over `raw_headers`, so the per-header scan cost is paid only by a handler that actually reads a header.
 
-`parseGetFastPath` (server.zig) is the keep-alive fast path for plain `GET` requests: it confirms the `"GET "` prefix and the `"HTTP/1.1"` version with single integer loads (`std.mem.readInt` of one `u32` and one `u64`, not `mem.eql`), extracts path and query by arithmetic, and only falls back to the full `parseHead` when `Connection: close` may be present. Same `ParsedHead` shape, no per-header scan.
+The method gate runs after the version check, so a request line that never tokenized still reports `error.InvalidRequest` (400) rather than blaming the method (501). It matches the uppercase token first with a length switch and one compare, and only a token that fails that pays for the case-folded retry, which is what keeps a normal request free of a copy. `core.parseErrorResponse(err)` turns either error into the response the dispatch loops write: 501 for `error.UnknownMethod`, 400 for everything else.
+
+`parseGetFastPath` (server.zig) is the keep-alive fast path for plain `GET` requests: it confirms the `"GET "` prefix and the `"HTTP/1.1"` version with single integer loads (`std.mem.readInt` of one `u32` and one `u64`, not `mem.eql`), extracts path and query by arithmetic, and only falls back to the full `parseHead` when `Connection: close` may be present. Same `ParsedHead` shape, no per-header scan. A keep-alive `GET` therefore never reaches the method gate at all.
 
 ### recvHead()
 
