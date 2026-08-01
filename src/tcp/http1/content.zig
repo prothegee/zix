@@ -67,82 +67,16 @@ pub const Type = enum(u8) {
 
     // --------------------------------------------------------- //
 
-    /// Get self object string from enum
+    /// Get self object as a string
     ///
     /// Note:
-    /// - exhaustive
-    ///
-    /// Param:
-    /// self - zix.Tcp.Http.Content.Type
-    ///
-    /// Return:
-    /// - []const u8
-    fn toString(self: Type) []const u8 {
-        return switch (self) {
-            .TEXT_PLAIN => "text/plain",
-            .TEXT_HTML => "text/html",
-            .TEXT_CSS => "text/css",
-            .TEXT_CSV => "text/csv",
-            .TEXT_EVENT_STREAM => "text/event-stream",
-
-            .AUDIO_MPEG => "audio/mpeg",
-            .AUDIO_WAV => "audio/wav",
-            .AUDIO_FLAC => "audio/flac",
-            .AUDIO_MIDI => "audio/midi",
-
-            .APPLICATION_JAVASCRIPT => "application/javascript",
-            .APPLICATION_JSON => "application/json",
-            .APPLICATION_PDF => "application/pdf",
-            .APPLICATION_XML => "application/xml",
-            .APPLICATION_RTF => "application/rtf",
-            .APPLICATION_ZIP => "application/zip",
-            .APPLICATION_GZIP => "application/gzip",
-            .APPLICATION_TAR => "application/x-tar",
-            .APPLICATION_7Z_COMPRESSED => "application/x-7z-compressed",
-            .APPLICATION_VND_RAR => "application/vnd.rar",
-            .APPLICATION_LD_JSON => "application/jsonld",
-            .APPLICATION_RDF_XML => "application/rdf+xml",
-            .APPLICATION_RSS_XML => "application/rss+xml",
-            .APPLICATION_ATOM_XML => "application/atom+xml",
-            .APPLICATION_GRAPHQL => "application/graphql",
-            .APPLICATION_JSONPATH => "application/jsonpath",
-            .APPLICATION_SQL => "application/sql",
-            .APPLICATION_X_WWW_FORM_URLENCODED => "application/x-www-form-urlencoded",
-            .APPLICATION_WASM => "application/wasm",
-            .APPLICATION_MANIFEST_JSON => "application/manifest+json",
-            .APPLICATION_OCTET_STREAM => "application/octet-stream",
-
-            .MULTIPART_FORM_DATA => "multipart/form-data",
-
-            .IMAGE_PNG => "image/png",
-            .IMAGE_JPEG => "image/jpeg",
-            .IMAGE_GIF => "image/gif",
-            .IMAGE_SVG_XML => "image/svg+xml",
-            .IMAGE_WEBP => "image/webp",
-            .IMAGE_X_ICON => "image/x-icon",
-
-            .VIDEO_MP4 => "video/mp4",
-            .VIDEO_WEBM => "video/webm",
-            .VIDEO_OGG => "video/ogg",
-            .VIDEO_MPEG => "video/mpeg",
-            .VIDEO_AVI => "video/x-msvideo",
-            .VIDEO_MOV => "video/quicktime",
-            .VIDEO_WMV => "video/x-ms-wmv",
-            .VIDEO_FLV => "video/x-flv",
-            .VIDEO_MKV => "video/x-matroska",
-
-            .FONT_TTF => "font/ttf",
-            .FONT_OTF => "font/otf",
-            .FONT_WOFF => "font/woff",
-            .FONT_WOFF2 => "font/woff2",
-        };
-    }
-    /// Get self object as a string
+    /// - The method-call spelling of stringFromEnum. One switch backs
+    ///   both, so the two forms cannot report different strings
     ///
     /// Return:
     /// - []const u8
     pub fn asString(self: Self) []const u8 {
-        return Self.toString(self);
+        return stringFromEnum(self);
     }
 };
 
@@ -503,10 +437,9 @@ pub fn fromExtension(ext: []const u8) []const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix http1: tcp http content" {
-    try std.testing.expect(true);
-
+test "zix http1: content every type round-trips through its string" {
     const all_types = [_]Type{
+        Type.TEXT_PLAIN,
         Type.TEXT_HTML,
         Type.TEXT_CSS, // css, min.css
         Type.TEXT_CSV,
@@ -564,16 +497,11 @@ test "zix http1: tcp http content" {
         Type.FONT_WOFF2,
     };
 
-    for (all_types) |e| {
-        const e_str = stringFromEnum(e);
+    for (all_types) |content_type| {
+        const content_type_string = stringFromEnum(content_type);
 
-        try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));
-
-        const expected1 = typeFromString(e_str).?;
-        try std.testing.expect(expected1 == e);
-
-        const expected2 = stringFromEnum(e);
-        try std.testing.expect(std.mem.eql(u8, e_str, expected2));
+        try std.testing.expectEqualStrings(content_type_string, content_type.asString());
+        try std.testing.expectEqual(content_type, typeFromString(content_type_string).?);
     }
 }
 
