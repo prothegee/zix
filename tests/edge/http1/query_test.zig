@@ -13,15 +13,35 @@ const TEST_FD: std.posix.fd_t = if (@import("builtin").os.tag == .windows) std.o
 
 // --------------------------------------------------------- //
 
-test "zix edge: Http1 QUERY token matching follows the engine's case-insensitive contract" {
-    // Method names are case-sensitive on the wire, but this engine has always
-    // matched them case-insensitively for every method. QUERY joins that rule
-    // rather than carrying an exception.
-    const lower = try zix.Http1.parseHead("query /search HTTP/1.1\r\nHost: x\r\n\r\n");
-    const mixed = try zix.Http1.parseHead("QuErY /search HTTP/1.1\r\nHost: x\r\n\r\n");
+test "zix edge: Http1 a lowercase method token is refused, not folded" {
+    // RFC 9110 section 9.1 makes method names case-sensitive. Both HTTP/1
+    // engines now read one method table, so the same token gets the same
+    // answer whichever engine serves it.
+    try std.testing.expectError(
+        error.UnknownMethod,
+        zix.Http1.parseHead("query /search HTTP/1.1\r\nHost: x\r\n\r\n"),
+    );
+    try std.testing.expectError(
+        error.UnknownMethod,
+        zix.Http1.parseHead("QuErY /search HTTP/1.1\r\nHost: x\r\n\r\n"),
+    );
+    try std.testing.expectError(
+        error.UnknownMethod,
+        zix.Http1.parseHead("get /search HTTP/1.1\r\nHost: x\r\n\r\n"),
+    );
+}
 
-    try std.testing.expectEqual(zix.Http1.Method.Code.QUERY, zix.Http1.Request.init(&lower.head, "", TEST_FD).method());
-    try std.testing.expectEqual(zix.Http1.Method.Code.QUERY, zix.Http1.Request.init(&mixed.head, "", TEST_FD).method());
+test "zix edge: Http1 and Http answer a lowercase method the same way" {
+    // The two engines used to disagree here: one folded the token, the other
+    // matched exactly. This pins them together so the split cannot come back.
+    try std.testing.expectError(
+        error.UnknownMethod,
+        zix.Http1.parseHead("query /search HTTP/1.1\r\nHost: x\r\n\r\n"),
+    );
+    try std.testing.expectError(
+        error.UnknownMethod,
+        zix.Http.Request.fromRaw("query /search HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
+    );
 }
 
 test "zix edge: Http1 a method token past the known maximum is refused, not truncated" {
