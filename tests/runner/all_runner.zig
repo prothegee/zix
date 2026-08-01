@@ -33,6 +33,7 @@ const checks_http = @import("checks_http.zig");
 const checks_tls = @import("checks_tls.zig");
 const checks_rpc = @import("checks_rpc.zig");
 const checks_misc = @import("checks_misc.zig");
+const checks_query = @import("checks_query.zig");
 
 // --------------------------------------------------------- //
 
@@ -125,6 +126,11 @@ const checks = [_]Check{
             return checks_http.runHttpGet(io, paths[0], 9008, "/path", "", "");
         }
     }.f },
+    .{ .label = "http-query", .run = &struct {
+        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+            return checks_query.runHttpQuery(io, paths[0], 9080);
+        }
+    }.f },
     .{ .label = "http-timeout-resp", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9010, "/ping", "", "pong");
@@ -180,6 +186,11 @@ const checks = [_]Check{
     .{ .label = "http1-paths", .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9023, "/path", "", "");
+        }
+    }.f },
+    .{ .label = "http1-query", .run = &struct {
+        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+            return checks_query.runHttpQuery(io, paths[0], 9079);
         }
     }.f },
     .{ .label = "http1-timeout-resp", .run = &struct {

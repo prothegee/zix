@@ -730,6 +730,7 @@ pub fn main() !void {
 - [examples/http1_json.zig](examples/http1_json.zig)
 - [examples/http1_params.zig](examples/http1_params.zig)
 - [examples/http1_paths.zig](examples/http1_paths.zig)
+- [examples/http1_query.zig](examples/http1_query.zig) - method QUERY (RFC 10008)
 - [examples/http1_middleware.zig](examples/http1_middleware.zig)
 - [examples/http1_cache.zig](examples/http1_cache.zig)
 - [examples/http1_manual_concurrent.zig](examples/http1_manual_concurrent.zig)
@@ -796,6 +797,7 @@ const sub = req.path()["/secret/".len..];  // misalnya "file.txt"
 **Contoh:**
 - [examples/http_params.zig](examples/http_params.zig) - penanganan parameter query dan form
 - [examples/http_paths.zig](examples/http_paths.zig) - pola routing parameter path
+- [examples/http_query.zig](examples/http_query.zig) - method QUERY (RFC 10008)
 - [examples/http_json.zig](examples/http_json.zig) - penanganan respons JSON
 
 **Mesin `zix.Http1` mentah**: mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik, prioritas `exact > param > prefix` yang sama, dan handler trio yang sama, jadi penangkapan param terbaca identik: `req.pathParam("id")` (fungsi bebas `zix.Http1.pathParam("id")` tetap ada sebagai padanan raw-layer):
@@ -1421,6 +1423,7 @@ Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu bia
 - Opt-in saja. Mati secara default, dan handler harus memanggil `res.sendFromCache` lalu `res.sendCached` (engine HTTP), `res.serveCached` lalu `res.sendCached` (gRPC), atau `cacheLookup` / `sendWithCacheFD` milik `zix.Http1` mentah.
 - Hanya `.EPOLL` dan `.URING` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
 - Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Saat respons dikompresi (`sendNegotiateFD` / `sendGzipCachedFD`), content-encoding juga dilipat ke dalam key (`hashKeyEncoded`), sehingga varian gzip dan brotli menempati entri berbeda. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
+- Respons QUERY tidak pernah disimpan. Key HTTP tidak membawa content request, jadi dua request QUERY ke satu path dengan body berbeda akan berbagi satu jawaban. RFC 10008 section 2.7 menjadikan cache respons QUERY berstatus MAY, jadi kedua engine HTTP menolak penyimpanannya langsung. Tidak ada yang berubah untuk method lain.
 - Cache hanya yang aman diputar ulang selama jendela TTL. Untuk HTTP byte yang sama (termasuk `Date` yang ditangkap) disajikan sampai entri kedaluwarsa, jadi jaga `cache_ttl_ms` tetap pendek untuk konten yang sensitif waktu.
 - Respons lebih besar dari `cache_max_value_bytes` melewati cache dan jatuh kembali ke plain send. Untuk gRPC batas ini berlaku pada pesan respons. Jaga tetap ramping agar hanya respons di atas crossover yang menempati slot.
 - Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker, secara opsional dibatasi oleh `cache_max_total_bytes`.

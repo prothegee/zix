@@ -343,7 +343,13 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
     while (true) {
         // Is a complete request already buffered? parse what we have. A null / IncompleteHeader means
         // we need more bytes.
-        const maybe_head = parser.parse(rbuf[0..rlen], cfg.max_request_headers.value()) catch {
+        // Answer before closing, the same way the 421 branch below does. A silent
+        // drop leaves the client unable to tell a refused method from a dead
+        // connection, and the session is established, so the status can be sent.
+        const maybe_head = parser.parse(rbuf[0..rlen], cfg.max_request_headers.value()) catch |err| {
+            writeAllFD(fd, conn.writeAppData(resp.parseErrorResponse(err), &encrypt_buf)) catch {};
+            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+
             return error.BadRequest;
         };
         const complete = if (maybe_head) |h| blk: {

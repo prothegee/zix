@@ -1,13 +1,12 @@
 //! zix http1 content
 
 const std = @import("std");
+const media_type = @import("../../utils/media_type.zig");
 
 pub const Type = enum(u8) {
     const Self = @This();
 
     // --------------------------------------------------------- //
-
-    NA,
 
     TEXT_PLAIN,
     TEXT_HTML,
@@ -35,9 +34,14 @@ pub const Type = enum(u8) {
     APPLICATION_RSS_XML,
     APPLICATION_ATOM_XML,
     APPLICATION_GRAPHQL, // graphql and graphqls
+    APPLICATION_JSONPATH, // RFC 10008 query content
+    APPLICATION_SQL, // RFC 10008 query content
+    APPLICATION_X_WWW_FORM_URLENCODED, // RFC 10008 query content
     APPLICATION_WASM,
     APPLICATION_MANIFEST_JSON, // manifest, webmanifest
     APPLICATION_OCTET_STREAM,
+
+    MULTIPART_FORM_DATA, // RFC 10008 query content
 
     IMAGE_PNG,
     IMAGE_JPEG, // jpeg, jpg
@@ -63,99 +67,43 @@ pub const Type = enum(u8) {
 
     // --------------------------------------------------------- //
 
-    /// Get self object string from enum
+    /// Get self object as a string
     ///
     /// Note:
-    /// - exhaustive
-    ///
-    /// Param:
-    /// self - zix.Tcp.Http.Content.Type
-    ///
-    /// Return:
-    /// - []const u8
-    fn toString(self: Type) []const u8 {
-        return switch (self) {
-            .NA => "n/a",
-
-            .TEXT_PLAIN => "text/plain",
-            .TEXT_HTML => "text/html",
-            .TEXT_CSS => "text/css",
-            .TEXT_CSV => "text/csv",
-            .TEXT_EVENT_STREAM => "text/event-stream",
-
-            .AUDIO_MPEG => "audio/mpeg",
-            .AUDIO_WAV => "audio/wav",
-            .AUDIO_FLAC => "audio/flac",
-            .AUDIO_MIDI => "audio/midi",
-
-            .APPLICATION_JAVASCRIPT => "application/javascript",
-            .APPLICATION_JSON => "application/json",
-            .APPLICATION_PDF => "application/pdf",
-            .APPLICATION_XML => "application/xml",
-            .APPLICATION_RTF => "application/rtf",
-            .APPLICATION_ZIP => "application/zip",
-            .APPLICATION_GZIP => "application/gzip",
-            .APPLICATION_TAR => "application/x-tar",
-            .APPLICATION_7Z_COMPRESSED => "application/x-7z-compressed",
-            .APPLICATION_VND_RAR => "application/vnd.rar",
-            .APPLICATION_LD_JSON => "application/jsonld",
-            .APPLICATION_RDF_XML => "application/rdf+xml",
-            .APPLICATION_RSS_XML => "application/rss+xml",
-            .APPLICATION_ATOM_XML => "application/atom+xml",
-            .APPLICATION_GRAPHQL => "application/graphql",
-            .APPLICATION_WASM => "application/wasm",
-            .APPLICATION_MANIFEST_JSON => "application/manifest+json",
-            .APPLICATION_OCTET_STREAM => "application/octet-stream",
-
-            .IMAGE_PNG => "image/png",
-            .IMAGE_JPEG => "image/jpeg",
-            .IMAGE_GIF => "image/gif",
-            .IMAGE_SVG_XML => "image/svg+xml",
-            .IMAGE_WEBP => "image/webp",
-            .IMAGE_X_ICON => "image/x-icon",
-
-            .VIDEO_MP4 => "video/mp4",
-            .VIDEO_WEBM => "video/webm",
-            .VIDEO_OGG => "video/ogg",
-            .VIDEO_MPEG => "video/mpeg",
-            .VIDEO_AVI => "video/x-msvideo",
-            .VIDEO_MOV => "video/quicktime",
-            .VIDEO_WMV => "video/x-ms-wmv",
-            .VIDEO_FLV => "video/x-flv",
-            .VIDEO_MKV => "video/x-matroska",
-
-            .FONT_TTF => "font/ttf",
-            .FONT_OTF => "font/otf",
-            .FONT_WOFF => "font/woff",
-            .FONT_WOFF2 => "font/woff2",
-        };
-    }
-    /// Get self object as a string
+    /// - The method-call spelling of stringFromEnum. One switch backs
+    ///   both, so the two forms cannot report different strings
     ///
     /// Return:
     /// - []const u8
     pub fn asString(self: Self) []const u8 {
-        return Self.toString(self);
+        return stringFromEnum(self);
     }
 };
 
-/// Get enum from string
+/// Longest media type string this table can name, in bytes.
+/// The current longest is `application/x-www-form-urlencoded` at 33 bytes. A
+/// value past this length names nothing here, so it is refused before the
+/// lowercase copy rather than overrunning the buffer.
+pub const MAX_TYPE_LEN: usize = 40;
+
+/// Get type from string
 ///
 /// Note:
-/// - If not match, it will return NA
+/// - Expects a bare type and subtype. A raw header value carrying parameters
+///   goes through typeFromHeader instead
+/// - A value longer than MAX_TYPE_LEN reports no match without copying
 ///
 /// Param:
 /// type_string - []const u8 (insensitive, forced to lowercase)
 ///
 /// Return:
 /// - zix.Tcp.Http.Content.Type
-pub fn enumFromString(type_string: []const u8) Type {
-    var data: [32]u8 = undefined;
-    const lower_type = std.ascii.lowerString(&data, type_string);
+/// - null when the value names no type this table knows
+pub fn typeFromString(type_string: []const u8) ?Type {
+    if (type_string.len > MAX_TYPE_LEN) return null;
 
-    if (std.mem.eql(u8, lower_type, "n/a")) {
-        return Type.NA;
-    }
+    var data: [MAX_TYPE_LEN]u8 = undefined;
+    const lower_type = std.ascii.lowerString(&data, type_string);
 
     if (std.mem.eql(u8, lower_type, "text/plain")) {
         return Type.TEXT_PLAIN;
@@ -231,6 +179,15 @@ pub fn enumFromString(type_string: []const u8) Type {
     if (std.mem.eql(u8, lower_type, "application/graphql")) {
         return Type.APPLICATION_GRAPHQL;
     }
+    if (std.mem.eql(u8, lower_type, "application/jsonpath")) {
+        return Type.APPLICATION_JSONPATH;
+    }
+    if (std.mem.eql(u8, lower_type, "application/sql")) {
+        return Type.APPLICATION_SQL;
+    }
+    if (std.mem.eql(u8, lower_type, "application/x-www-form-urlencoded")) {
+        return Type.APPLICATION_X_WWW_FORM_URLENCODED;
+    }
     if (std.mem.eql(u8, lower_type, "application/wasm")) {
         return Type.APPLICATION_WASM;
     }
@@ -239,6 +196,10 @@ pub fn enumFromString(type_string: []const u8) Type {
     }
     if (std.mem.eql(u8, lower_type, "application/octet-stream")) {
         return Type.APPLICATION_OCTET_STREAM;
+    }
+
+    if (std.mem.eql(u8, lower_type, "multipart/form-data")) {
+        return Type.MULTIPART_FORM_DATA;
     }
 
     if (std.mem.eql(u8, lower_type, "image/png")) {
@@ -301,7 +262,7 @@ pub fn enumFromString(type_string: []const u8) Type {
         return Type.FONT_WOFF2;
     }
 
-    return Type.NA;
+    return null;
 }
 
 /// Get string from enum
@@ -317,8 +278,6 @@ pub fn enumFromString(type_string: []const u8) Type {
 /// - []const u8
 pub fn stringFromEnum(content_enum: Type) []const u8 {
     return switch (content_enum) {
-        .NA => "n/a",
-
         .TEXT_PLAIN => "text/plain",
         .TEXT_HTML => "text/html",
         .TEXT_CSS => "text/css",
@@ -345,9 +304,14 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
         .APPLICATION_RSS_XML => "application/rss+xml",
         .APPLICATION_ATOM_XML => "application/atom+xml",
         .APPLICATION_GRAPHQL => "application/graphql",
+        .APPLICATION_JSONPATH => "application/jsonpath",
+        .APPLICATION_SQL => "application/sql",
+        .APPLICATION_X_WWW_FORM_URLENCODED => "application/x-www-form-urlencoded",
         .APPLICATION_WASM => "application/wasm",
         .APPLICATION_MANIFEST_JSON => "application/manifest+json",
         .APPLICATION_OCTET_STREAM => "application/octet-stream",
+
+        .MULTIPART_FORM_DATA => "multipart/form-data",
 
         .IMAGE_PNG => "image/png",
         .IMAGE_JPEG => "image/jpeg",
@@ -371,6 +335,34 @@ pub fn stringFromEnum(content_enum: Type) []const u8 {
         .FONT_WOFF => "font/woff",
         .FONT_WOFF2 => "font/woff2",
     };
+}
+
+/// Get Content.Type enum from a raw Content-Type header value
+///
+/// Note:
+/// - Parameters are dropped first, so `application/sql; charset=utf-8` and a
+///   bare `application/sql` resolve to the same type
+/// - Never sniffs the body. An unrecognised declared type stays unrecognised
+///
+/// Usage:
+/// ```zig
+/// const declared = req.header("content-type") orelse
+///     return res.sendStatus(400); // RFC 10008 section 2.1: nothing declared
+///
+/// const kind = Content.typeFromHeader(declared) orelse
+///     return res.sendStatus(415); // declared, but not one this route takes
+/// ```
+///
+/// Param:
+/// header_value - []const u8 (a raw Content-Type value, parameters allowed)
+///
+/// Return:
+/// - Type
+/// - null when the value names no type this table knows. A QUERY handler turns
+///   that into a 415 with an Accept-Query header (RFC 10008 section 2.1), which
+///   is a different answer from the 400 an absent header earns
+pub fn typeFromHeader(header_value: []const u8) ?Type {
+    return typeFromString(media_type.stripParameters(header_value));
 }
 
 /// Get Content.Type enum from a file extension
@@ -445,12 +437,9 @@ pub fn fromExtension(ext: []const u8) []const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix http1: tcp http content" {
-    try std.testing.expect(true);
-
+test "zix http1: content every type round-trips through its string" {
     const all_types = [_]Type{
-        Type.NA,
-
+        Type.TEXT_PLAIN,
         Type.TEXT_HTML,
         Type.TEXT_CSS, // css, min.css
         Type.TEXT_CSV,
@@ -476,9 +465,14 @@ test "zix http1: tcp http content" {
         Type.APPLICATION_RSS_XML,
         Type.APPLICATION_ATOM_XML,
         Type.APPLICATION_GRAPHQL, // graphql and graphqls
+        Type.APPLICATION_JSONPATH,
+        Type.APPLICATION_SQL,
+        Type.APPLICATION_X_WWW_FORM_URLENCODED,
         Type.APPLICATION_WASM,
         Type.APPLICATION_MANIFEST_JSON, // manifest, webmanifest
         Type.APPLICATION_OCTET_STREAM,
+
+        Type.MULTIPART_FORM_DATA,
 
         Type.IMAGE_PNG,
         Type.IMAGE_JPEG, // jpeg, jpg
@@ -503,15 +497,65 @@ test "zix http1: tcp http content" {
         Type.FONT_WOFF2,
     };
 
-    for (all_types) |e| {
-        const e_str = stringFromEnum(e);
+    for (all_types) |content_type| {
+        const content_type_string = stringFromEnum(content_type);
 
-        try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));
-
-        const expected1 = enumFromString(e_str);
-        try std.testing.expect(expected1 == e);
-
-        const expected2 = stringFromEnum(e);
-        try std.testing.expect(std.mem.eql(u8, e_str, expected2));
+        try std.testing.expectEqualStrings(content_type_string, content_type.asString());
+        try std.testing.expectEqual(content_type, typeFromString(content_type_string).?);
     }
+}
+
+test "zix http1: content the RFC 10008 query types resolve from their strings" {
+    try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromString("application/sql").?);
+    try std.testing.expectEqual(Type.APPLICATION_JSONPATH, typeFromString("application/jsonpath").?);
+    try std.testing.expectEqual(Type.APPLICATION_GRAPHQL, typeFromString("application/graphql").?);
+    try std.testing.expectEqual(Type.MULTIPART_FORM_DATA, typeFromString("multipart/form-data").?);
+    try std.testing.expectEqual(
+        Type.APPLICATION_X_WWW_FORM_URLENCODED,
+        typeFromString("application/x-www-form-urlencoded").?,
+    );
+}
+
+test "zix http1: content the longest media type string fits the lowercase buffer" {
+    // 33 bytes, one past the buffer this table used to declare. A safe build
+    // panicked here and a release build wrote past the end.
+    const longest = "application/x-www-form-urlencoded";
+
+    try std.testing.expectEqual(@as(usize, 33), longest.len);
+    try std.testing.expect(longest.len <= MAX_TYPE_LEN);
+    try std.testing.expectEqual(Type.APPLICATION_X_WWW_FORM_URLENCODED, typeFromString(longest).?);
+}
+
+test "zix http1: content a value past MAX_TYPE_LEN reports no match instead of panicking" {
+    // A peer controls this header, so an absurd value must be refused, not copied.
+    const prefix = "application/";
+    var oversized: [prefix.len + 200]u8 = @splat('x');
+    @memcpy(oversized[0..prefix.len], prefix);
+
+    try std.testing.expect(typeFromString(&oversized) == null);
+}
+
+test "zix http1: content typeFromHeader drops parameters before matching" {
+    try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("application/sql; charset=utf-8").?);
+    try std.testing.expectEqual(Type.APPLICATION_JSON, typeFromHeader("application/json;charset=utf-8").?);
+    try std.testing.expectEqual(
+        Type.MULTIPART_FORM_DATA,
+        typeFromHeader("multipart/form-data; boundary=----zixBoundary").?,
+    );
+}
+
+test "zix http1: content typeFromHeader matches a bare value unchanged" {
+    try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("application/sql").?);
+}
+
+test "zix http1: content typeFromHeader reports no match for an unknown type" {
+    // RFC 10008 section 2.1 forbids sniffing the body, so an unrecognised
+    // declared type stays unrecognised and the handler answers 415.
+    try std.testing.expect(typeFromHeader("application/vnd.zix.not-real") == null);
+    try std.testing.expect(typeFromHeader("") == null);
+}
+
+test "zix http1: content typeFromHeader is case-insensitive on the type" {
+    try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("APPLICATION/SQL").?);
+    try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("Application/SQL; charset=UTF-8").?);
 }

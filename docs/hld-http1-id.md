@@ -120,7 +120,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.Request` | struct | View request zero-copy: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `bodyReceived()`, `bodyComplete()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
 | `zix.Http1.Response` | struct | Builder response di atas writer fd: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus flag `sent` |
 | `zix.Http1.Context` | struct | io, arena allocator per-request, escape hatch fd, `withDeadline` |
-| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespace | Permukaan trio bertipe (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` mengembalikan `Method.Code`), identik di kedua engine |
+| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespace | Permukaan trio bertipe (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` mengembalikan `Method.Code`), identik di kedua engine. `Method.Code` memuat `QUERY` (RFC 10008). `Content.typeFromString` / `typeFromHeader` mengembalikan `?Type`, null berarti nilai itu tidak menyebut type yang dikenal tabel. Tiap namespace punya satu lookup per arah: `stringFromEnum(value)` untuk string-nya (`value.asString()` adalah fungsi yang sama, ditulis sebagai pemanggilan method), dan `codeFromString` / `typeFromString` untuk nilainya |
 | `zix.Http1.Header` / `HeaderSize` | struct / enum | Entri `addHeader` dan kelas kapasitasnya (`max_response_headers`) |
 | `zix.Http1.Multipart` / `MultipartField` | struct | Parser multipart bersama |
 | `zix.Http1.SseWriter` | struct | Writer event SSE yang dikembalikan `res.sendStream()` |
@@ -137,7 +137,8 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.WsFrameFn` | type | Callback per-frame untuk WebSocket milik engine |
 | `zix.Http1.setTimeout` | fn | Memasang atau memperpendek deadline per-handler (thread-local) |
 | `zix.Http1.isExpired` | fn | Apakah deadline handler saat ini sudah lewat |
-| `zix.Http1.parseHead` | fn | Parse head request lengkap dari buffer (zero copy) |
+| `zix.Http1.parseHead` | fn | Parse head request lengkap dari buffer (zero copy). `error.UnknownMethod` untuk method yang tidak diimplementasikan engine ini, `error.InvalidRequest` untuk request line yang rusak |
+| `zix.Http1.parseErrorResponse` | fn | Bytes response untuk parse yang gagal: 501 untuk `error.UnknownMethod`, 400 untuk sisanya |
 | `zix.Http1.getHeader` | fn | Pencarian header case-insensitive pada ParsedHead |
 | `zix.Http1.acceptEncoding` | fn | Nilai Accept-Encoding sebuah ParsedHead: O(1) dari span parse-pass, fallback getHeader selain itu |
 | `zix.Http1.setCache` | fn | Memasang atau melepas response cache per-worker |
@@ -258,6 +259,38 @@ try server.run();
 
 ---
 
+## Method QUERY (RFC 10008)
+
+QUERY bersifat safe dan idempotent seperti `GET`, dan membawa content seperti `POST`. Ia ada untuk pertanyaan yang terlalu besar atau terlalu terstruktur untuk muat di query string URL, dan karena ia tidak mengubah apa pun, client bebas mengulanginya.
+
+Engine melakukan parse dan klasifikasi. Keputusan content type mana yang diterima sebuah route tetap milik handler: engine tidak bisa tahu schema sebuah route tanpa config baru, dan method yang jarang dipakai tidak boleh menambah cabang di hot path.
+
+| Kebutuhan (RFC 10008) | Dipenuhi di mana |
+| :- | :- |
+| Section 2: tolak request yang content type-nya hilang atau tidak konsisten | Handler, dari `req.header("content-type")` dan `Content.typeFromHeader` |
+| Section 2.1: jangan pernah menebak dari content | `Content.typeFromHeader` melaporkan tidak ada kecocokan untuk type yang tidak ada di tabel, ia tidak pernah memeriksa body |
+| Section 2.7: cache key harus memasukkan content request | Key-nya `hash(method, path, query)` dan tidak membawa content, jadi response QUERY tidak pernah disimpan. Meng-cache response QUERY berstatus MAY, jadi menolak tetap conformant |
+| Section 3: `Accept-Query` | Ditulis handler sebagai nilai header biasa. Server hanya pernah mengirimkannya, jadi parser RFC 9651 tidak diperlukan |
+
+Token method dicocokkan persis, sesuai RFC 9110 section 9.1. Kedua engine HTTP/1 membaca tabel yang sama (`Method.codeFromString`), jadi `query` huruf kecil bukan method QUERY di keduanya: ia menamai method yang tidak diimplementasikan kedua engine, dan jawabannya 501.
+
+Status yang dipilih handler, sesuai section 2.1:
+
+| Kasus | Status |
+| :- | :- |
+| Tidak ada `Content-Type` sama sekali | 400 |
+| `Content-Type` yang tidak diterima route ini | 415, dengan `Accept-Query` menyebut apa yang diterima |
+| Content diterima route tapi tidak bisa dijawab | 422 |
+| `Accept` yang tidak bisa dipenuhi route | 406 |
+
+Content type yang ada di tabel untuk query content: `application/sql`, `application/jsonpath`, `application/graphql`, `application/x-www-form-urlencoded`, `multipart/form-data`.
+
+`examples/http1_query.zig` (port 9079) dan `examples/http_query.zig` (port 9080) membawa pola sisi handler-nya: peta status di atas, header `Accept-Query`, dan sebuah route yang menerima dua type dan menjawab satu. `tests/runner/checks_query.zig` menjalankan keduanya di wire.
+
+Catatan client: `zix.Http.Client` tidak bisa mengirim QUERY lewat TCP, karena ia membungkus `std.http.Client` dan `std.http.Method` adalah himpunan tertutup yang lebih tua dari RFC 10008. Ia melaporkan `error.UnsupportedMethod` sebelum membuka socket. `requestUds` menulis request line-nya sendiri, jadi jalur itu memang membawa QUERY. Kedua engine melayani QUERY tanpa peduli client mana yang mengirimnya.
+
+---
+
 ## Siklus Hidup Koneksi (.ASYNC)
 
 ```mermaid
@@ -287,7 +320,7 @@ sequenceDiagram
     Serve->>Serve: return (pemanggil menutup fd)
 ```
 
-Response error yang ditulis engine sendiri: `431` saat blok header melebihi receive buffer, `400` saat `parseHead` gagal atau body chunked tidak bisa di-framing, `413` saat body yang dideklarasikan melewati `max_request_body` (atau body chunked melampaui buffer). Semuanya menutup koneksi. Router (bila dipakai) menulis `404` untuk path yang tidak cocok.
+Response error yang ditulis engine sendiri: `431` saat blok header melebihi receive buffer, `501` saat method-nya tidak diimplementasikan engine ini, `400` saat request line rusak atau body chunked tidak bisa di-framing, `413` saat body yang dideklarasikan melewati `max_request_body` (atau body chunked melampaui buffer). Semuanya menutup koneksi. Router (bila dipakai) menulis `404` untuk path yang tidak cocok.
 
 ---
 

@@ -459,8 +459,8 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []
         scan_from = 0;
 
         const parsed = parseGetFastPath(rem, header_end) orelse
-            core.parseHeadAt(rem, header_end) catch {
-            core.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
+            core.parseHeadAt(rem, header_end) catch |err| {
+            core.writeAllFD(fd, core.parseErrorResponse(err)) catch {};
             return .close;
         };
         const head = parsed.head;

@@ -22,6 +22,7 @@ graph TD
     U["RFC 3986 URI"]
     SEM["RFC 9110 HTTP Semantics + 9111 Caching"]
     U --> SEM
+    SEM --> QRY["QUERY method: 10008 + 9651 Structured Fields"]
     SEM --> H1["HTTP/1.1: 9112"]
     SEM --> H2["HTTP/2: 9113 + 7541 HPACK"]
     SEM --> H3["HTTP/3: 9114 + 9204 QPACK"]
@@ -40,6 +41,8 @@ graph TD
 | | 5234 | ABNF |
 | HTTP semantics | 9110 | HTTP Semantics |
 | | 9111 | HTTP Caching |
+| | 10008 | The HTTP QUERY Method (safe and idempotent, carries content) |
+| | 9651 | Structured Field Values for HTTP (grammar RFC 10008 section 3 cites for Accept-Query) |
 | HTTP/1.1 | 9112 | HTTP/1.1 |
 | HTTP/2 | 9113 | HTTP/2 |
 | | 7541 | HPACK |
@@ -75,6 +78,7 @@ graph TD
 
 ## Notes
 
+- RFC 10008 has no checklist file of its own. It carries only four MUSTs, small enough to state here: refuse a QUERY whose `Content-Type` is missing or inconsistent with the content (section 2), never sniff the content to repair a missing or wrong type (section 2.1), incorporate the request content into any cache key (section 2.7), and process `Accept-Query` as an RFC 9651 structured field (section 3). zix refuses to cache a QUERY response outright, which satisfies 2.7 without a content-aware key, and leaves the type check to the handler because the engine cannot know which types a route accepts.
 - Strict surface totals: HTTP/1.1 about 130 MUST, HTTP/2 about 216, the HTTP/3 + QUIC path about 619 across five specs, TLS 1.3 about 330 in RFC 8446 alone.
 - The gating prerequisite for HTTP/3 and for any https or h2 is the TLS 1.3 handshake engine (RFC 8446) plus X.509 path validation (RFC 5280). The QUIC packet, header, and Retry protection math is pure-Zig on std.crypto, but the handshake state machine is what realistically forces binding a C TLS library.
 - Out-of-scope extensions, only if a feature lands: 7617 / 7616 / 6750 (auth schemes), 6265 (cookies), 8441 / 9220 (Extended CONNECT for WebSocket over h2 / h3).

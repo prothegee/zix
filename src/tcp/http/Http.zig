@@ -38,6 +38,7 @@ pub const Router = router.Router;
 pub const Header = response.HttpHeader;
 pub const HeaderSize = response.HeaderSize;
 pub const RequestHeaderSize = @import("parser.zig").RequestHeaderSize;
+pub const parseErrorResponse = response.parseErrorResponse;
 pub const ContentType = content.Type;
 pub const Content = content;
 pub const Method = @import("method.zig");

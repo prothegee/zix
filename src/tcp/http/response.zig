@@ -481,8 +481,8 @@ pub const Response = struct {
 
     /// Serialize the response once, write it, and store it under the request key
     /// for later sendFromCache hits. ttl_ms of 0 uses the worker default (cacheTtl).
-    /// Falls back to a plain send when no cache is installed or the serialized
-    /// response exceeds the per-slot cap.
+    /// Falls back to a plain send when no cache is installed, the request is a
+    /// QUERY, or the serialized response exceeds the per-slot cap.
     ///
     /// Param:
     /// req - *const Request (source of the cache key: method, path, query)
@@ -493,6 +493,7 @@ pub const Response = struct {
     /// - !void
     pub fn sendCached(self: *Response, req: *const Request, body_data: []const u8, ttl_ms: u32) !void {
         const cache = tl_cache orelse return self.send(body_data);
+        if (!storableUnderRequestKey(req)) return self.send(body_data);
 
         var extra_bytes: usize = 0;
         if (self.extra_buf) |extra| {
@@ -601,9 +602,52 @@ pub fn setCompression(enabled: bool, min_size: usize, max_out: usize) void {
     tl_compression_max_out = max_out;
 }
 
+/// Response to answer a failed request-line parse with
+///
+/// Note:
+/// - A method the engine does not implement is 501, not 400: the request line
+///   was well formed and only the method is unsupported (RFC 9110 section
+///   15.6.2). QUERY reached this path before RFC 10008 support, and answering
+///   400 told a client the request was broken when it was merely unhandled
+/// - Every other parse failure is a malformed request line, which stays 400
+/// - Reached only on the error path, so no request that parses pays for it
+///
+/// Param:
+/// err - anyerror (from parser.parse)
+///
+/// Return:
+/// - []const u8 (a complete response, ready to write)
+pub fn parseErrorResponse(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UnknownMethod => "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
+        else => "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
+    };
+}
+
 /// Cache key for a request: method name, path, and query string.
 fn requestKey(req: *const Request) u64 {
     return rc.hashKey(@tagName(req.method()), req.path(), req.query());
+}
+
+/// Whether a response to this request may be stored under its request key
+///
+/// Note:
+/// - requestKey carries no request content. Two QUERY requests to one path with
+///   different bodies would therefore share a key, and one query's answer could
+///   be served for another
+/// - RFC 10008 section 2.7 requires a cache key that incorporates the request
+///   content, and makes caching a QUERY response a MAY. Refusing to store is
+///   the conformant answer for a key this shape
+/// - Only the store path checks this. Nothing is ever written under a QUERY
+///   key, so sendFromCache cannot hit one and stays untouched
+///
+/// Param:
+/// req - *const Request
+///
+/// Return:
+/// - bool
+fn storableUnderRequestKey(req: *const Request) bool {
+    return req.method() != .QUERY;
 }
 
 // --------------------------------------------------------- //
@@ -943,6 +987,80 @@ test "zix http response cache: sendCached stores then sendFromCache writes ident
     var second: [256]u8 = undefined;
     const n2 = try fd_io.readOnce(fds[0], &second);
     try std.testing.expectEqualStrings(first[0..n1], second[0..n2]);
+}
+
+test "zix http response cache: a QUERY response is never stored under the request key" {
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // The request key is hash(method, path, query) and carries no content. Storing
+    // this would let its answer serve a later QUERY to /search asking something else.
+    var req = try Request.fromRaw(
+        "QUERY /search HTTP/1.1\r\nHost: x\r\nContent-Type: application/sql\r\nContent-Length: 14\r\n\r\nSELECT 1 AS a;",
+        arena.allocator(),
+    );
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
+
+    var res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try std.testing.expect(!res.sendFromCache(&req));
+    try res.sendCached(&req, "one", 0);
+
+    // The body still reaches the peer, the store is what was skipped.
+    var first: [256]u8 = undefined;
+    const n1 = try fd_io.readOnce(fds[0], &first);
+    try std.testing.expect(std.mem.endsWith(u8, first[0..n1], "\r\n\r\none"));
+
+    var res2 = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try std.testing.expect(!res2.sendFromCache(&req));
+}
+
+test "zix http response cache: refusing QUERY leaves GET on the same path cacheable" {
+    var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 512 });
+    defer cache.deinit();
+
+    setCache(&cache, 1000);
+    defer setCache(null, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var query_req = try Request.fromRaw("QUERY /search HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
+    var get_req = try Request.fromRaw("GET /search HTTP/1.1\r\nHost: x\r\n\r\n", arena.allocator());
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try socketPair(&fds);
+    defer fd_io.close(fds[0]);
+    defer fd_io.close(fds[1]);
+
+    var query_res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try query_res.sendCached(&query_req, "from-query", 0);
+
+    var drain: [256]u8 = undefined;
+    _ = try fd_io.readOnce(fds[0], &drain);
+
+    // The GET stores and hits as it always did, so the refusal is scoped to QUERY
+    // rather than disabling the cache for the path.
+    var get_res = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try std.testing.expect(!get_res.sendFromCache(&get_req));
+    try get_res.sendCached(&get_req, "from-get", 0);
+    _ = try fd_io.readOnce(fds[0], &drain);
+
+    var get_res2 = Response.init(fds[1], true, undefined, arena.allocator(), 16);
+    try std.testing.expect(get_res2.sendFromCache(&get_req));
+
+    var hit: [256]u8 = undefined;
+    const hit_len = try fd_io.readOnce(fds[0], &hit);
+    try std.testing.expect(std.mem.endsWith(u8, hit[0..hit_len], "\r\n\r\nfrom-get"));
 }
 
 fn negotiatedHttpRoundtrip(raw_req: []const u8, ct: Content.Type, body: []const u8, arena: std.mem.Allocator, out: []u8) !usize {

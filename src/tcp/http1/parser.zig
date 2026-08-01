@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
+const Method = @import("method.zig");
 
 pub const ParseResult = struct {
     head: ParsedHead,
@@ -47,6 +48,26 @@ pub const ParsedHead = struct {
 /// Byte range from a Range request header (parseRange), inclusive on both ends.
 pub const Range = struct { start: u64, end: u64 };
 
+/// Whether the request-line method token names a method this engine implements
+///
+/// Note:
+/// - Method.codeFromString is the single table. Keeping a second copy here is
+///   what let the two HTTP/1 engines disagree on method case, so the check
+///   defers to the table it publishes
+/// - The match is exact, per RFC 9110 section 9.1, so a normal request costs
+///   one length switch and one compare, with no copy
+/// - A keep-alive GET never reaches here at all: the EPOLL and URING loops
+///   resolve it in parseGetFastPath before parseHeadAt is called
+///
+/// Param:
+/// method - []const u8 (the raw token from the request line)
+///
+/// Return:
+/// - bool
+fn methodImplemented(method: []const u8) bool {
+    return Method.codeFromString(method) != null;
+}
+
 /// Parse a complete HTTP/1.x request from buf where header_end (the index of
 /// \r\n\r\n in buf) is already known. Avoids the redundant indexOf scan when
 /// the caller has already located the terminator. buf may extend beyond
@@ -61,6 +82,8 @@ pub const Range = struct { start: u64, end: u64 };
 /// Return:
 /// - !struct{ head: ParsedHead, body_offset: usize }
 /// - error.InvalidRequest on a malformed request line
+/// - error.UnknownMethod when the request line is well formed but names a
+///   method this engine does not implement (the caller answers 501)
 pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
     const body_offset = header_end + 4;
 
@@ -82,6 +105,10 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
         0
     else
         return error.InvalidRequest;
+
+    // Checked after the version so a mangled request line still reads as
+    // malformed (400) rather than as an unimplemented method (501).
+    if (!methodImplemented(method)) return error.UnknownMethod;
 
     var path = target;
     var query: []const u8 = "";
@@ -159,6 +186,7 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
 /// - !struct{ head: ParsedHead, body_offset: usize }
 /// - error.IncompleteHeader when \r\n\r\n has not arrived yet
 /// - error.InvalidRequest on a malformed request line
+/// - error.UnknownMethod when the method is not one this engine implements
 pub fn parseHead(buf: []const u8) !ParseResult {
     const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return error.IncompleteHeader;
     return parseHeadAt(buf, header_end);

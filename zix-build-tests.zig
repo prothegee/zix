@@ -136,9 +136,11 @@ pub fn addSteps(
         "tests/behaviour/http/config_test.zig",
         "tests/behaviour/http/sse_test.zig",
         "tests/behaviour/http/client_test.zig",
+        "tests/behaviour/http/query_test.zig",
         // http1
         "tests/behaviour/http1/config_test.zig",
         "tests/behaviour/http1/core_test.zig",
+        "tests/behaviour/http1/query_test.zig",
         // http2
         "tests/behaviour/http2/config_test.zig",
         // http3
@@ -191,9 +193,11 @@ pub fn addSteps(
         "tests/edge/http/client_test.zig",
         "tests/edge/http/ws_client_test.zig",
         "tests/edge/http/sse_client_test.zig",
+        "tests/edge/http/query_test.zig",
         // http1
         "tests/edge/http1/core_test.zig",
         "tests/edge/http1/body_test.zig",
+        "tests/edge/http1/query_test.zig",
         "tests/edge/http1/static_cache_test.zig",
         // http2
         "tests/edge/http2/server_test.zig",

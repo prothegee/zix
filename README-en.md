@@ -730,6 +730,7 @@ pub fn main() !void {
 - [examples/http1_json.zig](examples/http1_json.zig)
 - [examples/http1_params.zig](examples/http1_params.zig)
 - [examples/http1_paths.zig](examples/http1_paths.zig)
+- [examples/http1_query.zig](examples/http1_query.zig) - the QUERY method (RFC 10008)
 - [examples/http1_middleware.zig](examples/http1_middleware.zig)
 - [examples/http1_cache.zig](examples/http1_cache.zig)
 - [examples/http1_manual_concurrent.zig](examples/http1_manual_concurrent.zig)
@@ -796,6 +797,7 @@ const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 **Examples:**
 - [examples/http_params.zig](examples/http_params.zig) - query and form parameter handling
 - [examples/http_paths.zig](examples/http_paths.zig) - path parameter routing patterns
+- [examples/http_query.zig](examples/http_query.zig) - the QUERY method (RFC 10008)
 - [examples/http_json.zig](examples/http_json.zig) - JSON response handling
 
 **Raw `zix.Http1` engine**: the low-level engine ships the same comptime `Router` with identical `.EXACT` / `.PREFIX` / `.PARAM` kinds, the same `exact > param > prefix` priority, and the same trio handler, so param capture reads identically: `req.pathParam("id")` (the free function `zix.Http1.pathParam("id")` remains as the raw-layer equivalent):
@@ -1412,6 +1414,7 @@ The measured crossover on loopback is around 4 KiB of response body. Below that 
 - Opt-in only. Off by default, and the handler must call `res.sendFromCache` then `res.sendCached` (HTTP engines), `res.serveCached` then `res.sendCached` (gRPC), or the raw `zix.Http1` `cacheLookup` / `sendWithCacheFD`.
 - `.EPOLL` and `.URING` only in this release. The other dispatch models leave the cache uninstalled and the API degrades to a plain send.
 - For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. When a response is compressed (`sendNegotiateFD` / `sendGzipCachedFD`), the content-encoding is also folded into the key (`hashKeyEncoded`), so the gzip and brotli variants occupy distinct entries. For gRPC the key is the path plus the request message, so only an identical request hits.
+- A QUERY response is never stored. The HTTP key carries no request content, so two QUERY requests to one path with different bodies would share an answer. RFC 10008 section 2.7 makes caching a QUERY response a MAY, so both HTTP engines refuse the store outright. Nothing changes for any other method.
 - Cache only what is safe to replay for the TTL window. For HTTP the same bytes (including the captured `Date`) are served until the entry expires, so keep `cache_ttl_ms` short for time-sensitive content.
 - Responses larger than `cache_max_value_bytes` bypass the cache and fall back to a plain send. For gRPC this cap applies to the response message. Keep it lean so only past-crossover responses occupy a slot.
 - Per-worker memory is `cache_max_entries * cache_max_value_bytes`, times the worker count, optionally bounded by `cache_max_total_bytes`.

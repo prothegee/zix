@@ -253,20 +253,30 @@ test "zix http1: Request view exposes method, path, query" {
     try std.testing.expect(req.keepAlive());
 }
 
-test "zix http1: Request method maps unknown or oversized tokens to GET" {
+test "zix http1: an unimplemented method never reaches a Request" {
     if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
 
-    const parsed = try core.parseHead("BREW /pot HTTP/1.1\r\n\r\n");
-    const req = Request.init(&parsed.head, "", -1);
-    try std.testing.expect(req.method() == .GET);
-
-    const long = try core.parseHead("VERYLONGMETHOD /x HTTP/1.1\r\n\r\n");
-    const long_req = Request.init(&long.head, "", -1);
-    try std.testing.expect(long_req.method() == .GET);
+    // The parser refuses these now, so no handler ever sees one mislabelled as a
+    // GET. The caller answers 501 from the error instead.
+    try std.testing.expectError(error.UnknownMethod, core.parseHead("BREW /pot HTTP/1.1\r\n\r\n"));
+    try std.testing.expectError(error.UnknownMethod, core.parseHead("VERYLONGMETHOD /x HTTP/1.1\r\n\r\n"));
 
     const post = try core.parseHead("POST /x HTTP/1.1\r\n\r\n");
     const post_req = Request.init(&post.head, "", -1);
     try std.testing.expect(post_req.method() == .POST);
+}
+
+test "zix http1: Request method keeps its GET fallback for a hand-built head" {
+    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+
+    // A Request built directly rather than parsed can still hold any token, so
+    // the accessor keeps a total answer instead of a null a handler must unwrap.
+    const parsed = try core.parseHead("GET /pot HTTP/1.1\r\n\r\n");
+    var head = parsed.head;
+    head.method = "BREW";
+
+    const req = Request.init(&head, "", -1);
+    try std.testing.expect(req.method() == .GET);
 }
 
 test "zix http1: Request queryParam and header lookups" {

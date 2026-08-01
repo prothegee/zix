@@ -84,97 +84,16 @@ pub const Code = enum(u16) {
 
     // --------------------------------------------------------- //
 
-    /// Get string from enum
+    /// Get self object as string
     ///
     /// Note:
-    /// - Exhaustive
-    ///
-    /// Param:
-    /// self - zix.Tcp.Http.Method.Code
-    ///
-    /// Return:
-    /// - []const u8
-    fn toString(self: Self) []const u8 {
-        return switch (self) {
-            // 1xx : informational
-            .CONTINUE => "Continue",
-            .SWITCHING_PROTOCOL => "Switching Protocols",
-            .PROCESSING => "Processing",
-            .EARLY_HINTS => "Early Hints",
-
-            // 2xx : success
-            .OK => "Ok",
-            .CREATED => "Created",
-            .ACCEPTED => "Accepted",
-            .NON_AUTHORITATIVE_INFORMATION => "Non-Authoritative Information",
-            .NO_CONTENT => "No Content",
-            .RESET_CONTENT => "Reset Content",
-            .PARTIAL_CONTENT => "Partial Content",
-            .MULTI_STATUS => "Multi-Status",
-            .ALREADY_REPORTED => "Already Reported",
-            .IM_USED => "IM Used",
-
-            // 3xx : redirect
-            .MULTIPLE_CHOICES => "Multiple Choices",
-            .MOVED_PERMANENTLY => "Moved Permanently",
-            .FOUND => "Found",
-            .SEE_OTHER => "See Other",
-            .NOT_MODIFIED => "Not Modified",
-            .USE_PROXY => "Use Proxy",
-            .TEMPORARY_REDIRECT => "Temporary Redirect",
-            .PERMANENT_REDIRECT => "Permanent Redirect",
-
-            // 4xx : client error
-            .BAD_REQUEST => "Bad Request",
-            .UNAUTHORIZED => "Unauthorized",
-            .PAYMENT_REQUIRED => "Payment Required",
-            .FORBIDDEN => "Forbidden",
-            .NOT_FOUND => "Not Found",
-            .METHOD_NOT_ALLOWED => "Method Not Allowed",
-            .NOT_ACCEPTABLE => "Not Acceptable",
-            .PROXY_AUTHENTICATION_REQUIRED => "Proxy Authentication Required",
-            .REQUEST_TIMEOUT => "Request Timeout",
-            .CONFLICT => "Conflict",
-            .GONE => "Gone",
-            .LENGTH_REQUIRED => "Length Required",
-            .PRECONDITION_FAILED => "Precondition Failed",
-            .PAYLOAD_TOO_LARGE => "Payload Too Large",
-            .URI_TOO_LONG => "URI Too Long",
-            .UNSUPPORTED_MEDIA_TYPE => "Unsupported Media Type",
-            .RANGE_NOT_SATISFIABLE => "Range Not Satisfiable",
-            .EXPECTATION_FAILED => "Expectation Failed",
-            .IM_A_TEAPOT => "I'm a teapot",
-            .MISDIRECTED_REQUEST => "Misdirected Request",
-            .UNPROCESSABLE_ENTITY => "Unprocessable Entity",
-            .LOCKED => "Locked",
-            .FAILED_DEPENDENCY => "Failed Dependency",
-            .TOO_EARLY => "Too Early",
-            .UPGRADE_REQUIRED => "Upgrade Required",
-            .PRECONDITION_REQUIRED => "Precondition Required",
-            .TOO_MANY_REQUESTS => "Too Many Requests",
-            .REQUEST_HEADER_FIELDS_TOO_LARGE => "Request Header Fields Too Large",
-            .UNAVAILABLE_FOR_LEGAL_REASONS => "Unavailable For Legal Reasons",
-
-            // 5xx : server error
-            .INTERNAL_SERVER_ERROR => "Internal Server Error",
-            .NOT_IMPLEMENTED => "Not Implemented",
-            .BAD_GATEWAY => "Bad Gateway",
-            .SERVICE_UNAVAILABLE => "Service Unavailable",
-            .GATEWAY_TIMEOUT => "Gateway Timeout",
-            .HTTP_VERSION_NOT_SUPPORTED => "HTTP Version Not Supported",
-            .VARIANT_ALSO_NEGOTIATES => "Variant Also Negotiates",
-            .INSUFFICIENT_STORAGE => "Insufficient Storage",
-            .LOOP_DETECTED => "Loop Detected",
-            .NOT_EXTENDED => "Not Extended",
-            .NETWORK_AUTHENTICATION_REQUIRED => "Network Authentication Required",
-        };
-    }
-    /// Get self object as string
+    /// - The method-call spelling of stringFromEnum. One switch backs
+    ///   both, so the two forms cannot report different strings
     ///
     /// Return:
     /// - []const u8
     pub fn asString(self: Self) []const u8 {
-        return Self.toString(self);
+        return stringFromEnum(self);
     }
 };
 
@@ -545,7 +464,7 @@ test "zix http: statusLine pre-built lines" {
     try std.testing.expectEqualStrings("", statusLine(.IM_USED));
 }
 
-test "zix http: tcp http status fn/s" {
+test "zix http: status every code round-trips through its string" {
     const all_codes = [_]Code{
         // 1xx : informational
         Code.CONTINUE,
@@ -620,15 +539,10 @@ test "zix http: tcp http status fn/s" {
         Code.NETWORK_AUTHENTICATION_REQUIRED,
     };
 
-    for (all_codes) |e| {
-        const e_str = stringFromEnum(e);
+    for (all_codes) |code| {
+        const code_string = stringFromEnum(code);
 
-        try std.testing.expect(std.mem.eql(u8, e_str, e.asString()));
-
-        const expected1 = enumFromString(e_str);
-        try std.testing.expect(expected1 == e);
-
-        const expected2 = stringFromEnum(e);
-        try std.testing.expect(std.mem.eql(u8, e_str, expected2));
+        try std.testing.expectEqualStrings(code_string, code.asString());
+        try std.testing.expectEqual(code, enumFromString(code_string));
     }
 }

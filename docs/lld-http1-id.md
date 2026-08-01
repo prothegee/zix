@@ -46,6 +46,7 @@ GZIP_OUT_SIZE = 256 * 1024  // buffer output sendGzipFD
 1. indexOf "\r\n\r\n"            -> error.IncompleteHeader bila tidak ada
 2. request line: pecah pada ' ' pertama (method), ' ' terakhir (versi)
       versi harus "HTTP/1.1" (minor 1) atau "HTTP/1.0" (minor 0), selain itu error.InvalidRequest
+      method harus salah satu yang diimplementasikan engine ini, selain itu error.UnknownMethod
 3. target dipecah pada '?'       -> path, query
 4. raw_headers = slice dari setelah CRLF request-line sampai CRLF header terakhir
       (tanpa batas jumlah, dipindai sesuai kebutuhan oleh getHeader, kosong saat tanpa header)
@@ -60,7 +61,9 @@ GZIP_OUT_SIZE = 256 * 1024  // buffer output sendGzipFD
 
 Semua slice di `ParsedHead` yang dikembalikan menunjuk ke `buf` (zero copy). Mengembalikan `.{ head, body_offset }` dengan `body_offset` byte pertama setelah baris kosong. `getHeader(head, name)` melakukan pencarian case-insensitive sesuai kebutuhan atas `raw_headers`, jadi biaya scan per-header hanya dibayar oleh handler yang memang membaca sebuah header.
 
-`parseGetFastPath` (server.zig) adalah fast path keep-alive untuk request `GET` polos: ia memastikan prefix `"GET "` dan versi `"HTTP/1.1"` dengan integer load tunggal (`std.mem.readInt` satu `u32` dan satu `u64`, bukan `mem.eql`), mengekstrak path dan query secara aritmetika, dan hanya jatuh ke `parseHead` penuh bila `Connection: close` mungkin ada. Bentuk `ParsedHead` sama, tanpa scan per-header.
+Gate method berjalan setelah pemeriksaan versi, jadi request line yang memang tidak pernah ter-tokenisasi tetap melaporkan `error.InvalidRequest` (400), bukan menyalahkan method (501). Ia mencocokkan token huruf besar lebih dulu lewat length switch dan satu perbandingan, dan hanya token yang gagal di situ yang membayar percobaan ulang case-folded, dan itulah yang menjaga request normal bebas dari penyalinan. `core.parseErrorResponse(err)` mengubah kedua error itu menjadi response yang ditulis dispatch loop: 501 untuk `error.UnknownMethod`, 400 untuk sisanya.
+
+`parseGetFastPath` (server.zig) adalah fast path keep-alive untuk request `GET` polos: ia memastikan prefix `"GET "` dan versi `"HTTP/1.1"` dengan integer load tunggal (`std.mem.readInt` satu `u32` dan satu `u64`, bukan `mem.eql`), mengekstrak path dan query secara aritmetika, dan hanya jatuh ke `parseHead` penuh bila `Connection: close` mungkin ada. Bentuk `ParsedHead` sama, tanpa scan per-header. Maka `GET` keep-alive tidak pernah menyentuh gate method sama sekali.
 
 ### recvHead()
 

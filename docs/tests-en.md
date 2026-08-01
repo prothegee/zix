@@ -43,10 +43,10 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http/method.zig` | `refAllDecls` |
+| `tcp/http/method.zig` | `refAllDecls` + round-trip over every code including `QUERY` (RFC 10008), QUERY resolving from its wire token and never reported as GET, case-sensitive matching, `codeFromString` reporting an unknown token as null, a token past `MAX_TOKEN_LEN` refused by the length switch, `enumFromString` keeping its GET fallback |
 | `tcp/http/status.zig` | `refAllDecls` |
-| `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` for every enum variant |
-| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, invalid method, chunked flag set/false, chunked coding list, chunkedEnd complete/partial/watermark-resume/terminator-in-data/trailers/pipelined/invalid-hex, dechunkInPlace over its own buffer/overlapping move/chunk order |
+| `tcp/http/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` for every enum variant, `typeFromHeader` parameter stripping, an unknown or oversized value reporting no match |
+| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, an unimplemented method reporting UnknownMethod (501) apart from a malformed request line (400), chunked flag set/false, chunked coding list, chunkedEnd complete/partial/watermark-resume/terminator-in-data/trailers/pipelined/invalid-hex, dechunkInPlace over its own buffer/overlapping move/chunk order |
 | `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams, header lookup (case-insensitive), body delivery (segmented Content-Length and chunked arrival over a non-blocking fd, a body far larger than the read buffer, short read reported when the peer closes early) |
 | `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF), TooManyHeaders, `SseWriter` wire formats, `Response.streaming` default |
 | `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam, route registration (kind + path preserved) |
@@ -59,6 +59,8 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
+| `tcp/http1/method.zig` | `refAllDecls` + round-trip over every code including `QUERY` (RFC 10008), QUERY resolving from its wire token and never reported as GET, case-sensitive matching, `codeFromString` reporting an unknown token as null, a token past `MAX_TOKEN_LEN` refused by the length switch, `enumFromString` keeping its GET fallback |
+| `tcp/http1/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` for every enum variant, the RFC 10008 query types resolving from their strings, the 33-byte longest media type fitting the lowercase buffer, a value past `MAX_TYPE_LEN` reporting no match instead of panicking, `typeFromHeader` dropping parameters and staying case-insensitive |
 | `tcp/http1/core.zig` | `refAllDecls` + behavioral: parseHead (GET fields, query split from path, POST Content-Length, HTTP/1.0 keep_alive default + Connection override, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD into the active RespSink with no buffer bounce, cache no-op / store-then-hit / key separation by path and query, chunkedFrame walk (asks for more mid-body, terminator length, malformed vs too-large vs unfinished, data that spells the terminator, pipelined stop), decodeChunkedInBuf (in-place decode, source untouched while unfinished), ASYNC serveConn body path (fitting and over-large delivery with bodyReceived / bodyComplete reporting, the start of the body rather than drain leftovers, drain keeps the pipelined request, 413 declared and chunked past the buffer, 400 malformed chunked, 100 Continue, chunked arriving after the head, pipelined request behind a chunked body) |
 | `tcp/http1/request.zig` | `refAllDecls` + behavioral: body returns the engine-delivered slice, bodyReceived defaults to the slice length and takes the engine override, bodyComplete defaults true and takes the engine override, fromRaw parses a raw buffer with body |
 | `tcp/http1/server.zig` | `refAllDecls` + behavioral: config validation (ASYNC / EPOLL / URING), serveEpollConn answers a pipelined burst in order, EPOLL cache miss-then-hit + effectiveCacheEntries memory ceiling, ConnTable slab lifecycle + ws_recv_buf sizing, serveEpollWs drains to EAGAIN, parseGetFastPath (GET / query / rejects POST and HTTP/1.0 / raw headers), initUringRing yields a usable ring, URING finishClose rings the close (`prep_close`) and recycles the slot |
@@ -165,6 +167,7 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | :- | :- |
 | `utils/file.zig` | `refAllDecls` + behavioral: extension, save |
 | `utils/multipart.zig` | `refAllDecls` + behavioral: `Parser` parse + getField |
+| `utils/media_type.zig` | `refAllDecls` + behavioral: `stripParameters` drops a charset parameter, leaves a bare value unchanged, trims the space before a parameter, keeps a multipart boundary out of the result, handles more than one parameter, yields empty for an empty value or a lone semicolon. `equalIgnoreParameters` ignores case, rejects a different subtype, and rejects a prefix that is not the whole type |
 | `utils/response_cache.zig` | `refAllDecls` + behavioral: store-then-lookup returns identical bytes, miss on absent key, expired entry refetches, oversize value bypasses store, ttl 0 never fresh, distinct keys coexist via probing, `max_entries` rounded down to power of two, `hashKey` separates by query |
 | `utils/static_cache.zig` | `refAllDecls` + behavioral: path join rejects traversal / absolute / oversize, header carries `Vary` and only encodes when compressed, entry count clamped and rounded to a power of two, second request reuses the same open file, a miss caches nothing, ttl 0 never touches the table, `.br` / `.gz` siblings picked up and negotiated, a file with no sibling serves identity, an expired entry is reclaimed and re-opened, a pinned slot survives reclaim, a full table degrades to null, a sweep frees room, `install` is process-wide and `shutdown` clears it |
 | `utils/dispatch_support.zig` | `refAllDecls` + behavioral: `.ASYNC` is supported on every platform, `.EPOLL` / `.URING` support follows the target os tag, `rejectedName` reports the model tag, `Error` carries the single canonical reject error |
@@ -521,6 +524,23 @@ The cross-engine `DispatchModel` platform contract (ADR-065), asserted once for 
 | `ContentType.TEXT_EVENT_STREAM.asString()` | returns `"text/event-stream"` |
 | `Response.streaming` defaults to false | `init()` invariant |
 
+#### `query_test.zig`
+
+RFC 10008 QUERY support on the `zix.Http` engine, held to the same contract as the raw engine.
+
+| Test | What it verifies |
+| :- | :- |
+| Accepts a QUERY request line | the parser rejected QUERY outright before this |
+| A QUERY request is distinguishable from a GET | the typed code differs |
+| A QUERY request carries its content like a POST | chunked body delivery |
+| A QUERY request exposes its declared Content-Type | section 2 |
+| A QUERY without Content-Type reports no type | the 400 case |
+| An unsupported query content type reports no match, never sniffed | section 2.1 |
+| Every query content type RFC 10008 names is recognised | the table matches the raw engine's |
+| Http and Http1 agree on what a QUERY request is | one answer from both engines |
+| A method it does not implement draws 501, not 400 | the line tokenized, so the request was not malformed |
+| Http and Http1 answer an unimplemented method identically | byte-identical response |
+
 ### tests/behaviour/http1/
 
 #### `config_test.zig`
@@ -546,6 +566,26 @@ The cross-engine `DispatchModel` platform contract (ADR-065), asserted once for 
 | `parseHead` `Connection: close` disables keep_alive | the header overrides the default |
 | `getHeader` returns value case-insensitively | header lookup ignores case |
 | `queryParam` returns value for named param | query parsing by name |
+
+#### `query_test.zig`
+
+RFC 10008 QUERY support through the public `zix.Http1` surface.
+
+| Test | What it verifies |
+| :- | :- |
+| `parseHead` reads QUERY off the request line | the method token survives the parse |
+| `Request.method` resolves a QUERY request to QUERY | the typed code, not a fallback |
+| A QUERY request is distinguishable from a GET | the defect this closes: unknown tokens used to resolve to GET |
+| A QUERY request carries its content like a POST | Content-Length framing and `body()` delivery |
+| A QUERY request exposes its declared Content-Type | section 2 needs the handler to read it |
+| A QUERY without Content-Type reports no type | the 400 case |
+| An unsupported query content type reports no match, never sniffed | section 2.1 forbids guessing from the body |
+| Every query content type RFC 10008 names is recognised | sql, jsonpath, graphql, x-www-form-urlencoded, multipart/form-data |
+| A QUERY response is never filed under the request cache key | section 2.7, the key carries no content |
+| Refusing QUERY leaves GET on the same path cacheable | the refusal is scoped to the method |
+| The query content types compose a valid Accept-Query value | section 3, an RFC 9651 sf-list of bare items |
+| A method it does not implement draws 501, not a wrong answer | RFC 9110 section 15.6.2 |
+| QUERY is implemented, so it parses instead of drawing 501 | the same gate that refuses an unknown method passes QUERY |
 
 ### tests/behaviour/websocket/
 
@@ -743,6 +783,24 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | Empty string -> `APPLICATION_OCTET_STREAM` | `typeFromExtension("")` |
 | `fromExtension` unknown -> `"application/octet-stream"` | string form of fallback |
 
+#### `query_test.zig`
+
+QUERY boundary conditions on the `zix.Http` engine.
+
+| Test | What it verifies |
+| :- | :- |
+| Matches the QUERY token exactly, as it does every method | RFC 9110 section 9.1, method names are case-sensitive |
+| A five-byte token that is not QUERY is still refused | the length arm is not a catch-all |
+| An unimplemented method answers 501, a broken line answers 400 | the status comes from the error |
+| A QUERY with zero Content-Length frames as bodyless | framing |
+| A chunked QUERY body decodes to the same bytes as Content-Length | the two framings agree |
+| A QUERY keeps both its query string and its content | target parameters survive |
+| The longest query content type is matched, not truncated | 33 bytes |
+| An absurd Content-Type reports no match instead of overrunning | bounded |
+| An empty Content-Type value reports no match | empty, lone semicolon, whitespace |
+| A multipart QUERY boundary parameter does not defeat the match | parameters stripped |
+| Both engines answer the same for a parameterised query type | the two content tables stay in step |
+
 ### tests/edge/websocket/
 
 #### `websocket_test.zig`
@@ -869,6 +927,30 @@ Every case here ends in a null hit, which the engines treat as "serve it uncache
 | Keeps serving after the table fills with pinned entries | a full table declines the new path and leaves held entries intact |
 | Negotiation falls back to identity when a client rejects everything | serving the plain file beats refusing it |
 | Init survives an absurd entry request | clamped against the descriptor budget, still a power of two |
+
+#### `query_test.zig`
+
+QUERY boundary conditions: the two peer-controlled values a QUERY puts on paths that bodyless methods never reached.
+
+| Test | What it verifies |
+| :- | :- |
+| A lowercase method token is refused, not folded | RFC 9110 section 9.1, method names are case-sensitive |
+| Http1 and Http answer a lowercase method the same way | one shared method table, so the two engines cannot drift apart again |
+| A method token past the known maximum is refused, not truncated | bounded by the length switch |
+| An unimplemented method answers 501, a broken line answers 400 | the two failures stay apart |
+| A malformed request line is not reported as an unknown method | a line that never tokenized says nothing about the method |
+| A QUERY with an empty method-adjacent target still parses | root target |
+| Zero and absent Content-Length frame as bodyless | nothing declared means nothing to read |
+| A chunked QUERY sets the chunked flag | chunked framing is method-agnostic |
+| A QUERY may carry Expect 100-continue | the large-body handshake |
+| A QUERY body past the receive buffer reports what arrived | `bodyReceived` vs `content_length`, the case a GET cannot express |
+| A QUERY keeps both its query string and its content | the target parameters are not replaced by the body |
+| The longest query content type is matched, not truncated | 33 bytes, the value that overran the old buffer |
+| An absurd Content-Type reports no match instead of overrunning | a peer controls this header |
+| An empty Content-Type value reports no match | empty, lone semicolon, whitespace |
+| A multipart QUERY boundary parameter does not defeat the match | parameters are stripped first |
+| A QUERY store is refused even when the response fits the cache | not a size effect |
+| A QUERY encoded store is refused on the compressed path too | the per-encoding slots carry the same refusal |
 
 ### tests/edge/http2/
 
