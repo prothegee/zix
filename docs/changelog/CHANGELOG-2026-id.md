@@ -48,6 +48,8 @@ __*Fix:*__
 
 __*Update:*__
 
+- Monotonic clock Windows overflow setelah sekitar setengah jam uptime mesin. `zix.utils` dan executor postgrez sama-sama mengubah performance counter menjadi satuan waktu dengan `counter * scale / frequency`, yang mengalikan sebelum membagi, sehingga hasil kalinya keluar dari u64 begitu counter melewati `u64 max / scale`. Windows melaporkan counter 10 MHz, yang menempatkan batas itu di sekitar 31 menit uptime untuk nanosecond dan 21 hari untuk microsecond. Build safe panic dengan `integer overflow` dan menjatuhkan thread pemanggilnya, build release wrap dan melaporkan waktu tempuh yang ngawur. File baru `src/utils/counter_scale.zig` membagi lebih dulu, sehingga perkalian yang tersisa selalu dibatasi oleh frequency, dan executor postgrez memakai bentuk yang sama secara lokal karena module driver tidak bisa meng-import utils milik zix. Kedua query counter juga berhenti membuang status-nya: query yang ditolak menjawab 0 alih-alih membagi dengan pembacaan yang tidak pernah ditulis.
+
 - Tabel `Method`, `Status`, dan `Content` masing-masing menyimpan switch enum-ke-string dua kali: satu `toString` privat di balik `asString`, dan satu `stringFromEnum` publik yang identik. Itu 122 arm duplikat per engine, dan satu-satunya yang menjaga kedua salinan tetap sejalan adalah test yang menegaskan keduanya cocok. `stringFromEnum` kini menjadi satu-satunya switch dan `asString` memanggilnya, jadi kedua penulisan itu tidak bisa berbeda. Tidak ada perubahan bagi pemanggil: kedua nama tetap publik dan mengembalikan hal yang sama seperti sebelumnya.
 
 - Dukungan method HTTP QUERY di kedua engine HTTP/1 (RFC 10008):
