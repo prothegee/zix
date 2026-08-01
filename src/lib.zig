@@ -46,6 +46,7 @@ pub const Driver = struct {
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
+    pub const media_type = @import("utils/media_type.zig");
     pub const response_cache = @import("utils/response_cache.zig");
     pub const static_cache = @import("utils/static_cache.zig");
     pub const static_send = @import("utils/static_send.zig");
@@ -216,6 +217,7 @@ test "zix: unit test" {
     // # zix.Utils
     std.testing.refAllDecls(@import("utils/file.zig"));
     std.testing.refAllDecls(@import("utils/multipart.zig"));
+    std.testing.refAllDecls(@import("utils/media_type.zig"));
     std.testing.refAllDecls(@import("utils/response_cache.zig"));
     std.testing.refAllDecls(@import("utils/static_cache.zig"));
     std.testing.refAllDecls(@import("utils/static_send.zig"));
