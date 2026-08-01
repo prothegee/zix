@@ -65,7 +65,7 @@ flowchart TD
     W --> WAIT["epoll_wait"]
     WAIT --> EV{"event fd?"}
     EV -->|listener| ACCEPT["acceptAll\naccept4 NONBLOCK to EAGAIN\nregister conn in epoll + table"]
-    EV -->|draining oversize body| DRAIN["serveEpollDrain\nMSG_TRUNC discard"]
+    EV -->|draining oversize body| DRAIN["serveEpollDrainThenServe\nMSG_TRUNC discard, count bytes\nthen serve the deferred request"]
     EV -->|websocket conn| WS["serveEpollWs\nws.pump frames"]
     EV -->|http conn| HTTP["serveEpollConn\nread to EAGAIN\nparse + dispatch every\ncomplete pipelined request\ncoalesce responses, one write"]
     ACCEPT --> WAIT
@@ -117,7 +117,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.ServerConfig` | struct | Server configuration (see Http1ServerConfig section) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only) |
 | `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (the trio, ADR-062) |
-| `zix.Http1.Request` | struct | Zero-copy request view: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
+| `zix.Http1.Request` | struct | Zero-copy request view: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `bodyReceived()`, `bodyComplete()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
 | `zix.Http1.Response` | struct | Response builder over the fd writers: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus the `sent` flag |
 | `zix.Http1.Context` | struct | io, per-request arena allocator, fd escape hatch, `withDeadline` |
 | `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespaces | Typed trio surface (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` returns `Method.Code`), identical across both engines |
@@ -159,7 +159,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.sendChunkFD` | fn | Write one chunk |
 | `zix.Http1.sendChunkedEndFD` | fn | Terminate the chunked body |
 | `zix.Http1.sendRangeFD` | fn | 206 Partial Content or 416 based on a Range header value |
-| `zix.Http1.send100ContinueFD` | fn | Send `100 Continue` before reading a large body |
+| `zix.Http1.send100ContinueFD` | fn | Send `100 Continue` manually on the raw path (the engine already answers `Expect: 100-continue` on every dispatch model) |
 
 ---
 
@@ -174,6 +174,7 @@ pub const Http1ServerConfig = struct {
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
     max_recv_buf:       usize = 6 * 1024,      // per-connection buffer (.EPOLL / .URING, see note)
     large_body_rcvbuf:  usize = 0,             // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
+    max_request_body:   usize = 8 * 1024 * 1024, // declared Content-Length cap, past it the engine answers 413 (0 = no check)
     ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
     compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via res.sendNegotiated / core.sendNegotiateFD (every model)
     compression_min_size: usize = 256,           // skip bodies under this floor
@@ -190,7 +191,7 @@ pub const Http1ServerConfig = struct {
 
 The listing above is abbreviated: the full field reference (cache, uring tuning, TLS dual listener, steering) lives in [`docs/zix-config-en.md`](zix-config-en.md).
 
-Note: under `.ASYNC` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`.
+Note: under `.ASYNC` the connection loop uses fixed stack buffers (`core.BUF_SIZE` = 16 KB header buffer, 8 KB body buffer). `max_recv_buf` sizes the per-connection buffer under `.EPOLL` and `.URING`. `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
 
 Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
@@ -286,7 +287,7 @@ sequenceDiagram
     Serve->>Serve: return (caller closes fd)
 ```
 
-Error responses written by the engine itself: `431` when the header block exceeds the receive buffer, `400` when `parseHead` fails. Both close the connection. The router (when used) writes `404` for unmatched paths.
+Error responses written by the engine itself: `431` when the header block exceeds the receive buffer, `400` when `parseHead` fails or a chunked body cannot be framed, `413` when a declared body crosses `max_request_body` (or a chunked body outgrows the buffer). All of them close the connection. The router (when used) writes `404` for unmatched paths.
 
 ---
 
@@ -424,14 +425,15 @@ Per-request access logging is the handler's responsibility: the response bytes g
 | Limit | Behaviour |
 | :- | :- |
 | Header block size | Max 16 KB (`core.BUF_SIZE`, or `max_recv_buf` under .EPOLL). Exceeding returns `431` and closes |
-| Body under .ASYNC | The handler sees up to 8 KB (`ASYNC_BODY_CHUNK`). A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable (the handler reads `head.content_length`, not the bytes) |
-| Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body keeps the connection usable by draining the remainder off the socket (`MSG_TRUNC`): `.EPOLL` dispatches the handler first with an empty body slice, `.URING` drains and counts first, then the handler runs with the counted total in `req.bodyReceived()` |
+| Body under .ASYNC | The handler sees the first 8 KB (`ASYNC_BODY_CHUNK`). A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable: `req.bodyReceived()` reports the counted total, `req.bodyComplete()` whether the peer sent it all |
+| Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body keeps the connection usable by draining the remainder off the socket (`MSG_TRUNC`): both models defer the handler until the drain finishes, then run it with the counted total in `req.bodyReceived()` and an empty body slice |
+| Declared body past `max_request_body` | Refused with `413` before any body byte is read or drained, on every dispatch model (default 8 MiB, 0 disables the check) |
 | Large request body (uploads) | The drain widens the receive window via `large_body_rcvbuf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
-| Chunked request body | Decoded into the body buffer, excess discarded |
+| Chunked request body | Decoded into the body buffer. A frame the decoder cannot walk answers `400`, a chunked body past the buffer answers `413` (chunked declares no length up front, so the buffer stands in for `max_request_body`) |
 | HTTP versions | HTTP/1.0 and HTTP/1.1 only, anything else is `400` |
 | TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` terminates per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
 
-Endpoints that accept large uploads read `req.bodyReceived()` under `.URING` (the drained bytes are counted, not buffered). The other models do not carry the count, so they rely on `head.content_length` there.
+Endpoints that accept large uploads read `req.bodyReceived()` on every dispatch model (the drained bytes are counted, not buffered) and `req.bodyComplete()` to tell a finished upload from one the peer cut short.
 
 For the full-featured HTTP layer see [`docs/hld-http-en.md`](hld-http-en.md). For implementation details see [`docs/lld-http1-en.md`](lld-http1-en.md).
 
