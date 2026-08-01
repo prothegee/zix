@@ -204,7 +204,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http.WebSocket.serveTls` | fn | WebSocket over TLS (wss): encrypted `101` + engine-driven inline frame loop (ADR-055) |
 | `zix.Http.WebSocket.send` | fn | Send one server frame, sink-coalesced (used from an `on_frame` callback over TLS) |
 | `zix.utils.file.save` | fn | Write bytes to `dir/filename`, creates directory if needed |
-| `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT |
+| `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT QUERY (RFC 10008) |
 | `zix.Tcp.Http.Status.Code` | enum | Full HTTP 1xx--5xx status codes |
 
 ---
@@ -304,7 +304,7 @@ A zero-copy view over the parsed request head and the connection fd, which `body
 
 | Method | Returns | Notes |
 | :- | :- | :- |
-| `method()` | `Method.Code` | Mapped from `std.http.Method` |
+| `method()` | `Method.Code` | Resolved by this engine's own request-line parser. A method it does not implement never reaches a handler: the parse reports `error.UnknownMethod` and the caller answers 501 |
 | `path()` | `[]const u8` | Target stripped of query string |
 | `query()` | `[]const u8` | Raw query string after `?` |
 | `queryParam(key)` | `?[]const u8` | Single key from query string |
@@ -315,6 +315,21 @@ A zero-copy view over the parsed request head and the connection fd, which `body
 | `body()` | `![]const u8` | Reads body: `Content-Length` bytes or chunked transfer decoded, bounded by `max_request_body` (`error.RequestBodyTooLarge` answered `413`, malformed chunked `error.InvalidChunkedBody` answered `400`). Cached after first call. |
 | `bodyReceived()` | `u64` | Body bytes the reads actually consumed, not what the header claimed |
 | `bodyComplete()` | `bool` | Whether the declared or framed body end was reached. False means the peer cut the body short, or the handler never read it |
+
+---
+
+## QUERY Method (RFC 10008)
+
+QUERY is safe and idempotent like `GET`, and carries content like `POST`. It exists for a question too large or too structured to fit a URL query string.
+
+This engine's request-line parser accepts it and `req.method()` returns `.QUERY`. Everything else matches `zix.Http1` exactly, so a handler behaves the same on either engine. See the QUERY section of the `zix.Http1` HLD for the full requirement map, the status table (400 / 415 / 422 / 406), and the content types the table names.
+
+Two points specific to this engine:
+
+| Point | Detail |
+| :- | :- |
+| Method tokens are matched exactly | RFC 9110 section 9.1 makes method names case-sensitive, and this parser has always compared them that way. `query` in lowercase is not the QUERY method, it is a method this engine does not implement (501) |
+| A QUERY response is never cached | `sendCached` falls back to a plain send for a QUERY, because the request key is `hash(method, path, query)` and carries no content (RFC 10008 section 2.7) |
 
 ---
 

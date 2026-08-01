@@ -203,7 +203,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http.WebSocket.serveTls` | fn | WebSocket melalui TLS (wss): `101` terenkripsi + inline frame loop engine-driven (ADR-055) |
 | `zix.Http.WebSocket.send` | fn | Kirim satu server frame, ter-coalesce sink (dipakai dari callback `on_frame` melalui TLS) |
 | `zix.utils.file.save` | fn | Tulis bytes ke `dir/filename`, membuat direktori bila belum ada |
-| `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT |
+| `zix.Tcp.Http.Method.Code` | enum | GET HEAD POST PUT DELETE PATCH OPTIONS TRACE CONNECT QUERY (RFC 10008) |
 | `zix.Tcp.Http.Status.Code` | enum | Status code HTTP lengkap 1xx--5xx |
 
 ---
@@ -303,7 +303,7 @@ View zero-copy atas head request yang sudah di-parse dan fd koneksi, tempat `bod
 
 | Method | Mengembalikan | Catatan |
 | :- | :- | :- |
-| `method()` | `Method.Code` | Dipetakan dari `std.http.Method` |
+| `method()` | `Method.Code` | Diselesaikan oleh request-line parser milik engine ini sendiri. Method yang tidak diimplementasikan tidak pernah sampai ke handler: parse melaporkan `error.UnknownMethod` dan caller menjawab 501 |
 | `path()` | `[]const u8` | Target tanpa query string |
 | `query()` | `[]const u8` | Raw query string setelah `?` |
 | `queryParam(key)` | `?[]const u8` | Satu key dari query string |
@@ -314,6 +314,21 @@ View zero-copy atas head request yang sudah di-parse dan fd koneksi, tempat `bod
 | `body()` | `![]const u8` | Membaca body: bytes `Content-Length` atau chunked transfer yang sudah di-decode, dibatasi `max_request_body` (`error.RequestBodyTooLarge` dijawab `413`, chunked malformed `error.InvalidChunkedBody` dijawab `400`). Di-cache setelah pemanggilan pertama. |
 | `bodyReceived()` | `u64` | Byte body yang benar-benar dikonsumsi pembacaan, bukan yang diklaim header |
 | `bodyComplete()` | `bool` | Apakah akhir body yang dideklarasikan atau ter-framing tercapai. False berarti peer memutus body, atau handler tidak pernah membacanya |
+
+---
+
+## Method QUERY (RFC 10008)
+
+QUERY bersifat safe dan idempotent seperti `GET`, dan membawa content seperti `POST`. Ia ada untuk pertanyaan yang terlalu besar atau terlalu terstruktur untuk muat di query string URL.
+
+Request-line parser engine ini menerimanya dan `req.method()` mengembalikan `.QUERY`. Selebihnya persis sama dengan `zix.Http1`, jadi sebuah handler berperilaku sama di kedua engine. Lihat bagian QUERY di HLD `zix.Http1` untuk peta kebutuhan lengkap, tabel status (400 / 415 / 422 / 406), dan content type yang ada di tabel.
+
+Dua hal khusus engine ini:
+
+| Hal | Rincian |
+| :- | :- |
+| Token method dicocokkan persis | RFC 9110 section 9.1 menetapkan nama method case-sensitive, dan parser ini memang selalu membandingkannya begitu. `query` huruf kecil bukan method QUERY, melainkan method yang tidak diimplementasikan engine ini (501) |
+| Response QUERY tidak pernah di-cache | `sendCached` jatuh ke pengiriman biasa untuk QUERY, karena request key-nya `hash(method, path, query)` dan tidak membawa content (RFC 10008 section 2.7) |
 
 ---
 
