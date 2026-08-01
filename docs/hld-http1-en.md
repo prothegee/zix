@@ -120,7 +120,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.Request` | struct | Zero-copy request view: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `bodyReceived()`, `bodyComplete()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
 | `zix.Http1.Response` | struct | Response builder over the fd writers: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus the `sent` flag |
 | `zix.Http1.Context` | struct | io, per-request arena allocator, fd escape hatch, `withDeadline` |
-| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespaces | Typed trio surface (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` returns `Method.Code`), identical across both engines. `Method.Code` includes `QUERY` (RFC 10008). `Content.typeFromString` / `typeFromHeader` return `?Type`, null meaning the value names no type the table knows |
+| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespaces | Typed trio surface (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` returns `Method.Code`), identical across both engines. `Method.Code` includes `QUERY` (RFC 10008). `Content.typeFromString` / `typeFromHeader` return `?Type`, null meaning the value names no type the table knows. Each namespace has one lookup per direction: `stringFromEnum(value)` for the string (`value.asString()` is the same function spelled as a method call), and `codeFromString` / `typeFromString` for the value |
 | `zix.Http1.Header` / `HeaderSize` | struct / enum | `addHeader` entry and its capacity class (`max_response_headers`) |
 | `zix.Http1.Multipart` / `MultipartField` | struct | Shared multipart parser |
 | `zix.Http1.SseWriter` | struct | SSE event writer returned by `res.sendStream()` |
@@ -272,6 +272,8 @@ The engine parses and classifies it. Deciding which content types a route accept
 | Section 2.7: the cache key must incorporate the request content | The key is `hash(method, path, query)` and carries no content, so a QUERY response is never stored. Caching a QUERY response is a MAY, so refusing is conformant |
 | Section 3: `Accept-Query` | Written by the handler as a plain header value. A server only ever emits one, so no RFC 9651 parser is needed |
 
+Method tokens are matched exactly, per RFC 9110 section 9.1. Both HTTP/1 engines read the same table (`Method.codeFromString`), so `query` in lowercase is not the QUERY method on either one: it names a method neither engine implements, and the answer is 501.
+
 Statuses a handler picks from, per section 2.1:
 
 | Case | Status |
@@ -282,6 +284,8 @@ Statuses a handler picks from, per section 2.1:
 | An `Accept` the route cannot satisfy | 406 |
 
 Content types the table names for query content: `application/sql`, `application/jsonpath`, `application/graphql`, `application/x-www-form-urlencoded`, `multipart/form-data`.
+
+`examples/http1_query.zig` (port 9079) and `examples/http_query.zig` (port 9080) carry the handler-side pattern: the status map above, the `Accept-Query` header, and a route that accepts two types and answers one. `tests/runner/checks_query.zig` drives both on the wire.
 
 Client note: `zix.Http.Client` cannot put a QUERY on the wire over TCP, because it wraps `std.http.Client` and `std.http.Method` is a closed set that predates RFC 10008. It reports `error.UnsupportedMethod` before opening a socket. `requestUds` writes its own request line, so that path does carry QUERY. Both engines serve QUERY regardless of which client sent it.
 

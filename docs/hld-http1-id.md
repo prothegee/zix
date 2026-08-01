@@ -120,7 +120,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.Request` | struct | View request zero-copy: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `bodyReceived()`, `bodyComplete()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
 | `zix.Http1.Response` | struct | Builder response di atas writer fd: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus flag `sent` |
 | `zix.Http1.Context` | struct | io, arena allocator per-request, escape hatch fd, `withDeadline` |
-| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespace | Permukaan trio bertipe (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` mengembalikan `Method.Code`), identik di kedua engine. `Method.Code` memuat `QUERY` (RFC 10008). `Content.typeFromString` / `typeFromHeader` mengembalikan `?Type`, null berarti nilai itu tidak menyebut type yang dikenal tabel |
+| `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespace | Permukaan trio bertipe (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` mengembalikan `Method.Code`), identik di kedua engine. `Method.Code` memuat `QUERY` (RFC 10008). `Content.typeFromString` / `typeFromHeader` mengembalikan `?Type`, null berarti nilai itu tidak menyebut type yang dikenal tabel. Tiap namespace punya satu lookup per arah: `stringFromEnum(value)` untuk string-nya (`value.asString()` adalah fungsi yang sama, ditulis sebagai pemanggilan method), dan `codeFromString` / `typeFromString` untuk nilainya |
 | `zix.Http1.Header` / `HeaderSize` | struct / enum | Entri `addHeader` dan kelas kapasitasnya (`max_response_headers`) |
 | `zix.Http1.Multipart` / `MultipartField` | struct | Parser multipart bersama |
 | `zix.Http1.SseWriter` | struct | Writer event SSE yang dikembalikan `res.sendStream()` |
@@ -272,6 +272,8 @@ Engine melakukan parse dan klasifikasi. Keputusan content type mana yang diterim
 | Section 2.7: cache key harus memasukkan content request | Key-nya `hash(method, path, query)` dan tidak membawa content, jadi response QUERY tidak pernah disimpan. Meng-cache response QUERY berstatus MAY, jadi menolak tetap conformant |
 | Section 3: `Accept-Query` | Ditulis handler sebagai nilai header biasa. Server hanya pernah mengirimkannya, jadi parser RFC 9651 tidak diperlukan |
 
+Token method dicocokkan persis, sesuai RFC 9110 section 9.1. Kedua engine HTTP/1 membaca tabel yang sama (`Method.codeFromString`), jadi `query` huruf kecil bukan method QUERY di keduanya: ia menamai method yang tidak diimplementasikan kedua engine, dan jawabannya 501.
+
 Status yang dipilih handler, sesuai section 2.1:
 
 | Kasus | Status |
@@ -282,6 +284,8 @@ Status yang dipilih handler, sesuai section 2.1:
 | `Accept` yang tidak bisa dipenuhi route | 406 |
 
 Content type yang ada di tabel untuk query content: `application/sql`, `application/jsonpath`, `application/graphql`, `application/x-www-form-urlencoded`, `multipart/form-data`.
+
+`examples/http1_query.zig` (port 9079) dan `examples/http_query.zig` (port 9080) membawa pola sisi handler-nya: peta status di atas, header `Accept-Query`, dan sebuah route yang menerima dua type dan menjawab satu. `tests/runner/checks_query.zig` menjalankan keduanya di wire.
 
 Catatan client: `zix.Http.Client` tidak bisa mengirim QUERY lewat TCP, karena ia membungkus `std.http.Client` dan `std.http.Method` adalah himpunan tertutup yang lebih tua dari RFC 10008. Ia melaporkan `error.UnsupportedMethod` sebelum membuka socket. `requestUds` menulis request line-nya sendiri, jadi jalur itu memang membawa QUERY. Kedua engine melayani QUERY tanpa peduli client mana yang mengirimnya.
 
