@@ -730,6 +730,7 @@ pub fn main() !void {
 - [examples/http1_json.zig](examples/http1_json.zig)
 - [examples/http1_params.zig](examples/http1_params.zig)
 - [examples/http1_paths.zig](examples/http1_paths.zig)
+- [examples/http1_query.zig](examples/http1_query.zig) - the QUERY method (RFC 10008)
 - [examples/http1_middleware.zig](examples/http1_middleware.zig)
 - [examples/http1_cache.zig](examples/http1_cache.zig)
 - [examples/http1_manual_concurrent.zig](examples/http1_manual_concurrent.zig)
@@ -796,6 +797,7 @@ const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 **Examples:**
 - [examples/http_params.zig](examples/http_params.zig) - query and form parameter handling
 - [examples/http_paths.zig](examples/http_paths.zig) - path parameter routing patterns
+- [examples/http_query.zig](examples/http_query.zig) - the QUERY method (RFC 10008)
 - [examples/http_json.zig](examples/http_json.zig) - JSON response handling
 
 **Raw `zix.Http1` engine**: the low-level engine ships the same comptime `Router` with identical `.EXACT` / `.PREFIX` / `.PARAM` kinds, the same `exact > param > prefix` priority, and the same trio handler, so param capture reads identically: `req.pathParam("id")` (the free function `zix.Http1.pathParam("id")` remains as the raw-layer equivalent):

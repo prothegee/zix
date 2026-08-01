@@ -730,6 +730,7 @@ pub fn main() !void {
 - [examples/http1_json.zig](examples/http1_json.zig)
 - [examples/http1_params.zig](examples/http1_params.zig)
 - [examples/http1_paths.zig](examples/http1_paths.zig)
+- [examples/http1_query.zig](examples/http1_query.zig) - method QUERY (RFC 10008)
 - [examples/http1_middleware.zig](examples/http1_middleware.zig)
 - [examples/http1_cache.zig](examples/http1_cache.zig)
 - [examples/http1_manual_concurrent.zig](examples/http1_manual_concurrent.zig)
@@ -796,6 +797,7 @@ const sub = req.path()["/secret/".len..];  // misalnya "file.txt"
 **Contoh:**
 - [examples/http_params.zig](examples/http_params.zig) - penanganan parameter query dan form
 - [examples/http_paths.zig](examples/http_paths.zig) - pola routing parameter path
+- [examples/http_query.zig](examples/http_query.zig) - method QUERY (RFC 10008)
 - [examples/http_json.zig](examples/http_json.zig) - penanganan respons JSON
 
 **Mesin `zix.Http1` mentah**: mesin tingkat rendah menyediakan `Router` comptime yang sama dengan jenis `.EXACT` / `.PREFIX` / `.PARAM` yang identik, prioritas `exact > param > prefix` yang sama, dan handler trio yang sama, jadi penangkapan param terbaca identik: `req.pathParam("id")` (fungsi bebas `zix.Http1.pathParam("id")` tetap ada sebagai padanan raw-layer):
