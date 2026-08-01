@@ -47,20 +47,23 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http/status.zig` | `refAllDecls` |
 | `tcp/http/content.zig` | `refAllDecls` + round-trip: `enumFromString` / `stringFromEnum` untuk setiap varian enum |
 | `tcp/http/parser.zig` | `refAllDecls` + perilaku: input tidak lengkap menghasilkan null, offset GET minimal, pemisahan path+query, offset header, flag keep_alive, semua method, method tidak valid, flag chunked aktif/nonaktif, coding list chunked, chunkedEnd lengkap/parsial/resume-watermark/terminator-di-data/trailer/pipelined/hex-tidak-valid, dechunkInPlace di buffer sendiri/pemindahan overlap/urutan chunk |
-| `tcp/http/request.zig` | `refAllDecls` + perilaku: method, path, query string, queryParam (ada / tidak ada / flag), pathSegments, queryParams, pencarian header (case-insensitive) |
+| `tcp/http/request.zig` | `refAllDecls` + perilaku: method, path, query string, queryParam (ada / tidak ada / flag), pathSegments, queryParams, pencarian header (case-insensitive), pengantaran body (Content-Length dan chunked yang tiba tersegmen di fd non-blocking, body jauh lebih besar dari read buffer, short read dilaporkan saat peer menutup lebih awal) |
 | `tcp/http/response.zig` | `refAllDecls` + perilaku: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, penjaga injeksi (CR/LF), TooManyHeaders, format wire `SseWriter`, default `Response.streaming` |
 | `tcp/http/router.zig` | `refAllDecls` + perilaku: matchParam, registrasi route (kind + path tersimpan) |
 | `tcp/http/static.zig` | `refAllDecls` + perilaku: mimeType, parseRangeHeader |
 | `tcp/http/websocket.zig` | `refAllDecls` + perilaku: vektor RFC acceptKey, round-trip buildFrame + parseFrame, frame bermasker |
 | `tcp/http/context.zig` | `refAllDecls` + perilaku: `timedOut` dengan deadline null menghasilkan false, `isExpired` dengan deadline null menghasilkan false |
-| `tcp/http/server.zig` | `refAllDecls` + perilaku: siklus hidup alloc / free slab `EpollConnTable`, akuntansi filled-bytes, fd di luar jangkauan menghasilkan null, `getAvailableCpuCount` menghasilkan minimal 1, `effectiveCacheEntries` menghormati plafon memori, EPOLL `processRequest` melayani cache miss lalu hit |
+| `tcp/http/server.zig` | `refAllDecls` + perilaku: siklus hidup alloc / free slab `EpollConnTable`, akuntansi filled-bytes, fd di luar jangkauan menghasilkan null, `getAvailableCpuCount` menghasilkan minimal 1, `effectiveCacheEntries` menghormati plafon memori, EPOLL `processRequest` melayani cache miss lalu hit, hasil body `processRequest` (bodyComplete true untuk body Content-Length atau chunked yang terbaca penuh dan false saat handler tidak pernah membaca, 413 untuk body yang dideklarasikan atau chunked melewati limit, 100 Continue dikirim untuk Expect ber-body dan dilewati tanpanya, tutup saat body biasa atau chunked coding-list tidak dibaca atau peer berhenti lebih awal, body chunked yang tiba setelah head tetap diantar) |
 
 ### zix.Http1
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http1/core.zig` | `refAllDecls` + perilaku: parseHead (field GET, pemisahan query dari path, POST Content-Length, default keep_alive HTTP/1.0 + override Connection, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD ke RespSink aktif tanpa bounce buffer, cache no-op / store-lalu-hit / pemisahan key per path dan query |
+| `tcp/http1/core.zig` | `refAllDecls` + perilaku: parseHead (field GET, pemisahan query dari path, POST Content-Length, default keep_alive HTTP/1.0 + override Connection, Expect 100-continue), getHeader case-insensitive, queryParam, parseRange, percentDecode, buildSimpleHeaderInto, sendSimpleFD ke RespSink aktif tanpa bounce buffer, cache no-op / store-lalu-hit / pemisahan key per path dan query, walk chunkedFrame (minta lebih di tengah body, panjang terminator, malformed vs too-large vs belum selesai, data yang mengeja terminator, berhenti di request pipelined), decodeChunkedInBuf (decode di tempat, source tak tersentuh selama belum selesai), jalur body ASYNC serveConn (pengantaran body muat dan over-large dengan pelaporan bodyReceived / bodyComplete, awal body dan bukan sisa drain, drain menjaga request pipelined, 413 dideklarasikan dan chunked melewati buffer, 400 chunked malformed, 100 Continue, chunked tiba setelah head, request pipelined di belakang body chunked) |
+| `tcp/http1/request.zig` | `refAllDecls` + perilaku: body mengembalikan slice yang diantar engine, bodyReceived default ke panjang slice dan menerima override engine, bodyComplete default true dan menerima override engine, fromRaw mem-parse buffer mentah dengan body |
 | `tcp/http1/server.zig` | `refAllDecls` + perilaku: validasi config (ASYNC / EPOLL / URING), serveEpollConn menjawab burst pipelined secara berurutan, cache EPOLL miss-lalu-hit + plafon memori effectiveCacheEntries, siklus hidup slab ConnTable + sizing ws_recv_buf, serveEpollWs men-drain ke EAGAIN, parseGetFastPath (GET / query / menolak POST dan HTTP/1.0 / raw headers), initUringRing menghasilkan ring yang dapat dipakai |
+| `tcp/http1/dispatch/epoll.zig` (Linux) | perilaku jalur body: drain-lalu-sajikan melaporkan total terhitung, drain tepat menjaga request pipelined tetap utuh, peer yang berhenti di tengah drain tidak pernah dilayani, body yang muat menunggu hitungan penuh, 413 untuk body yang dideklarasikan melewati limit dan body chunked melewati body buffer, 400 pada chunked malformed, satu 100 Continue selagi body masih berdatangan |
+| `tcp/http1/dispatch/uring.zig` (Linux) | perilaku jalur body: body chunked yang hadir penuh ter-decode, body oversized ditunda dan disajikan dengan total terhitung, request yang ditunda tetap parkir selama drain-nya belum selesai, body yang muat menunggu hitungan penuh, 413 dideklarasikan dan chunked, 400 chunked malformed, 100 Continue selagi body masih berdatangan |
 | `tcp/http1/websocket.zig` | `refAllDecls` + perilaku: acceptKey vektor RFC 6455, round-trip buildFrame/parseFrame, SIMD unmask cocok dengan scalar (dan tail bytes), prefix buildHeader, pump echo lewat socketpair, pumpRing stage lalu melaporkan close, broadcast fan-out (+ skip fd mati, list kosong) |
 | `tcp/http1/router.zig` | `refAllDecls` + perilaku: matchParam, router comptime |
 | `tcp/http1/config.zig` | `refAllDecls` (nilai default diuji oleh `tests/behaviour/http1/config_test.zig`) |
@@ -818,6 +821,25 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | Checksum yang buruk menyebabkan server menutup tanpa propagasi error di sisi server | byte pesan yang rusak menutup koneksi `ctx.err == null` |
 
 ### tests/edge/http1/
+
+#### `body_test.zig`
+
+Content-Length adalah yang dipakai setiap dispatch model untuk memutuskan apakah body diantar utuh, ditunggu, atau di-drain, sehingga nilai yang ditolak parser mengubah jalur yang diambil sebuah request.
+
+| Tes | Yang diverifikasi |
+| :- | :- |
+| Content-Length absen mem-framing request sebagai tanpa body | tanpa header -> `content_length` 0, flag chunked false |
+| Content-Length nol mem-framing request sebagai tanpa body | `Content-Length: 0` -> 0 |
+| Content-Length non-numerik jatuh ke nol | `abc` -> 0 |
+| Content-Length dengan spasi di akhir jatuh ke nol | `5 ` -> 0 |
+| Content-Length melewati u64 jatuh ke nol | nilai 23 digit -> 0 |
+| Content-Length dibaca case-insensitive | `cOnTeNt-LeNgTh` dihormati |
+| request chunked menyalakan flag chunked di samping Content-Length | kedua nilai header disimpan |
+| Expect 100-continue di-flag untuk request ber-body | `expect_continue` true |
+| Request bodyReceived nol untuk request tanpa body | dan `body()` mengembalikan kosong |
+| Request bodyReceived mengikuti slice yang diantar secara default | slice 4 byte -> 4 |
+| Request bodyComplete true untuk request tanpa body | tidak ada yang dideklarasikan, tidak ada yang bisa kurang |
+| Request bodyComplete tidak bergantung panjang yang diantar | slice pendek tetap complete, override engine membuatnya false |
 
 #### `core_test.zig`
 
