@@ -128,25 +128,30 @@ pub fn build(b: *std.Build) void {
     // hung test, prints its name and captured stderr, and carries on to the next one.
     // The container suites (test-integration, test-runner) are left alone: they own a container
     // lifecycle and are legitimately slower than any bound that fits an in-process test.
-    // Same value the zix suites carry in the workflows, and for the same reason.
-    const DRIVER_TEST_TIMEOUT = "15s";
+    // Same value the zix suites carry in the native workflows, and for the same reason. A leg on a
+    // slow host (the qemu CI VMs) widens it with -Ddriver-test-timeout, native legs keep the default.
+    const driver_test_timeout = b.option(
+        []const u8,
+        "driver-test-timeout",
+        "Per-test bound for the container-free driver suites (default 15s)",
+    ) orelse "15s";
 
     // postgrez is a standalone package (src/driver/postgrez, own build.zig):
     // these steps delegate into it with the same compiler.
     if (dirExists(b, "src/driver/postgrez")) {
-        const postgrez_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const postgrez_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit", "--test-timeout", driver_test_timeout });
         postgrez_unit.setCwd(b.path("src/driver/postgrez"));
 
         const postgrez_unit_step = b.step("postgrez-test-unit", "Run the postgrez driver unit tests (no server needed)");
         postgrez_unit_step.dependOn(&postgrez_unit.step);
 
-        const postgrez_behaviour = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-behaviour", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const postgrez_behaviour = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-behaviour", "--test-timeout", driver_test_timeout });
         postgrez_behaviour.setCwd(b.path("src/driver/postgrez"));
 
         const postgrez_behaviour_step = b.step("postgrez-test-behaviour", "Run the postgrez driver behaviour tests against its in-process server (no container)");
         postgrez_behaviour_step.dependOn(&postgrez_behaviour.step);
 
-        const postgrez_edge = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-edge", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const postgrez_edge = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-edge", "--test-timeout", driver_test_timeout });
         postgrez_edge.setCwd(b.path("src/driver/postgrez"));
 
         const postgrez_edge_step = b.step("postgrez-test-edge", "Run the postgrez driver edge tests against its in-process server (no container)");
@@ -170,19 +175,19 @@ pub fn build(b: *std.Build) void {
     // rediz is a standalone package (src/driver/rediz, own build.zig):
     // these steps delegate into it with the same compiler.
     if (dirExists(b, "src/driver/rediz")) {
-        const rediz_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const rediz_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit", "--test-timeout", driver_test_timeout });
         rediz_unit.setCwd(b.path("src/driver/rediz"));
 
         const rediz_unit_step = b.step("rediz-test-unit", "Run the rediz driver unit tests (no server needed)");
         rediz_unit_step.dependOn(&rediz_unit.step);
 
-        const rediz_behaviour = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-behaviour", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const rediz_behaviour = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-behaviour", "--test-timeout", driver_test_timeout });
         rediz_behaviour.setCwd(b.path("src/driver/rediz"));
 
         const rediz_behaviour_step = b.step("rediz-test-behaviour", "Run the rediz driver behaviour tests against its in-process server (no container)");
         rediz_behaviour_step.dependOn(&rediz_behaviour.step);
 
-        const rediz_edge = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-edge", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const rediz_edge = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-edge", "--test-timeout", driver_test_timeout });
         rediz_edge.setCwd(b.path("src/driver/rediz"));
 
         const rediz_edge_step = b.step("rediz-test-edge", "Run the rediz driver edge tests against its in-process server (no container)");
@@ -208,19 +213,19 @@ pub fn build(b: *std.Build) void {
     // test-integration: its container coverage lives in test-runner, and the
     // docker-free behaviour and edge suites cover the rest.
     if (dirExists(b, "src/driver/prometheuz")) {
-        const prometheuz_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const prometheuz_unit = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-unit", "--test-timeout", driver_test_timeout });
         prometheuz_unit.setCwd(b.path("src/driver/prometheuz"));
 
         const prometheuz_unit_step = b.step("prometheuz-test-unit", "Run the prometheuz driver unit tests (no server needed)");
         prometheuz_unit_step.dependOn(&prometheuz_unit.step);
 
-        const prometheuz_behaviour = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-behaviour", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const prometheuz_behaviour = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-behaviour", "--test-timeout", driver_test_timeout });
         prometheuz_behaviour.setCwd(b.path("src/driver/prometheuz"));
 
         const prometheuz_behaviour_step = b.step("prometheuz-test-behaviour", "Run the prometheuz driver behaviour tests against its in-process server (no container)");
         prometheuz_behaviour_step.dependOn(&prometheuz_behaviour.step);
 
-        const prometheuz_edge = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-edge", "--test-timeout", DRIVER_TEST_TIMEOUT });
+        const prometheuz_edge = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test-edge", "--test-timeout", driver_test_timeout });
         prometheuz_edge.setCwd(b.path("src/driver/prometheuz"));
 
         const prometheuz_edge_step = b.step("prometheuz-test-edge", "Run the prometheuz driver edge tests against its in-process server (no container)");
