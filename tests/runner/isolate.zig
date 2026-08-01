@@ -11,13 +11,37 @@ const std = @import("std");
 /// Argv flag that puts a runner copy into child mode: run one check by label, report it, exit.
 pub const ONLY_FLAG = "--only";
 
-/// Longest a single check attempt may take before the parent kills it.
+/// Longest a single check attempt may take before the parent kills it, tuned for native speed.
 ///
 /// Note:
 /// - A healthy check finishes well inside a second, and the whole table inside ten.
 /// - The floor is the child's own startup poll (common.START_TIMEOUT_MS, 12 seconds) plus the check
 ///   body, so this leaves 8 seconds of body slack over the slowest honest attempt.
+/// - A slow host widens the live bound through CHECK_TIMEOUT_ENV (see checkTimeoutMs).
 pub const CHECK_TIMEOUT_MS: u32 = 20_000;
+
+/// Environment variable that widens CHECK_TIMEOUT_MS on a slow host. The value is milliseconds.
+/// The qemu CI legs set it: on a shared host the VM can stall one child for tens of seconds while
+/// its neighbors finish in milliseconds, and the native bound then kills a healthy check.
+pub const CHECK_TIMEOUT_ENV = "ZIX_CHECK_TIMEOUT_MS";
+
+/// Resolve the live check bound from the CHECK_TIMEOUT_ENV value.
+///
+/// Note:
+/// - The env can only widen the bound. A narrower one would kill children still inside their
+///   startup poll, so anything unparsable or below the default falls back to CHECK_TIMEOUT_MS.
+///
+/// Param:
+/// env_value - ?[]const u8 (raw environment value, null when the variable is unset)
+///
+/// Return:
+/// - u32 (milliseconds, never below CHECK_TIMEOUT_MS)
+pub fn checkTimeoutMs(env_value: ?[]const u8) u32 {
+    const text = env_value orelse return CHECK_TIMEOUT_MS;
+    const parsed = std.fmt.parseInt(u32, text, 10) catch return CHECK_TIMEOUT_MS;
+
+    return @max(parsed, CHECK_TIMEOUT_MS);
+}
 
 /// Longest child report this forwards. A PASS line is short. The longest case is a PASS carrying a
 /// fallback note, which common.printPass wraps at 80 columns and which stays inside a few hundred
@@ -41,7 +65,7 @@ pub const Verdict = enum {
     FAILED,
     /// A transient startup symptom, worth respawning the whole check.
     RETRIABLE,
-    /// The child blew CHECK_TIMEOUT_MS and was killed.
+    /// The child blew the check bound and was killed.
     TIMED_OUT,
 };
 
@@ -125,18 +149,18 @@ fn copyReport(text: []const u8, buf: []u8) []const u8 {
 }
 
 /// The report line for a check whose child never printed one: killed on the bound, or never spawned.
-fn unreportedLine(label: []const u8, err: anyerror, buf: []u8) []const u8 {
+fn unreportedLine(label: []const u8, err: anyerror, timeout_ms: u32, buf: []u8) []const u8 {
     if (err == error.Timeout) {
         return std.fmt.bufPrint(buf, "FAIL {s}: no result in {d}s, child killed\n", .{
             label,
-            CHECK_TIMEOUT_MS / 1000,
+            timeout_ms / 1000,
         }) catch buf[0..0];
     }
 
     return std.fmt.bufPrint(buf, "FAIL {s}: child {s}\n", .{ label, @errorName(err) }) catch buf[0..0];
 }
 
-/// Run one check in a child copy of the runner and wait for it, bounded by CHECK_TIMEOUT_MS.
+/// Run one check in a child copy of the runner and wait for it, bounded by timeout_ms.
 ///
 /// Note:
 /// - The child prints its own PASS or FAIL line. This forwards those bytes untouched rather than
@@ -151,6 +175,7 @@ fn unreportedLine(label: []const u8, err: anyerror, buf: []u8) []const u8 {
 /// self_exe - []const u8 (argv[0] of the running runner, respawned as the child)
 /// label - []const u8 (which check the child should run)
 /// paths - []const []const u8 (that check's server binaries)
+/// timeout_ms - u32 (kill bound for this attempt, from checkTimeoutMs)
 /// report_buf - []u8 (receives the report line, size it at REPORT_MAX)
 ///
 /// Return:
@@ -160,6 +185,7 @@ pub fn runIsolated(
     self_exe: []const u8,
     label: []const u8,
     paths: []const []const u8,
+    timeout_ms: u32,
     report_buf: []u8,
 ) Result {
     var argv_buf: [MAX_ARGV][]const u8 = undefined;
@@ -171,12 +197,12 @@ pub fn runIsolated(
     const finished = std.process.run(arena.allocator(), io, .{
         .argv = argv,
         .timeout = .{ .duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(@as(i64, CHECK_TIMEOUT_MS)),
+            .raw = std.Io.Duration.fromMilliseconds(@as(i64, timeout_ms)),
             .clock = .real,
         } },
     }) catch |err| return .{
         .verdict = if (err == error.Timeout) .TIMED_OUT else .FAILED,
-        .report = unreportedLine(label, err, report_buf),
+        .report = unreportedLine(label, err, timeout_ms, report_buf),
     };
 
     return .{
@@ -290,21 +316,45 @@ test "zix runner: copyReport on empty child output yields an empty line" {
 
 test "zix runner: unreportedLine names the bound when the child was killed" {
     var buf: [REPORT_MAX]u8 = undefined;
-    const line = unreportedLine("http1-timeout-resp", error.Timeout, &buf);
+    const line = unreportedLine("http1-timeout-resp", error.Timeout, CHECK_TIMEOUT_MS, &buf);
 
     try std.testing.expectEqualStrings("FAIL http1-timeout-resp: no result in 20s, child killed\n", line);
 }
 
+test "zix runner: unreportedLine names a widened bound in whole seconds" {
+    var buf: [REPORT_MAX]u8 = undefined;
+    const line = unreportedLine("http-websocket", error.Timeout, 60_000, &buf);
+
+    try std.testing.expectEqualStrings("FAIL http-websocket: no result in 60s, child killed\n", line);
+}
+
 test "zix runner: unreportedLine names the error when the child never spawned" {
     var buf: [REPORT_MAX]u8 = undefined;
-    const line = unreportedLine("http", error.FileNotFound, &buf);
+    const line = unreportedLine("http", error.FileNotFound, CHECK_TIMEOUT_MS, &buf);
 
     try std.testing.expectEqualStrings("FAIL http: child FileNotFound\n", line);
 }
 
 test "zix runner: unreportedLine yields an empty line when the buffer cannot hold it" {
     var buf: [4]u8 = undefined;
-    const line = unreportedLine("http", error.Timeout, &buf);
+    const line = unreportedLine("http", error.Timeout, CHECK_TIMEOUT_MS, &buf);
 
     try std.testing.expectEqual(@as(usize, 0), line.len);
+}
+
+test "zix runner: checkTimeoutMs on an unset variable keeps the default" {
+    try std.testing.expectEqual(CHECK_TIMEOUT_MS, checkTimeoutMs(null));
+}
+
+test "zix runner: checkTimeoutMs widens the bound from a valid value" {
+    try std.testing.expectEqual(@as(u32, 60_000), checkTimeoutMs("60000"));
+}
+
+test "zix runner: checkTimeoutMs refuses to narrow below the default" {
+    try std.testing.expectEqual(CHECK_TIMEOUT_MS, checkTimeoutMs("5000"));
+}
+
+test "zix runner: checkTimeoutMs on an unparsable value keeps the default" {
+    try std.testing.expectEqual(CHECK_TIMEOUT_MS, checkTimeoutMs("60s"));
+    try std.testing.expectEqual(CHECK_TIMEOUT_MS, checkTimeoutMs(""));
 }
