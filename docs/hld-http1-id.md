@@ -65,7 +65,7 @@ flowchart TD
     W --> WAIT["epoll_wait"]
     WAIT --> EV{"event fd?"}
     EV -->|listener| ACCEPT["acceptAll\naccept4 NONBLOCK to EAGAIN\nregister conn in epoll + table"]
-    EV -->|draining oversize body| DRAIN["serveEpollDrain\nMSG_TRUNC discard"]
+    EV -->|draining oversize body| DRAIN["serveEpollDrainThenServe\nMSG_TRUNC discard, hitung byte\nlalu sajikan request yang ditunda"]
     EV -->|websocket conn| WS["serveEpollWs\nws.pump frames"]
     EV -->|http conn| HTTP["serveEpollConn\nread to EAGAIN\nparse + dispatch every\ncomplete pipelined request\ncoalesce responses, one write"]
     ACCEPT --> WAIT
@@ -117,7 +117,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.ServerConfig` | struct | Konfigurasi server (lihat bagian Http1ServerConfig) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0, portabel) `.EPOLL`(1, hanya Linux) `.URING`(2, hanya Linux) |
 | `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio, ADR-062) |
-| `zix.Http1.Request` | struct | View request zero-copy: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
+| `zix.Http1.Request` | struct | View request zero-copy: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `bodyReceived()`, `bodyComplete()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
 | `zix.Http1.Response` | struct | Builder response di atas writer fd: `setStatus`, `setContentType`, `setKeepAlive`, `addHeader`, `send`, `sendJson`, `sendText`, `sendRaw`, `sendNoContent`, `sendFromCache`, `sendCached`, `sendNegotiated`, `sendStream`, plus flag `sent` |
 | `zix.Http1.Context` | struct | io, arena allocator per-request, escape hatch fd, `withDeadline` |
 | `zix.Http1.Method` / `Status` / `Content` / `ContentType` | namespace | Permukaan trio bertipe (`setStatus(Status.Code)`, `setContentType(Content.Type)`, `req.method()` mengembalikan `Method.Code`), identik di kedua engine |
@@ -159,7 +159,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.sendChunkFD` | fn | Menulis satu chunk |
 | `zix.Http1.sendChunkedEndFD` | fn | Mengakhiri body chunked |
 | `zix.Http1.sendRangeFD` | fn | 206 Partial Content atau 416 berdasarkan nilai header Range |
-| `zix.Http1.send100ContinueFD` | fn | Mengirim `100 Continue` sebelum membaca body besar |
+| `zix.Http1.send100ContinueFD` | fn | Mengirim `100 Continue` manual di jalur raw (engine sudah menjawab `Expect: 100-continue` pada semua dispatch model) |
 
 ---
 
@@ -174,6 +174,7 @@ pub const Http1ServerConfig = struct {
     kernel_backlog:     u31   = 1024,          // backlog listen() TCP
     max_recv_buf:       usize = 6 * 1024,      // buffer per-connection (.EPOLL / .URING, lihat catatan)
     large_body_rcvbuf:  usize = 0,             // SO_RCVBUF khusus jalur body besar (upload), 0 = default kernel
+    max_request_body:   usize = 8 * 1024 * 1024, // batas Content-Length yang dideklarasikan, melewatinya engine menjawab 413 (0 = tanpa cek)
     ws_recv_buf:        usize = 0,             // buffer WebSocket (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
     compress:             bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via res.sendNegotiated / core.sendNegotiateFD (semua model)
     compression_min_size: usize = 256,           // lewati body di bawah floor ini
@@ -190,7 +191,7 @@ pub const Http1ServerConfig = struct {
 
 Listing di atas diringkas: referensi field lengkap (cache, tuning uring, dual listener TLS, steering) ada di [`docs/zix-config-id.md`](zix-config-id.md).
 
-Catatan: pada `.ASYNC` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection pada `.EPOLL` dan `.URING`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada semua dispatch model: handler opt-in dengan `res.sendNegotiated` (atau `core.sendNegotiateFD` di jalur raw). Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`.
+Catatan: pada `.ASYNC` loop koneksi memakai buffer stack berukuran tetap (`core.BUF_SIZE` = 16 KB untuk header, 8 KB untuk body). `max_recv_buf` menentukan ukuran buffer per-connection pada `.EPOLL` dan `.URING`. `large_body_rcvbuf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada semua dispatch model: handler opt-in dengan `res.sendNegotiated` (atau `core.sendNegotiateFD` di jalur raw). Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`. Content-Length yang dideklarasikan melewati `max_request_body` ditolak dengan `413` sebelum body dibaca (0 mematikan cek), dan body chunked dibatasi receive buffer karena tidak mendeklarasikan panjang di muka.
 
 Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection WebSocket. Pada `.EPOLL` menentukan ukuran buffer recv; pada `.URING` menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask, independen dari `max_recv_buf` request yang kecil. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi burst pipelined yang dalam sebelum engine compact dan re-read saat fill.
 
@@ -286,7 +287,7 @@ sequenceDiagram
     Serve->>Serve: return (pemanggil menutup fd)
 ```
 
-Response error yang ditulis engine sendiri: `431` saat blok header melebihi receive buffer, `400` saat `parseHead` gagal. Keduanya menutup koneksi. Router (bila dipakai) menulis `404` untuk path yang tidak cocok.
+Response error yang ditulis engine sendiri: `431` saat blok header melebihi receive buffer, `400` saat `parseHead` gagal atau body chunked tidak bisa di-framing, `413` saat body yang dideklarasikan melewati `max_request_body` (atau body chunked melampaui buffer). Semuanya menutup koneksi. Router (bila dipakai) menulis `404` untuk path yang tidak cocok.
 
 ---
 
@@ -424,14 +425,15 @@ Access logging per-request adalah tanggung jawab handler: handler Http1 menulis 
 | Batas | Perilaku |
 | :- | :- |
 | Ukuran blok header | Maksimum 16 KB (`core.BUF_SIZE`, atau `max_recv_buf` pada .EPOLL). Melebihi mengembalikan `431` dan menutup |
-| Body pada .ASYNC | Handler melihat sampai 8 KB (`ASYNC_BODY_CHUNK`). Body Content-Length yang lebih besar sisanya dibuang dari socket agar koneksi keep-alive tetap dapat dipakai (handler membaca `head.content_length`, bukan byte-nya) |
-| Body pada .EPOLL / .URING | Harus muat di `max_recv_buf` dikurangi head. Body yang lebih besar menjaga koneksi tetap dapat dipakai dengan membuang sisanya dari socket (`MSG_TRUNC`): `.EPOLL` men-dispatch handler lebih dulu dengan slice body kosong, `.URING` men-drain dan menghitung lebih dulu, lalu handler berjalan dengan total terhitung di `req.bodyReceived()` |
+| Body pada .ASYNC | Handler melihat 8 KB pertama (`ASYNC_BODY_CHUNK`). Body Content-Length yang lebih besar sisanya dibuang dari socket agar koneksi keep-alive tetap dapat dipakai: `req.bodyReceived()` melaporkan total terhitung, `req.bodyComplete()` apakah peer mengirim seluruhnya |
+| Body pada .EPOLL / .URING | Harus muat di `max_recv_buf` dikurangi head. Body yang lebih besar menjaga koneksi tetap dapat dipakai dengan membuang sisanya dari socket (`MSG_TRUNC`): kedua model menunda handler sampai drain selesai, lalu menjalankannya dengan total terhitung di `req.bodyReceived()` dan slice body kosong |
+| Body yang dideklarasikan melewati `max_request_body` | Ditolak dengan `413` sebelum satu byte body pun dibaca atau di-drain, pada semua dispatch model (default 8 MiB, 0 mematikan cek) |
 | Body request besar (upload) | Drain melebarkan receive window via `large_body_rcvbuf` (SO_RCVBUF), lihat [`docs/zix-config-id.md`](zix-config-id.md) |
-| Body request chunked | Di-decode ke body buffer, kelebihan dibuang |
+| Body request chunked | Di-decode ke body buffer. Frame yang tidak bisa dijalani decoder dijawab `400`, body chunked melewati buffer dijawab `413` (chunked tidak mendeklarasikan panjang di muka, jadi buffer menggantikan `max_request_body`) |
 | Versi HTTP | Hanya HTTP/1.0 dan HTTP/1.1, selain itu `400` |
 | TLS | https/1.1 native (TLS 1.3 + 1.2), opt-in via `config.tls`, pada perf band-nya sendiri. `.ASYNC` melakukan terminasi per koneksi di worker thread, `.EPOLL` / `.URING` di worker epoll-mux event-driven. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
 
-Endpoint yang menerima upload besar membaca `req.bodyReceived()` pada `.URING` (byte yang dibuang dihitung, tidak di-buffer). Model lain tidak membawa hitungan itu, jadi di sana tetap mengandalkan `head.content_length`.
+Endpoint yang menerima upload besar membaca `req.bodyReceived()` pada semua dispatch model (byte yang dibuang dihitung, tidak di-buffer) dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer.
 
 Untuk lapisan HTTP berfitur lengkap lihat [`docs/hld-http-id.md`](hld-http-id.md). Untuk detail implementasi lihat [`docs/lld-http1-id.md`](lld-http1-id.md).
 
