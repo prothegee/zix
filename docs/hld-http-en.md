@@ -33,11 +33,11 @@ flowchart TD
     D --> E["io.async(handleConnection)"]
     E --> D
     E --> F["handleConnection()"]
-    F --> G["stack/heap read_buf + write_buf"]
-    G --> H["std.http.Server.init()"]
+    F --> G["stack/heap read_buf"]
+    G --> H["install compression + cache thread-locals"]
     H --> I["ArenaAllocator per-connection"]
-    I --> J["keep-alive loop"]
-    J --> K["receiveHead()"]
+    I --> J["keep-alive loop\nhandleOneRequest"]
+    J --> K["recv until the header terminator"]
     K -->|close or reset| Z["stream.close()"]
     K --> L["build Request + Response + Context"]
     L --> M["Router.dispatch()"]
@@ -67,7 +67,7 @@ flowchart TD
     W1 --> EL["event loop\nepoll_wait(1024)"]
     EL -->|listener fd| ACC["drain accept4(SOCK_CLOEXEC)\nsetNoDelay\nepoll_ctl ADD EPOLLIN+RDHUP"]
     EL -->|conn fd RDHUP/ERR| CLOSE["epoll_ctl DEL\nclose(fd)"]
-    EL -->|conn fd readable| SERVE["handleOneRequest(fd)\nblocking read/write"]
+    EL -->|conn fd readable| SERVE["read to EAGAIN\nprocessRequest(fd)\nparse + dispatch + send"]
     SERVE -->|keep-alive| EL
     SERVE -->|close| CLOSE
     ACC --> EL
@@ -75,7 +75,7 @@ flowchart TD
 
 - Each worker owns one `SO_REUSEPORT` listener and one `epoll` instance. The kernel distributes new connections across workers with no shared queue.
 - Level-triggered `EPOLLIN`: connections stay registered after each request and re-fire when new data arrives. No explicit re-arm.
-- Blocking fds: `handleOneRequest` does a synchronous recv/parse/send, then returns the worker to `epoll_wait`.
+- Non-blocking fds: the worker reads to EAGAIN into the connection buffer, then `processRequest` does a synchronous parse/dispatch/send and returns the worker to `epoll_wait`.
 - `workers` controls worker count (0 = cpu_count).
 - Best for high-throughput short-lived requests on Linux. Not suitable for SSE or WebSocket (blocking reads would park the worker).
 - Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
@@ -174,7 +174,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http.ClientConfig` | struct | Client configuration (see HttpClientConfig section) |
 | `zix.Http.ClientResponse` | struct | Parsed response: `status` / `header` / `iterateHeaders` / `body` / `deinit` |
 | `zix.Http.ClientRequestOpts` | struct | Per-request options: `headers`, `body`, `connect_timeout_ms` override |
-| `zix.Http.Request` | struct | Per-request reader: method, path, query, header, body |
+| `zix.Http.Request` | struct | Per-request reader: method, path, query, header, body, bodyReceived, bodyComplete |
 | `zix.Http.Response` | struct | Per-request writer: send, sendJson, noContent, addHeader, stream |
 | `zix.Http.SseWriter` | struct | SSE event writer returned by `res.sendStream()`: writeEvent, writeNamedEvent, comment |
 | `zix.Http.Context` | struct | Per-request context: io, allocator, stream (raw TCP), deadline (optional handler budget), logger (optional logger pointer) |
@@ -220,6 +220,7 @@ pub const HttpServerConfig = struct {
     kernel_backlog:   usize             = 1024 * 4,  // TCP listen() backlog
     max_recv_buf:   usize             = 1024 * 4,  // read buffer per connection
     large_body_rcvbuf:    usize             = 0,          // SO_RCVBUF on the large-body/upload path, 0 = kernel default
+    max_request_body:     usize             = 8 * 1024 * 1024, // request body cap, body() refuses past it with 413 (0 = no check on Content-Length)
     compress:             bool              = false,      // gzip / deflate / brotli negotiation, opt-in via resp.sendNegotiated (every model)
     compression_min_size: usize             = 256,        // skip bodies under this floor
     compression_max_out:  usize             = 256 * 1024, // codec-agnostic compressed-output cap
@@ -266,12 +267,12 @@ sequenceDiagram
     Queue->>Pool: queue.pop() unblocks
     Note over Accept: immediately back to accept()
 
-    Pool->>Pool: alloc read_buf + write_buf
+    Pool->>Pool: alloc read_buf
     Pool->>Pool: ArenaAllocator init
 
     loop keep-alive
         Client->>Pool: HTTP request
-        Pool->>Pool: receiveHead()
+        Pool->>Pool: recv until the header terminator
         Pool->>Pool: build Request + Response + Context
         Pool->>Router: dispatch(req, res, ctx)
 
@@ -299,7 +300,7 @@ sequenceDiagram
 
 ## Request
 
-Wraps `*std.http.Server.Request` and a `*std.Io.Reader` for body reading.
+A zero-copy view over the parsed request head and the connection fd, which `body()` reads from.
 
 | Method | Returns | Notes |
 | :- | :- | :- |
@@ -311,7 +312,9 @@ Wraps `*std.http.Server.Request` and a `*std.Io.Reader` for body reading.
 | `pathSegments(allocator)` | `![][]const u8` | Non-empty segments split by `/` |
 | `pathParam(name)` | `?[]const u8` | Named capture from param route, null if not captured |
 | `header(name)` | `?[]const u8` | Case-insensitive lookup. Lazy O(1) index built on first call |
-| `body()` | `![]const u8` | Reads body: `Content-Length` bytes or chunked transfer decoded. Cached after first call. |
+| `body()` | `![]const u8` | Reads body: `Content-Length` bytes or chunked transfer decoded, bounded by `max_request_body` (`error.RequestBodyTooLarge` answered `413`, malformed chunked `error.InvalidChunkedBody` answered `400`). Cached after first call. |
+| `bodyReceived()` | `u64` | Body bytes the reads actually consumed, not what the header claimed |
+| `bodyComplete()` | `bool` | Whether the declared or framed body end was reached. False means the peer cut the body short, or the handler never read it |
 
 ---
 
