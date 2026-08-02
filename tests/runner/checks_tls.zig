@@ -32,7 +32,7 @@ pub fn runTls(io: std.Io, server_path: []const u8, port: u16) !void {
         .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
-        .tls_ca_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+        .tls_ca_path = "examples/certs/ecdsa_p256_cert.pem",
     });
     defer client.deinit();
 
@@ -66,7 +66,7 @@ pub fn runTlsHttp1Dual(io: std.Io, server_path: []const u8, port: u16, tls_port:
         .response_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .read_timeout_ms = common.RESPONSE_TIMEOUT_MS,
         .max_response_body = 4096,
-        .tls_ca_path = "examples/tls/certs/ecdsa_p256_cert.pem",
+        .tls_ca_path = "examples/certs/ecdsa_p256_cert.pem",
     });
     defer client.deinit();
 
@@ -272,7 +272,7 @@ pub fn runTlsHttp1Ed25519(io: std.Io, server_path: []const u8, port: u16) !void 
     // trust the Ed25519 server cert (chain + hostname) against the fixture anchor.
     var pem_buf: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
-    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, "examples/tls/certs/ed25519_cert.pem", fba.allocator(), .limited(8192));
+    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, "examples/certs/ed25519_cert.pem", fba.allocator(), .limited(8192));
     var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
     const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);
     try finished.verifyServerCert(anchor_der, "localhost", common.realtimeSeconds(io));

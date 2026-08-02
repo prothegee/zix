@@ -28,8 +28,8 @@ const is_linux = builtin.target.os.tag == .linux;
 ///   and every test here failing with ServerNotUp. ADR-066 puts TLS on ASYNC for all platforms,
 ///   so the record splitting under test is genuinely exercised rather than skipped.
 const SPLIT_MODEL: zix.Http1.DispatchModel = if (is_linux) .EPOLL else .ASYNC;
-const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
-const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
+const CERT: []const u8 = "examples/certs/ecdsa_p256_cert.pem";
+const KEY: []const u8 = "examples/certs/ecdsa_p256_key.pem";
 
 /// Largest body a test asks for. Kept under the engine's TLS response staging, which bounds the
 /// whole response (headers included), not just the body.

@@ -16,7 +16,7 @@ const posix = std.posix;
 const fd_io = zix.utils.fd_io;
 
 const WAIT_MS: u64 = 5000;
-const CA_PATH = "examples/tls/certs/ed25519_cert.pem";
+const CA_PATH = "examples/certs/ed25519_cert.pem";
 const EXPECTED_BODY: []const u8 = "hello over tls 1.3 (ed25519)";
 
 // --------------------------------------------------------- //

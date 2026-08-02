@@ -27,6 +27,18 @@
 <br>
 
 <h4 align="center">
+    <b><i>Repositories:</i></b>
+</h4>
+
+<div align="center">
+
+[Main](https://codeberg.org/prothegee/zix) | [Mirror](https://github.com/prothegee/zix)
+
+</div>
+
+<br>
+
+<h4 align="center">
     <b><i>Languages:</i></b>
 </h4>
 

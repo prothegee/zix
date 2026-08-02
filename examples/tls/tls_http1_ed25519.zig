@@ -12,8 +12,8 @@ const PORT: u16 = 9062;
 // Demo fixtures. For a real domain, point CERT / KEY at your certbot files:
 // CERT: /etc/letsencrypt/live/sub.domain.tld/fullchain.pem
 // KEY: /etc/letsencrypt/live/sub.domain.tld/privkey.pem
-const CERT: []const u8 = "examples/tls/certs/ed25519_cert.pem";
-const KEY: []const u8 = "examples/tls/certs/ed25519_key.pem";
+const CERT: []const u8 = "examples/certs/ed25519_cert.pem";
+const KEY: []const u8 = "examples/certs/ed25519_key.pem";
 
 // HSTS max-age in SECONDS (RFC 6797). 1 year, well above the common 180-day minimum.
 const HSTS_MAX_AGE_S: u32 = 31536000;

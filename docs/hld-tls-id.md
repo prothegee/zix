@@ -82,8 +82,8 @@ Server memasang TLS via pointer, persis seperti logger:
 
 ```zig
 var tls = try zix.Tls.Context.init(allocator, io, .{
-    .cert_path = "examples/tls/certs/ecdsa_p256_cert.pem",
-    .key_path  = "examples/tls/certs/ecdsa_p256_key.pem",
+    .cert_path = "examples/certs/ecdsa_p256_cert.pem",
+    .key_path  = "examples/certs/ecdsa_p256_key.pem",
     .alpn      = &.{ .HTTP_1_1 }, // .H2 untuk server Http2
 });
 defer tls.deinit();

@@ -28,6 +28,31 @@ pub fn extension(file_path: []const u8) []const u8 {
     return "";
 }
 
+/// Read a whole file into memory
+///
+/// Note:
+/// - max_bytes is a hard ceiling, not a hint. A larger file fails rather than allocating, so
+///   an unexpected input cannot exhaust memory.
+/// - max_bytes is INCLUSIVE: a file of exactly max_bytes loads. The underlying std limit is
+///   exclusive (it rejects a file whose size equals the limit), so one byte is added here to
+///   make the parameter mean what its name says.
+/// - The path is resolved against the process working directory, so a relative path only
+///   resolves when the process is launched from the expected directory.
+///
+/// Param:
+/// io - std.Io
+/// allocator - std.mem.Allocator (owns the returned bytes, caller frees)
+/// file_path - []const u8 (path to read)
+/// max_bytes - usize (largest file accepted, inclusive)
+///
+/// Return:
+/// - ![]u8 (caller-owned file content)
+/// - error.StreamTooLong if the file is larger than max_bytes
+/// - error.FileNotFound if the path does not resolve
+pub fn load(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, max_bytes: usize) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(max_bytes +| 1));
+}
+
 /// Save file data to a directory, creating it if it does not exist
 ///
 /// Param:
@@ -69,4 +94,54 @@ test "zix utils: file extension" {
     try std.testing.expectEqualStrings("", extension("file"));
     try std.testing.expectEqualStrings("", extension("file."));
     try std.testing.expectEqualStrings("hidden", extension(".hidden"));
+}
+
+test "zix utils: file load, round trip through save" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    const allocator = std.testing.allocator;
+    const content = "<h1>zix</h1>\n";
+
+    const saved_path = try save(io, allocator, "tmp/zix_file_load_test", "page.html", content);
+    defer allocator.free(saved_path);
+    defer std.Io.Dir.cwd().deleteFile(io, saved_path) catch {};
+
+    const read_back = try load(io, allocator, saved_path, 4096);
+    defer allocator.free(read_back);
+
+    try std.testing.expectEqualStrings(content, read_back);
+}
+
+test "zix utils: file load, over max_bytes fails instead of allocating" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    const allocator = std.testing.allocator;
+    const content = "0123456789";
+
+    const saved_path = try save(io, allocator, "tmp/zix_file_load_test", "oversize.txt", content);
+    defer allocator.free(saved_path);
+    defer std.Io.Dir.cwd().deleteFile(io, saved_path) catch {};
+
+    // A ceiling below the file size must fail. Exactly the file size must succeed, which is
+    // the whole point of the inclusive adjustment inside load().
+    try std.testing.expectError(error.StreamTooLong, load(io, allocator, saved_path, content.len - 1));
+
+    const exact = try load(io, allocator, saved_path, content.len);
+    defer allocator.free(exact);
+
+    try std.testing.expectEqualStrings(content, exact);
+}
+
+test "zix utils: file load, missing path returns FileNotFound" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        load(threaded.io(), std.testing.allocator, "tmp/zix_file_load_test/definitely_absent.html", 4096),
+    );
 }

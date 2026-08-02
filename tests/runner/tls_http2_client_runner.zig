@@ -12,7 +12,7 @@ const zix = @import("zix");
 const common = @import("common.zig");
 
 const WAIT_MS: u64 = 5000;
-const CA_PATH = "examples/tls/certs/ecdsa_p256_cert.pem";
+const CA_PATH = "examples/certs/ecdsa_p256_cert.pem";
 
 // --------------------------------------------------------- //
 

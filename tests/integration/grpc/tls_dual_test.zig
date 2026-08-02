@@ -11,8 +11,8 @@ const EPOLL_PORT: u16 = 9225;
 const EPOLL_TLS_PORT: u16 = 9226;
 const URING_PORT: u16 = 9227;
 const URING_TLS_PORT: u16 = 9228;
-const CERT: []const u8 = "examples/tls/certs/ecdsa_p256_cert.pem";
-const KEY: []const u8 = "examples/tls/certs/ecdsa_p256_key.pem";
+const CERT: []const u8 = "examples/certs/ecdsa_p256_cert.pem";
+const KEY: []const u8 = "examples/certs/ecdsa_p256_key.pem";
 
 const h2_preface: []const u8 = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const settings_frame_type: u8 = 0x04;

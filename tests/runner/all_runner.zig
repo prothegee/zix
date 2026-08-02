@@ -448,11 +448,12 @@ fn runIsolatedCheck(
     self_exe: []const u8,
     label: []const u8,
     paths: []const []const u8,
+    timeout_ms: u32,
     report_buf: []u8,
 ) isolate.Result {
     var attempt: usize = 1;
     while (true) : (attempt += 1) {
-        const result = isolate.runIsolated(io, self_exe, label, paths, report_buf);
+        const result = isolate.runIsolated(io, self_exe, label, paths, timeout_ms, report_buf);
         if (result.verdict != .RETRIABLE or attempt >= MAX_ATTEMPTS) return result;
 
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(750), .awake) catch {};
@@ -523,7 +524,7 @@ fn maxHeavy(cpu: usize) usize {
 /// Output streams in stable table order: a wave is a contiguous block of checks, waves run in index
 /// order, and within a wave the slots are awaited and reported in index order. report() runs only
 /// here on the main thread (never on the concurrent check threads), so the prints never interleave.
-fn runWaves(io: std.Io, self_exe: []const u8, all_paths: []const []const u8, tally: *Tally, cpu: usize) void {
+fn runWaves(io: std.Io, self_exe: []const u8, all_paths: []const []const u8, tally: *Tally, cpu: usize, timeout_ms: u32) void {
     const wave_width = waveWidth(cpu);
     const max_heavy = maxHeavy(cpu);
     const Fut = std.Io.Future(isolate.Result);
@@ -554,7 +555,7 @@ fn runWaves(io: std.Io, self_exe: []const u8, all_paths: []const []const u8, tal
             if (c.heavy and heavy_count == max_heavy) break;
 
             const paths = all_paths[path_cursor..][0..c.arity];
-            futs[count] = io.async(runIsolatedCheck, .{ io, self_exe, c.label, paths, slot_report[count][0..] });
+            futs[count] = io.async(runIsolatedCheck, .{ io, self_exe, c.label, paths, timeout_ms, slot_report[count][0..] });
             slot_check[count] = check_idx;
             slot_res[count] = c.resource;
 
@@ -593,12 +594,14 @@ pub fn main(process: std.process.Init) void {
     }
 
     // Run all checks concurrently in bounded waves (width scaled to the host), streaming each wave's
-    // results in table order as it completes.
+    // results in table order as it completes. The per-check kill bound is the native default unless
+    // the environment widens it (the qemu CI legs do).
     const cpu = std.Thread.getCpuCount() catch 4;
+    const check_timeout_ms = isolate.checkTimeoutMs(process.environ_map.get(isolate.CHECK_TIMEOUT_ENV));
 
     var tally: Tally = .{};
 
-    runWaves(io, self_exe, &all_paths, &tally, cpu);
+    runWaves(io, self_exe, &all_paths, &tally, cpu, check_timeout_ms);
 
     if (tally.failed > 0) {
         std.debug.print("{d}/{d} protocol(s) failed\n", .{ tally.failed, tally.total });

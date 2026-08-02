@@ -19,6 +19,11 @@
 const std = @import("std");
 const zix = @import("zix");
 
+// Served page. Loaded per request so editing the file shows up on a browser refresh with
+// no rebuild. The path is relative, so run this example from the repository root.
+const PAGE_PATH: []const u8 = "templates/html/uds_http.html";
+const MAX_PAGE_BYTES: usize = 64 * 1024;
+
 const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9055;
 const SOCK_DIR: []const u8 = "tmp";
@@ -125,30 +130,13 @@ pub fn streamHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
 // GET /: HTML page with EventSource and a fetch button
 pub fn homeHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
     _ = req;
-    _ = ctx;
+
+    const page = try zix.utils.file.load(ctx.io, ctx.allocator, PAGE_PATH, MAX_PAGE_BYTES);
+    defer ctx.allocator.free(page);
+
     res.setContentType(.TEXT_HTML);
-    try res.send(
-        \\<!DOCTYPE html>
-        \\<html>
-        \\<head><meta charset="utf-8"><title>zix UDS + Channel</title></head>
-        \\<body>
-        \\<h2>zix UDS + Channel demo</h2>
-        \\<button onclick="fetchData()">GET /data (one-shot)</button>
-        \\<pre id="data" style="font-family:monospace"></pre>
-        \\<h3>SSE stream (/stream)</h3>
-        \\<pre id="stream-val" style="font-family:monospace">waiting...</pre>
-        \\<script>
-        \\async function fetchData() {
-        \\  const r = await fetch('/data');
-        \\  document.getElementById('data').textContent = await r.text();
-        \\}
-        \\const es = new EventSource('/stream');
-        \\es.onmessage = e => { document.getElementById('stream-val').textContent = e.data; };
-        \\es.onerror = () => { document.getElementById('stream-val').textContent = '[reconnecting...]'; };
-        \\</script>
-        \\</body>
-        \\</html>
-    );
+
+    try res.send(page);
 }
 
 // --------------------------------------------------------- //
