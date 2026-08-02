@@ -281,9 +281,10 @@ test "zix: unit test" {
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/http3/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("udp/http3/Http3.zig"));
 
-    // # webrtc STUN
+    // # webrtc
     std.testing.refAllDecls(@import("udp/webrtc/stun/message.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/stun/binding.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/demux.zig"));
 
     // # zix.Tcp (raw)
     std.testing.refAllDecls(@import("tcp/config.zig"));
