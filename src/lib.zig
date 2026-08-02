@@ -179,6 +179,15 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tls/tls12_client.zig"));
     std.testing.refAllDecls(@import("tls/cert_verify.zig"));
 
+    // # DTLS 1.2
+    std.testing.refAllDecls(@import("tls/dtls_record.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_handshake.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_hello.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_cookie.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_flight.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_exporter.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_connection.zig"));
+
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/ring.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/reuseport.zig"));
