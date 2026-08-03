@@ -83,6 +83,8 @@ pub fn addSteps(
         "tests/integration/http2/tls_dual_test.zig",
         // http3
         "tests/integration/http3/static_test.zig",
+        // webrtc
+        "tests/integration/webrtc/exchange_test.zig",
         // websocket
         "tests/integration/websocket/websocket_test.zig",
         // fix
@@ -145,6 +147,8 @@ pub fn addSteps(
         "tests/behaviour/http2/config_test.zig",
         // http3
         "tests/behaviour/http3/config_test.zig",
+        // webrtc
+        "tests/behaviour/webrtc/session_test.zig",
         // websocket
         "tests/behaviour/websocket/websocket_test.zig",
         // fix
@@ -204,6 +208,8 @@ pub fn addSteps(
         "tests/edge/http2/static_test.zig",
         // http3
         "tests/edge/http3/static_test.zig",
+        // webrtc
+        "tests/edge/webrtc/session_test.zig",
         // websocket
         "tests/edge/websocket/websocket_test.zig",
         // fix
