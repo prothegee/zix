@@ -1,9 +1,8 @@
 //! zix WebRTC ASYNC dispatch: the portable single-worker loop, on every target zix builds for.
 //!
 //! What:
-//! - One socket, one thread, and one peer table. Receive a datagram, give it to the peer it came
-//!   from, send back whatever that produced, then look at the deadlines nobody's datagram
-//!   answered.
+//! - One socket, one thread, and one worker. Receive a datagram, give it to the peer it came from,
+//!   send back whatever that produced, then look at the deadlines nobody's datagram answered.
 //!
 //! Note:
 //! - The wait is bounded, and that is the whole reason this engine exists. A loop that parks in
@@ -18,10 +17,9 @@ const std = @import("std");
 const Config = @import("../config.zig");
 const WebrtcServerConfig = Config.WebrtcServerConfig;
 const common = @import("common.zig");
-const connection = @import("../connection.zig");
 const core = @import("../core.zig");
 const socket_poll = @import("../../../utils/socket_poll.zig");
-const table = @import("../table.zig");
+const worker = @import("worker.zig");
 
 /// Run the WebRTC server with a single worker on the calling thread.
 ///
@@ -37,23 +35,19 @@ pub fn runAsync(comptime handler: core.HandlerFn, config: WebrtcServerConfig) !v
     const socket = try common.bindSocket(config);
     defer socket.close(io);
 
-    var peers = try table.Table.init(config.allocator, config.max_peers);
-    defer peers.deinit();
+    var served = try worker.Worker.initSocket(config, socket);
+    defer served.deinit();
 
     const recv_buf = try config.allocator.alloc(u8, config.max_recv_buf);
     defer config.allocator.free(recv_buf);
 
-    const send_buf = try config.allocator.alloc(u8, common.sendBufBytes(config));
-    defer config.allocator.free(send_buf);
-
-    const options = common.optionsFrom(config);
     const start = std.Io.Clock.Timestamp.now(io, .awake);
 
     common.logSystem(config, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
 
     while (true) {
         const before_ms = common.elapsedMs(start, std.Io.Clock.Timestamp.now(io, .awake));
-        const budget_ms = common.waitMs(&peers, before_ms, config);
+        const budget_ms = served.waitMs(before_ms);
 
         const ready = socket_poll.waitReady(socket.handle, socket_poll.READABLE, budget_ms) catch |err| {
             common.logSystem(config, "poll error: {s}", .{@errorName(err)});
@@ -63,25 +57,23 @@ pub fn runAsync(comptime handler: core.HandlerFn, config: WebrtcServerConfig) !v
 
         const now_ms = common.elapsedMs(start, std.Io.Clock.Timestamp.now(io, .awake));
 
-        if (ready) receiveOne(handler, &peers, socket, config, options, recv_buf, send_buf, now_ms);
+        if (ready) receiveOne(handler, &served, socket, config, recv_buf, now_ms);
 
         // Deadlines are only worth walking when the wait ran out, or when one of them has actually
         // come due. Under steady traffic neither is true and the walk is skipped.
-        const due = if (peers.earliestDeadline()) |at_ms| at_ms <= now_ms else false;
+        if (!ready or served.sweepDue(now_ms)) served.sweep(handler, now_ms);
 
-        if (!ready or due) common.sweepPeers(handler, &peers, now_ms, socket, config, send_buf);
+        served.flush();
     }
 }
 
 /// Take one datagram off the socket and give it to the peer it came from.
 fn receiveOne(
     comptime handler: core.HandlerFn,
-    peers: *table.Table,
+    served: *worker.Worker,
     socket: std.Io.net.Socket,
     config: WebrtcServerConfig,
-    options: connection.Options,
     recv_buf: []u8,
-    send_buf: []u8,
     now_ms: u64,
 ) void {
     const message = socket.receive(config.io, recv_buf) catch |err| {
@@ -98,33 +90,5 @@ fn receiveOne(
         return;
     }
 
-    const peer = peers.find(message.from) orelse open: {
-        const opened = peers.acquire(message.from, options, common.drawSecrets(), now_ms) catch |err| {
-            common.logSystem(config, "could not open a peer: {s}", .{@errorName(err)});
-
-            return;
-        };
-
-        break :open opened orelse {
-            common.logSystem(config, "peer table is full ({d}), dropping a datagram from a new address", .{peers.live});
-
-            return;
-        };
-    };
-
-    const outcome = peer.handle(message.data, now_ms) catch |err| {
-        common.logSystem(config, "peer raised {s}", .{@errorName(err)});
-
-        return;
-    };
-
-    if (outcome.dead) {
-        _ = peers.release(message.from);
-
-        return;
-    }
-
-    if (outcome.established) common.logSystem(config, "peer completed the dtls handshake", .{});
-
-    common.drainPeer(handler, peer, now_ms, socket, config, send_buf);
+    served.serve(handler, message.from, message.data, now_ms);
 }
