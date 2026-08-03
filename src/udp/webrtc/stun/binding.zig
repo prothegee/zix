@@ -75,20 +75,9 @@ pub fn respond(datagram: []const u8, peer: *const IpAddress, out: []u8) ?[]const
     if (request.fingerprint() == .INVALID) return null;
 
     var unknown: [MAX_UNKNOWN_LISTED]message.AttributeType = undefined;
-    var unknown_count: usize = 0;
+    const unknown_kinds = message.collectUnknownRequired(request, &unknown);
 
-    var iterator = request.attributes();
-    while (iterator.next()) |attr| {
-        if (!message.isComprehensionRequired(attr.kind)) continue;
-        if (message.isKnown(attr.kind)) continue;
-        if (listed(unknown[0..unknown_count], attr.kind)) continue;
-        if (unknown_count == unknown.len) break;
-
-        unknown[unknown_count] = attr.kind;
-        unknown_count += 1;
-    }
-
-    if (unknown_count > 0) return unknownAttributeResponse(request, unknown[0..unknown_count], out);
+    if (unknown_kinds.len > 0) return unknownAttributeResponse(request, unknown_kinds, out);
 
     return successResponse(request, peer, out);
 }
@@ -112,15 +101,6 @@ fn unknownAttributeResponse(request: message.Message, kinds: []const message.Att
     writer.addFingerprint() catch return null;
 
     return writer.finish();
-}
-
-/// Whether a type is already in the 420 list, so a repeated attribute is named once.
-fn listed(kinds: []const message.AttributeType, kind: message.AttributeType) bool {
-    for (kinds) |seen| {
-        if (seen == kind) return true;
-    }
-
-    return false;
 }
 
 // --------------------------------------------------------------- //
