@@ -62,6 +62,7 @@
     <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
     <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 </div>
+<!-- https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?logo=Zig&label=x86_64-linux -->
 
 <hr>
 
