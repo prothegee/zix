@@ -7,9 +7,11 @@
 //!   arrived and replies through its context.
 //!
 //! Note:
-//! - Only `.ASYNC` runs today. `.EPOLL` and `.URING` are the per-core Linux models the rest of the
-//!   family carries, and this engine gets them next, so asking for one now is rejected before the
-//!   socket is bound rather than silently downgraded.
+//! - `.ASYNC` is the portable single-worker loop, on every target zix builds for. `.EPOLL` and
+//!   `.URING` are the per-core Linux models, one SO_REUSEPORT worker per core, and off Linux they
+//!   are rejected before the socket is bound rather than silently downgraded (ADR-065).
+//! - The per-core models count max_peers per worker, so a server with N workers holds up to
+//!   N * max_peers peers.
 //!
 //! Usage:
 //! ```zig
@@ -27,6 +29,7 @@
 //! ```
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Config = @import("config.zig");
 const WebrtcServerConfig = Config.WebrtcServerConfig;
@@ -36,6 +39,8 @@ const ice_credentials = @import("ice/credentials.zig");
 
 const common = @import("dispatch/common.zig");
 const async_model = @import("dispatch/async.zig");
+const epoll_model = @import("dispatch/epoll.zig");
+const uring_model = @import("dispatch/uring.zig");
 
 /// The application event handler (re-exported from core).
 pub const HandlerFn = core.HandlerFn;
@@ -74,7 +79,7 @@ fn WebrtcServerImpl(comptime handler: HandlerFn) type {
         /// - error.IceCredentialsInvalid when either is outside what RFC 8445 5.3 allows
         /// - error.TlsRequired when config.tls is null (WebRTC has no cleartext mode)
         /// - error.UnsupportedCertificateKey when that context's key is not ECDSA P-256
-        /// - error.DispatchModelUnsupported for any model but .ASYNC
+        /// - error.DispatchModelUnsupported for .EPOLL or .URING off Linux
         pub fn run(self: *const Self) !void {
             if (self.config.port == 0) return error.PortNotConfigured;
 
@@ -117,11 +122,8 @@ fn WebrtcServerImpl(comptime handler: HandlerFn) type {
 
             return switch (self.config.dispatch_model) {
                 .ASYNC => async_model.runAsync(handler, self.config),
-                .EPOLL, .URING => {
-                    common.logSystem(self.config, "this engine implements .ASYNC only, the per-core models are not built yet.", .{});
-
-                    return error.DispatchModelUnsupported;
-                },
+                .EPOLL => epoll_model.runEpoll(handler, self.config),
+                .URING => uring_model.runUring(handler, self.config),
             };
         }
     };
@@ -293,7 +295,11 @@ test "zix webrtc: server run rejects a certificate key it cannot sign with" {
     try std.testing.expectError(error.UnsupportedCertificateKey, server.run());
 }
 
-test "zix webrtc: server run rejects every model but async" {
+test "zix webrtc: server run rejects the per-core models off linux" {
+    // On Linux those models bind and never return, so there is nothing a test can call. What is
+    // pinned here is the other half of ADR-065: everywhere else they are refused, not downgraded.
+    if (comptime builtin.target.os.tag == .linux) return error.SkipZigTest;
+
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -307,6 +313,26 @@ test "zix webrtc: server run rejects every model but async" {
         defer server.deinit();
 
         try std.testing.expectError(error.DispatchModelUnsupported, server.run());
+    }
+}
+
+test "zix webrtc: server run checks the config before it looks at the model" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var tls = testContext(std.testing.allocator, .{ .ecdsa_p256 = try testSigningKey() });
+
+    // A per-core model with a broken config is refused for the config, on every platform, so a
+    // rejected config never reaches a bind whatever model it asked for.
+    for ([_]Config.DispatchModel{ .EPOLL, .URING }) |model| {
+        var config = testConfig(threaded.io(), std.testing.allocator, &tls);
+        config.dispatch_model = model;
+        config.port = 0;
+
+        var server = Server.init(noopHandler, config);
+        defer server.deinit();
+
+        try std.testing.expectError(error.PortNotConfigured, server.run());
     }
 }
 
