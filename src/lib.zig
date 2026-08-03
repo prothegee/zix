@@ -186,6 +186,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tls/dtls_cookie.zig"));
     std.testing.refAllDecls(@import("tls/dtls_flight.zig"));
     std.testing.refAllDecls(@import("tls/dtls_exporter.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_use_srtp.zig"));
     std.testing.refAllDecls(@import("tls/dtls_connection.zig"));
 
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
@@ -334,6 +335,19 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/webrtc/sdp/candidate.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/sdp/offer.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/sdp/answer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/profile.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/rtp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/mux.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/rtcp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/report.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/feedback.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_cipher.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_key.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_auth.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_index.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtcp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/forward.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/demux.zig"));
 
     // # zix.Tcp (raw)
