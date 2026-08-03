@@ -317,6 +317,13 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/webrtc/sctp/send_queue.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/sctp/reconfig.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/sctp/association.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/payload.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/dcep.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/stream_id.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/channel.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/registry.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/reset.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/peer.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/demux.zig"));
 
     // # zix.Tcp (raw)
