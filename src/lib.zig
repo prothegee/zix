@@ -297,6 +297,26 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/webrtc/ice/credentials.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/ice/check.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/ice/lite.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/checksum.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/chunk.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/parameter.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/packet.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/init.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/cookie.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/error_cause.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/teardown.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/heartbeat.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/serial.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/data.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/sack.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/reassembly.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/rto.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/congestion.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/receive_queue.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/forward_tsn.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/send_queue.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/reconfig.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/association.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/demux.zig"));
 
     // # zix.Tcp (raw)
