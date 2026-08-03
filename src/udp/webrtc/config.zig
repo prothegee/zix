@@ -18,7 +18,7 @@ const Logger = @import("../../logger/logger.zig").Logger;
 const Tls = @import("../../tls/Tls.zig");
 
 /// The dispatch model, shared with the TCP engines and the other UDP engines (ADR-050). `.ASYNC` is
-/// the portable single-worker loop. `.EPOLL` / `.URING` are Linux-only and land at phase 10.
+/// the portable single-worker loop. `.EPOLL` / `.URING` run one worker per core and are Linux-only.
 pub const DispatchModel = @import("../../tcp/config.zig").DispatchModel;
 
 pub const WebrtcServerConfig = struct {
@@ -33,13 +33,13 @@ pub const WebrtcServerConfig = struct {
 
     // UDP substrate knobs (ADR-049), restated flat.
 
-    /// Concurrency model. ASYNC runs a single worker and is the only model this engine implements
-    /// today, run() rejects the other two with error.DispatchModelUnsupported.
+    /// Concurrency model. ASYNC runs a single worker on every platform, EPOLL and URING run one
+    /// SO_REUSEPORT worker per core and are rejected off Linux with error.DispatchModelUnsupported.
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
-    /// Worker count for the per-core models. Unused until the Linux models land.
+    /// Worker count for the per-core models. 0 means one per usable CPU. Ignored by ASYNC.
     workers: usize = 0,
-    /// Worker thread stack size in bytes for the per-core workers. Unused until the Linux models land.
+    /// Worker thread stack size in bytes for the per-core workers. Ignored by ASYNC.
     worker_stack_size_bytes: usize = 512 * 1024,
     /// Maximum datagram size, the receive buffer per slot. 1500 is the common Ethernet MTU.
     max_recv_buf: usize = 1500,
@@ -82,8 +82,9 @@ pub const WebrtcServerConfig = struct {
 
     // Engine limits and deadlines.
 
-    /// How many peers this server holds at once. A datagram from a new peer past the ceiling is
-    /// dropped, which reads to that peer as a check that went unanswered.
+    /// How many peers one worker holds at once. A datagram from a new peer past the ceiling is
+    /// dropped, which reads to that peer as a check that went unanswered. The per-core models count
+    /// this per worker, so a server with N workers holds up to N * max_peers.
     max_peers: usize = 64,
     /// How long a peer may go without a datagram before the engine drops it. Covers the case a
     /// browser closes its tab without a graceful shutdown.
