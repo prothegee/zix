@@ -25,6 +25,7 @@
 //   checks_tls.zig   https/1.1, h2, gRPC, SSE, WebSocket over TLS 1.3
 //   checks_rpc.zig   gRPC + FIX
 //   checks_misc.zig  TCP, UDP, UDS, Channel
+//   checks_webrtc.zig  ICE + DTLS + SCTP + data channel, one whole session
 
 const std = @import("std");
 const common = @import("common.zig");
@@ -34,6 +35,7 @@ const checks_tls = @import("checks_tls.zig");
 const checks_rpc = @import("checks_rpc.zig");
 const checks_misc = @import("checks_misc.zig");
 const checks_query = @import("checks_query.zig");
+const checks_webrtc = @import("checks_webrtc.zig");
 
 // --------------------------------------------------------- //
 
@@ -355,6 +357,14 @@ const checks = [_]Check{
     .{ .label = "tls-http1-dual", .heavy = true, .run = &struct {
         fn f(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsHttp1Dual(io, paths[0], 9076, 9077);
+        }
+    }.f },
+
+    // WebRTC data channel: ICE, DTLS, SCTP, and DCEP in one session between two zix processes.
+    // Appended last so the argv order of the existing checks stays stable.
+    .{ .label = "webrtc-datachannel", .heavy = true, .run = &struct {
+        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+            return checks_webrtc.runWebrtc(io, paths[0], 9083);
         }
     }.f },
 };
