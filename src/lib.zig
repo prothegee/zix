@@ -293,6 +293,10 @@ test "zix: unit test" {
     // # webrtc
     std.testing.refAllDecls(@import("udp/webrtc/stun/message.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/stun/binding.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/candidate.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/credentials.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/check.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/lite.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/demux.zig"));
 
     // # zix.Tcp (raw)
