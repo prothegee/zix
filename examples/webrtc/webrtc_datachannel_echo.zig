@@ -60,7 +60,9 @@ pub fn main(process: std.process.Init) !void {
         .allocator = allocator,
         .ip = SERVER_IP,
         .port = SERVER_PORT,
-        .dispatch_model = .ASYNC, // the only model this engine runs today
+        // ASYNC is one worker and runs everywhere. On Linux, .EPOLL and .URING run one worker per
+        // core instead, and each holds its own peers.
+        .dispatch_model = .ASYNC,
         .ice_ufrag = LOCAL_UFRAG,
         .ice_password = LOCAL_PASSWORD,
         .peer_ice_ufrag = PEER_UFRAG,
