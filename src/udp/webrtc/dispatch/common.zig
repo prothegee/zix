@@ -1,25 +1,23 @@
 //! zix WebRTC dispatch substrate: everything the loops share, and no loop of its own (ADR-043).
 //!
 //! What:
-//! - The parts of running a WebRTC server that are not the loop: binding the socket, drawing the
-//!   randomness a connection needs, reading the clock, and the fixed order in which one peer is
-//!   drained after something happened to it.
+//! - The parts of running a WebRTC server that are neither the loop nor the peers: binding a socket,
+//!   drawing the randomness a connection needs, reading a clock, and picking a worker's CPU.
 //! - This is the only place in the engine that reaches for ambient state. Everything under
 //!   connection.zig takes its clock and its randomness from the caller, which is what keeps a full
 //!   exchange testable in memory.
 //!
 //! Note:
-//! - The drain order is fixed and shared, so every dispatch model answers a peer the same way:
-//!   send what is owed, then tell the application what arrived, then send what the application
-//!   produced. Reversing the last two loses a reply until the next datagram.
+//! - The peers a worker holds, and the fixed order one of them is answered in, live in worker.zig.
+//!   That split is what lets the three loops differ only in how they learn a datagram arrived.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Config = @import("../config.zig");
 const WebrtcServerConfig = Config.WebrtcServerConfig;
 const connection = @import("../connection.zig");
-const core = @import("../core.zig");
-const table = @import("../table.zig");
+const datagram = @import("../../datagram.zig");
 const secure_random = @import("../../../utils/secure_random.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -148,7 +146,12 @@ pub fn bindSocket(config: WebrtcServerConfig) !std.Io.net.Socket {
 /// Note:
 /// - Best effort. A kernel that clamps the request or refuses it leaves the default in place,
 ///   which is a slower server rather than a broken one.
+/// - Nothing is asked for on Windows. std.posix.setsockopt is a compile error there since the
+///   std.Io migration, and std.Io exposes no equivalent, so a Windows server keeps the default
+///   buffers. Same as the raw UDP path, which gates this the same way.
 pub fn setSocketBuffers(handle: std.posix.socket_t, rcvbuf: usize, sndbuf: usize) void {
+    if (comptime builtin.target.os.tag == .windows) return;
+
     if (rcvbuf > 0) {
         const want = std.mem.toBytes(@as(c_int, @intCast(@min(rcvbuf, std.math.maxInt(c_int)))));
         std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &want) catch {};
@@ -160,113 +163,133 @@ pub fn setSocketBuffers(handle: std.posix.socket_t, rcvbuf: usize, sndbuf: usize
     }
 }
 
-/// Drain one peer after something happened to it: send what it owes, hand the application what
-/// arrived, then send what the application produced.
+/// Open the raw descriptor one Linux worker receives and replies on.
 ///
 /// Note:
-/// - Two send passes, and both are needed. The first carries acknowledgements and handshake
-///   flights. The second carries whatever the handler queued, which does not exist until the
-///   handler has run.
+/// - SO_REUSEPORT, so every worker binds the same port and the kernel picks one by 4-tuple hash. A
+///   WebRTC peer is identified by its transport address, which is that same 4-tuple, so all of one
+///   peer's datagrams land on the worker holding that peer.
 ///
 /// Param:
-/// handler - comptime core.HandlerFn
-/// peer - *connection.Connection
-/// now_ms - u64 (monotonic milliseconds)
-/// socket - std.Io.net.Socket
 /// config - WebrtcServerConfig
-/// out - []u8 (scratch for one datagram, sized by sendBufBytes)
+///
+/// Return:
+/// - std.posix.socket_t, bound and ready to receive
+/// - whatever the bind raised
+pub fn openWorkerSocket(config: WebrtcServerConfig) !std.posix.socket_t {
+    const fd = try datagram.open(config.ip, config.port, true);
+
+    setSocketBuffers(fd, config.socket_rcvbuf, config.socket_sndbuf);
+
+    return fd;
+}
+
+/// Monotonic milliseconds straight from the kernel clock, for the two Linux models.
+///
+/// Note:
+/// - The portable model reads its clock through std.Io (elapsedMs). These two hold a raw descriptor
+///   and never touch the Io, so they read the kernel clock the way every other Linux worker in the
+///   family does.
+/// - Off Linux this is unreachable: only epoll.zig and uring.zig call it, and run() rejects both
+///   models there before a socket is bound.
+///
+/// Return:
+/// - u64 (milliseconds since an unspecified fixed point, only differences are meaningful)
+pub fn monotonicMs() u64 {
+    if (comptime builtin.target.os.tag != .linux) return 0;
+
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+
+    return @as(u64, @intCast(ts.sec)) * std.time.ms_per_s + @as(u64, @intCast(@divTrunc(ts.nsec, std.time.ns_per_ms)));
+}
+
+/// How many workers the per-core models spawn: the configured count, or one per usable CPU.
+///
+/// Note:
+/// - max_peers is counted per worker, so a server with N workers holds up to N * max_peers.
+///
+/// Param:
+/// config - WebrtcServerConfig
+///
+/// Return:
+/// - usize (at least one)
+pub fn effectiveWorkers(config: WebrtcServerConfig) usize {
+    if (config.workers != 0) return config.workers;
+
+    return availableCpuCount();
+}
+
+/// CPUs this process may actually run on, so a cpuset-limited container never spawns more workers
+/// than it has cores to put them on.
+///
+/// Return:
+/// - usize (at least one)
+pub fn availableCpuCount() usize {
+    if (comptime builtin.target.os.tag != .linux) return std.Thread.getCpuCount() catch 1;
+
+    var allowed: std.os.linux.cpu_set_t = undefined;
+    if (std.os.linux.sched_getaffinity(0, @sizeOf(std.os.linux.cpu_set_t), &allowed) != 0) {
+        return std.Thread.getCpuCount() catch 1;
+    }
+
+    var count: usize = 0;
+    for (allowed) |word| count += @popCount(word);
+
+    return if (count == 0) 1 else count;
+}
+
+/// Pin the calling thread to one CPU out of the allowed set, so a worker stays on the core its peer
+/// table is warm on.
+///
+/// Note:
+/// - Allowed-mask order, not sysfs topology order. The engines that saturate a box order physical
+///   cores ahead of their SMT siblings, which matters when every core is busy. A WebRTC worker
+///   spends most of its life waiting on a deadline, so the simpler selection is enough here.
+/// - Silent no-op off Linux, and whenever the mask cannot be read or set.
+///
+/// Param:
+/// worker_id - usize (wraps when there are more workers than CPUs)
 ///
 /// Return:
 /// - void
-pub fn drainPeer(
-    comptime handler: core.HandlerFn,
-    peer: *connection.Connection,
-    now_ms: u64,
-    socket: std.Io.net.Socket,
-    config: WebrtcServerConfig,
-    out: []u8,
-) void {
-    flushPeer(peer, now_ms, socket, config, out);
+pub fn pinToCpu(worker_id: usize) void {
+    if (comptime builtin.target.os.tag != .linux) return;
 
-    while (peer.nextEvent(now_ms) catch null) |event| {
-        var ctx = peer.context(now_ms) orelse break;
+    const linux = std.os.linux;
+    const Shift = std.math.Log2Int(usize);
 
-        handler(event, &ctx) catch |err| logSystem(config, "handler returned {s}", .{@errorName(err)});
+    var allowed: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &allowed) != 0) return;
+
+    var usable: usize = 0;
+    for (allowed) |word| usable += @popCount(word);
+
+    if (usable == 0) return;
+
+    // Walk the set bits to the worker's own slot.
+    var remaining = worker_id % usable;
+    var chosen: usize = 0;
+
+    outer: for (allowed, 0..) |word, word_index| {
+        var bits = word;
+
+        while (bits != 0) : (bits &= bits - 1) {
+            if (remaining == 0) {
+                chosen = word_index * @bitSizeOf(usize) + @ctz(bits);
+
+                break :outer;
+            }
+
+            remaining -= 1;
+        }
     }
 
-    flushPeer(peer, now_ms, socket, config, out);
-}
+    var target: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+    const bit: Shift = @intCast(chosen % @bitSizeOf(usize));
+    target[chosen / @bitSizeOf(usize)] |= @as(usize, 1) << bit;
 
-/// Send everything one peer has waiting.
-pub fn flushPeer(
-    peer: *connection.Connection,
-    now_ms: u64,
-    socket: std.Io.net.Socket,
-    config: WebrtcServerConfig,
-    out: []u8,
-) void {
-    while (peer.nextOutbound(now_ms, out) catch null) |packet| {
-        socket.send(config.io, &peer.address, packet) catch |err| {
-            logSystem(config, "send to peer failed: {s}", .{@errorName(err)});
-
-            return;
-        };
-    }
-}
-
-/// Give every peer its due deadlines, drain whatever that produced, and let go of the finished.
-///
-/// Param:
-/// handler - comptime core.HandlerFn
-/// peers - *table.Table
-/// now_ms - u64 (monotonic milliseconds)
-/// socket - std.Io.net.Socket
-/// config - WebrtcServerConfig
-/// out - []u8
-///
-/// Return:
-/// - void
-pub fn sweepPeers(
-    comptime handler: core.HandlerFn,
-    peers: *table.Table,
-    now_ms: u64,
-    socket: std.Io.net.Socket,
-    config: WebrtcServerConfig,
-    out: []u8,
-) void {
-    var walk = peers.iterator();
-    while (walk.next()) |peer| {
-        const outcome = peer.tick(now_ms);
-
-        if (outcome.dead) continue;
-
-        drainPeer(handler, peer, now_ms, socket, config, out);
-    }
-
-    const dropped = peers.dropDead();
-    if (dropped > 0) logSystem(config, "dropped {d} peer(s), {d} still held", .{ dropped, peers.live });
-}
-
-/// How long the loop may wait for the next datagram.
-///
-/// Note:
-/// - The soonest deadline any peer holds, capped by the tick interval. With no peers at all it is
-///   the tick interval, so a bound socket with nobody on it still wakes up regularly rather than
-///   parking forever.
-///
-/// Param:
-/// peers - *table.Table
-/// now_ms - u64 (monotonic milliseconds)
-/// config - WebrtcServerConfig
-///
-/// Return:
-/// - u32 (milliseconds)
-pub fn waitMs(peers: *table.Table, now_ms: u64, config: WebrtcServerConfig) u32 {
-    const soonest = peers.earliestDeadline() orelse return config.tick_interval_ms;
-
-    if (soonest <= now_ms) return 0;
-
-    return @intCast(@min(soonest - now_ms, @as(u64, config.tick_interval_ms)));
+    linux.sched_setaffinity(0, &target) catch {};
 }
 
 // --------------------------------------------------------------- //
@@ -367,34 +390,47 @@ test "zix webrtc: dispatch common, an unread clock reports no time passed" {
     try std.testing.expectEqual(@as(u64, 0), elapsedMs(start, start));
 }
 
-test "zix webrtc: dispatch common, an empty table waits the tick interval" {
+test "zix webrtc: dispatch common, the monotonic clock only moves forward" {
+    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const first = monotonicMs();
+    const second = monotonicMs();
+
+    try std.testing.expect(second >= first);
+}
+
+test "zix webrtc: dispatch common, the worker count follows the config and then the cpus" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
     var tls = try testContext(std.testing.allocator);
     var config = testConfig(threaded.io(), std.testing.allocator, &tls);
-    config.tick_interval_ms = 250;
+    config.workers = 3;
 
-    var peers = try table.Table.init(std.testing.allocator, 4);
-    defer peers.deinit();
+    try std.testing.expectEqual(@as(usize, 3), effectiveWorkers(config));
 
-    try std.testing.expectEqual(@as(u32, 250), waitMs(&peers, 1_000, config));
+    config.workers = 0;
+    try std.testing.expect(effectiveWorkers(config) >= 1);
+    try std.testing.expectEqual(availableCpuCount(), effectiveWorkers(config));
 }
 
-test "zix webrtc: dispatch common, a deadline already passed means no waiting at all" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+test "zix webrtc: dispatch common, pinning a worker to any slot is survivable" {
+    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
 
-    var tls = try testContext(std.testing.allocator);
-    const config = testConfig(threaded.io(), std.testing.allocator, &tls);
+    const linux = std.os.linux;
 
-    var peers = try table.Table.init(std.testing.allocator, 4);
-    defer peers.deinit();
+    // The pin moves the calling thread, and here that thread is the test runner, so its own mask is
+    // put back before anything else runs.
+    var original: linux.cpu_set_t = undefined;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &original) != 0) return error.SkipZigTest;
 
-    _ = (try peers.acquire(.{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 5000 } }, optionsFrom(config), drawSecrets(), 0)).?;
+    defer linux.sched_setaffinity(0, &original) catch {};
 
-    // The peer's idle deadline sits at 30 seconds, so before then the wait is capped by the tick
-    // interval, and after it there is nothing left to wait for.
-    try std.testing.expectEqual(config.tick_interval_ms, waitMs(&peers, 0, config));
-    try std.testing.expectEqual(@as(u32, 0), waitMs(&peers, 30_000, config));
+    // Best effort by design: a mask it cannot read or set leaves the thread where it is. What this
+    // pins down is that no worker index, including one past the CPU count, faults or lands nowhere.
+    pinToCpu(0);
+    pinToCpu(1);
+    pinToCpu(1024);
+
+    try std.testing.expect(availableCpuCount() >= 1);
 }
