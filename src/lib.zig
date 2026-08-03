@@ -370,7 +370,10 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/webrtc/dialer.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/server.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/dispatch/common.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/dispatch/worker.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/dispatch/async.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/webrtc/dispatch/epoll.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/webrtc/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/Webrtc.zig"));
 
     // # zix.Tcp (raw)
