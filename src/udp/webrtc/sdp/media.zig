@@ -28,6 +28,15 @@ pub const DATA_CHANNEL_PROTO: []const u8 = "UDP/DTLS/SCTP";
 /// The one format value a data channel section names.
 pub const DATA_CHANNEL_FORMAT: []const u8 = "webrtc-datachannel";
 
+/// The media type an audio section uses.
+pub const AUDIO_MEDIA: []const u8 = "audio";
+
+/// The media type a video section uses.
+pub const VIDEO_MEDIA: []const u8 = "video";
+
+/// The transport WebRTC media runs over (RFC 5764 9, RFC 8829 5.1.1).
+pub const RTP_PROTO: []const u8 = "UDP/TLS/RTP/SAVPF";
+
 /// The port that says a section is refused (RFC 3264 6).
 pub const REJECTED_PORT: u16 = 0;
 
@@ -72,6 +81,20 @@ pub const Media = struct {
         if (!std.mem.eql(u8, self.proto, DATA_CHANNEL_PROTO)) return false;
 
         return std.mem.eql(u8, self.formats, DATA_CHANNEL_FORMAT);
+    }
+
+    /// Whether this section describes WebRTC audio or video.
+    ///
+    /// Note:
+    /// - The transport is checked as well as the media type. An `m=audio` over a plain RTP
+    ///   profile is a session with no encryption, which is not one a WebRTC endpoint answers.
+    ///
+    /// Return:
+    /// - bool
+    pub fn isRtpMedia(self: Media) bool {
+        if (!std.mem.eql(u8, self.proto, RTP_PROTO)) return false;
+
+        return std.mem.eql(u8, self.media, AUDIO_MEDIA) or std.mem.eql(u8, self.media, VIDEO_MEDIA);
     }
 };
 
@@ -263,6 +286,28 @@ test "zix sdp: media isDataChannel, the transport compare is exact" {
 
 test "zix sdp: media isDataChannel, another format is not one" {
     try std.testing.expect(!(try read("application 9 UDP/DTLS/SCTP 5000")).isDataChannel());
+}
+
+test "zix sdp: media isRtpMedia, the webrtc audio and video shapes are accepted" {
+    try std.testing.expect((try read("audio 9 UDP/TLS/RTP/SAVPF 111 103 0")).isRtpMedia());
+    try std.testing.expect((try read("video 9 UDP/TLS/RTP/SAVPF 96 97")).isRtpMedia());
+}
+
+test "zix sdp: media isRtpMedia, an unencrypted profile is not one" {
+    // RFC 8834 requires the secure profile, so a plain RTP/AVP section is a session this
+    // endpoint has no business answering.
+    try std.testing.expect(!(try read("audio 49170 RTP/AVP 0 8 97")).isRtpMedia());
+    try std.testing.expect(!(try read("audio 9 UDP/TLS/RTP/SAVP 111")).isRtpMedia());
+}
+
+test "zix sdp: media isRtpMedia, a data channel is not rtp media and the reverse" {
+    const data_channel = try read(data_channel_line);
+    const audio = try read("audio 9 UDP/TLS/RTP/SAVPF 111");
+
+    try std.testing.expect(!data_channel.isRtpMedia());
+    try std.testing.expect(data_channel.isDataChannel());
+    try std.testing.expect(audio.isRtpMedia());
+    try std.testing.expect(!audio.isDataChannel());
 }
 
 test "zix sdp: media isRejected, a zero port is a refusal" {
