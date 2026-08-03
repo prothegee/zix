@@ -109,6 +109,9 @@ pub const Outcome = struct {
     closed: bool = false,
     /// Messages may be waiting, see `nextMessage`.
     delivered: bool = false,
+    /// A RE-CONFIG chunk arrived, and this is its value, borrowed from the datagram handed in.
+    /// Stream reset is driven by the layer that owns the channels, so it is passed up untouched.
+    reconfig: ?[]const u8 = null,
 };
 
 /// Everything that can go wrong driving an association.
@@ -153,6 +156,9 @@ pub const Association = struct {
     inbound_streams: u16,
     /// The peer's last advertised receive window.
     peer_rwnd: u32,
+    /// The first TSN the peer said it would use. Kept because the RFC 6525 request sequence
+    /// numbering starts there, and only the handshake ever sees it.
+    peer_initial_tsn: u32,
     peer_forward_tsn: bool,
     peer_reconfig: bool,
     send: send_queue.SendQueue,
@@ -193,6 +199,7 @@ pub const Association = struct {
             .outbound_streams = config.outbound_streams,
             .inbound_streams = config.inbound_streams,
             .peer_rwnd = initiation.MIN_ADVERTISED_RWND,
+            .peer_initial_tsn = 0,
             .peer_forward_tsn = false,
             .peer_reconfig = false,
             .send = send_queue.SendQueue.init(allocator, config.send_limits, local.initial_tsn),
@@ -273,11 +280,16 @@ pub const Association = struct {
                 .FORWARD_TSN => self.onForwardTsn(item, &outcome),
                 .HEARTBEAT => return self.onHeartbeat(item, out),
                 .HEARTBEAT_ACK => {},
+                // Handed up rather than handled here, because what a stream reset means is a
+                // data channel question (RFC 8831 6.7). Only the first one in a packet is taken,
+                // and RFC 6525 3.1 never bundles two.
+                .RE_CONFIG => {
+                    if (outcome.reconfig == null) outcome.reconfig = item.value;
+                },
                 // Known, and nothing is done with them here. Congestion notification is not
-                // implemented, padding exists only to make a probe the right size, an ERROR is
-                // not fatal on its own, and stream reset is driven by the layer that owns the
-                // channels rather than by the association.
-                .ECNE, .CWR, .PAD, .ERROR, .RE_CONFIG => {},
+                // implemented, padding exists only to make a probe the right size, and an ERROR
+                // is not fatal on its own.
+                .ECNE, .CWR, .PAD, .ERROR => {},
                 .SHUTDOWN => return self.onShutdown(item, out),
                 .SHUTDOWN_ACK => return self.onShutdownAck(out),
                 .SHUTDOWN_COMPLETE => {
@@ -498,6 +510,77 @@ pub const Association = struct {
         return reply;
     }
 
+    /// Send a RE-CONFIG chunk built by the layer that owns the channels.
+    ///
+    /// Note:
+    /// - Both sides must have listed RE-CONFIG in SUPPORTED-EXTENSIONS, which only the handshake
+    ///   saw, so the check lives here (RFC 6525 5.1.1).
+    ///
+    /// Param:
+    /// value - []const u8 (the whole chunk value, one or two reconfiguration parameters)
+    /// out - []u8 (at least MAX_REPLY_BYTES)
+    ///
+    /// Return:
+    /// - []const u8, the packet to send
+    /// - error.NotEstablished if the association is not up
+    /// - error.ProtocolViolation if the peer never announced the extension
+    /// - error.NoSpace
+    pub fn sendReconfig(self: *Association, value: []const u8, out: []u8) Error![]const u8 {
+        if (self.state != .ESTABLISHED) return error.NotEstablished;
+        if (!self.peer_reconfig) return error.ProtocolViolation;
+
+        return self.buildPacket(out, self.peer_tag, .RE_CONFIG, 0, value);
+    }
+
+    /// Put one outgoing stream's sequence numbering back to zero (RFC 6525 5.2.2 E3).
+    ///
+    /// Note:
+    /// - Only the numbering is touched. Anything already queued for the stream keeps the number
+    ///   it was given, which is why a reset is asked for after the queue has drained.
+    ///
+    /// Param:
+    /// stream_identifier - u16
+    ///
+    /// Return:
+    /// - void
+    pub fn resetOutboundStream(self: *Association, stream_identifier: u16) void {
+        if (stream_identifier >= self.outbound_streams) return;
+
+        self.next_sequence[stream_identifier] = 0;
+    }
+
+    /// The last TSN handed to a DATA chunk, which a reset request has to carry.
+    ///
+    /// Return:
+    /// - u32
+    pub fn lastAssignedTsn(self: Association) u32 {
+        return serial.Tsn.previous(self.send.next_tsn);
+    }
+
+    /// The highest TSN with nothing missing below it.
+    ///
+    /// Return:
+    /// - u32
+    pub fn cumulativeTsn(self: Association) u32 {
+        return self.receive.cumulative_tsn;
+    }
+
+    /// The first TSN the peer announced.
+    ///
+    /// Return:
+    /// - u32, zero before the handshake completes
+    pub fn peerInitialTsn(self: Association) u32 {
+        return self.peer_initial_tsn;
+    }
+
+    /// Whether the peer announced RFC 6525 support during the handshake.
+    ///
+    /// Return:
+    /// - bool
+    pub fn supportsReconfig(self: Association) bool {
+        return self.peer_reconfig;
+    }
+
     /// Largest user payload one DATA chunk can carry on this path.
     ///
     /// Return:
@@ -666,6 +749,7 @@ pub const Association = struct {
     fn adopt(self: *Association, answer: initiation.Initiation) void {
         self.peer_tag = answer.fixed.initiate_tag;
         self.peer_rwnd = answer.fixed.advertised_rwnd;
+        self.peer_initial_tsn = answer.fixed.initial_tsn;
         self.peer_forward_tsn = answer.supportsForwardTsn();
         self.peer_reconfig = answer.supportsReconfig();
 
@@ -687,6 +771,7 @@ pub const Association = struct {
     fn adoptCookie(self: *Association, contents: cookie.Contents) void {
         self.peer_tag = contents.peer.initiate_tag;
         self.peer_rwnd = contents.peer.advertised_rwnd;
+        self.peer_initial_tsn = contents.peer.initial_tsn;
         self.peer_forward_tsn = contents.peer_forward_tsn;
         self.peer_reconfig = contents.peer_reconfig;
 
@@ -1211,4 +1296,168 @@ test "zix sctp: association flush, chunks are bundled up to the path maximum" {
     while (iterator.next()) |_| count += 1;
 
     try std.testing.expectEqual(@as(usize, 4), count);
+}
+
+test "zix sctp: association sendReconfig, the packet carries the value as a RE-CONFIG chunk" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    var wire: [MAX_REPLY_BYTES]u8 = undefined;
+    const outbound = try pair.client.sendReconfig(&.{ 0x00, 0x0D, 0x00, 0x04 }, &wire);
+    const parsed = try packet.parse(outbound);
+    const item = parsed.find(.RE_CONFIG) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x0D, 0x00, 0x04 }, item.value);
+}
+
+test "zix sctp: association sendReconfig, an association that is not up refuses" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    var wire: [MAX_REPLY_BYTES]u8 = undefined;
+
+    try std.testing.expectError(error.NotEstablished, pair.client.sendReconfig(&.{ 0, 0, 0, 4 }, &wire));
+}
+
+test "zix sctp: association sendReconfig, a peer that never announced the extension refuses" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    pair.client.peer_reconfig = false;
+
+    var wire: [MAX_REPLY_BYTES]u8 = undefined;
+
+    try std.testing.expectError(error.ProtocolViolation, pair.client.sendReconfig(&.{ 0, 0, 0, 4 }, &wire));
+}
+
+test "zix sctp: association handle, a RE-CONFIG chunk is handed up rather than answered" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    var wire: [MAX_REPLY_BYTES]u8 = undefined;
+    const outbound = try pair.client.sendReconfig(&.{ 0x00, 0x0D, 0x00, 0x04 }, &wire);
+
+    var reply: [MAX_REPLY_BYTES]u8 = undefined;
+    const outcome = try pair.server.handle(outbound, 1_000, &reply);
+
+    try std.testing.expect(outcome.reply == null);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x0D, 0x00, 0x04 }, outcome.reconfig.?);
+}
+
+test "zix sctp: association handle, a packet with no RE-CONFIG hands nothing up" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    try pair.client.sendMessage(0, "hello", .{}, 1_000);
+
+    var wire: [1200]u8 = undefined;
+    const outbound = (try pair.client.flush(1_000, &wire)).?;
+
+    var reply: [1200]u8 = undefined;
+    const outcome = try pair.server.handle(outbound, 1_000, &reply);
+
+    try std.testing.expect(outcome.reconfig == null);
+}
+
+test "zix sctp: association resetOutboundStream, the sequence numbering goes back to zero" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    try pair.client.sendMessage(3, "one", .{}, 1_000);
+    try pair.client.sendMessage(3, "two", .{}, 1_000);
+
+    try std.testing.expectEqual(@as(u16, 2), pair.client.next_sequence[3]);
+
+    pair.client.resetOutboundStream(3);
+
+    try std.testing.expectEqual(@as(u16, 0), pair.client.next_sequence[3]);
+}
+
+test "zix sctp: association resetOutboundStream, a stream outside the negotiated set is ignored" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    // Nothing to assert but that it returns, which is the point: a peer naming a stream that
+    // does not exist must not reach past the table.
+    pair.client.resetOutboundStream(pair.client.outbound_streams);
+    pair.client.resetOutboundStream(65_535);
+}
+
+test "zix sctp: association lastAssignedTsn, it trails the next TSN by one" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    try std.testing.expectEqual(client_identity.initial_tsn - 1, pair.client.lastAssignedTsn());
+
+    try pair.client.sendMessage(0, "one", .{}, 1_000);
+
+    try std.testing.expectEqual(client_identity.initial_tsn, pair.client.lastAssignedTsn());
+}
+
+test "zix sctp: association cumulativeTsn, it follows what has arrived" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    try std.testing.expectEqual(client_identity.initial_tsn - 1, pair.server.cumulativeTsn());
+
+    try pair.client.sendMessage(0, "one", .{}, 1_000);
+
+    var wire: [1200]u8 = undefined;
+    const outbound = (try pair.client.flush(1_000, &wire)).?;
+
+    var reply: [1200]u8 = undefined;
+    _ = try pair.server.handle(outbound, 1_000, &reply);
+
+    try std.testing.expectEqual(client_identity.initial_tsn, pair.server.cumulativeTsn());
+}
+
+test "zix sctp: association peerInitialTsn, each side ends up holding the other's first TSN" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), pair.client.peerInitialTsn());
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    try std.testing.expectEqual(server_identity.initial_tsn, pair.client.peerInitialTsn());
+    try std.testing.expectEqual(client_identity.initial_tsn, pair.server.peerInitialTsn());
+}
+
+test "zix sctp: association supportsReconfig, both sides announce the extension" {
+    var pair = try testPair(std.testing.allocator);
+    defer pair.client.deinit();
+    defer pair.server.deinit();
+
+    try std.testing.expect(!pair.client.supportsReconfig());
+
+    try handshake(&pair.client, &pair.server, 1_000);
+
+    try std.testing.expect(pair.client.supportsReconfig());
+    try std.testing.expect(pair.server.supportsReconfig());
 }
