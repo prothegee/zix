@@ -6,10 +6,12 @@
 //!   and how the SCTP association is to be set up.
 //!
 //! Note:
-//! - An attribute is looked for in the media section first and at session level second. That is
-//!   the rule for the ICE credentials (RFC 8839 5.4) and for the fingerprint (RFC 8122 5), and
-//!   browsers put both in the media section while the RFC examples often put them at session
-//!   level. Searching one place only reads half of what is out there.
+//! - An attribute is looked for in three places, in order: the data channel section, the
+//!   BUNDLE-tagged section, and the session level. The first is where browsers write the ICE
+//!   credentials and the fingerprint (RFC 8839 5.4, RFC 8122 5), the last is where the RFC
+//!   examples put them, and the middle one is the case that only shows up once a session carries
+//!   media: a re-offer writes the transport attributes ONLY on the tagged section (RFC 8843 7.4),
+//!   so a data channel section behind an audio section carries none of its own.
 //! - Only the first data channel section is read. A bundled session can carry audio and video
 //!   sections that zix has nothing to say about, and refusing the whole offer over them would
 //!   turn a session zix can partly serve into one it cannot serve at all.
@@ -56,6 +58,9 @@ pub const Error = error{
 pub const Offer = struct {
     /// The whole description, borrowed.
     text: []const u8,
+    /// The description cut into regions, so an answer can walk every section the offer had and
+    /// not just the data channel one (RFC 3264 6).
+    description: session.Description,
     /// The data channel section, borrowed.
     section: session.Section,
     /// The section's `m=` line.
@@ -104,41 +109,96 @@ pub fn read(text: []const u8) Error!Offer {
 
     if (media_line.isRejected()) return error.Rejected;
 
-    const ufrag = lookup(description, section, "ice-ufrag") orelse return error.MissingField;
-    const password = lookup(description, section, "ice-pwd") orelse return error.MissingField;
-    const fingerprint_value = lookup(description, section, fingerprint.ATTRIBUTE) orelse
-        return error.MissingField;
-    const setup_value = lookup(description, section, setup.ATTRIBUTE) orelse return error.MissingField;
-    const sctp_port = lookup(description, section, "sctp-port") orelse return error.MissingField;
+    const scope = scopeOf(description, section);
+
+    const ufrag = scope.find("ice-ufrag") orelse return error.MissingField;
+    const password = scope.find("ice-pwd") orelse return error.MissingField;
+    const fingerprint_value = scope.find(fingerprint.ATTRIBUTE) orelse return error.MissingField;
+    const setup_value = scope.find(setup.ATTRIBUTE) orelse return error.MissingField;
+    const sctp_port = scope.find("sctp-port") orelse return error.MissingField;
 
     return .{
         .text = text,
+        .description = description,
         .section = section,
         .media_line = media_line,
         .ice_ufrag = ufrag,
         .ice_pwd = password,
         .ice_lite = attribute.has(description.session, "ice-lite"),
-        .ice2 = hasIce2(description, section),
+        .ice2 = hasIce2(scope),
         .fingerprint = try fingerprint.read(fingerprint_value),
         .setup = try setup.read(setup_value),
         .mid = attribute.findValue(section.text, "mid"),
         .bundle = attribute.findValue(description.session, "group"),
-        .tls_id = lookup(description, section, "tls-id"),
+        .tls_id = scope.find("tls-id"),
         .sctp_port = std.fmt.parseInt(u16, sctp_port, 10) catch return error.BadPort,
-        .max_message_size = try readMaxMessageSize(description, section),
+        .max_message_size = try readMaxMessageSize(scope),
     };
 }
 
-/// An attribute value, looked for in the media section and then at session level.
-fn lookup(description: session.Description, section: session.Section, name: []const u8) ?[]const u8 {
-    if (attribute.findValue(section.text, name)) |found| return found;
+/// The semantics token that opens a BUNDLE group (RFC 8843 7.1).
+pub const BUNDLE_SEMANTICS: []const u8 = "BUNDLE";
 
-    return attribute.findValue(description.session, name);
+/// The three regions an attribute may be written in, in the order they are searched.
+const Scope = struct {
+    /// The section being read.
+    section: []const u8,
+    /// The BUNDLE-tagged section, whose transport attributes apply to every bundled section
+    /// (RFC 8843 7.4). Absent when there is no group, or no section carries the first tag.
+    tagged: ?[]const u8,
+    /// The session level.
+    session: []const u8,
+
+    /// An attribute value from the first region that has one.
+    fn find(self: Scope, name: []const u8) ?[]const u8 {
+        if (attribute.findValue(self.section, name)) |found| return found;
+
+        if (self.tagged) |region| {
+            if (attribute.findValue(region, name)) |found| return found;
+        }
+
+        return attribute.findValue(self.session, name);
+    }
+};
+
+/// The regions that apply to one section of a description.
+fn scopeOf(description: session.Description, section: session.Section) Scope {
+    return .{
+        .section = section.text,
+        .tagged = taggedSection(description),
+        .session = description.session,
+    };
 }
 
-/// Whether either level announced the "ice2" option.
-fn hasIce2(description: session.Description, section: session.Section) bool {
-    const options = lookup(description, section, "ice-options") orelse return false;
+/// The section the BUNDLE group names first, whose transport attributes the rest inherit.
+///
+/// Note:
+/// - A re-offer carries the ICE credentials and the fingerprint ONLY there (RFC 8843 7.4), and a
+///   browser re-offers every time a track is added. Reading just the data channel section and the
+///   session level finds nothing on those, which reads as an offer with no credentials at all.
+fn taggedSection(description: session.Description) ?[]const u8 {
+    const group = attribute.findValue(description.session, "group") orelse return null;
+    var words = std.mem.tokenizeScalar(u8, group, ' ');
+
+    const semantics = words.next() orelse return null;
+
+    if (!std.mem.eql(u8, semantics, BUNDLE_SEMANTICS)) return null;
+
+    const tag = words.next() orelse return null;
+
+    var index: usize = 0;
+    while (description.section(index)) |candidate| : (index += 1) {
+        const mid = attribute.findValue(candidate.text, "mid") orelse continue;
+
+        if (std.mem.eql(u8, mid, tag)) return candidate.text;
+    }
+
+    return null;
+}
+
+/// Whether any region that applies announced the "ice2" option.
+fn hasIce2(scope: Scope) bool {
+    const options = scope.find("ice-options") orelse return false;
 
     var words = std.mem.tokenizeScalar(u8, options, ' ');
     while (words.next()) |word| {
@@ -149,9 +209,8 @@ fn hasIce2(description: session.Description, section: session.Section) bool {
 }
 
 /// The peer's message ceiling, or the RFC 8841 6.1 default when it said nothing.
-fn readMaxMessageSize(description: session.Description, section: session.Section) Error!u32 {
-    const value = lookup(description, section, "max-message-size") orelse
-        return DEFAULT_MAX_MESSAGE_SIZE;
+fn readMaxMessageSize(scope: Scope) Error!u32 {
+    const value = scope.find("max-message-size") orelse return DEFAULT_MAX_MESSAGE_SIZE;
 
     return std.fmt.parseInt(u32, value, 10) catch error.BadPort;
 }
@@ -476,4 +535,105 @@ test "zix sdp: offer read, an offer terminated with bare newlines is accepted" {
 
     try std.testing.expectEqualStrings("4ZcD", parsed.ice_ufrag);
     try std.testing.expectEqual(@as(u16, 5000), parsed.sctp_port);
+}
+
+test "zix sdp: offer read, a re-offer carries the transport facts only on the tagged section" {
+    // RFC 8843 7.4: in a subsequent offer the ICE credentials and the fingerprint appear in the
+    // tagged section alone. The data channel section behind it has none of its own, and reading
+    // only that section reads an offer with no credentials at all.
+    const reoffer: []const u8 =
+        "v=0\r\n" ++
+        "o=- 1 3 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=group:BUNDLE 0 1\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:0\r\n" ++
+        "a=rtcp-mux\r\n" ++
+        "a=ice-ufrag:4ZcD\r\n" ++
+        "a=ice-pwd:2/1muCWoOi3uLifh0NuRHlZ6\r\n" ++
+        "a=fingerprint:sha-256 6B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:" ++
+        "DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r\n" ++
+        "a=setup:actpass\r\n" ++
+        "a=rtpmap:111 opus/48000/2\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=mid:1\r\n" ++
+        "a=sctp-port:5000\r\n";
+
+    const parsed = try read(reoffer);
+
+    try std.testing.expectEqualStrings("4ZcD", parsed.ice_ufrag);
+    try std.testing.expectEqualStrings("2/1muCWoOi3uLifh0NuRHlZ6", parsed.ice_pwd);
+    try std.testing.expectEqual(setup.Role.ACTPASS, parsed.setup);
+    try std.testing.expectEqual(@as(u16, 5000), parsed.sctp_port);
+    try std.testing.expectEqualStrings("1", parsed.mid.?);
+}
+
+test "zix sdp: offer read, the section's own value wins over the tagged one" {
+    const both: []const u8 =
+        "v=0\r\n" ++
+        "o=- 1 3 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=group:BUNDLE 0 1\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:0\r\n" ++
+        "a=ice-ufrag:TAGGED\r\n" ++
+        "a=ice-pwd:taggedPasswordOfProperLength\r\n" ++
+        "a=fingerprint:sha-256 6B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:" ++
+        "DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r\n" ++
+        "a=setup:actpass\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=mid:1\r\n" ++
+        "a=ice-ufrag:OWNVAL\r\n" ++
+        "a=sctp-port:5000\r\n";
+
+    try std.testing.expectEqualStrings("OWNVAL", (try read(both)).ice_ufrag);
+}
+
+test "zix sdp: offer read, a group that is not BUNDLE names no tagged section" {
+    // Other grouping semantics exist (LS, FID), and none of them make one section's transport
+    // attributes apply to another.
+    const other_group: []const u8 =
+        "v=0\r\n" ++
+        "o=- 1 3 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=group:LS 0 1\r\n" ++
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
+        "a=mid:0\r\n" ++
+        "a=ice-ufrag:4ZcD\r\n" ++
+        "a=ice-pwd:2/1muCWoOi3uLifh0NuRHlZ6\r\n" ++
+        "a=setup:actpass\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=mid:1\r\n" ++
+        "a=sctp-port:5000\r\n";
+
+    try std.testing.expectError(error.MissingField, read(other_group));
+}
+
+test "zix sdp: offer read, a bundle tag naming no section falls through to session level" {
+    const dangling: []const u8 =
+        "v=0\r\n" ++
+        "o=- 1 3 IN IP4 127.0.0.1\r\n" ++
+        "s=-\r\n" ++
+        "t=0 0\r\n" ++
+        "a=group:BUNDLE 9\r\n" ++
+        "a=ice-ufrag:4ZcD\r\n" ++
+        "a=ice-pwd:2/1muCWoOi3uLifh0NuRHlZ6\r\n" ++
+        "a=fingerprint:sha-256 6B:8B:F0:65:5F:78:E2:51:3B:AC:6F:F3:3F:46:1B:35:" ++
+        "DC:B8:5F:64:1A:24:C2:43:F0:A1:58:D0:A1:2C:19:08\r\n" ++
+        "a=setup:actpass\r\n" ++
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n" ++
+        "a=mid:1\r\n" ++
+        "a=sctp-port:5000\r\n";
+
+    try std.testing.expectEqualStrings("4ZcD", (try read(dangling)).ice_ufrag);
+}
+
+test "zix sdp: offer read, the description comes back so every section can be answered" {
+    const parsed = try read(browser_offer);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.description.sectionCount());
+    try std.testing.expect(parsed.description.dataChannelSection() != null);
 }
