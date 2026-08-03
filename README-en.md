@@ -154,11 +154,11 @@ __*Platform Development Status:*__ <br>
 __*Maintained Platforms:*__
 - x86_64-linux:
     - Maintainers:
-        @prothegee
+        - @prothegee
     ---
 - aarch64-linux:
     - Maintainers:
-        @prothegee
+        - @prothegee
     ---
 - x86_64-windows:
     - Looking for contributor & maintaner.
