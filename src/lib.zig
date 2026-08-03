@@ -335,6 +335,14 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/webrtc/sdp/candidate.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/sdp/offer.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/sdp/answer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/builder.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/direction.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/rtpmap.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/fmtp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/rtcp_feedback.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/format.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/media_offer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/media_answer.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/media/profile.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/media/rtp.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/media/mux.zig"));
