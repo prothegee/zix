@@ -96,14 +96,18 @@ pub const Outcome = struct {
 /// Note:
 /// - Borrows all three strings, it copies nothing. They have to outlive the responder, and they
 ///   are replaced together on an ICE restart.
-/// - remote_ufrag has to be known before checks arrive. A peer starts sending checks as soon as
-///   it has the answer, so a caller that has not read the peer's ufrag yet will reject those
-///   early checks with 401 and wait for the retransmissions.
+/// - A named remote_ufrag has to be known before checks arrive. A peer starts sending checks as
+///   soon as it has the answer, so a caller that has not read the peer's ufrag yet will reject
+///   those early checks with 401 and wait for the retransmissions.
+/// - A null remote_ufrag takes whatever the peer calls itself, and the local password stays the
+///   gate. That is the case where the peer picks its own ufrag per session (a browser does) and
+///   this agent has one set of credentials for everybody: the password is in the answer that peer
+///   was handed, so proving it is what proves the session, and the ufrag adds nothing on top.
 pub const Responder = struct {
     /// This agent's own ufrag and password, the credentials a check is verified against.
     local: credentials.Credentials,
-    /// The other peer's ufrag, the second half of the USERNAME every check carries.
-    remote_ufrag: []const u8,
+    /// The other peer's ufrag, the second half of the USERNAME every check carries. Null takes any.
+    remote_ufrag: ?[]const u8,
     /// Address the peer nominated with USE-CANDIDATE, once one has. This is the pair DTLS runs
     /// over.
     selected: ?IpAddress = null,
@@ -139,7 +143,11 @@ pub const Responder = struct {
         const parts = credentials.splitUsername(username.value) catch return badRequest(request, out);
 
         if (!std.mem.eql(u8, parts.destination_ufrag, self.local.ufrag)) return unauthorized(request, out);
-        if (!std.mem.eql(u8, parts.source_ufrag, self.remote_ufrag)) return unauthorized(request, out);
+
+        if (self.remote_ufrag) |expected| {
+            if (!std.mem.eql(u8, parts.source_ufrag, expected)) return unauthorized(request, out);
+        }
+
         if (request.messageIntegrity(self.local.password) != .VALID) return unauthorized(request, out);
 
         var unknown: [MAX_UNKNOWN_LISTED]message.AttributeType = undefined;
@@ -391,6 +399,45 @@ test "zix ice: lite respond, a wrong ufrag on either half is 401" {
         // Nothing to sign an unauthenticated rejection with, so it goes out unsigned.
         try std.testing.expectEqual(message.IntegrityState.ABSENT, response.messageIntegrity(TEST_LOCAL_PASSWORD));
         try std.testing.expectEqual(message.FingerprintState.VALID, response.fingerprint());
+    }
+}
+
+test "zix ice: lite respond, a null remote ufrag takes whatever the peer calls itself" {
+    // What a browser needs: it draws its own ufrag per session, and this agent has one set of
+    // credentials for every peer, so there is nothing to compare that half against.
+    var responder = testResponder();
+    responder.remote_ufrag = null;
+
+    const names = [_][]const u8{ "9uB6", "aB3x", "someverylongufragvalue" };
+
+    for (names) |name| {
+        var request_buf: [256]u8 = undefined;
+        var out: [MAX_RESPONSE_BYTES]u8 = undefined;
+        const outcome = responder.respond(writeTestCheck(&request_buf, .{ .source_ufrag = name }), &TEST_PEER, &out);
+
+        try std.testing.expect(outcome.authenticated);
+        try std.testing.expectEqual(message.Class.SUCCESS_RESPONSE, (try message.parse(outcome.reply.?)).class);
+    }
+}
+
+test "zix ice: lite respond, a null remote ufrag still holds a check to the local credentials" {
+    var responder = testResponder();
+    responder.remote_ufrag = null;
+
+    // The half that names this agent is still compared, and the password is still the gate. Taking
+    // any source ufrag lets a peer name itself, it does not let a stranger in.
+    const cases = [_]TestCheck{
+        .{ .destination_ufrag = "0000" },
+        .{ .password = TEST_REMOTE_PASSWORD },
+    };
+
+    for (cases) |params| {
+        var request_buf: [256]u8 = undefined;
+        var out: [MAX_RESPONSE_BYTES]u8 = undefined;
+        const outcome = responder.respond(writeTestCheck(&request_buf, params), &TEST_PEER, &out);
+
+        try std.testing.expect(!outcome.authenticated);
+        try std.testing.expectEqual(ERROR_UNAUTHORIZED, errorCodeOf(try message.parse(outcome.reply.?)));
     }
 }
 
