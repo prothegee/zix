@@ -69,6 +69,9 @@ pub const datachannel = @import("datachannel/peer.zig");
 pub const payload = @import("datachannel/payload.zig");
 pub const sdp_offer = @import("sdp/offer.zig");
 pub const sdp_answer = @import("sdp/answer.zig");
+/// The certificate hash an answer publishes, which a caller computes from the certificate its TLS
+/// context holds.
+pub const sdp_fingerprint = @import("sdp/fingerprint.zig");
 pub const sdp_media_offer = @import("sdp/media_offer.zig");
 pub const sdp_media_answer = @import("sdp/media_answer.zig");
 pub const srtp = @import("media/srtp.zig");
