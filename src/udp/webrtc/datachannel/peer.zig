@@ -193,6 +193,21 @@ pub const Peer = struct {
         return self.channels.find(stream_identifier);
     }
 
+    /// The channel at a position, for walking every channel this peer has.
+    ///
+    /// Note:
+    /// - Positions shift as channels open and close, so this is for one walk and not for holding
+    ///   on to. `count()` bounds it, and the pointer lasts until the next open or close.
+    ///
+    /// Param:
+    /// index - usize
+    ///
+    /// Return:
+    /// - ?*channel.Channel, null past the last one
+    pub fn at(self: *Peer, index: usize) ?*channel.Channel {
+        return self.channels.at(index);
+    }
+
     /// Open a channel and send the DATA_CHANNEL_OPEN that announces it.
     ///
     /// Note:
@@ -716,6 +731,34 @@ test "zix datachannel: peer openChannel, the server takes the first odd identifi
     try fixture.connect();
 
     try std.testing.expectEqual(@as(u16, 1), try fixture.server.openChannel(.{ .label = "chat" }, NOW));
+}
+
+test "zix datachannel: peer at, a walk visits every channel and stops at the end" {
+    var fixture: Fixture = undefined;
+    try fixture.setUp(std.testing.allocator);
+    defer fixture.tearDown();
+
+    try fixture.connect();
+
+    _ = try openOne(&fixture, .{ .label = "chat" });
+    _ = try openOne(&fixture, .{ .label = "files" });
+
+    // What a fan-out needs: the identifiers of every channel a peer has, without knowing any of
+    // them in advance.
+    var seen: [2]u16 = undefined;
+    var found: usize = 0;
+
+    while (fixture.client.at(found)) |open| : (found += 1) {
+        if (found == seen.len) break;
+
+        seen[found] = open.stream_identifier;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), found);
+    try std.testing.expectEqual(fixture.client.count(), found);
+    try std.testing.expectEqual(@as(u16, 0), seen[0]);
+    try std.testing.expectEqual(@as(u16, 2), seen[1]);
+    try std.testing.expectEqual(@as(?*channel.Channel, null), fixture.client.at(found));
 }
 
 test "zix datachannel: peer openChannel, an association that is not up refuses" {
