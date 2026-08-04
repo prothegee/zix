@@ -364,6 +364,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/webrtc/config.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/timer.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/dtls_session.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/fanout.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/core.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/connection.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/table.zig"));
