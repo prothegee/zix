@@ -98,6 +98,11 @@ pub const HandshakeOptions = struct {
     server_random: [32]u8,
     /// Largest handshake fragment body this server emits.
     max_fragment_len: usize = DEFAULT_MAX_FRAGMENT,
+    /// Where this server's epoch 0 record numbering has already reached. A HelloVerifyRequest went
+    /// out on that epoch before this flight, so starting over at zero gives two records the same
+    /// (epoch, sequence) and a peer with an anti-replay window (RFC 6347 4.1.2.6) throws the second
+    /// one away. The caller passes one past the sequence its HelloVerifyRequest used.
+    first_record_seq: u48 = 0,
 };
 
 /// Carried from the server flight into the finish: the randoms, the ephemeral scalar, the running
@@ -256,7 +261,7 @@ pub fn serverFlight(opts: HandshakeOptions, client_hello_body: []const u8, out: 
         .server_random = opts.server_random,
         .server_eph_scalar = reduceP256Scalar(opts.server_eph_secret),
         .transcript = Sha256.init(.{}),
-        .next_record_seq = 0,
+        .next_record_seq = opts.first_record_seq,
     };
 
     // The cookie-bearing ClientHello opens the transcript (RFC 6347 4.2.6).
@@ -660,6 +665,40 @@ test "zix dtls: connection flight, four messages in message_seq order" {
         try std.testing.expectEqual(seq, header.sequence_number);
         try std.testing.expectEqual(@as(u16, EPOCH_HANDSHAKE), header.epoch);
     }
+}
+
+test "zix dtls: connection flight, the record numbering starts where the caller says" {
+    // A HelloVerifyRequest has already gone out on epoch 0 by the time this flight is built, so a
+    // flight that starts over at zero repeats a sequence number the peer has seen. Its anti-replay
+    // window (RFC 6347 4.1.2.6) then throws the whole ServerHello away, which is a handshake that
+    // stops dead against any peer that keeps such a window.
+    const key = try testSigningKey();
+
+    var hello_buf: [256]u8 = undefined;
+    const body = try dtls_hello.writeClientHelloBody(
+        &hello_buf,
+        dtls_record.VERSION_DTLS_1_2,
+        TEST_CLIENT_RANDOM,
+        "",
+        "cookie",
+        &.{CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256},
+    );
+
+    var options = testOptions(key);
+    options.first_record_seq = 8;
+
+    var out: [4096]u8 = undefined;
+    const flight = try serverFlight(options, body, &out);
+
+    var iterator: dtls_record.RecordIterator = .{ .datagram = flight.to_send };
+    var seq: u48 = 8;
+    while (try iterator.next()) |bytes| : (seq += 1) {
+        try std.testing.expectEqual(seq, (try dtls_record.parseHeader(bytes)).sequence_number);
+    }
+
+    // Four messages went out, and the state carries where to carry on from.
+    try std.testing.expectEqual(@as(u48, 12), seq);
+    try std.testing.expectEqual(@as(u48, 12), flight.state.next_record_seq);
 }
 
 test "zix dtls: connection flight, a hello without the supported suite is refused" {
