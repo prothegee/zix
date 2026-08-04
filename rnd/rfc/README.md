@@ -1,6 +1,6 @@
 # RFC Conformance Reference
 
-Spec source files and the MUST / MUST NOT conformance checklists derived from them, for the raw HTTP/1.1, HTTP/2, HTTP/3, and TLS engine work in 0.5.x, plus the RSA signing and response compression reference material.
+Spec source files and the MUST / MUST NOT conformance checklists derived from them, for the raw HTTP/1.1, HTTP/2, HTTP/3, and TLS engine work in 0.5.x, plus the RSA signing, response compression, and proxy gateway (zixer) reference material.
 
 Each checklist is grounded in the current-generation RFCs. Obsoleted predecessors are kept with an -obsoleted.txt suffix for diffing only, not for implementation.
 
@@ -67,6 +67,10 @@ graph TD
 | | 7517 | JWK key representation |
 | Compression | 1951 | DEFLATE Compressed Data Format |
 | | 7932 | Brotli Compressed Data Format (format + static dictionary in Appendix A) |
+| Proxy / gateway | 7239 | Forwarded HTTP Extension (standard form of X-Forwarded-*) |
+| | 9209 | The Proxy-Status HTTP Response Header Field |
+| | 8441 | Bootstrapping WebSockets with HTTP/2 (Extended CONNECT) |
+| ACME | 8555 | Automatic Certificate Management Environment (http-01 webroot flow) |
 
 ## Obsoleted (reference only)
 
@@ -81,7 +85,8 @@ graph TD
 - RFC 10008 has no checklist file of its own. It carries only four MUSTs, small enough to state here: refuse a QUERY whose `Content-Type` is missing or inconsistent with the content (section 2), never sniff the content to repair a missing or wrong type (section 2.1), incorporate the request content into any cache key (section 2.7), and process `Accept-Query` as an RFC 9651 structured field (section 3). zix refuses to cache a QUERY response outright, which satisfies 2.7 without a content-aware key, and leaves the type check to the handler because the engine cannot know which types a route accepts.
 - Strict surface totals: HTTP/1.1 about 130 MUST, HTTP/2 about 216, the HTTP/3 + QUIC path about 619 across five specs, TLS 1.3 about 330 in RFC 8446 alone.
 - The gating prerequisite for HTTP/3 and for any https or h2 is the TLS 1.3 handshake engine (RFC 8446) plus X.509 path validation (RFC 5280). The QUIC packet, header, and Retry protection math is pure-Zig on std.crypto, but the handshake state machine is what realistically forces binding a C TLS library.
-- Out-of-scope extensions, only if a feature lands: 7617 / 7616 / 6750 (auth schemes), 6265 (cookies), 8441 / 9220 (Extended CONNECT for WebSocket over h2 / h3).
+- Out-of-scope extensions, only if a feature lands: 7617 / 7616 / 6750 (auth schemes), 6265 (cookies), 9220 (Extended CONNECT for WebSocket over h3). 8441 moved out of this list when the proxy gateway work planned WebSocket on its h2 edge.
+- The Proxy / gateway and ACME rows ground the zixer proxy gateway work. The intermediary rules live in specs already vendored above: 9110 (hop-by-hop strip, Via) and 9112 (framing precedence, why the upstream leg is always re-originated). 7239 standardizes the Forwarded header, 9209 adds Proxy-Status for reporting why a gateway failed, 8441 carries WebSocket over the h2 edge, 8555 grounds the ACME http-01 webroot passthrough. 6455 (WebSocket) and 6066 / 7301 (SNI / ALPN routing) were already in tree.
 - TLS version policy: zix offers TLS 1.3 (RFC 8446, default) and optionally TLS 1.2 (RFC 5246) only. TLS 1.0 and 1.1 are deprecated by RFC 8996 (March 2021, "MUST NOT be used"), SSL 3.0 by RFC 7568, SSL 2.0 by RFC 6176. These deprecation memos are policy authorities, not implementation specs, so they are not vendored as .txt here. Offering TLS 1.0 / 1.1 caps an SSL Labs grade at B, so they are never put on the wire (the A+ target).
 - Compression rows are reference for the gzip / deflate / brotli response compression item. gzip and deflate ride `std.compress.flate` (the DEFLATE algorithm is RFC 1951, here for grounding), so RFC 1951 is informational, not authored. The container framing RFCs are NOT vendored because std handles them: zlib (RFC 1950, the on-the-wire `deflate` token wrapper) and gzip (RFC 1952). RFC 7932 IS the one that matters: brotli is a std-gap, so it is authored from this spec, dictionary and all (Appendix A).
 - The Crypto / RSA and JOSE rows are reference material, not a conformance checklist target. They ground the RSA signing roadmap item: std verifies RSA but cannot sign with an RSA private key, so PKCS#1 v2.2 (8017) is the spec to author from if an RSA certificate or RS256 issuance is ever required. RFC 8017 is the canonical one. 4055 / 5756 / 3279 cover the X.509 identifiers, 7518 / 7517 the JWS / JWK use.
