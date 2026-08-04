@@ -144,6 +144,21 @@ __*Update:*__
 
 <br>
 
+- New engine `zix.Webrtc`, a WebRTC peer (ADR-067):
+    - A browser cannot open a raw socket, and WebRTC is the only transport it offers a server that gives unreliable delivery, a per-channel ordering choice, and audio and video. `zix.Webrtc.Server.init(handler, config)` answers one, with the same flat config shape, the same `DispatchModel`, and the same `Tls.Context` as every other engine.
+    - Everything arrives on one UDP port and is sorted by its first byte (RFC 7983): ICE connectivity checks over STUN (RFC 8445 / 8489), the DTLS 1.2 handshake (RFC 6347), the SCTP association and its data channels (RFC 9260 / 8831 / 8832), and optionally SRTP media (RFC 3711 / 5764). SDP offer and answer (RFC 8866 / 8829) negotiate all of it. Written from the RFCs on `std.crypto`, with no OpenSSL and no C WebRTC library.
+    - Three events reach a handler: `CHANNEL_OPEN`, `CHANNEL_CLOSED`, and `MESSAGE`. A handler answers through `ctx.send`, `ctx.broadcast`, `ctx.openChannel`, `ctx.close`, and `ctx.channelCount`. A `MESSAGE` payload is borrowed for the length of the call and dies on the next one.
+    - Media forwarding is off by default. With `carry_media` on, the server becomes a selective forwarding unit: a packet is opened once with the sender's key, its RTP header is rewritten per receiver, and it is sealed again under each receiver's key. Nothing is decoded, there is no codec in the engine. RTCP is answered rather than forwarded, because a report names streams by their pre-rewrite identifiers. The server asks a source for a keyframe when a new receiver is admitted, since nothing in a browser asks on a watcher's behalf.
+    - All three dispatch models: `.ASYNC` runs one worker on every platform, `.EPOLL` and `.URING` run one SO_REUSEPORT worker per core on Linux. There is deliberately no CPU steering knob, unlike raw UDP and HTTP/3: a WebRTC peer is its 4-tuple, and receive-CPU steering would split one session across two workers mid-handshake. `max_peers` is counted per worker, so N workers hold up to N times that. The reach of `ctx.broadcast` is one worker.
+    - `run()` validates before it binds: `error.PortNotConfigured`, `error.IceCredentialsRequired`, `error.IceCredentialsInvalid`, `error.TlsRequired`, `error.UnsupportedCertificateKey` (the key must be ECDSA P-256, since the one DTLS 1.2 suite here is ECDHE-ECDSA), and `error.DispatchModelUnsupported` off Linux.
+    - `accept_any_peer_ice_ufrag` is new and off by default. A browser draws a fresh ICE ufrag for every peer connection, so without it every check from a browser is refused with 401. Turning it on leaves `ice_password` as the only gate, which is what it always effectively was with one server-wide credential set.
+    - Eight examples on ports 9081 to 9088, four driven by a browser: a WebSocket signalling relay, a STUN binding server, a data channel echo, a native zix-to-zix pair, a room chat, a file transfer, a media forwarding broadcast, and a mesh video call. Load the browser pages by the machine's network address rather than `localhost`, because a browser gathers no loopback candidate and will not pair with one.
+    - DTLS 1.2 landed in `src/tls/` with a flat `dtls_` prefix, beside the TLS 1.2 and 1.3 code it shares primitives with: record layer with anti-replay, handshake fragmentation and overlap-safe reassembly, stateless HMAC cookies, the retransmit state machine, RFC 5705 keying material export, the RFC 5764 `use_srtp` extension, plus a server driver and a client. It keeps no separate public surface.
+- Test runner result lines now name the example they run:
+    - A check reports as `zix-example-<file>-<arch>-<os>` instead of a short label, so a line names a file a reader can open, matching what the driver suites already print. The name is composed in `tests/runner/report_name.zig` (std only, with its own test step), because the runner builds its own copy of each example rather than running the installed binary. `--only` accepts either the short label or the printed name.
+
+<br>
+
 ## 0.5.x-rc2 (2026-07-27)
 
 __*Update:*__
