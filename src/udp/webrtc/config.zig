@@ -58,7 +58,14 @@ pub const WebrtcServerConfig = struct {
     ice_password: []const u8 = "",
     /// The peer's ufrag, the second half of that USERNAME. Empty means checks are refused with 401
     /// until it is known, which is what a caller with no signalling channel yet has to live with.
+    /// Ignored when accept_any_peer_ice_ufrag is set.
     peer_ice_ufrag: []const u8 = "",
+    /// Take a check whatever the peer calls itself, and let ice_password be the only gate. A peer
+    /// that draws its own ufrag per session needs this, which is every browser: it learns this
+    /// server's password from the answer it was handed, and every check it sends is verified
+    /// against that password, so the ufrag it picked adds nothing on top. Off by default, because a
+    /// server that names one peer should keep refusing everybody else.
+    accept_any_peer_ice_ufrag: bool = false,
 
     // DTLS (RFC 6347). Server side, the role a zix peer always takes.
 
@@ -143,4 +150,7 @@ test "zix webrtc: config credentials are empty until the caller fills them" {
     try std.testing.expectEqual(@as(usize, 0), config.peer_ice_ufrag.len);
     try std.testing.expect(config.tls == null);
     try std.testing.expect(config.logger == null);
+
+    // A server nobody named a peer for refuses everybody, rather than taking the first arrival.
+    try std.testing.expect(!config.accept_any_peer_ice_ufrag);
 }
