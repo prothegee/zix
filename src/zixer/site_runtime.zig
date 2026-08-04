@@ -8,9 +8,10 @@ const site_serve = @import("site_serve.zig");
 /// One started site inside the daemon.
 ///
 /// Note:
-/// - An http1 site with upstreams serves the proxy loop (phase 3). Every
-///   other engine binds and holds its socket, so the port is owned and a
-///   collision surfaces at start time, the loop attaches in its own phase.
+/// - An http1 site with upstreams or public_dir serves the edge loop
+///   (phases 3 and 4). Every other engine binds and holds its socket, so
+///   the port is owned and a collision surfaces at start time, the loop
+///   attaches in its own phase.
 pub const SiteRuntime = struct {
     name: []const u8,
     engine: site_cfg.Engine,
@@ -55,8 +56,8 @@ pub const SiteRuntime = struct {
             .HTTP1, .HTTP2, .GRPC => blk: {
                 var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
-                if (engine == .HTTP1 and cfg.upstreams.len > 0) {
-                    const state = site_serve.ServeState.create(allocator, io, server, cfg.upstreams, cfg.ip, port) catch |err| {
+                if (engine == .HTTP1 and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
+                    const state = site_serve.ServeState.create(allocator, io, server, &cfg, port) catch |err| {
                         server.deinit(io);
                         return err;
                     };
@@ -151,6 +152,21 @@ test "zix zixer: site runtime, http1 with upstreams serves and unbind frees the 
 
     var rebound = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, 64);
     rebound.unbind(std.testing.allocator, io);
+}
+
+test "zix zixer: site runtime, http1 static-only site serves without upstreams" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39882, .public_dir = "/var/www/pages" };
+
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "static.cfg", cfg, 64);
+    try std.testing.expect(runtime.listener == .http1_proxy);
+
+    runtime.unbind(std.testing.allocator, io);
 }
 
 test "zix zixer: site runtime, http3 engine also takes the udp path" {
