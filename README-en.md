@@ -633,7 +633,7 @@ The real entry points are the named steps. List them any time with `zig build -l
 | `zig build` | Compile the module graph only. No artifact is emitted, because zix is a source module. |
 | `zig build test-all` | Run unit, integration, behaviour, and edge tests. |
 | `zig build unit-test` | Run unit tests only. Also `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Build every example into `zig-out/bin/`. Binaries are named `example-<name>-<arch>-<os>`, so builds for several targets coexist. |
+| `zig build examples` | Build every example into `zig-out/bin/`. Binaries are named `zix-example-<name>-<arch>-<os>`, so builds for several targets coexist. |
 | `zig build example-<group>` | Build one group of examples, for example `example-http1` or `example-grpc`. |
 | `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. The installed binary carries the target triple, run it from there. |
 | `zig build test-runner-<name>` | Spawn a server plus client integration check, for example `test-runner-http1-websocket`. |
@@ -643,7 +643,7 @@ Built example binaries land in `zig-out/bin/`. To build all examples, then run o
 
 ```sh
 zig build examples                                   # build every example into zig-out/bin/
-./zig-out/bin/example-http1_websocket-x86_64-linux & # run one in the background
+./zig-out/bin/zix-example-http1_websocket-x86_64-linux & # run one in the background
 kill %1                                              # stop it
 ```
 
