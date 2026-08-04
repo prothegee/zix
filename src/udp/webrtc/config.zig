@@ -16,10 +16,23 @@ const std = @import("std");
 
 const Logger = @import("../../logger/logger.zig").Logger;
 const Tls = @import("../../tls/Tls.zig");
+const dtls_exporter = @import("../../tls/dtls_exporter.zig");
 
 /// The dispatch model, shared with the TCP engines and the other UDP engines (ADR-050). `.ASYNC` is
 /// the portable single-worker loop. `.EPOLL` / `.URING` run one worker per core and are Linux-only.
 pub const DispatchModel = @import("../../tcp/config.zig").DispatchModel;
+
+/// The SRTP profiles this engine offers when it carries media, best first (RFC 5764 4.1.2).
+///
+/// Note:
+/// - The 80-bit tag comes first. The 32-bit one saves six bytes a packet and gives up
+///   authentication strength for them, so it is answered only to a peer that offers nothing else.
+/// - The NULL profiles are not here at all. They authenticate without encrypting, which is not
+///   something to agree to on a path that was just given a certificate.
+pub const SRTP_PROFILES: []const dtls_exporter.SrtpProfile = &.{
+    .SRTP_AES128_CM_HMAC_SHA1_80,
+    .SRTP_AES128_CM_HMAC_SHA1_32,
+};
 
 pub const WebrtcServerConfig = struct {
     /// Io backend for the server. Caller-provided, must outlive the server.
@@ -76,6 +89,19 @@ pub const WebrtcServerConfig = struct {
     /// Largest handshake fragment body this server emits, sized so a record fits the path MTU.
     max_handshake_fragment: usize = 1024,
 
+    // Media (RFC 5764, RFC 3711). Off by default: a data channel server carries none.
+
+    /// Whether this server forwards audio and video between its peers. On, the handshake
+    /// negotiates SRTP through use_srtp and every peer's media goes to the rest of the worker's
+    /// room. Off, no keys are exported and RTP from a peer is dropped where it is routed.
+    ///
+    /// Note:
+    /// - The answer has its own switch. This one keys the transport, and
+    ///   `sdp/answer.zig Config.carry_media` is what tells the peer to send in the first place. A
+    ///   server that turns on one and not the other either promises media it will not carry, or
+    ///   keys a path nothing will use.
+    carry_media: bool = false,
+
     // SCTP and data channels (RFC 9260, RFC 8831).
 
     /// Largest SCTP packet that fits the path, DTLS overhead already taken off.
@@ -131,6 +157,16 @@ test "zix webrtc: config default field values" {
     try std.testing.expectEqual(@as(usize, 64), config.max_peers);
     try std.testing.expectEqual(@as(u32, 30000), config.peer_idle_ms);
     try std.testing.expectEqual(@as(u32, 250), config.tick_interval_ms);
+
+    // A data channel server carries no media, so nothing keys the media path unless it is asked
+    // for.
+    try std.testing.expect(!config.carry_media);
+}
+
+test "zix webrtc: config srtp profiles, the strong tag is offered first" {
+    try std.testing.expectEqual(@as(usize, 2), SRTP_PROFILES.len);
+    try std.testing.expectEqual(dtls_exporter.SrtpProfile.SRTP_AES128_CM_HMAC_SHA1_80, SRTP_PROFILES[0]);
+    try std.testing.expectEqual(dtls_exporter.SrtpProfile.SRTP_AES128_CM_HMAC_SHA1_32, SRTP_PROFILES[1]);
 }
 
 test "zix webrtc: config credentials are empty until the caller fills them" {
