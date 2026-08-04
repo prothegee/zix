@@ -69,8 +69,9 @@ pub const Options = struct {
     /// This agent's ICE credentials, the pair every check is verified against. Borrowed.
     ice_ufrag: []const u8,
     ice_password: []const u8,
-    /// The peer's ufrag, the second half of the USERNAME its checks carry. Borrowed.
-    peer_ice_ufrag: []const u8,
+    /// The peer's ufrag, the second half of the USERNAME its checks carry. Borrowed. Null takes
+    /// whatever the peer calls itself, which is what a peer that draws its own ufrag needs.
+    peer_ice_ufrag: ?[]const u8,
 
     /// The certificate this server presents, DER encoded. Borrowed.
     certificate_der: []const u8,
