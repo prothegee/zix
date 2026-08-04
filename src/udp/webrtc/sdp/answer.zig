@@ -64,6 +64,16 @@ pub const DEFAULT_MAX_MESSAGE_SIZE: u32 = 256 * 1024;
 /// The address the origin line names, so no local address leaks (RFC 8828).
 pub const ORIGIN_ADDRESS: []const u8 = "IN IP4 0.0.0.0";
 
+/// The largest session id to draw, and a mask that turns any draw into a legal one.
+///
+/// Note:
+/// - RFC 8829 5.2.1 wants a value representable as a 64-bit SIGNED integer, which is what browsers
+///   read it into. A full-range u64 draw is over that half the time, and the answer is then refused
+///   whole with "Invalid owner session id" before anything else in it is looked at.
+/// - It is 62 bits rather than 63 so the value stays clear of the signed boundary in every parser
+///   that reads it, and it is still far more than enough to be unique per session.
+pub const MAX_SESSION_ID: u64 = (@as(u64, 1) << 62) - 1;
+
 /// Everything that stops an answer from being built.
 pub const Error = error{
     /// The output buffer is too small.
@@ -90,7 +100,9 @@ pub const Config = struct {
     sctp_port: u16 = DEFAULT_SCTP_PORT,
     /// The largest message this endpoint will take, or zero for any size.
     max_message_size: u32 = DEFAULT_MAX_MESSAGE_SIZE,
-    /// Unique per session (RFC 8829 5.2.1), drawn by the caller.
+    /// Unique per session (RFC 8829 5.2.1), drawn by the caller. Keep it at or below
+    /// MAX_SESSION_ID: a browser reads this field into a signed 64-bit integer and refuses the
+    /// whole answer if it does not fit.
     session_id: u64,
     /// This endpoint's identifier for the DTLS association, sent only when the offer had one.
     tls_id: ?[]const u8 = null,
