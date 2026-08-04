@@ -6,6 +6,7 @@
 //!   they learn a datagram arrived.
 //! - The drain order lives here and nowhere else: send what the peer owes, tell the application what
 //!   arrived, then send what the application produced.
+//! - The fan-out behind `ctx.broadcast` too, because the table it walks is this worker's own.
 //!
 //! Note:
 //! - Reversing the last two loses a reply until the next datagram. connection.zig clears its
@@ -25,6 +26,7 @@ const common = @import("common.zig");
 const connection = @import("../connection.zig");
 const core = @import("../core.zig");
 const datagram = @import("../../datagram.zig");
+const fanout = @import("../fanout.zig");
 const table = @import("../table.zig");
 
 const IpAddress = std.Io.net.IpAddress;
@@ -220,11 +222,51 @@ pub const Worker = struct {
 
         while (peer.nextEvent(now_ms) catch null) |event| {
             var ctx = peer.context(now_ms) orelse break;
+            ctx.fanout = .{ .worker = @ptrCast(self), .deliver = deliverBroadcast };
 
             handler(event, &ctx) catch |err| common.logSystem(self.config, "handler returned {s}", .{@errorName(err)});
         }
 
         self.queueOutbound(peer, now_ms);
+    }
+
+    /// Take one handler's message to every peer this worker holds but the one it came from.
+    ///
+    /// Note:
+    /// - Each of those peers is drained on the spot, because the drain order above only reaches the
+    ///   peer whose datagram woke it. Without this a broadcast would sit in the other peers' send
+    ///   queues until each of them next said something.
+    /// - A peer with no channel open yet, or one whose send queue is full, is skipped rather than
+    ///   raised. A room does not lose a message over one member who cannot take it.
+    fn deliverBroadcast(worker: *anyopaque, from: IpAddress, now_ms: u64, kind: fanout.Kind, bytes: []const u8) usize {
+        const self: *Worker = @ptrCast(@alignCast(worker));
+
+        var took: usize = 0;
+        var walk = self.peers.iterator();
+
+        while (walk.next()) |peer| {
+            if (peer.address.eql(&from)) continue;
+
+            const channels = (peer.context(now_ms) orelse continue).channels;
+
+            var index: usize = 0;
+            var sent = false;
+
+            while (channels.at(index)) |open| : (index += 1) {
+                if (!open.isSendable()) continue;
+
+                channels.sendMessage(open.stream_identifier, kind, bytes, now_ms) catch continue;
+
+                sent = true;
+            }
+
+            if (!sent) continue;
+
+            self.queueOutbound(peer, now_ms);
+            took += 1;
+        }
+
+        return took;
     }
 
     /// Move everything one peer has waiting into the batch.
@@ -271,9 +313,31 @@ pub const Worker = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
+const builtin = @import("builtin");
+
 const Tls = @import("../../../tls/Tls.zig");
 const dialer = @import("../dialer.zig");
+const session = @import("test_session.zig");
+const socket_poll = @import("../../../utils/socket_poll.zig");
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+/// The two ports the whole-session tests below bind, kept out of the range the model files use.
+const TEST_ANY_UFRAG_PORT: u16 = 19099;
+const TEST_BROADCAST_PORT: u16 = 19100;
+
+/// Longest one turn of the loop below waits for a datagram that may not come.
+const TEST_POLL_MS: u32 = 5;
+
+/// What the last broadcast reached, for the test that checks a whole room got one message.
+var broadcast_reach: usize = 0;
+
+/// Take every message to the rest of the room instead of back to its sender.
+fn broadcastHandler(event: core.Event, ctx: *core.Context) !void {
+    switch (event) {
+        .MESSAGE => |message| broadcast_reach = ctx.broadcast(message.kind, message.payload),
+        else => {},
+    }
+}
 
 /// Mutable because Tls.Context owns its certificate bytes, so the field is not const.
 var test_certificate_der = [_]u8{ 0x30, 0x03, 0x01, 0x02, 0x03 };
@@ -452,6 +516,127 @@ test "zix webrtc: worker, a table at its ceiling drops the stranger and keeps th
     try std.testing.expectEqual(@as(usize, 2), worker.peers.live);
     try std.testing.expect(worker.peers.find(testAddress(5000)) != null);
     try std.testing.expect(worker.peers.find(testAddress(5002)) == null);
+}
+
+/// One turn of a dispatch loop, standing in for the model files: take everything waiting on the
+/// socket, let the deadlines run, and send what all of that produced.
+fn passOnce(served: *Worker, comptime handler: core.HandlerFn, socket: std.Io.net.Socket, io: std.Io) !void {
+    var buf: [1500]u8 = undefined;
+
+    while (try socket_poll.waitReady(socket.handle, socket_poll.READABLE, TEST_POLL_MS)) {
+        const message = try socket.receive(io, &buf);
+
+        served.serve(handler, message.from, message.data, common.monotonicMs());
+    }
+
+    served.sweep(handler, common.monotonicMs());
+    served.flush();
+}
+
+test "zix webrtc: worker, a peer whose ufrag the config never named still carries a session" {
+    // Both halves read common.monotonicMs, which only answers on Linux, so the sessions below are
+    // driven there and the models this worker serves are Linux-only anyway.
+    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+
+    var tls = try session.testContext(std.testing.allocator);
+    var config = session.testConfig(io, std.testing.allocator, &tls, TEST_ANY_UFRAG_PORT);
+    config.peer_ice_ufrag = "nobodybythisname";
+    config.accept_any_peer_ice_ufrag = true;
+
+    const socket = common.bindSocket(config) catch return error.SkipZigTest;
+    defer socket.close(io);
+
+    var served = try Worker.initSocket(config, socket);
+    defer served.deinit();
+
+    var driver = session.Driver.init(io, TEST_ANY_UFRAG_PORT, 0) catch return error.SkipZigTest;
+    defer driver.deinit();
+
+    var rounds: usize = 0;
+    while (rounds < session.MAX_ROUNDS and !driver.done()) : (rounds += 1) {
+        try driver.send();
+        try passOnce(&served, session.echoHandler, socket, io);
+        try driver.receive();
+    }
+
+    // The config names a peer this dialer is not, so the whole session rests on the ufrag compare
+    // having been let go of rather than on the name matching.
+    try std.testing.expectEqualStrings(session.MESSAGE, driver.echo());
+    try std.testing.expectEqual(@as(usize, 1), served.peers.live);
+}
+
+test "zix webrtc: worker, a broadcast reaches the room and skips the peer that sent it" {
+    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+
+    var tls = try session.testContext(std.testing.allocator);
+    var config = session.testConfig(io, std.testing.allocator, &tls, TEST_BROADCAST_PORT);
+    config.accept_any_peer_ice_ufrag = true;
+
+    const socket = common.bindSocket(config) catch return error.SkipZigTest;
+    defer socket.close(io);
+
+    var served = try Worker.initSocket(config, socket);
+    defer served.deinit();
+
+    var room: [3]session.Driver = undefined;
+    var joined: usize = 0;
+    defer for (room[0..joined]) |*member| member.deinit();
+
+    while (joined < room.len) : (joined += 1) {
+        room[joined] = session.Driver.init(io, TEST_BROADCAST_PORT, 0) catch return error.SkipZigTest;
+        room[joined].speak = false;
+    }
+
+    // Everybody joins first. A message sent before the last channel opened would reach a room that
+    // is not all there yet, and this is about what a full room does.
+    var rounds: usize = 0;
+    while (rounds < session.MAX_ROUNDS and !everyoneOpened(&room)) : (rounds += 1) {
+        for (&room) |*member| try member.send();
+
+        try passOnce(&served, broadcastHandler, socket, io);
+
+        for (&room) |*member| try member.receive();
+    }
+
+    try std.testing.expect(everyoneOpened(&room));
+    try std.testing.expectEqual(@as(usize, 3), served.peers.live);
+
+    broadcast_reach = 0;
+    try room[0].say(common.monotonicMs());
+
+    while (rounds < session.MAX_ROUNDS and !(room[1].done() and room[2].done())) : (rounds += 1) {
+        for (&room) |*member| try member.send();
+
+        try passOnce(&served, broadcastHandler, socket, io);
+
+        for (&room) |*member| try member.receive();
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), broadcast_reach);
+    try std.testing.expectEqualStrings(session.MESSAGE, room[1].echo());
+    try std.testing.expectEqualStrings(session.MESSAGE, room[2].echo());
+
+    // The one who spoke is the one the fan-out skips, so nothing came back to it.
+    try std.testing.expectEqual(@as(usize, 0), room[0].echo().len);
+}
+
+/// Whether every driver in a room has its channel, for the wait above.
+fn everyoneOpened(room: []const session.Driver) bool {
+    for (room) |*member| {
+        if (!member.opened()) return false;
+    }
+
+    return true;
 }
 
 test "zix webrtc: worker, the sweep lets go of a peer that stopped speaking" {
