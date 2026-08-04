@@ -80,6 +80,7 @@
     - [Channel](./README-en.md#channel)
     - [UDP](./README-en.md#udp)
     - [HTTP/3](./README-en.md#http3)
+    - [WebRTC](./README-en.md#webrtc)
     - [Logger](./README-en.md#logger)
 - [Drivers](./README-en.md#drivers)
 
@@ -102,6 +103,7 @@
 | [`docs/hld-logger-en.md`](docs/hld-logger-en.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
 | [`docs/hld-tls-en.md`](docs/hld-tls-en.md) | TLS: goals, version policy, Tls.Context, handshake flow, engine integration, client |
 | [`docs/hld-http3-en.md`](docs/hld-http3-en.md) | HTTP/3 (QUIC): goals, runtime model, API, router, dispatch models, handshake, QPACK, memory model |
+| [`docs/hld-webrtc-en.md`](docs/hld-webrtc-en.md) | WebRTC: goals, runtime model, API, ICE-lite, data channels, media forwarding, dispatch models, memory model |
 | [`docs/lld-http-en.md`](docs/lld-http-en.md) | HTTP: internal data structures and algorithms |
 | [`docs/lld-http1-en.md`](docs/lld-http1-en.md) | HTTP/1: internal parsing, write helpers, router, EPOLL engine, WebSocket codec |
 | [`docs/lld-http2-en.md`](docs/lld-http2-en.md) | HTTP/2: mux state machine, per-worker stream-slot pool, HPACK cache, frame loop, flow control, dispatch |
@@ -114,6 +116,7 @@
 | [`docs/lld-logger-en.md`](docs/lld-logger-en.md) | Logger: internal write buffer, spinlock, rotation algorithm |
 | [`docs/lld-tls-en.md`](docs/lld-tls-en.md) | TLS: wire / handshake / key-schedule / record internals, Tls.Context validate, serve paths |
 | [`docs/lld-http3-en.md`](docs/lld-http3-en.md) | HTTP/3 (QUIC): per-layer internals (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
+| [`docs/lld-webrtc-en.md`](docs/lld-webrtc-en.md) | WebRTC: per-layer internals (demux, STUN, ICE, DTLS, SCTP, data channels, SDP, media, dispatch) |
 | [`docs/zix-deploy-en.md`](docs/zix-deploy-en.md) | Deployment: build a Docker image (zig fetch or vendor) and configure the TLS context for Ed25519 / ECDSA P-256 / RSA |
 | [`docs/zix-config-en.md`](docs/zix-config-en.md) | Config reference: every config field with its default, effect, and tuning trade-offs (server engines plus the TLS context) |
 | [`docs/concurrency-en.md`](docs/concurrency-en.md) | Dispatch models: ASYNC, EPOLL, URING. Thread counts, protocol applicability. |
@@ -293,8 +296,8 @@ patched, so the supply chain is the Zig toolchain plus this repository.
 __*1. Full protocol stack under one roof:*__
 
 Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (hot-path-optimized
-variant), Http2 (h2c), Http3 (HTTP/3 over QUIC), Grpc (gRPC over h2c), Fix (FIX 4.x), plus
-Channel and Logger.
+variant), Http2 (h2c), Http3 (HTTP/3 over QUIC), Webrtc (data channels and media), Grpc
+(gRPC over h2c), Fix (FIX 4.x), plus Channel and Logger.
 
 > One coherent memory/threading model across monolith, micro-service, and
 modular-micro-service backends, instead of stitching together separate libraries with
@@ -429,7 +432,15 @@ __*16. HTTP/3 over QUIC, pure-Zig:*__
 
 <br>
 
-__*17. Response compression (gzip / deflate / brotli):*__
+__*17. WebRTC peer, pure-Zig:*__
+
+`zix.Webrtc` answers a browser over WebRTC: ICE-lite (RFC 8445) over STUN, DTLS 1.2 (RFC 6347), SCTP data channels (RFC 9260 / 8831 / 8832), SDP offer and answer, and optional SRTP media forwarding (RFC 3711 / 5764), all on one UDP port and all written from the RFCs on `std.crypto`. Media is forwarded, never decoded: there is no codec in the engine.
+
+> The one transport a browser offers that gives unreliable delivery, per-channel ordering, and audio and video, with no C WebRTC library and the same config shape and dispatch models as every other engine.
+
+<br>
+
+__*18. Response compression (gzip / deflate / brotli):*__
 
 `Accept-Encoding` negotiation on `zix.Http1` and `zix.Http`: gzip and deflate on `std.compress.flate` (a small dynamic body takes the in-tree fast gzip encoder instead), plus brotli from an in-tree encoder / decoder authored from RFC 7932 (`std` has no brotli). Opt-in per server, with a size floor, already-compressed media-type skip, and `Vary: Accept-Encoding`. HTTP/3 serves pre-compressed static bodies with `content-encoding`.
 
@@ -437,7 +448,7 @@ __*17. Response compression (gzip / deflate / brotli):*__
 
 <br>
 
-__*18. Comptime routing, zero allocation:*__
+__*19. Comptime routing, zero allocation:*__
 
 One comptime `Router` shared by `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, and `zix.Http3`: the route table is a comptime argument, so matching (`.EXACT` via a `StaticStringMap`, `.PARAM`, longest-prefix `.PREFIX`, query stripped first) does no runtime allocation.
 
@@ -445,7 +456,7 @@ One comptime `Router` shared by `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`
 
 <br>
 
-__*19. Bounded, work-proportional memory:*__
+__*20. Bounded, work-proportional memory:*__
 
 Explicit, capped allocation: an arena per connection or request, per-worker stream-slot pools on the multiplexed h2 / gRPC engines (resident stream memory tracks concurrent streams, not connections * max_streams, cutting 4096-connection footprint 6 to 12x), and a lock-free response cache. No hidden per-request heap growth.
 
@@ -453,7 +464,7 @@ Explicit, capped allocation: an arena per connection or request, per-worker stre
 
 <br>
 
-__*20. Hermetic conformance test harness:*__
+__*21. Hermetic conformance test harness:*__
 
 Tests run with no external tools: a 69-protocol runner driving hand-rolled native clients (raw sockets, a native QUIC client, native TLS), plus RFC-vector unit tests for the wire codecs (TLS key schedule, HPACK / QPACK, QUIC packets), discovered through `std.testing.refAllDecls`.
 
@@ -461,7 +472,7 @@ Tests run with no external tools: a 69-protocol runner driving hand-rolled nativ
 
 <br>
 
-__*21. Static file serving with range support:*__
+__*22. Static file serving with range support:*__
 
 `public_dir` on all four HTTP engines serves unmatched routes as files before the 404 fallback, with a traversal-safe path check, and a multipart upload companion (`public_dir_upload`) on `zix.Http` and `zix.Http1`. Range requests (RFC 7233, 206 / 416) are served on `zix.Http`, `zix.Http1`, and `zix.Http2`, whole-file only on `zix.Http3`.
 
@@ -471,7 +482,7 @@ Set `public_dir_cache_ttl_ms` above 0 to keep a resolved file open with its resp
 
 <br>
 
-__*22. Bilingual multi-documentation:*__
+__*23. Bilingual multi-documentation:*__
 
 Every doc has it own variants.
 
@@ -2121,6 +2132,78 @@ curl --http3-only -k https://127.0.0.1:9063/
 **Example:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) serves `/`, a query-sum `/baseline2`, a 256 KiB `/big` that exercises the multi-packet streamed send path, and a `/negotiated` that serves a brotli-precompressed body with `content-encoding: br` when the client accepts br.
 
 See [`docs/hld-http3-en.md`](docs/hld-http3-en.md) and [`docs/lld-http3-en.md`](docs/lld-http3-en.md) for the full design and per-layer internals.
+
+<br>
+
+### WebRTC
+
+`zix.Webrtc` is a WebRTC peer, which is what lets a browser reach the server over something other than HTTP or WebSocket: unreliable delivery, a per-channel ordering choice, and audio and video. Everything arrives on one UDP port and is sorted by its first byte (RFC 7983): ICE connectivity checks carried over STUN, the DTLS 1.2 handshake, the SCTP association and its data channels, and optionally SRTP media. All of it is written from the RFCs, with `std.crypto` underneath and no OpenSSL.
+
+zix answers, it never gathers. The ICE agent is lite and the DTLS role is always server, which is what fixes data channels to odd stream identifiers.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+fn onEvent(event: zix.Webrtc.Event, ctx: *zix.Webrtc.Context) !void {
+    switch (event) {
+        .CHANNEL_OPEN => |channel| std.log.info("channel {d} open", .{channel}),
+        .CHANNEL_CLOSED => |channel| std.log.info("channel {d} closed", .{channel}),
+        .MESSAGE => |message| try ctx.send(message.channel, message.kind, message.payload),
+    }
+}
+
+pub fn main(process: std.process.Init) !void {
+    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+        .cert_path = "examples/certs/ecdsa_p256_cert.pem",
+        .key_path  = "examples/certs/ecdsa_p256_key.pem",
+    });
+    defer tls.deinit();
+
+    var server = zix.Webrtc.Server.init(onEvent, .{
+        .io             = process.io,
+        .allocator      = std.heap.smp_allocator,
+        .ip             = "127.0.0.1",
+        .port           = 9083,
+        .dispatch_model = .ASYNC,
+        .ice_ufrag      = "zixanswer",
+        .ice_password   = "zixanswerpasswordaaaaaa",
+        .peer_ice_ufrag = "zixdialer",
+        .tls            = &tls,
+    });
+    defer server.deinit();
+
+    try server.run();
+}
+```
+
+**HandlerFn:** `fn(event: zix.Webrtc.Event, ctx: *zix.Webrtc.Context) anyerror!void`
+
+- Three events: `CHANNEL_OPEN` and `CHANNEL_CLOSED` carry a stream identifier, `MESSAGE` carries `channel`, `kind` and `payload`. A `payload` is borrowed for the length of the call and dies on the next one, so anything worth keeping has to be copied out.
+- `ctx` answers: `send(channel, kind, bytes)`, `broadcast(kind, bytes)`, `openChannel(request)`, `close(channel)`, `channelCount()`. The reach of `broadcast` is one worker, which is the whole room under `.ASYNC` and this core's share under `.EPOLL` or `.URING`.
+- `run()` validates before it binds: `error.PortNotConfigured`, `error.IceCredentialsRequired`, `error.IceCredentialsInvalid`, `error.TlsRequired`, `error.UnsupportedCertificateKey` (the key must be ECDSA P-256), and `error.DispatchModelUnsupported` off Linux.
+- A browser draws a fresh ICE ufrag for every peer connection, so a browser-facing server sets `accept_any_peer_ice_ufrag = true` and lets `ice_password` be the gate.
+
+**Dispatch models:** `.ASYNC` runs one worker and runs everywhere. `.EPOLL` and `.URING` run one SO_REUSEPORT worker per core and are Linux-only. There is deliberately no CPU steering knob here: a WebRTC peer is its 4-tuple, and steering would split one session across two workers mid-handshake.
+
+**Media:** off by default. With `carry_media` on, the server forwards audio and video between its peers without decoding a frame: a packet is opened once with the sender's key, its RTP header is rewritten per receiver, and it is sealed again under each receiver's key. RTCP is answered, never forwarded.
+
+**Examples:** eight, on ports 9081 to 9088.
+
+| Example | Port | What it shows |
+| :- | :- | :- |
+| [webrtc_signaling](examples/webrtc/webrtc_signaling.zig) | 9081 | a WebSocket room relay, zix is not a peer |
+| [webrtc_stun](examples/webrtc/webrtc_stun.zig) | 9082 | a STUN binding server plus a page that reads its own reflexive address |
+| [webrtc_datachannel_echo](examples/webrtc/webrtc_datachannel_echo.zig) | 9083 | the smallest server, echoes what a peer sends |
+| [webrtc_native_pair](examples/webrtc/webrtc_native_pair.zig) | dials 9083 | zix dialing zix, no browser involved |
+| [webrtc_datachannel_chat](examples/webrtc/webrtc_datachannel_chat.zig) | 9085 | one message to every other browser in the room |
+| [webrtc_file_transfer](examples/webrtc/webrtc_file_transfer.zig) | 9086 | a binary channel carrying a file |
+| [webrtc_sfu_broadcast](examples/webrtc/webrtc_sfu_broadcast.zig) | 9087 | the forwarding unit, one sender and many watchers |
+| [webrtc_video_call](examples/webrtc/webrtc_video_call.zig) | 9088 | a mesh call through the relay, zix carries no media |
+
+Load the browser pages by the machine's network address, not `localhost`: a browser gathers no loopback candidate and will not pair with one. `webrtc_sfu_broadcast` is the exception, because its sender page also needs a secure context for the camera, so it stays on `http://localhost` and asks for the address to publish through a `?at=` query parameter.
+
+See [`docs/hld-webrtc-en.md`](docs/hld-webrtc-en.md) and [`docs/lld-webrtc-en.md`](docs/lld-webrtc-en.md) for the full design and per-layer internals.
 
 <br>
 

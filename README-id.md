@@ -80,6 +80,7 @@
     - [Channel](./README-id.md#channel)
     - [UDP](./README-id.md#udp)
     - [HTTP/3](./README-id.md#http3)
+    - [WebRTC](./README-id.md#webrtc)
     - [Logger](./README-id.md#logger)
 - [Driver](./README-id.md#driver)
 
@@ -102,6 +103,7 @@
 | [`docs/hld-logger-id.md`](docs/hld-logger-id.md) | Logger: tujuan, API, metode log, format, rotasi file, pemasangan protokol |
 | [`docs/hld-tls-id.md`](docs/hld-tls-id.md) | TLS: tujuan, version policy, Tls.Context, alur handshake, integrasi engine, client |
 | [`docs/hld-http3-id.md`](docs/hld-http3-id.md) | HTTP/3 (QUIC): tujuan, runtime model, API, router, dispatch model, handshake, QPACK, memory model |
+| [`docs/hld-webrtc-id.md`](docs/hld-webrtc-id.md) | WebRTC: tujuan, runtime model, API, ICE-lite, data channel, forwarding media, dispatch model, memory model |
 | [`docs/lld-http-id.md`](docs/lld-http-id.md) | HTTP: struktur data internal dan algoritma |
 | [`docs/lld-http1-id.md`](docs/lld-http1-id.md) | HTTP/1: parsing internal, write helper, router, engine EPOLL, codec WebSocket |
 | [`docs/lld-http2-id.md`](docs/lld-http2-id.md) | HTTP/2: mux state machine, pool slot stream per worker, cache HPACK, frame loop, flow control, dispatch |
@@ -114,6 +116,7 @@
 | [`docs/lld-logger-id.md`](docs/lld-logger-id.md) | Logger: buffer tulis internal, spinlock, algoritma rotasi |
 | [`docs/lld-tls-id.md`](docs/lld-tls-id.md) | TLS: internal wire / handshake / key-schedule / record, validate Tls.Context, jalur serve |
 | [`docs/lld-http3-id.md`](docs/lld-http3-id.md) | HTTP/3 (QUIC): internal per-layer (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
+| [`docs/lld-webrtc-id.md`](docs/lld-webrtc-id.md) | WebRTC: internal per-layer (demux, STUN, ICE, DTLS, SCTP, data channel, SDP, media, dispatch) |
 | [`docs/zix-deploy-id.md`](docs/zix-deploy-id.md) | Deployment: bangun Docker image (zig fetch atau vendor) dan konfigurasi TLS context untuk Ed25519 / ECDSA P-256 / RSA |
 | [`docs/zix-config-id.md`](docs/zix-config-id.md) | Referensi config: tiap field config dengan default, efek, dan trade-off tuning-nya (engine server plus TLS context) |
 | [`docs/concurrency-id.md`](docs/concurrency-id.md) | Model dispatch: ASYNC, EPOLL, URING. Jumlah thread, kecocokan protokol. |
@@ -293,8 +296,8 @@ di-pin, atau terus di-patch, jadi supply chain-nya adalah Zig toolchain plus rep
 __*1. Stack protokol lengkap dalam satu tempat:*__
 
 Tcp (raw), Udp, Uds (Unix domain sockets), Http (HTTP/1.1), Http1 (varian
-hot-path-optimized), Http2 (h2c), Http3 (HTTP/3 melalui QUIC), Grpc (gRPC melalui h2c), Fix
-(FIX 4.x), plus Channel dan Logger.
+hot-path-optimized), Http2 (h2c), Http3 (HTTP/3 melalui QUIC), Webrtc (data channel dan
+media), Grpc (gRPC melalui h2c), Fix (FIX 4.x), plus Channel dan Logger.
 
 > Satu model memori/threading yang koheren untuk backend monolith, micro-service, dan
 modular-micro-service, alih-alih menggabungkan banyak library terpisah dengan
@@ -429,7 +432,15 @@ __*16. HTTP/3 di atas QUIC, pure-Zig:*__
 
 <br>
 
-__*17. Kompresi respons (gzip / deflate / brotli):*__
+__*17. Peer WebRTC, pure-Zig:*__
+
+`zix.Webrtc` menjawab browser lewat WebRTC: ICE-lite (RFC 8445) di atas STUN, DTLS 1.2 (RFC 6347), data channel SCTP (RFC 9260 / 8831 / 8832), offer dan answer SDP, serta forwarding media SRTP opsional (RFC 3711 / 5764), semuanya di satu port UDP dan semuanya ditulis dari RFC di atas `std.crypto`. Media diteruskan, tidak pernah didekode: tidak ada codec di dalam engine.
+
+> Satu-satunya transport yang ditawarkan browser yang memberi pengiriman tidak reliabel, urutan per channel, serta audio dan video, tanpa C WebRTC library dan dengan bentuk config serta dispatch model yang sama seperti engine lain.
+
+<br>
+
+__*18. Kompresi respons (gzip / deflate / brotli):*__
 
 Negosiasi `Accept-Encoding` pada `zix.Http1` dan `zix.Http`: gzip dan deflate di atas `std.compress.flate` (body dinamis kecil memakai encoder gzip cepat in-tree), plus brotli dari encoder / decoder in-tree yang ditulis dari RFC 7932 (`std` tidak punya brotli). Opt-in per server, dengan size floor, skip media-type yang sudah ter-compressed, dan `Vary: Accept-Encoding`. HTTP/3 menyajikan body statis pre-compressed dengan `content-encoding`.
 
@@ -437,7 +448,7 @@ Negosiasi `Accept-Encoding` pada `zix.Http1` dan `zix.Http`: gzip dan deflate di
 
 <br>
 
-__*18. Routing comptime, tanpa alokasi:*__
+__*19. Routing comptime, tanpa alokasi:*__
 
 Satu `Router` comptime yang dibagikan oleh `zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, dan `zix.Http3`: route table adalah argumen comptime, jadi matching (`.EXACT` via `StaticStringMap`, `.PARAM`, `.PREFIX` longest-prefix, query di-strip lebih dulu) tidak melakukan alokasi runtime.
 
@@ -445,7 +456,7 @@ Satu `Router` comptime yang dibagikan oleh `zix.Http`, `zix.Http1`, `zix.Http2`,
 
 <br>
 
-__*19. Memori terbatas, proporsional terhadap kerja:*__
+__*20. Memori terbatas, proporsional terhadap kerja:*__
 
 Alokasi eksplisit dan ter-cap: satu arena per koneksi atau request, pool slot-stream per-worker pada engine h2 / gRPC multipleks (memori stream residen mengikuti stream konkuren, bukan connections * max_streams, memangkas footprint 4096-koneksi 6 sampai 12x), dan response cache lock-free. Tanpa pertumbuhan heap per-request yang tersembunyi.
 
@@ -453,7 +464,7 @@ Alokasi eksplisit dan ter-cap: satu arena per koneksi atau request, pool slot-st
 
 <br>
 
-__*20. Harness test conformance yang hermetik:*__
+__*21. Harness test conformance yang hermetik:*__
 
 Test berjalan tanpa tool eksternal: runner 69-protokol yang menggerakkan client native buatan sendiri (raw socket, client QUIC native, TLS native), plus unit test vektor-RFC untuk codec wire (TLS key schedule, HPACK / QPACK, packet QUIC), ditemukan lewat `std.testing.refAllDecls`.
 
@@ -461,7 +472,7 @@ Test berjalan tanpa tool eksternal: runner 69-protokol yang menggerakkan client 
 
 <br>
 
-__*21. Static file serving dengan dukungan range:*__
+__*22. Static file serving dengan dukungan range:*__
 
 `public_dir` pada keempat engine HTTP menyajikan route yang tak cocok sebagai file sebelum fallback 404, dengan pemeriksaan path aman-traversal, dan companion upload multipart (`public_dir_upload`) pada `zix.Http` dan `zix.Http1`. Range request (RFC 7233, 206 / 416) disajikan pada `zix.Http`, `zix.Http1`, dan `zix.Http2`, hanya file utuh pada `zix.Http3`.
 
@@ -471,7 +482,7 @@ Atur `public_dir_cache_ttl_ms` di atas 0 agar file yang sudah di-resolve tetap t
 
 <br>
 
-__*22. Dokumentasi multi-bahasa:*__
+__*23. Dokumentasi multi-bahasa:*__
 
 Setiap dokumen punya variannya sendiri.
 
@@ -2130,6 +2141,78 @@ curl --http3-only -k https://127.0.0.1:9063/
 **Contoh:** [examples/tls/http3_basic.zig](examples/tls/http3_basic.zig) (port 9063) menyajikan `/`, query-sum `/baseline2`, `/big` 256 KiB yang menguji jalur kirim streamed multi-packet, dan `/negotiated` yang menyajikan body brotli-precompressed dengan `content-encoding: br` saat klien menerima br.
 
 Lihat [`docs/hld-http3-id.md`](docs/hld-http3-id.md) dan [`docs/lld-http3-id.md`](docs/lld-http3-id.md) untuk desain lengkap dan internal per-layer.
+
+<br>
+
+### WebRTC
+
+`zix.Webrtc` adalah peer WebRTC, yang memungkinkan browser menjangkau server lewat sesuatu selain HTTP atau WebSocket: pengiriman tidak reliabel, pilihan urutan per channel, serta audio dan video. Semuanya datang di satu port UDP lalu dipilah dari byte pertamanya (RFC 7983): ICE connectivity check yang dibawa lewat STUN, handshake DTLS 1.2, association SCTP beserta data channel-nya, dan opsional media SRTP. Semuanya ditulis dari RFC, dengan `std.crypto` di bawahnya dan tanpa OpenSSL.
+
+zix menjawab, ia tidak pernah gathering. ICE agent-nya lite dan role DTLS-nya selalu server, dan itulah yang mengunci data channel ke stream identifier ganjil.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+fn onEvent(event: zix.Webrtc.Event, ctx: *zix.Webrtc.Context) !void {
+    switch (event) {
+        .CHANNEL_OPEN => |channel| std.log.info("channel {d} open", .{channel}),
+        .CHANNEL_CLOSED => |channel| std.log.info("channel {d} closed", .{channel}),
+        .MESSAGE => |message| try ctx.send(message.channel, message.kind, message.payload),
+    }
+}
+
+pub fn main(process: std.process.Init) !void {
+    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+        .cert_path = "examples/certs/ecdsa_p256_cert.pem",
+        .key_path  = "examples/certs/ecdsa_p256_key.pem",
+    });
+    defer tls.deinit();
+
+    var server = zix.Webrtc.Server.init(onEvent, .{
+        .io             = process.io,
+        .allocator      = std.heap.smp_allocator,
+        .ip             = "127.0.0.1",
+        .port           = 9083,
+        .dispatch_model = .ASYNC,
+        .ice_ufrag      = "zixanswer",
+        .ice_password   = "zixanswerpasswordaaaaaa",
+        .peer_ice_ufrag = "zixdialer",
+        .tls            = &tls,
+    });
+    defer server.deinit();
+
+    try server.run();
+}
+```
+
+**HandlerFn:** `fn(event: zix.Webrtc.Event, ctx: *zix.Webrtc.Context) anyerror!void`
+
+- Tiga event: `CHANNEL_OPEN` dan `CHANNEL_CLOSED` membawa stream identifier, `MESSAGE` membawa `channel`, `kind` dan `payload`. Sebuah `payload` dipinjam selama panggilan itu saja dan mati pada panggilan berikutnya, jadi apa pun yang perlu disimpan harus disalin keluar.
+- `ctx` adalah tempat menjawab: `send(channel, kind, bytes)`, `broadcast(kind, bytes)`, `openChannel(request)`, `close(channel)`, `channelCount()`. Jangkauan `broadcast` adalah satu worker, yang berarti seluruh room di bawah `.ASYNC` dan bagian room milik core ini di bawah `.EPOLL` atau `.URING`.
+- `run()` memvalidasi sebelum bind: `error.PortNotConfigured`, `error.IceCredentialsRequired`, `error.IceCredentialsInvalid`, `error.TlsRequired`, `error.UnsupportedCertificateKey` (kuncinya harus ECDSA P-256), dan `error.DispatchModelUnsupported` di luar Linux.
+- Browser menarik ufrag ICE baru untuk setiap peer connection, jadi server yang menghadap browser mengisi `accept_any_peer_ice_ufrag = true` lalu membiarkan `ice_password` menjadi gerbangnya.
+
+**Dispatch model:** `.ASYNC` menjalankan satu worker dan berjalan di mana saja. `.EPOLL` dan `.URING` menjalankan satu worker SO_REUSEPORT per core dan khusus Linux. Di sini sengaja tidak ada knob steering CPU: satu peer WebRTC adalah 4-tuple-nya, dan steering akan memecah satu sesi ke dua worker di tengah handshake.
+
+**Media:** mati secara default. Dengan `carry_media` menyala, server meneruskan audio dan video antar peer-nya tanpa mendekode satu frame pun: paket dibuka sekali dengan kunci pengirim, header RTP-nya ditulis ulang untuk tiap penerima, lalu disegel kembali dengan kunci masing-masing penerima. RTCP dijawab, tidak pernah diteruskan.
+
+**Example:** delapan, di port 9081 sampai 9088.
+
+| Example | Port | Yang ditunjukkan |
+| :- | :- | :- |
+| [webrtc_signaling](examples/webrtc/webrtc_signaling.zig) | 9081 | relay room WebSocket, zix bukan peer |
+| [webrtc_stun](examples/webrtc/webrtc_stun.zig) | 9082 | server STUN binding plus halaman yang membaca alamat reflexive-nya sendiri |
+| [webrtc_datachannel_echo](examples/webrtc/webrtc_datachannel_echo.zig) | 9083 | server terkecil, memantulkan yang dikirim peer |
+| [webrtc_native_pair](examples/webrtc/webrtc_native_pair.zig) | memanggil 9083 | zix memanggil zix, tanpa browser |
+| [webrtc_datachannel_chat](examples/webrtc/webrtc_datachannel_chat.zig) | 9085 | satu pesan ke setiap browser lain di room |
+| [webrtc_file_transfer](examples/webrtc/webrtc_file_transfer.zig) | 9086 | channel biner yang membawa sebuah berkas |
+| [webrtc_sfu_broadcast](examples/webrtc/webrtc_sfu_broadcast.zig) | 9087 | unit forwarding, satu pengirim dan banyak penonton |
+| [webrtc_video_call](examples/webrtc/webrtc_video_call.zig) | 9088 | panggilan mesh lewat relay, zix tidak membawa media |
+
+Buka halaman browser lewat alamat jaringan mesin, bukan `localhost`: browser tidak mengumpulkan candidate loopback dan tidak akan memasangkannya. `webrtc_sfu_broadcast` adalah pengecualian, karena halaman pengirimnya juga butuh secure context untuk kamera, jadi ia tetap di `http://localhost` lalu menanyakan alamat yang akan dipublikasikan lewat query parameter `?at=`.
+
+Lihat [`docs/hld-webrtc-id.md`](docs/hld-webrtc-id.md) dan [`docs/lld-webrtc-id.md`](docs/lld-webrtc-id.md) untuk desain lengkap dan internal per-layer.
 
 <br>
 
