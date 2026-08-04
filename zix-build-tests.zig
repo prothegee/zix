@@ -51,9 +51,21 @@ pub fn addSteps(
     const isolate_step = testRunStep(b, isolate_tests, foreign_target, "tests/runner/isolate.zig");
     isolate_step.dependOn(zix_tests_step);
 
+    // The name a check reports itself as, for the same reason: std only, so it needs no slot in the
+    // suite lists below.
+    const report_name_mod = b.createModule(.{
+        .root_source_file = b.path("tests/runner/report_name.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const report_name_tests = b.addTest(.{ .root_module = report_name_mod });
+    const report_name_step = testRunStep(b, report_name_tests, foreign_target, "tests/runner/report_name.zig");
+    report_name_step.dependOn(isolate_step);
+
     const test_step = b.step("unit-test", "Run unit tests");
     test_step.dependOn(zix_tests_step);
     test_step.dependOn(isolate_step);
+    test_step.dependOn(report_name_step);
 
     // --------------------------------------------------------- //
 
