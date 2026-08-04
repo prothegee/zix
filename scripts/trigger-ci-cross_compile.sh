@@ -73,4 +73,5 @@ fi
 for workflow in "${workflows[@]}"; do
     echo "dispatching zig-${workflow}-${ZIG_VERSION}.yml on ${REF}"
     gh workflow run "zig-${workflow}-${ZIG_VERSION}.yml" --repo "$REPO" --ref "$REF"
+    sleep 12
 done
