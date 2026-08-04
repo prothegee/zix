@@ -68,7 +68,7 @@ pub const Tcp = @import("tcp/Tcp.zig");
 - Handler atau callback dibakukan ke dalam tipe server pada `init` (comptime), dan `io` adalah field config, sehingga `run()` tidak menerima argumen (ADR-038, ADR-039).
 - `initFramed` adalah kontrak yang benar-benar berbeda, bukan wrapper kenyamanan. `HandlerFn` per-connection memiliki socket dan blocking pada read sinkron, yang tidak bisa digerakkan loop completion single-threaded, jadi jalur ring memerlukan `FrameFn` per-frame yang non-blocking. Untuk handler per-connection, `.URING` melipat ke `.EPOLL`.
 - `initArgs` / `initFramedArgs` hanya menambah parsing `--ip` / `--port`, sehingga satu binary yang sudah di-build bisa bind ke address atau port berbeda tanpa rebuild. Contoh memakai `init` / `initFramed` polos. Pakai varian `Args` saat kamu ingin override runtime.
-- `zix.Udp` punya split `init` / `initArgs` yang sama. Lima engine server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`) hanya punya `init`.
+- `zix.Udp` punya split `init` / `initArgs` yang sama. Tujuh engine server (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Fix`) hanya punya `init`.
 
 ---
 
