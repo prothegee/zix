@@ -148,3 +148,11 @@ The `.EPOLL` / `.URING` path (ADR-052). `runTlsMux` spawns one worker per core, 
 ## tls12_*.zig
 
 The 1.2 track mirrors the 1.3 layers: `tls12_prf` (SHA-256 PRF key schedule), `tls12_record` (1.2 AES-GCM with the explicit 8-byte nonce), `tls12_version` (`selectVersion` + the downgrade sentinel in ServerHello.random, RFC 8446 4.1.3), `tls12_connection` (`serverFlight1` + `serverFinish`, ECDHE-ECDSA-AES128-GCM, secp256r1), and `tls12_client`.
+
+## dtls_*.zig
+
+The DTLS 1.2 track (RFC 6347), reached only by `zix.Webrtc`. Nine files, and `zix.Tls` re-exports none of them. Per-file internals are in [`docs/lld-webrtc-en.md`](lld-webrtc-en.md), because every trap here is a WebRTC-facing one. The three that matter most to a TLS reader:
+
+- `dtls_connection.zig` composes its **own** flights (2, 4 and 6) and reuses only leaf primitives from the 1.2 track. It cannot reuse `tls12_connection.zig`: that file hashes TLS-framed bytes, while RFC 6347 section 4.2.6 needs the transcript taken over DTLS 12-byte headers as-if-unfragmented, excluding the first ClientHello and the HelloVerifyRequest. The mismatch is invisible until a real peer rejects the Finished message.
+- `dtls_record.zig` adds epoch, a 48-bit sequence, and an anti-replay window on top of the same AEAD. The window must be checked before the AEAD and updated after, or a forged far-ahead sequence clears it.
+- `dtls_exporter.zig` is RFC 5705 keying material export plus the RFC 5764 SRTP split. DTLS-SRTP uses the **no-context** seed form: passing an empty slice appends a 2-byte zero and silently breaks interop.
