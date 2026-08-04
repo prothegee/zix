@@ -127,6 +127,11 @@ pub const Session = struct {
     pending_cursor: usize,
     /// Whether the buffered flight is one a timer may resend. A HelloVerifyRequest is not.
     pending_retransmittable: bool,
+    /// Where this server's epoch 0 record numbering has reached. A HelloVerifyRequest goes out on
+    /// the sequence the ClientHello arrived with (RFC 6347 4.2.1), and the flight after it has to
+    /// carry on from there rather than start again at zero. Two records with the same epoch and
+    /// sequence look like a replay to the peer, and it drops the second one.
+    next_record_seq: u48,
 
     handshake: ?dtls_connection.State,
     connection: ?dtls_connection.Connection,
@@ -184,6 +189,7 @@ pub const Session = struct {
             .pending_len = 0,
             .pending_cursor = 0,
             .pending_retransmittable = false,
+            .next_record_seq = 0,
             .handshake = null,
             .connection = null,
             .reassembler = .{},
@@ -405,10 +411,7 @@ pub const Session = struct {
             return;
         }
 
-        self.reassembler.reset();
-        self.reassembler.accept(fragment) catch return;
-
-        const message = self.reassembler.message() orelse return;
+        const message = self.acceptFragment(fragment) orelse return;
         const hello = dtls_hello.parseClientHello(message) catch return;
 
         if (!dtls_connection.cookieAccepted(&self.signer, self.peer, hello)) {
@@ -417,6 +420,7 @@ pub const Session = struct {
             self.pending_len = verify.len;
             self.pending_cursor = 0;
             self.pending_retransmittable = false;
+            self.next_record_seq = record_seq +% 1;
 
             return;
         }
@@ -427,6 +431,7 @@ pub const Session = struct {
             .server_eph_secret = self.options.server_eph_secret,
             .server_random = self.options.server_random,
             .max_fragment_len = self.options.max_fragment_len,
+            .first_record_seq = self.next_record_seq,
         };
 
         const flight = dtls_connection.serverFlight(options, message, self.pending) catch {
@@ -446,14 +451,36 @@ pub const Session = struct {
         self.flight.sent(now_ms, true);
     }
 
+    /// Take one fragment into the reassembler, and answer with the whole message once it is there.
+    ///
+    /// Note:
+    /// - A handshake message larger than the path is split across records, and the pieces arrive in
+    ///   separate datagrams (RFC 6347 4.2.3). They only add up if they accumulate, so the reset
+    ///   belongs at the boundary between two messages and nowhere else. A browser's ClientHello is
+    ///   around 1500 bytes and always arrives in two pieces, which is why this is not optional.
+    /// - A fragment the message in progress cannot take starts a new one rather than poisoning it,
+    ///   which is what a peer that gave up and began again looks like from here.
+    fn acceptFragment(self: *Session, fragment: dtls_handshake.Fragment) ?[]const u8 {
+        const header = fragment.header;
+        const other_message = self.reassembler.message_seq != header.message_seq or
+            self.reassembler.msg_type != header.msg_type;
+
+        if (self.reassembler.started and other_message) self.reassembler.reset();
+
+        self.reassembler.accept(fragment) catch {
+            self.reassembler.reset();
+            self.reassembler.accept(fragment) catch return null;
+        };
+
+        return self.reassembler.message();
+    }
+
     /// Take one fragment of a ClientKeyExchange, holding the body until the Finished arrives.
     fn onKeyExchangeFragment(self: *Session, fragment: dtls_handshake.Fragment) Error!void {
         if (self.state != .AWAITING_FINISH) return;
 
-        self.reassembler.reset();
-        self.reassembler.accept(fragment) catch return;
+        const message = self.acceptFragment(fragment) orelse return;
 
-        const message = self.reassembler.message() orelse return;
         if (message.len > MAX_KEY_EXCHANGE) return;
 
         @memcpy(self.key_exchange[0..message.len], message);
@@ -631,6 +658,48 @@ test "zix webrtc: dtls session, a cookie-bearing hello brings the server flight 
         seen += piece.len;
     }
     try std.testing.expect(seen > 0);
+}
+
+test "zix webrtc: dtls session, the server flight carries on from the sequence the cookie used" {
+    // What this pins: the HelloVerifyRequest and the ServerHello both went out as epoch 0 record 0,
+    // and a peer holding an anti-replay window (RFC 6347 4.1.2.6) drops the second of the two. Every
+    // browser and OpenSSL hold one, so the handshake stopped there and nothing said why.
+    var session = try Session.init(std.testing.allocator, TEST_PEER, try testOptions(), 1500);
+    defer session.deinit();
+
+    var first_buf: [768]u8 = undefined;
+    _ = try session.handle(try clientHelloRecord(&first_buf, "", 7), 1000);
+
+    var out: [1500]u8 = undefined;
+    const verify = session.nextOutbound(&out).?;
+    const verify_seq = (try dtls_record.parseHeader(verify)).sequence_number;
+
+    // The HelloVerifyRequest answers on the sequence its ClientHello arrived with (RFC 6347 4.2.1),
+    // which is what makes the cookie exchange keep no state.
+    try std.testing.expectEqual(@as(u48, 7), verify_seq);
+
+    const verify_body = try dtls_record.plaintextFragment(verify);
+    const cookie = try dtls_hello.parseHelloVerifyRequestBody(verify_body[dtls_handshake.HEADER_LEN..]);
+
+    var second_buf: [768]u8 = undefined;
+    _ = try session.handle(try clientHelloRecord(&second_buf, cookie, 8), 1000);
+
+    var expected: u48 = verify_seq + 1;
+    var flight_out: [1500]u8 = undefined;
+
+    while (session.nextOutbound(&flight_out)) |piece| {
+        var records: dtls_record.RecordIterator = .{ .datagram = piece };
+
+        while (try records.next()) |record| : (expected += 1) {
+            const header = try dtls_record.parseHeader(record);
+
+            try std.testing.expectEqual(expected, header.sequence_number);
+            try std.testing.expectEqual(@as(u16, dtls_connection.EPOCH_HANDSHAKE), header.epoch);
+        }
+    }
+
+    // Four messages, so the numbering moved by four and never repeated the cookie's.
+    try std.testing.expectEqual(@as(u48, verify_seq + 5), expected);
 }
 
 test "zix webrtc: dtls session, a timeout resends the buffered flight" {
