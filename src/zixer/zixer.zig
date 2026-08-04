@@ -3,9 +3,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const cmd_daemon = @import("cmd_daemon.zig");
 const cmd_init = @import("cmd_init.zig");
 const cmd_list = @import("cmd_list.zig");
+const cmd_restart = @import("cmd_restart.zig");
+const cmd_start = @import("cmd_start.zig");
 const cmd_status = @import("cmd_status.zig");
+const cmd_stop = @import("cmd_stop.zig");
 const root_dir = @import("root_dir.zig");
 
 const HELP =
@@ -18,6 +22,11 @@ const HELP =
     \\    init                create the root dir (main.cfg, sites/, logs/)
     \\    status [name...]    validate main.cfg and site configs, report with fix hints
     \\    list                list site configs
+    \\    start <site.cfg>    start one site, spawning the daemon when needed
+    \\    stop <site.cfg>     stop one started site
+    \\    restart <site.cfg>  re-read one site cfg and rebind it
+    \\    daemon              run the daemon in the foreground
+    \\    daemon stop         stop the daemon and every started site
     \\    help                show this help
     \\
     \\root dir resolution order:
@@ -28,7 +37,9 @@ const HELP =
 ;
 
 /// Everything pulled out of argv: the command, the --dir value, the rest.
+/// exe_path keeps argv[0] so start/restart can respawn this binary as the daemon.
 const CliArgs = struct {
+    exe_path: []const u8 = "zixer",
     command: ?[]const u8 = null,
     dir_arg: ?[]const u8 = null,
     filters: []const []const u8 = &.{},
@@ -52,7 +63,7 @@ fn parseArgs(arena: std.mem.Allocator, arg_iter: anytype) !CliArgs {
     var cli = CliArgs{};
     var filters: std.ArrayList([]const u8) = .empty;
 
-    _ = arg_iter.next();
+    if (arg_iter.next()) |arg0| cli.exe_path = arg0;
 
     while (arg_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--dir")) {
@@ -120,6 +131,63 @@ const FakeArgs = struct {
     }
 };
 
+// --------------------------------------------------------- //
+
+pub fn main(process: std.process.Init) !void {
+    const io = process.io;
+    const arena = process.arena.allocator();
+
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    const out = &stdout_writer.interface;
+
+    var arg_iter = argsIterator(process.minimal.args);
+    const cli = parseArgs(arena, &arg_iter) catch {
+        try out.writeAll("--dir needs a path\n");
+        try out.flush();
+        std.process.exit(2);
+    };
+
+    const root = root_dir.resolveFromEnviron(arena, cli.dir_arg, process.environ_map) catch {
+        try out.writeAll("cannot resolve the root dir: no HOME, use --dir or ZIXER_DIR\n");
+        try out.flush();
+        std.process.exit(2);
+    };
+
+    var code: u8 = 0;
+    if (cli.command) |command| {
+        if (std.mem.eql(u8, command, "init")) {
+            code = try cmd_init.run(io, arena, out, root);
+        } else if (std.mem.eql(u8, command, "status")) {
+            code = try cmd_status.run(io, arena, out, root, cli.filters);
+        } else if (std.mem.eql(u8, command, "list")) {
+            code = try cmd_list.run(io, arena, out, root);
+        } else if (std.mem.eql(u8, command, "start")) {
+            code = try cmd_start.run(io, arena, out, root, cli.filters, cli.exe_path);
+        } else if (std.mem.eql(u8, command, "stop")) {
+            code = try cmd_stop.run(io, arena, out, root, cli.filters);
+        } else if (std.mem.eql(u8, command, "restart")) {
+            code = try cmd_restart.run(io, arena, out, root, cli.filters, cli.exe_path);
+        } else if (std.mem.eql(u8, command, "daemon")) {
+            code = try cmd_daemon.run(io, std.heap.smp_allocator, arena, out, root, cli.filters);
+        } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+            try out.writeAll(HELP);
+        } else {
+            try out.print("unknown command: {s}\n\n", .{command});
+            try out.writeAll(HELP);
+            code = 2;
+        }
+    } else {
+        code = try reportRootAndHelp(io, arena, out, root);
+    }
+
+    try out.flush();
+    if (code != 0) std.process.exit(code);
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+
 test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("cfg_math.zig"));
     std.testing.refAllDecls(@import("cfg_scanner.zig"));
@@ -130,6 +198,15 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("cmd_init.zig"));
     std.testing.refAllDecls(@import("cmd_status.zig"));
     std.testing.refAllDecls(@import("cmd_list.zig"));
+    std.testing.refAllDecls(@import("control.zig"));
+    std.testing.refAllDecls(@import("control_client.zig"));
+    std.testing.refAllDecls(@import("site_runtime.zig"));
+    std.testing.refAllDecls(@import("daemon.zig"));
+    std.testing.refAllDecls(@import("daemon_spawn.zig"));
+    std.testing.refAllDecls(@import("cmd_daemon.zig"));
+    std.testing.refAllDecls(@import("cmd_start.zig"));
+    std.testing.refAllDecls(@import("cmd_stop.zig"));
+    std.testing.refAllDecls(@import("cmd_restart.zig"));
 }
 
 test "zix zixer: cli args, command dir flag and filters split out" {
@@ -170,49 +247,20 @@ test "zix zixer: cli help, every command is documented" {
     try std.testing.expect(std.mem.indexOf(u8, HELP, "init") != null);
     try std.testing.expect(std.mem.indexOf(u8, HELP, "status") != null);
     try std.testing.expect(std.mem.indexOf(u8, HELP, "list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, HELP, "start <site.cfg>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, HELP, "stop <site.cfg>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, HELP, "restart <site.cfg>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, HELP, "daemon stop") != null);
     try std.testing.expect(std.mem.indexOf(u8, HELP, "ZIXER_DIR") != null);
 }
 
-pub fn main(process: std.process.Init) !void {
-    const io = process.io;
-    const arena = process.arena.allocator();
+test "zix zixer: cli args, argv0 lands in exe_path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-    const out = &stdout_writer.interface;
+    var args = FakeArgs{ .items = &.{ "/usr/local/bin/zixer-x86_64-linux", "start", "a.cfg" } };
+    const cli = try parseArgs(arena.allocator(), &args);
 
-    var arg_iter = argsIterator(process.minimal.args);
-    const cli = parseArgs(arena, &arg_iter) catch {
-        try out.writeAll("--dir needs a path\n");
-        try out.flush();
-        std.process.exit(2);
-    };
-
-    const root = root_dir.resolveFromEnviron(arena, cli.dir_arg, process.environ_map) catch {
-        try out.writeAll("cannot resolve the root dir: no HOME, use --dir or ZIXER_DIR\n");
-        try out.flush();
-        std.process.exit(2);
-    };
-
-    var code: u8 = 0;
-    if (cli.command) |command| {
-        if (std.mem.eql(u8, command, "init")) {
-            code = try cmd_init.run(io, arena, out, root);
-        } else if (std.mem.eql(u8, command, "status")) {
-            code = try cmd_status.run(io, arena, out, root, cli.filters);
-        } else if (std.mem.eql(u8, command, "list")) {
-            code = try cmd_list.run(io, arena, out, root);
-        } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
-            try out.writeAll(HELP);
-        } else {
-            try out.print("unknown command: {s}\n\n", .{command});
-            try out.writeAll(HELP);
-            code = 2;
-        }
-    } else {
-        code = try reportRootAndHelp(io, arena, out, root);
-    }
-
-    try out.flush();
-    if (code != 0) std.process.exit(code);
+    try std.testing.expectEqualStrings("/usr/local/bin/zixer-x86_64-linux", cli.exe_path);
+    try std.testing.expectEqualStrings("start", cli.command.?);
 }
