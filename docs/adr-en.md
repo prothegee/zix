@@ -1634,4 +1634,74 @@ Three separate gaps, found by auditing rather than by a failing test, because no
 
 ---
 
+## ADR-067: zix.Webrtc, a WebRTC peer as its own engine
+
+**Status:** Accepted
+
+**Context:** A browser cannot open a raw socket. The only transports it offers a server are HTTP, WebSocket and WebRTC, and only WebRTC gives unreliable delivery, a per-channel choice about ordering, and audio and video. zix had the first two and not the third.
+
+WebRTC is not one protocol. Reaching a browser at all means answering ICE connectivity checks carried over STUN, completing a DTLS 1.2 handshake, running SCTP inside it for data channels, and negotiating all of that through SDP. Carrying media means SRTP on top of that. Every one of those is a separate wire format with its own RFC.
+
+Three constraints shaped the design before any code was written:
+
+1. **It is timer-driven.** DTLS retransmits on a 1 second doubling timer, SCTP has its own retransmission timeout, ICE has consent freshness, and an idle peer has to be dropped. Nothing else in zix's UDP family needs a clock: `zix.Udp` in raw mode hands a handler `fn (datagram, peer, sink) void` and its dispatch path has no tick, no deadline and no clock anywhere. Adding one to `zix.Udp` would have made every raw UDP server pay for a facility only WebRTC uses.
+
+2. **A peer is its 4-tuple.** Every datagram of one session, whatever protocol it carries inside, arrives from the same address and port and has to reach the same state machine. That rules out the receive-CPU steering (`reuseport_cbpf`) the raw UDP and HTTP/3 engines use, because steering picks a worker by receiving CPU and could split one session across two workers in the middle of a handshake.
+
+3. **Self-testing proves nothing here.** Eight layers tested against themselves agree with their own mistakes. This is an interop protocol, so the exit criterion for every phase had to be an independent implementation, first OpenSSL and then a real browser.
+
+**Decision:** WebRTC is its own engine at `src/udp/webrtc/`, owning its socket and its own `dispatch/`, not a mode of `zix.Udp`.
+
+- **DTLS lives in `src/tls/` with a flat `dtls_` prefix**, beside the TLS 1.2 and 1.3 code it shares primitives with, not under the WebRTC tree. It keeps no separate public surface. `dtls_connection.zig` composes its own flights and reuses only leaf primitives (`tls12_prf`, certificate plus ECDSA signing, P-256 ECDHE). It cannot reuse `tls12_connection.zig`, because that one hashes TLS-framed bytes while RFC 6347 section 4.2.6 needs the transcript taken over DTLS 12-byte headers as-if-unfragmented, excluding the first ClientHello and the HelloVerifyRequest. That mismatch is invisible until a real peer rejects the Finished message.
+- **ICE-lite, not a full ICE agent.** A server is not behind a NAT it has to discover its way out of. It has one candidate, it never gathers, it never nominates, and it answers 487 for every role tiebreaker value because it has no role to switch to (RFC 8445 section 6.1.1). That removes candidate gathering, pair state, and trickle as a mechanism from the engine entirely.
+- **zix is always the DTLS server.** The answer is always `a=setup:passive`. That single value fixes the SRTP key direction (`client_write_*` opens what arrives, `server_write_*` seals what leaves) and fixes data channels to odd stream identifiers (RFC 8832 section 6).
+- **Three dispatch models, matching every other engine.** `.ASYNC` runs one worker on every platform, `.EPOLL` and `.URING` run one SO_REUSEPORT worker per core and are rejected off Linux with `error.DispatchModelUnsupported`. The loop body is shared by all three in `dispatch/worker.zig`, because the order a peer's outbound datagrams drain in is a correctness property and not a per-model detail. Copying that order per model would have reopened a defect the engine already shipped once. Outbound goes through `datagram.SendBatch`, which is `sendmmsg` on Linux and a portable `std.Io` sink elsewhere.
+- **The wait is deadline-derived, not a fixed maintenance interval.** `Worker.waitMs` is the soonest peer deadline capped by `tick_interval_ms`, so the loop never parks past a retransmit and never spins when nothing is due. That is the whole reason this engine has its own loop instead of borrowing one.
+- **Media is forwarded, never decoded.** With `carry_media` on, the engine opens a peer's SRTP packet, rewrites the RTP header, and seals it again under each receiver's key. It does not parse a codec, does not hold a frame, and has no opinion about what the payload is. Re-protection is unavoidable rather than chosen: no two peers share an SRTP key, so a packet cannot be passed along as it arrived.
+- **RTCP is answered, never forwarded.** A report names streams by their pre-rewrite identifiers, so relaying one describes a stream the far side never saw. A receiver's picture-loss indication is read, mapped back through its routes to the source, and rebuilt for the sender.
+
+Layer map, one concern per file, 84 files under `src/udp/webrtc/` plus 9 `dtls_*` files in `src/tls/`:
+
+| Directory | Owns |
+| :- | :- |
+| `stun/` | the RFC 8489 message container and the section 6.3.1 binding rules |
+| `ice/` | candidate, credentials, the four ICE attributes, the ice-lite responder |
+| `sctp/` | 20 files: wire, control, data, reliability, reconfig, then the association driver |
+| `datachannel/` | payload types, DCEP, stream identifier parity, the channel registry, stream reset |
+| `sdp/` | 18 files: the line and attribute codecs up to reading an offer and writing an answer |
+| `media/` | RTP, RTCP, SRTP, SRTCP, and the forwarding path (routes, stream sets, per-peer state) |
+| `dispatch/` | `worker.zig` holds the loop, one file per model, `common.zig` is substrate only |
+
+**Consequences:**
+
+- `zix.Webrtc.Server` answers a real browser under every dispatch model. Eight examples occupy ports 9081 to 9088, four of which need a browser to drive.
+- `max_peers` is counted per worker, so a server with N workers holds up to N times `max_peers`. The config doc says so.
+- One SRTP session per stream identifier, not per peer. The rollover counter and the replay list are per-SSRC, so audio and video sharing one session read each other's sequence numbers as gaps or wraps and reject real packets.
+- A fan-out opens a packet once and seals it once per receiver. Opening it twice is a replay of an index the source stream already accepted, so the relay had to split into `open` plus `reseal`.
+- The engine asks a source for a keyframe when a new route is admitted on any receiver. Nothing in a browser asks on a watcher's behalf, so without it a watcher joining mid-stream stays grey indefinitely.
+- `accept_any_peer_ice_ufrag` exists because a browser draws a fresh ICE ufrag for every peer connection. With one server-wide credential set, comparing the ufrag proved nothing the password did not, so the flag makes the password the only gate. It is off by default: a server that names one peer should keep refusing everybody else.
+- The reach of `ctx.broadcast` is one worker. That is the whole room under `.ASYNC` and this core's share under `.EPOLL` or `.URING`, so the room examples pin `.ASYNC` and say why in their own header.
+- `zix.Udp` is untouched. Nothing here was folded into it, and no raw UDP server pays for the timer wheel.
+- Browser runs are not a CI check and must not become one. The CI exit gate is `tests/integration/webrtc/exchange_test.zig`, a whole session driven in memory in 435ms with no port and no sleep.
+
+**Not built, and each for a stated reason:** TURN relaying and a full ICE agent (everything so far was one machine on one LAN with no NAT, which says nothing about what they would need), DTLS 1.3 (Firefox 153 and OpenSSL 3.6 both complete on 1.2), periodic sender and receiver reports on a timer, NACK answering (advertised in SDP, no packet history is kept), payload type remapping, simulcast and layer switching, `a=msid`, `a=extmap`, `a=ssrc`, RFC 8260 message interleaving, and a room that spans cores.
+
+**Evidence, and why self-tests were not enough:** five defects reached a browser and nothing self-tested could have caught any of them, because in each case zix's own client agreed with zix's own server.
+
+| Defect | Why every self-test passed |
+| :- | :- |
+| HelloVerifyRequest and ServerHello both sent as epoch 0 record sequence 0 | zix's DTLS client only runs a replay window on established epoch 1 records |
+| a fragmented ClientHello never reassembled | OpenSSL's hello is 206 bytes and fits one record, a browser's is about 1500 and never does |
+| a full-range u64 SDP session id | RFC 8829 section 5.2.1 wants one that fits a signed 64-bit integer, and zix's own reader did not care |
+| a candidate published as 127.0.0.1 | Firefox gathers no loopback candidate and never pairs with one |
+| no `a=candidate` line in a carried media section | the answer parses and reads back cleanly through zix's own offer reader |
+
+The last one is the sharpest. A browser reads remote candidates off the BUNDLE-tagged section, which is whichever section the offer put first, and with media offered that is audio or video, not the data channel section that did carry a candidate. The peer had credentials to sign checks with and no address to send them to, so ICE failed with zero datagrams ever leaving the browser.
+
+**How a browser was driven without a display:** the page reassigns its own `log` to also `fetch('http://' + location.hostname + ':9099/' + encodeURIComponent(line), {mode: 'no-cors'})` against a small threaded `http.server`, then Firefox runs headless with `media.navigator.streams.fake=true` and `media.navigator.permission.disabled=true`. That is what makes a headless browser report back. For DTLS alone, `openssl s_client -dtls1_2 -connect <ip>:<port> -state` reaches the DTLS server directly, because the demux routes DTLS with no ICE gate in front of it.
+
+**Guardrails held:** `zig fmt` clean, `test-all` 2913 tests over 167 steps on both `zig-0.16` and `zig-0.17` with a fresh cache directory, `test-runner-all` green across all 55 protocols, and all 7 CI legs green on the branch. Every ladder phase exit was met by an independent implementation rather than by inspection: OpenSSL for the DTLS handshake, a hand-built STUN binding request for ICE, and real browsers for the data channel, file transfer, mesh call and forwarding examples. The forwarding exit was one sending Firefox and two watching Firefox, both watchers decoding 640x480 with nothing sent back to the sender.
+
+---
+
 ###### end of adr

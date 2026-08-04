@@ -1634,4 +1634,74 @@ Tiga celah terpisah, ditemukan lewat audit dan bukan lewat test yang gagal, kare
 
 ---
 
+## ADR-067: zix.Webrtc, peer WebRTC sebagai engine tersendiri
+
+**Status:** Accepted
+
+**Konteks:** Browser tidak bisa membuka socket mentah. Transport yang ia tawarkan ke server hanya HTTP, WebSocket dan WebRTC, dan hanya WebRTC yang memberi pengiriman tidak reliabel, pilihan urutan per channel, serta audio dan video. zix punya dua yang pertama dan tidak punya yang ketiga.
+
+WebRTC bukan satu protokol. Menjangkau browser saja berarti menjawab ICE connectivity check yang dibawa lewat STUN, menyelesaikan handshake DTLS 1.2, menjalankan SCTP di dalamnya untuk data channel, dan menegosiasikan semuanya lewat SDP. Membawa media berarti SRTP di atas itu semua. Masing-masing adalah format wire terpisah dengan RFC-nya sendiri.
+
+Tiga batasan membentuk desain ini sebelum satu baris kode pun ditulis:
+
+1. **Ia digerakkan timer.** DTLS melakukan retransmit pada timer 1 detik yang berlipat, SCTP punya retransmission timeout sendiri, ICE punya consent freshness, dan peer yang idle harus dilepas. Tidak ada anggota keluarga UDP zix lain yang butuh clock: `zix.Udp` dalam mode raw memberi handler `fn (datagram, peer, sink) void` dan jalur dispatch-nya tidak punya tick, deadline, maupun clock di mana pun. Menambahkannya ke `zix.Udp` akan membuat setiap server UDP raw membayar fasilitas yang hanya dipakai WebRTC.
+
+2. **Satu peer adalah 4-tuple-nya.** Setiap datagram dari satu sesi, apa pun protokol yang dibawanya di dalam, datang dari address dan port yang sama dan harus sampai ke state machine yang sama. Itu menutup pintu untuk steering berbasis receive-CPU (`reuseport_cbpf`) yang dipakai engine UDP raw dan HTTP/3, karena steering memilih worker berdasarkan CPU penerima dan bisa memecah satu sesi ke dua worker di tengah handshake.
+
+3. **Menguji diri sendiri tidak membuktikan apa pun di sini.** Delapan layer yang diuji terhadap dirinya sendiri akan sepakat dengan kesalahannya sendiri. Ini protokol interop, jadi kriteria exit setiap fase harus berupa implementasi independen, mula-mula OpenSSL lalu browser sungguhan.
+
+**Keputusan:** WebRTC adalah engine tersendiri di `src/udp/webrtc/`, memiliki socket dan `dispatch/`-nya sendiri, bukan mode dari `zix.Udp`.
+
+- **DTLS tinggal di `src/tls/` dengan prefix datar `dtls_`**, bersebelahan dengan kode TLS 1.2 dan 1.3 yang primitif-primitifnya ia pakai bersama, bukan di bawah pohon WebRTC. Ia tidak memegang public surface terpisah. `dtls_connection.zig` menyusun flight-nya sendiri dan hanya memakai ulang primitif daun (`tls12_prf`, certificate plus penandatanganan ECDSA, ECDHE P-256). Ia tidak bisa memakai ulang `tls12_connection.zig`, karena berkas itu meng-hash byte berbingkai TLS sementara RFC 6347 bagian 4.2.6 menuntut transcript diambil di atas header DTLS 12-byte seolah-olah tidak terfragmentasi, tanpa ClientHello pertama dan HelloVerifyRequest. Ketidakcocokan itu tidak terlihat sampai peer sungguhan menolak pesan Finished.
+- **ICE-lite, bukan ICE agent penuh.** Server tidak berada di balik NAT yang harus ia cari jalan keluarnya. Ia punya satu candidate, tidak pernah gathering, tidak pernah nominasi, dan menjawab 487 untuk setiap nilai role tiebreaker karena ia tidak punya role untuk ditukar (RFC 8445 bagian 6.1.1). Itu menghapus candidate gathering, pair state, dan trickle sebagai mekanisme dari engine sepenuhnya.
+- **zix selalu menjadi DTLS server.** Answer selalu `a=setup:passive`. Nilai tunggal itu mengunci arah kunci SRTP (`client_write_*` membuka yang datang, `server_write_*` menyegel yang keluar) dan mengunci data channel ke stream identifier ganjil (RFC 8832 bagian 6).
+- **Tiga dispatch model, sama seperti engine lain.** `.ASYNC` menjalankan satu worker di setiap platform, `.EPOLL` dan `.URING` menjalankan satu worker SO_REUSEPORT per core dan ditolak di luar Linux dengan `error.DispatchModelUnsupported`. Badan loop dipakai bersama oleh ketiganya di `dispatch/worker.zig`, karena urutan datagram keluar satu peer dikuras adalah properti kebenaran, bukan detail per model. Menyalin urutan itu per model akan membuka lagi cacat yang pernah dikirim engine ini. Jalur keluar lewat `datagram.SendBatch`, yaitu `sendmmsg` di Linux dan sink `std.Io` yang portable di tempat lain.
+- **Waktu tunggu diturunkan dari deadline, bukan interval maintenance tetap.** `Worker.waitMs` adalah deadline peer terdekat yang dibatasi `tick_interval_ms`, sehingga loop tidak pernah parkir melewati satu retransmit dan tidak pernah berputar saat tidak ada yang jatuh tempo. Itulah alasan utama engine ini punya loop sendiri alih-alih meminjam.
+- **Media diteruskan, tidak pernah didekode.** Dengan `carry_media` menyala, engine membuka paket SRTP satu peer, menulis ulang header RTP, lalu menyegelnya kembali dengan kunci masing-masing penerima. Ia tidak mengurai codec, tidak menahan frame, dan tidak punya pendapat soal isi payload. Penyegelan ulang bukan pilihan melainkan keharusan: tidak ada dua peer yang berbagi kunci SRTP, jadi paket tidak bisa diteruskan apa adanya.
+- **RTCP dijawab, tidak pernah diteruskan.** Sebuah report menamai stream dengan identifier sebelum penulisan ulang, jadi meneruskannya berarti menggambarkan stream yang tidak pernah dilihat sisi seberang. Picture-loss indication dari penerima dibaca, dipetakan balik lewat route-nya ke sumber, lalu dibangun ulang untuk pengirim.
+
+Peta layer, satu concern per berkas, 84 berkas di bawah `src/udp/webrtc/` plus 9 berkas `dtls_*` di `src/tls/`:
+
+| Direktori | Memiliki |
+| :- | :- |
+| `stun/` | container pesan RFC 8489 dan aturan binding bagian 6.3.1 |
+| `ice/` | candidate, credentials, empat atribut ICE, responder ice-lite |
+| `sctp/` | 20 berkas: wire, control, data, reliability, reconfig, lalu driver association |
+| `datachannel/` | payload type, DCEP, paritas stream identifier, registry channel, stream reset |
+| `sdp/` | 18 berkas: codec line dan attribute sampai membaca offer dan menulis answer |
+| `media/` | RTP, RTCP, SRTP, SRTCP, dan jalur forwarding (route, stream set, state per peer) |
+| `dispatch/` | `worker.zig` memegang loop, satu berkas per model, `common.zig` hanya substrate |
+
+**Konsekuensi:**
+
+- `zix.Webrtc.Server` menjawab browser sungguhan di bawah setiap dispatch model. Delapan example menempati port 9081 sampai 9088, empat di antaranya butuh browser untuk dijalankan.
+- `max_peers` dihitung per worker, jadi server dengan N worker menampung sampai N kali `max_peers`. Dokumentasi config menyebutkan hal ini.
+- Satu session SRTP per stream identifier, bukan per peer. Rollover counter dan daftar replay bersifat per-SSRC, jadi audio dan video yang berbagi satu session membaca nomor urut satu sama lain sebagai lubang atau wrap lalu menolak paket yang sah.
+- Satu fan-out membuka paket sekali dan menyegelnya sekali untuk tiap penerima. Membukanya dua kali adalah replay atas index yang sudah diterima stream sumber, jadi relay harus dipecah menjadi `open` plus `reseal`.
+- Engine meminta keyframe ke sumber ketika route baru diterima pada penerima mana pun. Tidak ada apa pun di browser yang memintanya mewakili penonton, jadi tanpa itu penonton yang bergabung di tengah stream akan tetap abu-abu tanpa batas.
+- `accept_any_peer_ice_ufrag` ada karena browser menarik ufrag ICE baru untuk setiap peer connection. Dengan satu set credential milik server, membandingkan ufrag tidak membuktikan apa pun yang belum dibuktikan password, jadi flag ini menjadikan password satu-satunya gerbang. Ia mati secara default: server yang menyebut satu peer harus tetap menolak yang lain.
+- Jangkauan `ctx.broadcast` adalah satu worker. Itu berarti seluruh room di bawah `.ASYNC` dan bagian core ini di bawah `.EPOLL` atau `.URING`, jadi example bertipe room memasang pin `.ASYNC` dan menjelaskan alasannya di header masing-masing.
+- `zix.Udp` tidak disentuh. Tidak ada yang dilipat ke dalamnya, dan tidak ada server UDP raw yang membayar timer wheel.
+- Menjalankan browser bukan pemeriksaan CI dan tidak boleh menjadi satu. Gerbang exit CI adalah `tests/integration/webrtc/exchange_test.zig`, satu sesi utuh yang digerakkan di memori dalam 435ms tanpa port dan tanpa sleep.
+
+**Tidak dibangun, masing-masing dengan alasan yang dinyatakan:** relay TURN dan ICE agent penuh (semua yang dikerjakan sejauh ini adalah satu mesin di satu LAN tanpa NAT, yang tidak mengatakan apa pun tentang kebutuhan keduanya), DTLS 1.3 (Firefox 153 dan OpenSSL 3.6 sama-sama selesai di 1.2), sender dan receiver report berkala di atas timer, jawaban NACK (diiklankan di SDP, tidak ada riwayat paket yang disimpan), pemetaan ulang payload type, simulcast dan pergantian layer, `a=msid`, `a=extmap`, `a=ssrc`, message interleaving RFC 8260, dan room yang melintasi core.
+
+**Bukti, dan alasan uji mandiri tidak cukup:** lima cacat baru terungkap oleh browser dan tidak satu pun bisa ditangkap uji mandiri, karena pada setiap kasus client zix sendiri sepakat dengan server zix sendiri.
+
+| Cacat | Kenapa semua uji mandiri lolos |
+| :- | :- |
+| HelloVerifyRequest dan ServerHello sama-sama dikirim sebagai epoch 0 record sequence 0 | client DTLS zix hanya menjalankan replay window pada record epoch 1 yang sudah mapan |
+| ClientHello terfragmentasi tidak pernah dirakit ulang | hello OpenSSL 206 byte dan muat satu record, hello browser sekitar 1500 byte dan tidak pernah muat |
+| session id SDP memakai rentang penuh u64 | RFC 8829 bagian 5.2.1 menuntut yang muat di integer 64-bit bertanda, dan reader zix sendiri tidak peduli |
+| candidate dipublikasikan sebagai 127.0.0.1 | Firefox tidak mengumpulkan candidate loopback dan tidak pernah memasangkannya |
+| tidak ada baris `a=candidate` di section media yang dibawa | answer terurai dan terbaca ulang bersih lewat offer reader zix sendiri |
+
+Yang terakhir paling tajam. Browser membaca candidate remote dari section bertanda BUNDLE, yaitu section mana pun yang diletakkan offer paling depan, dan ketika media ditawarkan itu adalah audio atau video, bukan section data channel yang justru membawa candidate. Peer punya credential untuk menandatangani check dan tidak punya alamat tujuan, jadi ICE gagal tanpa satu datagram pun keluar dari browser.
+
+**Cara menggerakkan browser tanpa layar:** halaman menugaskan ulang `log` miliknya agar juga memanggil `fetch('http://' + location.hostname + ':9099/' + encodeURIComponent(line), {mode: 'no-cors'})` ke sebuah `http.server` berulir kecil, lalu Firefox dijalankan headless dengan `media.navigator.streams.fake=true` dan `media.navigator.permission.disabled=true`. Itulah yang membuat browser headless bisa melapor balik. Untuk DTLS saja, `openssl s_client -dtls1_2 -connect <ip>:<port> -state` menjangkau DTLS server secara langsung, karena demux merutekan DTLS tanpa gerbang ICE di depannya.
+
+**Guardrail yang terpenuhi:** `zig fmt` bersih, `test-all` 2913 test di 167 step pada `zig-0.16` maupun `zig-0.17` dengan cache directory baru, `test-runner-all` hijau di seluruh 55 protokol, dan ketujuh leg CI hijau di branch tersebut. Setiap exit fase ladder dipenuhi implementasi independen, bukan lewat inspeksi: OpenSSL untuk handshake DTLS, binding request STUN buatan tangan untuk ICE, dan browser sungguhan untuk example data channel, file transfer, panggilan mesh dan forwarding. Exit forwarding adalah satu Firefox pengirim dan dua Firefox penonton, kedua penonton mendekode 640x480 tanpa apa pun terkirim balik ke pengirim.
+
+---
+
 ###### end of adr
