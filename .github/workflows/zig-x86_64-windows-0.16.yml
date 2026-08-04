@@ -91,6 +91,13 @@ jobs:
         shell: pwsh
         run: zig build examples --summary failures
 
+      - name: zix zixer
+        if: always()
+        timeout-minutes: 6
+        shell: pwsh
+        run: zig build zixer --summary failures
+
+
       - name: zix protocol runners
         if: always()
         timeout-minutes: 6
