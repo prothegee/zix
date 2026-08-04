@@ -40,6 +40,8 @@ const dtls_record = @import("dtls_record.zig");
 const dtls_handshake = @import("dtls_handshake.zig");
 const dtls_hello = @import("dtls_hello.zig");
 const dtls_cookie = @import("dtls_cookie.zig");
+const dtls_use_srtp = @import("dtls_use_srtp.zig");
+const dtls_exporter = @import("dtls_exporter.zig");
 
 const P256 = std.crypto.ecc.P256;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -103,6 +105,10 @@ pub const HandshakeOptions = struct {
     /// (epoch, sequence) and a peer with an anti-replay window (RFC 6347 4.1.2.6) throws the second
     /// one away. The caller passes one past the sequence its HelloVerifyRequest used.
     first_record_seq: u48 = 0,
+    /// SRTP profiles this server will carry, best first (RFC 5764 4.1). Empty declines media: the
+    /// ServerHello echoes no use_srtp extension, and a peer that offered one still gets a plain
+    /// DTLS association, just with no SRTP keys exported for it.
+    srtp_profiles: []const dtls_exporter.SrtpProfile = &.{},
 };
 
 /// Carried from the server flight into the finish: the randoms, the ephemeral scalar, the running
@@ -114,6 +120,9 @@ pub const State = struct {
     transcript: Sha256,
     /// Next record sequence number in epoch 0.
     next_record_seq: u48,
+    /// What use_srtp settled on, or null when neither side asked for media. The finish exports
+    /// keys for exactly this profile, and the SRTP layer above reads its tag lengths from it.
+    srtp_profile: ?dtls_exporter.SrtpProfile = null,
 };
 
 pub const Flight = struct {
@@ -126,6 +135,14 @@ pub const Flight = struct {
 pub const FinishResult = struct {
     to_send: []const u8,
     connection: Connection,
+    /// The SRTP master keys and salts for the profile use_srtp agreed on, or null when no profile
+    /// was agreed. Exported here because this is the only point where the master secret exists
+    /// (RFC 5764 4.2), and it is deliberately not kept on Connection: a caller that wants media
+    /// takes these keys once and builds its own SRTP sessions from them.
+    srtp_keys: ?dtls_exporter.SrtpKeys = null,
+    /// The profile those keys belong to. The two travel together, because a key with the wrong
+    /// profile picks the wrong authentication tag length and every packet fails to open.
+    srtp_profile: ?dtls_exporter.SrtpProfile = null,
 };
 
 /// An established association: the keys, the send sequence, and the receive replay window.
@@ -262,6 +279,7 @@ pub fn serverFlight(opts: HandshakeOptions, client_hello_body: []const u8, out: 
         .server_eph_scalar = reduceP256Scalar(opts.server_eph_secret),
         .transcript = Sha256.init(.{}),
         .next_record_seq = opts.first_record_seq,
+        .srtp_profile = selectSrtpProfile(hello.extensions, opts.srtp_profiles),
     };
 
     // The cookie-bearing ClientHello opens the transcript (RFC 6347 4.2.6).
@@ -275,7 +293,7 @@ pub fn serverFlight(opts: HandshakeOptions, client_hello_body: []const u8, out: 
 
     {
         var writer = wire.Writer{ .buf = &body_buf };
-        writeServerHelloBody(&writer, state.server_random, hello.session_id);
+        writeServerHelloBody(&writer, state.server_random, hello.session_id, state.srtp_profile);
         cursor += try emitMessage(out[cursor..], &state, .SERVER_HELLO, SEQ_SERVER_HELLO, writer.slice(), opts.max_fragment_len);
     }
 
@@ -376,9 +394,20 @@ pub fn serverFinish(
         km.server_write_iv,
     ) catch return error.NoSpace;
 
+    // The master secret exists only inside this function, so the SRTP export happens here or not
+    // at all (RFC 5764 4.2). A profile that carries no cipher key exports nothing and is reported
+    // as no media rather than as a failure.
+    var srtp_keys: ?dtls_exporter.SrtpKeys = null;
+
+    if (state.srtp_profile) |profile| {
+        srtp_keys = dtls_exporter.srtpKeys(profile, master, state.client_random, state.server_random) catch null;
+    }
+
     return .{
         .to_send = out[0 .. ccs.len + finished.len],
         .connection = .{ .km = km },
+        .srtp_keys = srtp_keys,
+        .srtp_profile = if (srtp_keys == null) null else state.srtp_profile,
     };
 }
 
@@ -442,7 +471,39 @@ fn emitMessage(
     return written;
 }
 
-fn writeServerHelloBody(writer: *wire.Writer, server_random: [32]u8, session_id: []const u8) void {
+/// Which SRTP profile to answer with, given what the ClientHello offered and what this server
+/// carries. Null means no media: either the peer offered none, or none of its offers is one this
+/// server implements.
+///
+/// Note:
+/// - A use_srtp extension this server cannot read is treated as no offer rather than as a fatal
+///   alert. The data channel half of the association works either way, and refusing the whole
+///   handshake over a media extension would cost a peer its data channels too.
+///
+/// Param:
+/// extensions - []const u8 (the ClientHello extensions block, possibly empty)
+/// preferences - []const dtls_exporter.SrtpProfile (this server's order, best first)
+///
+/// Return:
+/// - ?dtls_exporter.SrtpProfile
+fn selectSrtpProfile(
+    extensions: []const u8,
+    preferences: []const dtls_exporter.SrtpProfile,
+) ?dtls_exporter.SrtpProfile {
+    if (preferences.len == 0) return null;
+
+    const extension_data = (dtls_use_srtp.find(extensions) catch return null) orelse return null;
+    const offered = dtls_use_srtp.read(extension_data) catch return null;
+
+    return dtls_use_srtp.select(offered, preferences);
+}
+
+fn writeServerHelloBody(
+    writer: *wire.Writer,
+    server_random: [32]u8,
+    session_id: []const u8,
+    srtp_profile: ?dtls_exporter.SrtpProfile,
+) void {
     writer.writeU16(dtls_record.VERSION_DTLS_1_2);
     writer.writeBytes(&server_random);
     writer.writeU8(@intCast(session_id.len));
@@ -460,6 +521,16 @@ fn writeServerHelloBody(writer: *wire.Writer, server_random: [32]u8, session_id:
     writer.writeU16(2);
     writer.writeU8(1);
     writer.writeU8(0);
+
+    // use_srtp names the one profile the two sides settled on (RFC 5764 4.1.1). Answering with a
+    // list, or with a profile the peer did not offer, is what a peer refuses the handshake over.
+    if (srtp_profile) |chosen| {
+        var answer_buf: [dtls_use_srtp.ANSWER_LEN]u8 = undefined;
+        const answer = dtls_use_srtp.writeAnswer(&answer_buf, chosen) catch unreachable;
+
+        writer.writeBytes(answer);
+    }
+
     writer.patchU16(extensions);
 }
 
@@ -701,6 +772,139 @@ test "zix dtls: connection flight, the record numbering starts where the caller 
     try std.testing.expectEqual(@as(u48, 12), flight.state.next_record_seq);
 }
 
+/// One ClientHello body carrying a use_srtp extension that offers `profiles`, in that order.
+fn testHelloOfferingSrtp(
+    out: []u8,
+    cookie: []const u8,
+    profiles: []const dtls_exporter.SrtpProfile,
+) ![]const u8 {
+    var body_buf: [256]u8 = undefined;
+    const body = try dtls_hello.writeClientHelloBody(
+        &body_buf,
+        dtls_record.VERSION_DTLS_1_2,
+        TEST_CLIENT_RANDOM,
+        "",
+        cookie,
+        &.{CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256},
+    );
+
+    @memcpy(out[0..body.len], body);
+
+    var writer = wire.Writer{ .buf = out[body.len..] };
+    const block = writer.placeU16();
+
+    writer.writeU16(dtls_use_srtp.EXTENSION_TYPE);
+    const extension = writer.placeU16();
+    writer.writeU16(@intCast(profiles.len * dtls_use_srtp.PROFILE_LEN));
+
+    for (profiles) |profile| writer.writeU16(@intFromEnum(profile));
+
+    writer.writeU8(0); // no MKI
+    writer.patchU16(extension);
+    writer.patchU16(block);
+
+    return out[0 .. body.len + writer.len];
+}
+
+/// The use_srtp profile a ServerHello body answers with, or null when it carries none.
+fn serverHelloSrtpProfile(server_hello_body: []const u8) !?dtls_exporter.SrtpProfile {
+    // 2 version, 32 random, 1 session id length, the id itself, 2 cipher suite, 1 compression.
+    const session_id_len: usize = server_hello_body[34];
+    const at = 35 + session_id_len + 3;
+
+    const extensions_len = std.mem.readInt(u16, server_hello_body[at..][0..2], .big);
+    const extensions = server_hello_body[at + 2 ..][0..extensions_len];
+
+    const extension_data = (try dtls_use_srtp.find(extensions)) orelse return null;
+
+    return (try dtls_use_srtp.read(extension_data)).at(0);
+}
+
+test "zix dtls: connection flight, use_srtp answers with the server's choice not the client's" {
+    const key = try testSigningKey();
+
+    var hello_buf: [512]u8 = undefined;
+    const body = try testHelloOfferingSrtp(&hello_buf, "cookie", &.{
+        .SRTP_AES128_CM_HMAC_SHA1_32,
+        .SRTP_AES128_CM_HMAC_SHA1_80,
+    });
+
+    var opts = testOptions(key);
+    opts.srtp_profiles = &.{ .SRTP_AES128_CM_HMAC_SHA1_80, .SRTP_AES128_CM_HMAC_SHA1_32 };
+
+    var out: [4096]u8 = undefined;
+    const flight = try serverFlight(opts, body, &out);
+
+    // The client put the 32-bit tag first and the server prefers the 80-bit one. The server's
+    // order decides (RFC 5764 4.1.1), and the answer names exactly one profile.
+    try std.testing.expectEqual(dtls_exporter.SrtpProfile.SRTP_AES128_CM_HMAC_SHA1_80, flight.state.srtp_profile.?);
+
+    var messages: [8]dtls_handshake.Fragment = undefined;
+    _ = try collectMessages(flight.to_send, &messages);
+
+    try std.testing.expectEqual(
+        dtls_exporter.SrtpProfile.SRTP_AES128_CM_HMAC_SHA1_80,
+        (try serverHelloSrtpProfile(messages[0].data)).?,
+    );
+}
+
+test "zix dtls: connection flight, a hello with no use_srtp is answered without one" {
+    const key = try testSigningKey();
+
+    var hello_buf: [256]u8 = undefined;
+    const body = try dtls_hello.writeClientHelloBody(
+        &hello_buf,
+        dtls_record.VERSION_DTLS_1_2,
+        TEST_CLIENT_RANDOM,
+        "",
+        "cookie",
+        &.{CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256},
+    );
+
+    var opts = testOptions(key);
+    opts.srtp_profiles = &.{.SRTP_AES128_CM_HMAC_SHA1_80};
+
+    var out: [4096]u8 = undefined;
+    const flight = try serverFlight(opts, body, &out);
+
+    try std.testing.expect(flight.state.srtp_profile == null);
+
+    var messages: [8]dtls_handshake.Fragment = undefined;
+    _ = try collectMessages(flight.to_send, &messages);
+
+    // A server that offers media to a peer that asked for none is describing a stream that peer
+    // will never send, and a data-channel-only browser refuses the extension it did not offer.
+    try std.testing.expect((try serverHelloSrtpProfile(messages[0].data)) == null);
+}
+
+test "zix dtls: connection flight, a server carrying no profiles leaves an offer unanswered" {
+    const key = try testSigningKey();
+
+    var hello_buf: [512]u8 = undefined;
+    const body = try testHelloOfferingSrtp(&hello_buf, "cookie", &.{.SRTP_AES128_CM_HMAC_SHA1_80});
+
+    var out: [4096]u8 = undefined;
+    const flight = try serverFlight(testOptions(key), body, &out);
+
+    // The default is no media at all, so the offer is passed over and the data channels still work.
+    try std.testing.expect(flight.state.srtp_profile == null);
+}
+
+test "zix dtls: connection flight, no profile in common leaves media unnegotiated" {
+    const key = try testSigningKey();
+
+    var hello_buf: [512]u8 = undefined;
+    const body = try testHelloOfferingSrtp(&hello_buf, "cookie", &.{.SRTP_AES128_CM_HMAC_SHA1_32});
+
+    var opts = testOptions(key);
+    opts.srtp_profiles = &.{.SRTP_AES128_CM_HMAC_SHA1_80};
+
+    var out: [4096]u8 = undefined;
+    const flight = try serverFlight(opts, body, &out);
+
+    try std.testing.expect(flight.state.srtp_profile == null);
+}
+
 test "zix dtls: connection flight, a hello without the supported suite is refused" {
     const key = try testSigningKey();
 
@@ -926,6 +1130,135 @@ test "zix dtls: connection handshake, a full in-memory exchange agrees on keys" 
         km.client_write_iv,
     );
     try std.testing.expectEqual(@as(?[]const u8, null), try finish.connection.readAppData(stale, &read_buf));
+}
+
+/// Drive one whole handshake with a client written here, and hand back what the finish produced
+/// plus the master secret that client derived. Both buffers must outlive the result.
+fn runFullHandshake(
+    opts: HandshakeOptions,
+    client_hello_body: []const u8,
+    flight_buf: []u8,
+    finish_buf: []u8,
+) !struct { finish: FinishResult, master: [48]u8, server_random: [32]u8 } {
+    const flight = try serverFlight(opts, client_hello_body, flight_buf);
+    var state = flight.state;
+
+    var messages: [8]dtls_handshake.Fragment = undefined;
+    _ = try collectMessages(flight.to_send, &messages);
+
+    const server_random_seen: [32]u8 = messages[0].data[2..34].*;
+    const server_key_exchange = messages[2].data;
+    const point_len = server_key_exchange[3];
+    const server_point = server_key_exchange[4 .. 4 + point_len];
+
+    const client_scalar = reduceP256Scalar(@splat(0x44));
+    const client_point = (try P256.basePoint.mul(client_scalar, .big)).toUncompressedSec1();
+    const pre_master = try ecdheSharedX(client_scalar, server_point);
+    const master = prf.masterSecret(&pre_master, TEST_CLIENT_RANDOM, server_random_seen);
+    const km = prf.keyMaterial(master, TEST_CLIENT_RANDOM, server_random_seen);
+
+    var cke_body: [1 + 65]u8 = undefined;
+    cke_body[0] = 65;
+    @memcpy(cke_body[1..], &client_point);
+
+    var client_transcript = Sha256.init(.{});
+    updateTranscript(&client_transcript, .CLIENT_HELLO, hello_message_seq_with_cookie, client_hello_body);
+    updateTranscript(&client_transcript, .SERVER_HELLO, SEQ_SERVER_HELLO, messages[0].data);
+    updateTranscript(&client_transcript, .CERTIFICATE, SEQ_CERTIFICATE, messages[1].data);
+    updateTranscript(&client_transcript, .SERVER_KEY_EXCHANGE, SEQ_SERVER_KEY_EXCHANGE, messages[2].data);
+    updateTranscript(&client_transcript, .SERVER_HELLO_DONE, SEQ_SERVER_HELLO_DONE, messages[3].data);
+    updateTranscript(&client_transcript, .CLIENT_KEY_EXCHANGE, SEQ_CLIENT_KEY_EXCHANGE, &cke_body);
+
+    var hash: [32]u8 = undefined;
+    {
+        var copy = client_transcript;
+        copy.final(&hash);
+    }
+
+    const client_verify_data = prf.finishedFromHash(master, "client finished", hash);
+
+    var finished_message: [dtls_handshake.HEADER_LEN + VERIFY_DATA_LEN]u8 = undefined;
+    dtls_handshake.writeHeader(&finished_message, .{
+        .msg_type = .FINISHED,
+        .length = VERIFY_DATA_LEN,
+        .message_seq = SEQ_CLIENT_FINISHED,
+        .fragment_offset = 0,
+        .fragment_length = VERIFY_DATA_LEN,
+    });
+    @memcpy(finished_message[dtls_handshake.HEADER_LEN..], &client_verify_data);
+
+    var record_buf: [128]u8 = undefined;
+    const client_finished_record = try dtls_record.protect(
+        &record_buf,
+        &finished_message,
+        .HANDSHAKE,
+        EPOCH_APPLICATION,
+        0,
+        km.client_write_key,
+        km.client_write_iv,
+    );
+
+    return .{
+        .finish = try serverFinish(&state, &cke_body, client_finished_record, finish_buf),
+        .master = master,
+        .server_random = server_random_seen,
+    };
+}
+
+test "zix dtls: connection finish, the srtp keys match what the peer derives" {
+    const key = try testSigningKey();
+
+    var hello_buf: [512]u8 = undefined;
+    const body = try testHelloOfferingSrtp(&hello_buf, "cookie", &.{.SRTP_AES128_CM_HMAC_SHA1_80});
+
+    var opts = testOptions(key);
+    opts.srtp_profiles = &.{.SRTP_AES128_CM_HMAC_SHA1_80};
+
+    var flight_buf: [4096]u8 = undefined;
+    var finish_buf: [512]u8 = undefined;
+    const done = try runFullHandshake(opts, body, &flight_buf, &finish_buf);
+
+    try std.testing.expectEqual(dtls_exporter.SrtpProfile.SRTP_AES128_CM_HMAC_SHA1_80, done.finish.srtp_profile.?);
+
+    // The peer exports from the same master secret and the same randoms. All four values have to
+    // agree byte for byte, because nothing on the media path reports a key that is merely close.
+    const peer_keys = try dtls_exporter.srtpKeys(
+        .SRTP_AES128_CM_HMAC_SHA1_80,
+        done.master,
+        TEST_CLIENT_RANDOM,
+        done.server_random,
+    );
+    const server_keys = done.finish.srtp_keys.?;
+
+    try std.testing.expectEqualSlices(u8, &peer_keys.client_write_key, &server_keys.client_write_key);
+    try std.testing.expectEqualSlices(u8, &peer_keys.server_write_key, &server_keys.server_write_key);
+    try std.testing.expectEqualSlices(u8, &peer_keys.client_write_salt, &server_keys.client_write_salt);
+    try std.testing.expectEqualSlices(u8, &peer_keys.server_write_salt, &server_keys.server_write_salt);
+
+    // The two directions never share a key, which is what stops one peer forging the other's
+    // stream on a path where both keys are derived from one secret.
+    try std.testing.expect(!std.mem.eql(u8, &server_keys.client_write_key, &server_keys.server_write_key));
+}
+
+test "zix dtls: connection finish, a handshake with no media exports nothing" {
+    const key = try testSigningKey();
+
+    var hello_buf: [256]u8 = undefined;
+    const body = try dtls_hello.writeClientHelloBody(
+        &hello_buf,
+        dtls_record.VERSION_DTLS_1_2,
+        TEST_CLIENT_RANDOM,
+        "",
+        "cookie",
+        &.{CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256},
+    );
+
+    var flight_buf: [4096]u8 = undefined;
+    var finish_buf: [512]u8 = undefined;
+    const done = try runFullHandshake(testOptions(key), body, &flight_buf, &finish_buf);
+
+    try std.testing.expect(done.finish.srtp_keys == null);
+    try std.testing.expect(done.finish.srtp_profile == null);
 }
 
 test "zix dtls: connection finish, a wrong client finished is rejected" {
