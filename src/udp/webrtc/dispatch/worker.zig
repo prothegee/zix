@@ -136,6 +136,12 @@ pub const Worker = struct {
 
         if (outcome.established) common.logSystem(self.config, "peer completed the dtls handshake", .{});
 
+        // Media before the drain. It is not DTLS-wrapped, so it does not travel through the peer's
+        // own outbound queue, and holding it back until after the handler would put a frame behind
+        // whatever the application produced.
+        if (outcome.media) self.forwardMedia(peer);
+        if (outcome.keyframe_requested) self.forwardKeyframeRequest(peer);
+
         self.drainPeer(handler, peer, now_ms);
     }
 
@@ -269,19 +275,83 @@ pub const Worker = struct {
         return took;
     }
 
+    /// Take one peer's media packet to every other peer this worker holds.
+    ///
+    /// Note:
+    /// - Opened once by the peer that sent it and sealed once per receiver, because no two peers
+    ///   share a key. That re-protection is the whole cost of forwarding, and it is why a room of
+    ///   N costs N seals per packet rather than one send.
+    /// - Nothing here reads the payload. What changes is the header, and only where a receiver
+    ///   renumbers the stream.
+    /// - A peer that cannot take it is skipped. One member that negotiated no media, or that is
+    ///   past its stream ceiling, does not cost the rest of the room a frame.
+    fn forwardMedia(self: *Worker, from: *connection.Connection) void {
+        const opened = from.openedMedia() orelse return;
+
+        var joined = false;
+        var walk = self.peers.iterator();
+
+        while (walk.next()) |peer| {
+            if (peer.address.eql(&from.address)) continue;
+            if (peer.isNewSource(opened.header.ssrc)) joined = true;
+
+            const packet = peer.sealMedia(opened, self.out) orelse continue;
+
+            self.queueDatagram(peer.address, packet);
+        }
+
+        // Somebody was just put on this stream, and a stream joined partway through cannot be
+        // decoded until a keyframe arrives. Nothing in the browser asks for one on a watcher's
+        // behalf, so the forwarder asks the source itself.
+        if (joined) self.requestKeyframe(from, opened.header.ssrc);
+    }
+
+    /// Carry one receiver's keyframe request to whichever peer is sending that stream.
+    ///
+    /// Note:
+    /// - The receiver's own packet is never relayed. It names this server as the peer to answer,
+    ///   and a sender handed it would authenticate it against the wrong key. What travels is the
+    ///   request, rebuilt and sealed for the sender.
+    fn forwardKeyframeRequest(self: *Worker, from: *connection.Connection) void {
+        const source_ssrc = from.takeKeyframeRequest() orelse return;
+
+        var walk = self.peers.iterator();
+
+        while (walk.next()) |peer| {
+            if (peer.address.eql(&from.address)) continue;
+            if (!peer.sendsStream(source_ssrc)) continue;
+
+            self.requestKeyframe(peer, source_ssrc);
+
+            return;
+        }
+    }
+
+    /// Ask one peer for a fresh keyframe on a stream it is sending.
+    fn requestKeyframe(self: *Worker, source: *connection.Connection, source_ssrc: u32) void {
+        const request = source.sealKeyframeRequest(source_ssrc, self.out) orelse return;
+
+        self.queueDatagram(source.address, request);
+    }
+
     /// Move everything one peer has waiting into the batch.
     fn queueOutbound(self: *Worker, peer: *connection.Connection, now_ms: u64) void {
-        const destination = datagram.ipToSockaddr6(peer.address);
-
         while (peer.nextOutbound(now_ms, self.out) catch null) |packet| {
-            if (self.tx.queue(destination, packet)) continue;
+            self.queueDatagram(peer.address, packet);
+        }
+    }
 
-            // The batch is full: put it on the wire, then take the reply that did not fit.
-            self.flush();
+    /// Put one datagram in the batch, making room for it when the batch is already full.
+    fn queueDatagram(self: *Worker, address: IpAddress, packet: []const u8) void {
+        const destination = datagram.ipToSockaddr6(address);
 
-            if (!self.tx.queue(destination, packet)) {
-                common.logSystem(self.config, "dropped a {d} byte reply the send batch could not hold", .{packet.len});
-            }
+        if (self.tx.queue(destination, packet)) return;
+
+        // The batch is full: put it on the wire, then take the one that did not fit.
+        self.flush();
+
+        if (!self.tx.queue(destination, packet)) {
+            common.logSystem(self.config, "dropped a {d} byte reply the send batch could not hold", .{packet.len});
         }
     }
 
@@ -637,6 +707,245 @@ fn everyoneOpened(room: []const session.Driver) bool {
     }
 
     return true;
+}
+
+const dtls_exporter = @import("../../../tls/dtls_exporter.zig");
+const feedback = @import("../media/feedback.zig");
+const peer_media = @import("../media/peer_media.zig");
+const rtcp = @import("../media/rtcp.zig");
+const rtp = @import("../media/rtp.zig");
+const srtcp = @import("../media/srtcp.zig");
+const stream_set = @import("../media/stream_set.zig");
+
+const TEST_PROFILE: dtls_exporter.SrtpProfile = .SRTP_AES128_CM_HMAC_SHA1_80;
+
+/// One peer's SRTP keys, different per member so a packet really does have to be re-protected.
+fn testKeys(seed: u8) dtls_exporter.SrtpKeys {
+    return .{
+        .client_write_key = @splat(seed),
+        .server_write_key = @splat(seed +% 1),
+        .client_write_salt = @splat(seed +% 2),
+        .server_write_salt = @splat(seed +% 3),
+    };
+}
+
+/// The browser half of one member: it writes with the client key and reads with the server key.
+const TestMember = struct {
+    address: IpAddress,
+    keys: dtls_exporter.SrtpKeys,
+    sending: stream_set.StreamSet,
+    receiving: stream_set.StreamSet,
+    control_sending: srtcp.Session,
+    control_receiving: srtcp.Session,
+
+    fn init(port: u16, seed: u8) !TestMember {
+        const keys = testKeys(seed);
+
+        return .{
+            .address = testAddress(port),
+            .keys = keys,
+            .sending = try stream_set.StreamSet.init(TEST_PROFILE, keys.client_write_key, keys.client_write_salt),
+            .receiving = try stream_set.StreamSet.init(TEST_PROFILE, keys.server_write_key, keys.server_write_salt),
+            .control_sending = try srtcp.Session.init(TEST_PROFILE, keys.client_write_key, keys.client_write_salt),
+            .control_receiving = try srtcp.Session.init(TEST_PROFILE, keys.server_write_key, keys.server_write_salt),
+        };
+    }
+
+    /// Put this member in the worker's table, already keyed, as a finished handshake would.
+    fn join(self: *TestMember, worker: *Worker) !void {
+        const peer = (try worker.peers.acquire(self.address, worker.options, common.drawSecrets(), 0)).?;
+
+        peer.media = try peer_media.PeerMedia.init(TEST_PROFILE, self.keys);
+    }
+
+    fn send(self: *TestMember, buffer: []u8, ssrc: u32, sequence: u16, payload: []const u8) ![]const u8 {
+        const written = try rtp.write(buffer, .{
+            .payload_type = 96,
+            .sequence = sequence,
+            .timestamp = 90 * @as(u32, sequence),
+            .ssrc = ssrc,
+        }, payload);
+
+        return (try self.sending.sessionFor(ssrc)).protect(buffer, written.len);
+    }
+
+    fn receive(self: *TestMember, buffer: []u8, packet_len: usize) !rtp.Packet {
+        const ssrc = (try rtp.read(buffer[0..packet_len])).header.ssrc;
+
+        return rtp.read(try (try self.receiving.sessionFor(ssrc)).unprotect(buffer[0..packet_len]));
+    }
+
+    fn askForKeyframe(self: *TestMember, buffer: []u8, media_ssrc: u32) ![]const u8 {
+        const written = try feedback.writePictureLoss(buffer, 0x9999_9999, media_ssrc);
+
+        return self.control_sending.protect(buffer, written.len);
+    }
+
+    fn receiveControl(self: *TestMember, buffer: []u8, packet_len: usize) ![]const u8 {
+        return self.control_receiving.unprotect(buffer[0..packet_len]);
+    }
+};
+
+/// One queued datagram copied out of the batch, so a test can open it in place.
+fn queuedAt(worker: *Worker, index: usize, out: []u8) []u8 {
+    const iov = worker.tx.iovs[index];
+    @memcpy(out[0..iov.len], iov.base[0..iov.len]);
+
+    return out[0..iov.len];
+}
+
+test "zix webrtc: worker, one peer's media reaches the rest of the room and not its sender" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var tls = try testContext(std.testing.allocator);
+    var config = testConfig(threaded.io(), std.testing.allocator, &tls);
+    config.carry_media = true;
+
+    const socket = try testSocket(threaded.io());
+    defer socket.close(threaded.io());
+
+    var worker = try Worker.initSocket(config, socket);
+    defer worker.deinit();
+
+    var sender = try TestMember.init(5000, 0x11);
+    var first = try TestMember.init(5001, 0x21);
+    var second = try TestMember.init(5002, 0x31);
+
+    try sender.join(&worker);
+    try first.join(&worker);
+    try second.join(&worker);
+
+    var buffer: [256]u8 = undefined;
+    const protected = try sender.send(&buffer, 0x1111_1111, 100, "camera bytes");
+
+    worker.serve(noopHandler, sender.address, protected, 0);
+
+    // Two members, two sealed copies, nothing back to the one who sent it, and one keyframe
+    // request to the sender because both of them were just put on the stream.
+    try std.testing.expectEqual(@as(usize, 3), worker.tx.count);
+
+    var went_to_first: [256]u8 = undefined;
+    const first_len = queuedAt(&worker, 0, &went_to_first).len;
+
+    var went_to_second: [256]u8 = undefined;
+    const second_len = queuedAt(&worker, 1, &went_to_second).len;
+
+    // Different ciphertext each way, and the same payload out of both.
+    try std.testing.expect(!std.mem.eql(u8, went_to_first[0..first_len], went_to_second[0..second_len]));
+    try std.testing.expectEqualStrings("camera bytes", (try first.receive(&went_to_first, first_len)).payload);
+    try std.testing.expectEqualStrings("camera bytes", (try second.receive(&went_to_second, second_len)).payload);
+
+    var went_back: [256]u8 = undefined;
+    const request_len = queuedAt(&worker, 2, &went_back).len;
+
+    var walk = try rtcp.begin(try sender.receiveControl(&went_back, request_len));
+
+    try std.testing.expectEqual(feedback.PayloadFormat.PLI, try feedback.payloadFormat(walk.next().?));
+
+    // And the second packet finds nobody new, so nothing more is asked for.
+    worker.tx.reset();
+
+    var again: [256]u8 = undefined;
+    worker.serve(noopHandler, sender.address, try sender.send(&again, 0x1111_1111, 101, "camera bytes"), 0);
+
+    try std.testing.expectEqual(@as(usize, 2), worker.tx.count);
+}
+
+test "zix webrtc: worker, a peer alone in the room has its media opened and forwarded nowhere" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var tls = try testContext(std.testing.allocator);
+    var config = testConfig(threaded.io(), std.testing.allocator, &tls);
+    config.carry_media = true;
+
+    const socket = try testSocket(threaded.io());
+    defer socket.close(threaded.io());
+
+    var worker = try Worker.initSocket(config, socket);
+    defer worker.deinit();
+
+    var sender = try TestMember.init(5000, 0x11);
+    try sender.join(&worker);
+
+    var buffer: [256]u8 = undefined;
+    const protected = try sender.send(&buffer, 0x1111_1111, 1, "nobody listening");
+
+    worker.serve(noopHandler, sender.address, protected, 0);
+
+    try std.testing.expectEqual(@as(usize, 0), worker.tx.count);
+    try std.testing.expectEqual(@as(usize, 1), worker.peers.live);
+}
+
+test "zix webrtc: worker, a keyframe request reaches the peer sending that stream" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var tls = try testContext(std.testing.allocator);
+    var config = testConfig(threaded.io(), std.testing.allocator, &tls);
+    config.carry_media = true;
+
+    const socket = try testSocket(threaded.io());
+    defer socket.close(threaded.io());
+
+    var worker = try Worker.initSocket(config, socket);
+    defer worker.deinit();
+
+    var sender = try TestMember.init(5000, 0x11);
+    var receiver = try TestMember.init(5001, 0x21);
+
+    try sender.join(&worker);
+    try receiver.join(&worker);
+
+    // One packet first, so the sender is known to be the source of that stream and the receiver
+    // has a route to name.
+    var buffer: [256]u8 = undefined;
+    worker.serve(noopHandler, sender.address, try sender.send(&buffer, 0x1111_1111, 1, "a frame"), 0);
+    worker.tx.reset();
+
+    var control_buf: [256]u8 = undefined;
+    const asked = try receiver.askForKeyframe(&control_buf, 0x1111_1111);
+
+    worker.serve(noopHandler, receiver.address, asked, 10);
+
+    try std.testing.expectEqual(@as(usize, 1), worker.tx.count);
+
+    var went_out: [256]u8 = undefined;
+    const request_len = queuedAt(&worker, 0, &went_out).len;
+
+    const compound = try sender.receiveControl(&went_out, request_len);
+    var walk = try rtcp.begin(compound);
+    const packet = walk.next().?;
+
+    try std.testing.expectEqual(feedback.PayloadFormat.PLI, try feedback.payloadFormat(packet));
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), (try feedback.read(packet)).media_ssrc);
+}
+
+test "zix webrtc: worker, media from a peer of a server that carries none is dropped" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var tls = try testContext(std.testing.allocator);
+    const config = testConfig(threaded.io(), std.testing.allocator, &tls);
+
+    const socket = try testSocket(threaded.io());
+    defer socket.close(threaded.io());
+
+    var worker = try Worker.initSocket(config, socket);
+    defer worker.deinit();
+
+    var sender = try TestMember.init(5000, 0x11);
+    const listener = try TestMember.init(5001, 0x21);
+
+    // Joined without keys, which is every peer of a server that answers no media.
+    _ = (try worker.peers.acquire(sender.address, worker.options, common.drawSecrets(), 0)).?;
+    _ = (try worker.peers.acquire(listener.address, worker.options, common.drawSecrets(), 0)).?;
+
+    var buffer: [256]u8 = undefined;
+    worker.serve(noopHandler, sender.address, try sender.send(&buffer, 0x1111_1111, 1, "unwanted"), 0);
+
+    try std.testing.expectEqual(@as(usize, 0), worker.tx.count);
 }
 
 test "zix webrtc: worker, the sweep lets go of a peer that stopped speaking" {
