@@ -62,11 +62,11 @@
     <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
     <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 </div>
-<p align="center">
-    <code><i>Green: Maintained | Yellow: Cross-Compiled</i></code>
+<!-- <p align="center"> -->
+    <!-- <code><i>Green: Maintained | Yellow: Cross-Compiled</i></code> -->
     <!-- <br> -->
     <!-- <code><i>Looking for maintaner & contributor.</i></code> -->
-</p>
+<!-- </p> -->
 
 <!-- <hr> -->
 
