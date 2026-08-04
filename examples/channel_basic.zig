@@ -8,7 +8,7 @@
 // std.Io.Threaded provides the IO backend for spawned OS threads.
 //
 // Run:
-// zig build example-channel_basic && ./zig-out/bin/example-channel_basic
+// zig build example-channel_basic && ./zig-out/bin/zix-example-channel_basic
 
 const std = @import("std");
 const zix = @import("zix");
