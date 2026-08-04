@@ -19,6 +19,7 @@ const WebrtcServerConfig = Config.WebrtcServerConfig;
 const connection = @import("../connection.zig");
 const datagram = @import("../../datagram.zig");
 const secure_random = @import("../../../utils/secure_random.zig");
+const srtp = @import("../media/srtp.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
@@ -94,6 +95,7 @@ pub fn optionsFrom(config: WebrtcServerConfig) connection.Options {
         .certificate_der = if (config.tls) |tls| tls.cert_der else "",
         .signing_key = ecdsaKey(config).?,
         .max_handshake_fragment = config.max_handshake_fragment,
+        .srtp_profiles = if (config.carry_media) Config.SRTP_PROFILES else &.{},
         .path_max_bytes = config.path_max_bytes,
         .max_datagram_bytes = config.max_recv_buf,
         .outbound_streams = config.outbound_streams,
@@ -104,8 +106,13 @@ pub fn optionsFrom(config: WebrtcServerConfig) connection.Options {
 }
 
 /// How wide the outbound scratch buffer has to be for one datagram.
+///
+/// Note:
+/// - The received size plus the SRTP overhead, because a forwarded packet is sealed under the
+///   receiving peer's key and that peer's tag is not always the length the sender's was. Without
+///   the headroom a packet crossing two different profiles has nowhere to be written.
 pub fn sendBufBytes(config: WebrtcServerConfig) usize {
-    return @max(config.max_recv_buf, config.path_max_bytes + connection.DTLS_OVERHEAD + 64);
+    return @max(config.max_recv_buf + srtp.MAX_OVERHEAD, config.path_max_bytes + connection.DTLS_OVERHEAD + 64);
 }
 
 /// Milliseconds between two readings of the same clock, never negative.
@@ -351,6 +358,23 @@ test "zix webrtc: dispatch common, options carry the config through unchanged" {
     try std.testing.expectEqual(@as(usize, 8), options.max_channels);
     try std.testing.expectEqual(@as(u32, 12_000), options.peer_idle_ms);
     try std.testing.expectEqual(config.max_recv_buf, options.max_datagram_bytes);
+
+    // Media is off, so the handshake offers no use_srtp and exports no keys.
+    try std.testing.expectEqual(@as(usize, 0), options.srtp_profiles.len);
+}
+
+test "zix webrtc: dispatch common, carrying media puts the profiles in front of the handshake" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var tls = try testContext(std.testing.allocator);
+    var config = testConfig(threaded.io(), std.testing.allocator, &tls);
+    config.carry_media = true;
+
+    const options = optionsFrom(config);
+
+    try std.testing.expectEqual(Config.SRTP_PROFILES.len, options.srtp_profiles.len);
+    try std.testing.expectEqual(Config.SRTP_PROFILES[0], options.srtp_profiles[0]);
 }
 
 test "zix webrtc: dispatch common, taking any peer ufrag drops the name the config held" {
