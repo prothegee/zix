@@ -39,7 +39,7 @@
 <br>
 
 <h4 align="center">
-    <b><i>Languages:</i></b>
+    <b><i>Languages Documentation:</i></b>
 </h4>
 
 <div align="center">
@@ -64,8 +64,8 @@
 </div>
 <p align="center">
     <code><i>Green: Maintained | Yellow: Cross-Compiled</i></code>
-    <br>
-    <code><i>Looking for maintaner & contributor.</i></code>
+    <!-- <br> -->
+    <!-- <code><i>Looking for maintaner & contributor.</i></code> -->
 </p>
 
 <!-- <hr> -->
