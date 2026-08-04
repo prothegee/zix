@@ -53,6 +53,9 @@ graph TD
 | `cert_verify.zig` | Peer cert chain (RFC 5280) + hostname / IP identity (RFC 6125), the misdirected-request check |
 | `client.zig` | TLS 1.3 client handshake (start / finish, `ClientConnection`) |
 | `tls12_*.zig` | TLS 1.2 track: PRF schedule, record layer, version select, server handshake, client |
+| `dtls_*.zig` | DTLS 1.2 track (ADR-067), used by `zix.Webrtc` only: record layer with anti-replay, handshake fragment and reassembly, ClientHello with a cookie, stateless HMAC cookies, the retransmit state machine, RFC 5705 key export, the RFC 5764 `use_srtp` extension, a server driver and a client |
+
+The DTLS files live here rather than under the WebRTC tree because they share leaf primitives with the 1.2 track (`tls12_prf`, the certificate and ECDSA signing path, P-256 ECDHE) and because DTLS is a TLS profile, not a WebRTC concept. They keep **no separate public surface**: `zix.Tls` does not re-export them, and only `zix.Webrtc` reaches them. `dtls_connection.zig` composes its own flights rather than reusing `tls12_connection.zig`, because the DTLS transcript is taken over 12-byte DTLS headers as-if-unfragmented (RFC 6347 section 4.2.6), which the TLS-framed hashing cannot produce.
 
 ## Version Policy
 

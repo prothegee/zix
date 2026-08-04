@@ -53,6 +53,9 @@ graph TD
 | `cert_verify.zig` | Chain cert peer (RFC 5280) + identitas hostname / IP (RFC 6125), cek misdirected-request |
 | `client.zig` | Handshake client TLS 1.3 (start / finish, `ClientConnection`) |
 | `tls12_*.zig` | Track TLS 1.2: PRF schedule, record layer, version select, handshake server, client |
+| `dtls_*.zig` | Track DTLS 1.2 (ADR-067), dipakai hanya oleh `zix.Webrtc`: record layer dengan anti-replay, fragment dan perakitan ulang handshake, ClientHello dengan cookie, cookie HMAC stateless, state machine retransmit, ekspor kunci RFC 5705, ekstensi `use_srtp` RFC 5764, driver server dan client |
+
+Berkas DTLS tinggal di sini, bukan di bawah pohon WebRTC, karena mereka berbagi primitif daun dengan track 1.2 (`tls12_prf`, jalur certificate dan penandatanganan ECDSA, ECDHE P-256) dan karena DTLS adalah profil TLS, bukan konsep WebRTC. Mereka **tidak memegang public surface terpisah**: `zix.Tls` tidak mengekspor ulang mereka, dan hanya `zix.Webrtc` yang menjangkaunya. `dtls_connection.zig` menyusun flight-nya sendiri alih-alih memakai ulang `tls12_connection.zig`, karena transcript DTLS diambil di atas header DTLS 12 byte seolah tidak terfragmentasi (RFC 6347 bagian 4.2.6), yang tidak bisa dihasilkan hashing berbingkai TLS.
 
 ## Version Policy
 
