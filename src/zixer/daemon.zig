@@ -178,6 +178,14 @@ pub const Daemon = struct {
         if (faults.slice().len != 0 or cfg.engine == null or cfg.port == null)
             return print(reply_buf, "error: {s} has config errors, run: zixer status {s}", .{ name, name });
 
+        // Tcp sites listen with reuse_address (restart survives TIME_WAIT),
+        // so a same-port collision between sites must be caught here, the
+        // kernel would happily share the port.
+        for (self.sites.items) |site| {
+            if (site.port == cfg.port.?)
+                return print(reply_buf, "error: {s} port {d} is already used by {s}", .{ name, cfg.port.?, site.name });
+        }
+
         const backlog = cfg.kernel_backlog orelse self.cfg.kernel_backlog;
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, backlog) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
@@ -434,7 +442,7 @@ test "zix zixer: daemon handleLine, two sites on one port collide at start" {
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start one.cfg", &reply_buf), "ok: "));
     try std.testing.expectEqualStrings(
-        "error: two.cfg port 39865 is already in use",
+        "error: two.cfg port 39865 is already used by one.cfg",
         daemon.handleLine("start two.cfg", &reply_buf),
     );
 }
