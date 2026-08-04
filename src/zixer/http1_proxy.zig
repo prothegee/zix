@@ -4,6 +4,7 @@ const std = @import("std");
 
 const http1_head = @import("http1_head.zig");
 const proxy_headers = @import("proxy_headers.zig");
+const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
@@ -16,11 +17,14 @@ const PUMP_CHUNK: usize = 16 * 1024;
 /// Interim (1xx) responses relayed per exchange before giving up.
 const MAX_INTERIM = 4;
 
-/// What one site's edge connections share.
+/// What one site's edge connections share. A proxied site carries pool and
+/// idle together, a static-only site leaves both null and serves public_dir
+/// alone.
 pub const Proxy = struct {
     io: std.Io,
-    pool: *upstream_pool.Pool,
-    idle: *upstream_conn.IdleCache,
+    pool: ?*upstream_pool.Pool = null,
+    idle: ?*upstream_conn.IdleCache = null,
+    static: ?static_files.StaticSite = null,
 };
 
 /// After one exchange: keep the edge connection or close it.
@@ -35,6 +39,8 @@ const EdgeResult = enum {
 /// - Every request is re-originated: zixer parses the client framing and
 ///   builds its own upstream message, raw client bytes never splice through
 ///   (rfc 9112 smuggling defense).
+/// - A site with public_dir answers matching file requests at the edge
+///   before the pool is consulted, see staticAnswer.
 pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     const io = proxy.io;
     defer client_stream.close(io);
@@ -57,6 +63,15 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
             return;
         };
 
+        // The static plane answers first: on a hit or a local status the
+        // upstream never sees the request.
+        if (staticAnswer(proxy, &request, &client_writer.interface)) |result| {
+            client_writer.interface.flush() catch return;
+            if (result == .CLOSE) return;
+
+            continue;
+        }
+
         var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
         const upstream_head = buildUpstreamHead(&build_buf, &request, client_addr) catch {
             writeEdgeError(&client_writer.interface, 400, "bad request", "http_request_error");
@@ -78,6 +93,107 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     }
 }
 
+/// Answer the request from public_dir when the site serves static files.
+///
+/// Return:
+/// - EdgeResult when a response was written here
+/// - null when the request continues to the upstream pool
+fn staticAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, client_w: *std.Io.Writer) ?EdgeResult {
+    const io = proxy.io;
+    const static_only = proxy.pool == null;
+
+    const site: *const static_files.StaticSite = if (proxy.static) |*inner| inner else {
+        if (!static_only) return null;
+
+        // Validation never lets a site carry neither upstreams nor
+        // public_dir, answering locally beats reaching into a null pool.
+        writeLocalStatus(client_w, 404, "not found", "", requestCloses(request));
+        return closeOrKeep(request);
+    };
+
+    if (static_files.handles(site, request.method, request.target)) {
+        const accept = acceptEncoding(request);
+        if (static_files.open(io, site.public_dir, request.target, accept)) |resolved| {
+            return sendResolved(io, client_w, resolved, request);
+        }
+
+        // File miss: a client-side routed app answers its fallback page.
+        // Validation ties spa_fallback to static-only sites or a bounded
+        // public_prefix, so a backend 404 never swallows into it.
+        if (site.spa_fallback) |fallback| {
+            var target_buf: [static_files.MAX_PATH]u8 = undefined;
+            if (std.fmt.bufPrint(&target_buf, "/{s}", .{fallback}) catch null) |fallback_target| {
+                if (static_files.open(io, site.public_dir, fallback_target, accept)) |resolved| {
+                    return sendResolved(io, client_w, resolved, request);
+                }
+            }
+        }
+    }
+
+    if (!static_only) return null;
+
+    if (!static_files.fileMethod(request.method)) {
+        writeLocalStatus(client_w, 405, "method not allowed", "Allow: GET, HEAD\r\n", requestCloses(request));
+        return closeOrKeep(request);
+    }
+
+    writeLocalStatus(client_w, 404, "not found", "", requestCloses(request));
+    return closeOrKeep(request);
+}
+
+/// Write the resolved file as the response, closing it after.
+fn sendResolved(io: std.Io, client_w: *std.Io.Writer, resolved: static_files.Resolved, request: *const http1_head.RequestHead) EdgeResult {
+    defer resolved.file.close(io);
+
+    const edge_close = requestCloses(request);
+    static_files.writeResolvedHead(client_w, &resolved, edge_close) catch return .CLOSE;
+
+    if (!std.mem.eql(u8, request.method, "HEAD")) {
+        var chunk: [PUMP_CHUNK]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < resolved.size) {
+            const want: usize = @intCast(@min(resolved.size - offset, chunk.len));
+            const got = resolved.file.readPositionalAll(io, chunk[0..want], offset) catch return .CLOSE;
+            if (got == 0) return .CLOSE;
+
+            client_w.writeAll(chunk[0..got]) catch return .CLOSE;
+            offset += got;
+        }
+    }
+
+    return if (edge_close) .CLOSE else .KEEP;
+}
+
+/// A request whose body was never read cannot keep the edge conn: the next
+/// head parse on this connection would read body bytes.
+fn requestCloses(request: *const http1_head.RequestHead) bool {
+    return request.connection_close or request.framing != .none;
+}
+
+fn closeOrKeep(request: *const http1_head.RequestHead) EdgeResult {
+    return if (requestCloses(request)) .CLOSE else .KEEP;
+}
+
+/// The request Accept-Encoding value, null when the header is absent.
+fn acceptEncoding(request: *const http1_head.RequestHead) ?[]const u8 {
+    for (request.headerSlice()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "accept-encoding")) return header.value;
+    }
+
+    return null;
+}
+
+/// Local origin reply for the static plane: no Proxy-Status, since zixer
+/// answers as the origin here, not as an intermediary.
+fn writeLocalStatus(client_w: *std.Io.Writer, status: u16, reason: []const u8, extra_header: []const u8, edge_close: bool) void {
+    client_w.print(
+        "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\n{s}",
+        .{ status, reason, reason.len + 1, extra_header },
+    ) catch return;
+    if (edge_close) client_w.writeAll("Connection: close\r\n") catch return;
+    client_w.print("\r\n{s}\n", .{reason}) catch return;
+}
+
 /// One request against the pool: pick, forward, relay, bounded retry.
 fn exchange(
     proxy: *const Proxy,
@@ -89,12 +205,17 @@ fn exchange(
     const io = proxy.io;
     const no_body = request.framing == .none;
 
+    // serveConn only reaches the exchange when the pool exists: the static
+    // branch answered everything else on a static-only site.
+    const pool = proxy.pool.?;
+    const idle = proxy.idle.?;
+
     // Bounded retry: one try per configured upstream, plus one spare so a
     // single stale idle conn never eats a slot's only chance.
-    var attempts: usize = proxy.pool.slots.len + 1;
+    var attempts: usize = pool.slots.len + 1;
     var failed_here: bool = false;
     while (attempts > 0) : (attempts -= 1) {
-        const picked = proxy.pool.pick(nowMs(io)) orelse {
+        const picked = pool.pick(nowMs(io)) orelse {
             // Nothing left to pick. When this exchange itself emptied the
             // pool the honest answer is the failure it saw, not 503.
             if (failed_here) break;
@@ -103,9 +224,9 @@ fn exchange(
             return .CLOSE;
         };
 
-        const conn = proxy.idle.acquire(picked.index) orelse
+        const conn = idle.acquire(picked.index) orelse
             upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
-            proxy.pool.markDown(picked.index, nowMs(io));
+            pool.markDown(picked.index, nowMs(io));
             failed_here = true;
             continue;
         };
@@ -117,7 +238,7 @@ fn exchange(
 
         up_writer.interface.writeAll(upstream_head) catch {
             conn.stream.close(io);
-            if (!conn.reused) proxy.pool.markDown(picked.index, nowMs(io));
+            if (!conn.reused) pool.markDown(picked.index, nowMs(io));
             failed_here = true;
             continue;
         };
@@ -141,7 +262,7 @@ fn exchange(
         up_writer.interface.flush() catch {
             conn.stream.close(io);
             if (no_body) {
-                if (!conn.reused) proxy.pool.markDown(picked.index, nowMs(io));
+                if (!conn.reused) pool.markDown(picked.index, nowMs(io));
                 failed_here = true;
                 continue;
             }
@@ -155,7 +276,7 @@ fn exchange(
             if (no_body) {
                 // A stale idle conn answers EOF here. Bodyless requests are
                 // safe to replay, with a body the client already spent it.
-                if (!conn.reused) proxy.pool.markDown(picked.index, nowMs(io));
+                if (!conn.reused) pool.markDown(picked.index, nowMs(io));
                 failed_here = true;
                 continue;
             }
@@ -182,7 +303,7 @@ fn exchange(
         }
 
         const reusable = !relay_failed and !response.connection_close and response.framing != .until_close;
-        if (reusable) proxy.idle.release(io, conn) else conn.stream.close(io);
+        if (reusable) idle.release(io, conn) else conn.stream.close(io);
 
         if (relay_failed or edge_close) return .CLOSE;
 
@@ -758,4 +879,245 @@ test "zix zixer: http1 proxy, every upstream down answers 502 with proxy-status"
 
     try std.testing.expect(std.mem.startsWith(u8, reply2, "HTTP/1.1 503 "));
     try std.testing.expect(std.mem.indexOf(u8, reply2, "Proxy-Status: zixer; error=\"destination_unavailable\"") != null);
+}
+
+// --------------------------------------------------------- //
+
+const testing = std.testing;
+
+fn writeFixture(dir: std.Io.Dir, name: []const u8, data: []const u8) void {
+    dir.writeFile(testing.io, .{ .sub_path = name, .data = data }) catch @panic("fixture write failed");
+}
+
+fn fixtureRoot(buf: []u8, tmp: *const testing.TmpDir) []const u8 {
+    return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+}
+
+test "zix zixer: http1 proxy, static hit serves the file and keeps alive" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "app.js", "console.log(1)");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+
+    const request = try http1_head.parseRequest("GET /app.js HTTP/1.1\r\nHost: t\r\n\r\n");
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const result = staticAnswer(&proxy, &request, &out).?;
+    const reply = out.buffered();
+
+    try testing.expectEqual(EdgeResult.KEEP, result);
+    try testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, reply, "Content-Type: application/javascript\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, reply, "Content-Length: 14\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, reply, "Vary: Accept-Encoding\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, reply, "\r\n\r\nconsole.log(1)"));
+}
+
+test "zix zixer: http1 proxy, static head request sends no body" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "page.html", "<h1>hi</h1>");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+
+    const request = try http1_head.parseRequest("HEAD /page.html HTTP/1.1\r\nHost: t\r\n\r\n");
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const result = staticAnswer(&proxy, &request, &out).?;
+    const reply = out.buffered();
+
+    try testing.expectEqual(EdgeResult.KEEP, result);
+    try testing.expect(std.mem.indexOf(u8, reply, "Content-Length: 11\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, reply, "\r\n\r\n"));
+}
+
+test "zix zixer: http1 proxy, static miss falls back to the spa page" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "index.html", "<app/>");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = "index.html" } };
+
+    // A deep link misses on disk and serves the fallback page instead.
+    const request = try http1_head.parseRequest("GET /users/42 HTTP/1.1\r\nHost: t\r\n\r\n");
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const result = staticAnswer(&proxy, &request, &out).?;
+    const reply = out.buffered();
+
+    try testing.expectEqual(EdgeResult.KEEP, result);
+    try testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(std.mem.indexOf(u8, reply, "Content-Type: text/html\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, reply, "\r\n\r\n<app/>"));
+}
+
+test "zix zixer: http1 proxy, static-only site answers 404 and 405 locally" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+
+    const miss = try http1_head.parseRequest("GET /absent.txt HTTP/1.1\r\nHost: t\r\n\r\n");
+    var miss_buf: [512]u8 = undefined;
+    var miss_out = std.Io.Writer.fixed(&miss_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &miss, &miss_out).?);
+    try testing.expect(std.mem.startsWith(u8, miss_out.buffered(), "HTTP/1.1 404 not found\r\n"));
+    try testing.expect(std.mem.indexOf(u8, miss_out.buffered(), "Proxy-Status") == null);
+
+    const post = try http1_head.parseRequest("POST /submit HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n\r\n");
+    var post_buf: [512]u8 = undefined;
+    var post_out = std.Io.Writer.fixed(&post_buf);
+
+    // The unread body forces the close, the method earns the 405.
+    try testing.expectEqual(EdgeResult.CLOSE, staticAnswer(&proxy, &post, &post_out).?);
+    try testing.expect(std.mem.startsWith(u8, post_out.buffered(), "HTTP/1.1 405 method not allowed\r\n"));
+    try testing.expect(std.mem.indexOf(u8, post_out.buffered(), "Allow: GET, HEAD\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, post_out.buffered(), "Connection: close\r\n") != null);
+}
+
+test "zix zixer: http1 proxy, mixed site miss continues to the pool" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    tmp.dir.createDirPath(testing.io, "assets") catch @panic("fixture dir failed");
+    writeFixture(tmp.dir, "assets/app.css", "body{}");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39879 }};
+    var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(testing.allocator, 1);
+    defer idle.deinit(testing.allocator, testing.io);
+    const proxy = Proxy{
+        .io = testing.io,
+        .pool = &pool,
+        .idle = &idle,
+        .static = .{ .public_dir = root, .public_prefix = "/assets", .spa_fallback = null },
+    };
+
+    // Outside the prefix nothing is written and the request proxies.
+    const api = try http1_head.parseRequest("GET /api/users HTTP/1.1\r\nHost: t\r\n\r\n");
+    var api_buf: [512]u8 = undefined;
+    var api_out = std.Io.Writer.fixed(&api_buf);
+    try testing.expect(staticAnswer(&proxy, &api, &api_out) == null);
+    try testing.expectEqual(@as(usize, 0), api_out.buffered().len);
+
+    // A miss under the prefix also proxies on a mixed site.
+    const miss = try http1_head.parseRequest("GET /assets/gone.css HTTP/1.1\r\nHost: t\r\n\r\n");
+    var miss_buf: [512]u8 = undefined;
+    var miss_out = std.Io.Writer.fixed(&miss_buf);
+    try testing.expect(staticAnswer(&proxy, &miss, &miss_out) == null);
+
+    // A hit under the prefix serves from disk.
+    const hit = try http1_head.parseRequest("GET /assets/app.css HTTP/1.1\r\nHost: t\r\n\r\n");
+    var hit_buf: [512]u8 = undefined;
+    var hit_out = std.Io.Writer.fixed(&hit_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &hit, &hit_out).?);
+    try testing.expect(std.mem.indexOf(u8, hit_out.buffered(), "Content-Type: text/css\r\n") != null);
+}
+
+test "zix zixer: http1 proxy, static request carrying a body closes the edge" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "app.js", "x()");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+
+    const request = try http1_head.parseRequest("GET /app.js HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\n\r\n");
+    var out_buf: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    // The body was never read, so the head says close and the edge closes.
+    try testing.expectEqual(EdgeResult.CLOSE, staticAnswer(&proxy, &request, &out).?);
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "Connection: close\r\n") != null);
+}
+
+test "zix zixer: http1 proxy, mixed site serves static beside the pool end to end" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    tmp.dir.createDirPath(io, "assets") catch @panic("fixture dir failed");
+    tmp.dir.writeFile(io, .{ .sub_path = "assets/app.js", .data = "let n=1" }) catch @panic("fixture write failed");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+
+    var fake = FakeUpstream{ .io = io, .port = 39880, .request_quota = 1 };
+    const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
+    try waitReady(io, &fake);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39880 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+    const proxy = Proxy{
+        .io = io,
+        .pool = &pool,
+        .idle = &idle,
+        .static = .{ .public_dir = root, .public_prefix = "/assets", .spa_fallback = null },
+    };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    var read_buf: [4096]u8 = undefined;
+    var write_buf: [512]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var writer = client.writer(io, &write_buf);
+
+    // First request hits the static plane and keeps the connection.
+    try writer.interface.writeAll("GET /assets/app.js HTTP/1.1\r\nHost: t\r\n\r\n");
+    try writer.interface.flush();
+    var head_buf: [2048]u8 = undefined;
+    const static_head = try http1_head.readHead(&reader.interface, &head_buf);
+    const static_response = try http1_head.parseResponse(static_head, "GET");
+    try std.testing.expectEqual(@as(u16, 200), static_response.status);
+    var body: [64]u8 = undefined;
+    const static_len: usize = @intCast(static_response.framing.content_length);
+    _ = try reader.interface.readSliceShort(body[0..static_len]);
+    try std.testing.expectEqualStrings("let n=1", body[0..static_len]);
+
+    // Second request misses the prefix and crosses the pool.
+    try writer.interface.writeAll("GET /api HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+    try writer.interface.flush();
+    var head_buf2: [2048]u8 = undefined;
+    const proxied_head = try http1_head.readHead(&reader.interface, &head_buf2);
+    const proxied = try http1_head.parseResponse(proxied_head, "GET");
+    try std.testing.expectEqual(@as(u16, 200), proxied.status);
+    try std.testing.expect(std.mem.indexOf(u8, proxied_head, "Via: 1.1 zixer\r\n") != null);
+
+    client.close(io);
+    edge_thread.join();
+    fake_thread.join();
+
+    try std.testing.expectEqual(@as(usize, 1), fake.conns_accepted);
 }
