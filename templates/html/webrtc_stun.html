@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>zix STUN binding</title></head>
+<body>
+<h2>zix STUN binding server</h2>
+<p>
+  This asks the browser's ICE agent to gather candidates using nothing but the STUN server below.
+  A <b>host</b> candidate is an address the browser already knew about. An <b>srflx</b> one is the
+  address zix saw the request arrive from, handed back.
+</p>
+<p>STUN server: <b id="stun"></b></p>
+<p>
+  <button id="gather" onclick="gather()">Gather candidates</button>
+  state: <b id="state">idle</b>
+</p>
+<pre id="log" style="font-family:monospace"></pre>
+<p id="hint"></p>
+<script>
+const stunUrl = 'stun:' + location.hostname + ':' + (location.port || '9082');
+document.getElementById('stun').textContent = stunUrl;
+
+function log(line) {
+  document.getElementById('log').textContent += line + '\n';
+}
+
+async function gather() {
+  document.getElementById('gather').disabled = true;
+  document.getElementById('log').textContent = '';
+  document.getElementById('hint').textContent = '';
+  document.getElementById('state').textContent = 'gathering';
+
+  const peer = new RTCPeerConnection({ iceServers: [{ urls: stunUrl }] });
+  let reflexive = 0;
+
+  // A connection with nothing on it gathers nothing, so give it one data channel to gather for.
+  peer.createDataChannel('probe');
+
+  peer.onicecandidate = e => {
+    // The last event carries an empty candidate rather than null in some browsers, and that is the
+    // one that means gathering is over.
+    if (e.candidate && e.candidate.candidate) {
+      if (e.candidate.type === 'srflx') reflexive += 1;
+
+      log(e.candidate.type + '  ' + e.candidate.address + ':' + e.candidate.port +
+          '  (' + e.candidate.protocol + ')');
+
+      return;
+    }
+
+    document.getElementById('state').textContent = 'done';
+    document.getElementById('gather').disabled = false;
+
+    if (reflexive === 0) {
+      document.getElementById('hint').textContent =
+        'No srflx candidate. That happens when the reflexive address the server sees is one the ' +
+        'browser already has as a host candidate, so it drops the duplicate. Load this page by ' +
+        'the address the server binds rather than by localhost, or open it from another machine.';
+    }
+
+    peer.close();
+  };
+
+  await peer.setLocalDescription(await peer.createOffer());
+}
+</script>
+</body>
+</html>
