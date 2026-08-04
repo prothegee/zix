@@ -49,7 +49,7 @@ The `zix.Http1` EPOLL / URING connection table pre-allocates one `MAX_FD * buf_s
 ## Design Patterns
 
 **Type-Per-Domain Methods (Namespace Struct):**<br>
-Each protocol is its own Zig file-as-struct namespace exported from `lib.zig` (`zix.Http`, `zix.Http1`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), exposing only that domain's methods (`Server.init`, `run`, ...).
+Each protocol is its own Zig file-as-struct namespace exported from `lib.zig` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), exposing only that domain's methods (`Server.init`, `run`, ...).
 
 > Use it when a subsystem has a self-contained surface: give it one namespace type instead of scattered free functions.
 
