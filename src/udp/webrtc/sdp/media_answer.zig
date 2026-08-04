@@ -16,15 +16,22 @@
 //!   rtcp_feedback.zig for why answering more is worse than answering less.
 //! - `a=rtcp-mux` always goes out on a carried section. zix has one socket, so there is no
 //!   version of this where RTCP arrives somewhere else.
-//! - The ICE credentials, the fingerprint, and the setup role are repeated in every section. RFC
-//!   8843 lets a bundled session carry them once on the tagged section, and every browser writes
-//!   them per section, so writing them per section is what interoperates.
+//! - The ICE credentials, the fingerprint, the setup role, and the candidate are repeated in every
+//!   section. RFC 8843 lets a bundled session carry them once on the tagged section, and every
+//!   browser writes them per section, so writing them per section is what interoperates.
+//! - Leaving the candidate out is the mistake worth naming. A browser reads the remote candidates
+//!   off the tagged section of the bundle group, which is whichever section the OFFER put first.
+//!   With media offered, that is an audio or a video section, and a section with credentials but
+//!   no candidate leaves the browser nothing to send a check to: ICE goes straight to failed with
+//!   nothing on the wire and nothing in any log.
 
 const std = @import("std");
 
 const address = @import("address.zig");
 const builder = @import("builder.zig");
+const candidate = @import("candidate.zig");
 const direction = @import("direction.zig");
+const ice = @import("../ice/candidate.zig");
 const fingerprint = @import("fingerprint.zig");
 const fmtp = @import("fmtp.zig");
 const format = @import("format.zig");
@@ -126,6 +133,9 @@ pub fn write(
 
         try feedbackLines(&appender, entry);
     }
+
+    try candidateLine(&appender, transport.address);
+    try appender.addAttribute(candidate.END_OF_CANDIDATES, null);
 
     return .{
         .text = appender.written(),
@@ -230,6 +240,20 @@ fn connectionText(appender: *builder.Builder, family: address.Family, host: []co
     const written = address.writeConnection(&value, family, host) catch return error.NoSpace;
 
     try appender.addLine(.CONNECTION, written);
+}
+
+/// Append the one host candidate this endpoint has, and close the list.
+///
+/// Note:
+/// - An ice-lite agent gathers nothing and has nothing to trickle, so saying so at once saves the
+///   peer waiting (RFC 8838 8).
+fn candidateLine(appender: *builder.Builder, host: IpAddress) Error!void {
+    const entry = ice.Candidate.host(host, .RTP, ice.SINGLE_ADDRESS_PREFERENCE);
+
+    var value: [candidate.MAX_VALUE_LEN]u8 = undefined;
+    const written = candidate.write(&value, entry) catch return error.NoSpace;
+
+    try appender.addAttribute(candidate.ATTRIBUTE, written);
 }
 
 /// Append the fingerprint attribute.
