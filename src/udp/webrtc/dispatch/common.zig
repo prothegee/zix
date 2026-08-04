@@ -90,7 +90,7 @@ pub fn optionsFrom(config: WebrtcServerConfig) connection.Options {
     return .{
         .ice_ufrag = config.ice_ufrag,
         .ice_password = config.ice_password,
-        .peer_ice_ufrag = config.peer_ice_ufrag,
+        .peer_ice_ufrag = if (config.accept_any_peer_ice_ufrag) null else config.peer_ice_ufrag,
         .certificate_der = if (config.tls) |tls| tls.cert_der else "",
         .signing_key = ecdsaKey(config).?,
         .max_handshake_fragment = config.max_handshake_fragment,
@@ -346,11 +346,25 @@ test "zix webrtc: dispatch common, options carry the config through unchanged" {
     const options = optionsFrom(config);
 
     try std.testing.expectEqualStrings("zixL", options.ice_ufrag);
-    try std.testing.expectEqualStrings("peer", options.peer_ice_ufrag);
+    try std.testing.expectEqualStrings("peer", options.peer_ice_ufrag.?);
     try std.testing.expectEqual(@as(usize, 1100), options.path_max_bytes);
     try std.testing.expectEqual(@as(usize, 8), options.max_channels);
     try std.testing.expectEqual(@as(u32, 12_000), options.peer_idle_ms);
     try std.testing.expectEqual(config.max_recv_buf, options.max_datagram_bytes);
+}
+
+test "zix webrtc: dispatch common, taking any peer ufrag drops the name the config held" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    var tls = try testContext(std.testing.allocator);
+    var config = testConfig(threaded.io(), std.testing.allocator, &tls);
+    config.accept_any_peer_ice_ufrag = true;
+
+    // The name stays in the config and stops being read, so a caller that sets both gets the
+    // behaviour it asked for last rather than a silent contradiction.
+    try std.testing.expectEqual(@as(?[]const u8, null), optionsFrom(config).peer_ice_ufrag);
+    try std.testing.expectEqualStrings("peer", config.peer_ice_ufrag);
 }
 
 test "zix webrtc: dispatch common, the send buffer always holds a wrapped path-sized packet" {
