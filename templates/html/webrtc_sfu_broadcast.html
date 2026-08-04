@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>zix WebRTC broadcast</title></head>
+<body>
+<h2>zix WebRTC broadcast</h2>
+<p>
+  One camera, many watchers. Every tab holds one connection, to zix, and zix forwards the sender's
+  picture and sound to everybody else. Nothing here is decoded on the way through: a packet is
+  opened with the sender's key, renumbered where it has to be, and sealed again under each
+  watcher's key.
+</p>
+<p>
+  Open this page in one tab and press <b>Send my camera</b>, then open it again in as many tabs as
+  you like and press <b>Just watch</b>. A watcher that arrives in the middle of a stream cannot
+  decode it until a fresh keyframe comes, so zix asks the sender for one whenever somebody new is
+  put on a stream.
+</p>
+<p>
+  A sender takes what is forwarded as well as giving it, so the picture below fills in for a sender
+  too, with whatever a second sender is putting in.
+</p>
+<p>
+  this server's address for media
+  <input id="at" size="18">
+  <button id="send" onclick="startSending()">Send my camera</button>
+  <button id="watch" onclick="startWatching()">Just watch</button>
+</p>
+<p id="warning" style="color:#b00000"></p>
+<p>connection: <b id="state">not started</b>, <span id="stats">nothing yet</span></p>
+<div style="display:flex;flex-wrap:wrap">
+  <div style="margin:0 8px 8px 0">
+    <video id="local" autoplay playsinline muted width="240" style="background:#202020;display:block"></video>
+    <b>your camera</b>
+  </div>
+  <div style="margin:0 8px 8px 0">
+    <video id="remote" autoplay playsinline controls width="360" style="background:#202020;display:block"></video>
+    <b>what zix is forwarding</b>
+  </div>
+</div>
+<pre id="log" style="font-family:monospace"></pre>
+<script>
+// Audio and video together, the same pair the call example asks for.
+const constraints = { audio: true, video: true };
+
+// Everything arriving from zix goes in one stream. The answer carries no msid, so a track shows up
+// without a stream of its own and the page has to make one.
+const incoming = new MediaStream();
+
+let peer = null;
+let role = null;
+
+function log(line) {
+  document.getElementById('log').textContent += line + '\n';
+}
+
+function setState(text) {
+  document.getElementById('state').textContent = text;
+}
+
+// The address a browser has to be able to route to. It is asked for rather than taken from the
+// address bar because the two rules pull opposite ways: a camera is handed out over localhost
+// only, and a candidate on localhost is one no browser will pair with.
+function checkAddress() {
+  const box = document.getElementById('at');
+  const loopback = box.value === 'localhost' || box.value.startsWith('127.');
+
+  document.getElementById('warning').textContent = loopback
+    ? 'That is a loopback address, and a browser will not pair with a candidate on one. Put this ' +
+      'machine network address here, the one that `ip -4 -o addr show` prints.'
+    : '';
+
+  return !loopback;
+}
+
+// getUserMedia is handed out in a secure context only, and a plain http page on a network address
+// is not one. Say so here, because the alternative is a TypeError on a property nobody expected to
+// be missing.
+function cameraAvailable() {
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) return true;
+
+  document.getElementById('warning').textContent =
+    'No camera on this address. getUserMedia needs a secure context, and http://' +
+    location.hostname + ' is not one. Load this page at http://localhost:' +
+    (location.port || '9087') + '/ to send, or watch from here instead.';
+
+  return false;
+}
+
+// --------------------------------------------------------- //
+
+async function startSending() {
+  if (!cameraAvailable()) return;
+  if (!checkAddress()) return;
+
+  let camera = null;
+
+  try {
+    camera = await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (failure) {
+    log('[no camera: ' + failure.name + ']');
+
+    return;
+  }
+
+  document.getElementById('local').srcObject = camera;
+
+  await start('sender', connection => {
+    for (const track of camera.getTracks()) connection.addTrack(track, camera);
+  });
+}
+
+async function startWatching() {
+  if (!checkAddress()) return;
+
+  await start('watcher', connection => {
+    // A watcher offers two places for media to arrive in and sends none of its own.
+    connection.addTransceiver('audio', { direction: 'recvonly' });
+    connection.addTransceiver('video', { direction: 'recvonly' });
+  });
+}
+
+async function start(taking, describe) {
+  role = taking;
+
+  document.getElementById('send').disabled = true;
+  document.getElementById('watch').disabled = true;
+
+  try {
+    await connect(describe);
+  } catch (failure) {
+    log('[' + taking + ' failed: ' + failure + ']');
+
+    document.getElementById('send').disabled = false;
+    document.getElementById('watch').disabled = false;
+  }
+}
+
+async function connect(describe) {
+  // No ICE servers. zix answers with the one address the page published, and the browser sends its
+  // connectivity checks straight there.
+  peer = new RTCPeerConnection({ iceServers: [] });
+
+  peer.oniceconnectionstatechange = () => log('[ice ' + peer.iceConnectionState + ']');
+  peer.onconnectionstatechange = () => setState(peer.connectionState);
+
+  peer.ontrack = e => {
+    incoming.addTrack(e.track);
+
+    const view = document.getElementById('remote');
+
+    if (view.srcObject !== incoming) view.srcObject = incoming;
+
+    // Only a refusal is worth saying. Attaching the stream interrupts the play already under way,
+    // and that rejects with AbortError on an element which then plays perfectly well.
+    view.play().catch(error => {
+      if (error.name === 'NotAllowedError') log('[press play on the picture]');
+    });
+
+    log('[' + e.track.kind + ' arriving]');
+  };
+
+  // zix answers a session built around a data channel, so every browser opens one. This page uses
+  // it for nothing but knowing the connection came up.
+  const channel = peer.createDataChannel('zix');
+  channel.onopen = () => log('[data channel open]');
+
+  describe(peer);
+
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+
+  // Sent without waiting for candidate gathering. zix never sends checks of its own, so the
+  // browser's candidates are of no use to it: what matters is the one address in the answer.
+  const reply = await fetch('/offer?at=' + encodeURIComponent(document.getElementById('at').value.trim()), {
+    method: 'POST',
+    headers: { 'content-type': 'application/sdp' },
+    body: offer.sdp
+  });
+
+  if (!reply.ok) throw new Error('the signalling server answered ' + reply.status);
+
+  await peer.setRemoteDescription({ type: 'answer', sdp: await reply.text() });
+
+  log('[answer accepted as a ' + role + ']');
+  setState('connecting');
+
+  window.setInterval(showStats, 1000);
+}
+
+// What the connection is actually carrying, which is the one thing worth watching on a page whose
+// picture has not arrived yet.
+async function showStats() {
+  if (!peer) return;
+
+  const report = await peer.getStats();
+  const lines = [];
+
+  report.forEach(entry => {
+    if (entry.type === 'inbound-rtp') {
+      lines.push(entry.kind + ' in ' + entry.bytesReceived + 'B' +
+        (entry.framesDecoded === undefined ? '' : ' ' + entry.framesDecoded + ' frames'));
+    }
+
+    if (entry.type === 'outbound-rtp') {
+      lines.push(entry.kind + ' out ' + entry.bytesSent + 'B' +
+        (entry.framesSent === undefined ? '' : ' ' + entry.framesSent + ' frames'));
+    }
+  });
+
+  document.getElementById('stats').textContent = lines.length === 0 ? 'nothing yet' : lines.join(', ');
+}
+
+document.getElementById('at').value = location.hostname;
+checkAddress();
+</script>
+</body>
+</html>
