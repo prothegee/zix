@@ -26,6 +26,7 @@ const dtls_flight = @import("../../tls/dtls_flight.zig");
 const dtls_handshake = @import("../../tls/dtls_handshake.zig");
 const dtls_hello = @import("../../tls/dtls_hello.zig");
 const dtls_record = @import("../../tls/dtls_record.zig");
+const dtls_exporter = @import("../../tls/dtls_exporter.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const IpAddress = std.Io.net.IpAddress;
@@ -95,6 +96,9 @@ pub const Options = struct {
     path_max_bytes: usize = 1200,
     /// How many times one flight goes out again before the session gives up.
     max_retransmits: usize = dtls_flight.DEFAULT_MAX_RETRANSMITS,
+    /// SRTP profiles this peer will carry media under, best first (RFC 5764 4.1). Empty is the
+    /// data-channel-only server: use_srtp is left unanswered and no media keys are exported.
+    srtp_profiles: []const dtls_exporter.SrtpProfile = &.{},
 };
 
 /// One DTLS 1.2 server handshake, and the connection it becomes.
@@ -135,6 +139,12 @@ pub const Session = struct {
 
     handshake: ?dtls_connection.State,
     connection: ?dtls_connection.Connection,
+    /// The SRTP master keys use_srtp agreed on, taken from the finish. Null when this peer
+    /// negotiated no media, which is every data-channel-only session.
+    srtp_keys: ?dtls_exporter.SrtpKeys,
+    /// The profile those keys belong to. Read together with them or not at all: the profile fixes
+    /// the authentication tag length, and the wrong one fails every packet.
+    srtp_profile: ?dtls_exporter.SrtpProfile,
 
     reassembler: dtls_handshake.Reassembler(MAX_HANDSHAKE_MESSAGE),
     key_exchange: [MAX_KEY_EXCHANGE]u8,
@@ -192,6 +202,8 @@ pub const Session = struct {
             .next_record_seq = 0,
             .handshake = null,
             .connection = null,
+            .srtp_keys = null,
+            .srtp_profile = null,
             .reassembler = .{},
             .key_exchange = undefined,
             .key_exchange_len = 0,
@@ -432,6 +444,7 @@ pub const Session = struct {
             .server_random = self.options.server_random,
             .max_fragment_len = self.options.max_fragment_len,
             .first_record_seq = self.next_record_seq,
+            .srtp_profiles = self.options.srtp_profiles,
         };
 
         const flight = dtls_connection.serverFlight(options, message, self.pending) catch {
@@ -520,6 +533,8 @@ pub const Session = struct {
         };
 
         self.connection = finish.connection;
+        self.srtp_keys = finish.srtp_keys;
+        self.srtp_profile = finish.srtp_profile;
         self.pending_len = finish.to_send.len;
         self.pending_cursor = 0;
         self.pending_retransmittable = true;
@@ -591,6 +606,114 @@ fn clientHelloRecord(out: []u8, cookie: []const u8, record_seq: u48) ![]const u8
     const message = fragmenter.next(&message_buf).?;
 
     return try dtls_record.writePlaintext(out, .HANDSHAKE, dtls_connection.EPOCH_HANDSHAKE, record_seq, message);
+}
+
+/// One ClientHello record that also offers `profiles` through use_srtp.
+///
+/// Note:
+/// - The extensions block is written by hand rather than through a writer, because dtls_hello only
+///   builds the fixed part of a hello and this is the one place in the engine that needs more.
+fn clientHelloRecordOfferingSrtp(
+    out: []u8,
+    cookie: []const u8,
+    profiles: []const dtls_exporter.SrtpProfile,
+) ![]const u8 {
+    var body_buf: [512]u8 = undefined;
+    const base = try dtls_hello.writeClientHelloBody(
+        &body_buf,
+        dtls_record.VERSION_DTLS_1_2,
+        @splat(0x11),
+        "",
+        cookie,
+        &.{dtls_connection.CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256},
+    );
+
+    var hello_buf: [640]u8 = undefined;
+    @memcpy(hello_buf[0..base.len], base);
+
+    const list_len: u16 = @intCast(profiles.len * 2);
+    var at = base.len;
+
+    std.mem.writeInt(u16, hello_buf[at..][0..2], 7 + list_len, .big); // whole extensions block
+    std.mem.writeInt(u16, hello_buf[at + 2 ..][0..2], 14, .big); // use_srtp
+    std.mem.writeInt(u16, hello_buf[at + 4 ..][0..2], 3 + list_len, .big); // extension_data
+    std.mem.writeInt(u16, hello_buf[at + 6 ..][0..2], list_len, .big); // profile list
+    at += 8;
+
+    for (profiles) |profile| {
+        std.mem.writeInt(u16, hello_buf[at..][0..2], @intFromEnum(profile), .big);
+        at += 2;
+    }
+
+    hello_buf[at] = 0; // no MKI
+    at += 1;
+
+    var message_buf: [768]u8 = undefined;
+    var fragmenter: dtls_handshake.Fragmenter = .{
+        .msg_type = .CLIENT_HELLO,
+        .message_seq = if (cookie.len == 0) 0 else 1,
+        .body = hello_buf[0..at],
+        .max_fragment_len = at,
+    };
+    const message = fragmenter.next(&message_buf).?;
+
+    return try dtls_record.writePlaintext(out, .HANDSHAKE, dtls_connection.EPOCH_HANDSHAKE, 1, message);
+}
+
+/// The cookie out of a HelloVerifyRequest record.
+fn cookieFrom(record: []const u8) ![]const u8 {
+    const body = try dtls_record.plaintextFragment(record);
+
+    return try dtls_hello.parseHelloVerifyRequestBody(body[dtls_handshake.HEADER_LEN..]);
+}
+
+test "zix webrtc: dtls session, a peer offering media is answered with the profile the config names" {
+    var options = try testOptions();
+    options.srtp_profiles = &.{.SRTP_AES128_CM_HMAC_SHA1_80};
+
+    var session = try Session.init(std.testing.allocator, TEST_PEER, options, 1500);
+    defer session.deinit();
+
+    var first_buf: [768]u8 = undefined;
+    _ = try session.handle(try clientHelloRecord(&first_buf, "", 0), 1000);
+
+    var verify_out: [1500]u8 = undefined;
+    const cookie = try cookieFrom(session.nextOutbound(&verify_out).?);
+
+    var second_buf: [900]u8 = undefined;
+    const offering = try clientHelloRecordOfferingSrtp(&second_buf, cookie, &.{
+        .SRTP_AES128_CM_HMAC_SHA1_80,
+        .SRTP_AES128_CM_HMAC_SHA1_32,
+    });
+
+    _ = try session.handle(offering, 1100);
+
+    try std.testing.expectEqual(State.AWAITING_FINISH, session.state);
+    try std.testing.expectEqual(
+        dtls_exporter.SrtpProfile.SRTP_AES128_CM_HMAC_SHA1_80,
+        session.handshake.?.srtp_profile.?,
+    );
+}
+
+test "zix webrtc: dtls session, a peer offering media to a data-only server gets none back" {
+    // The default config carries no profiles, which is what every data channel example runs, and
+    // a browser offering use_srtp there has to end up with a working association anyway.
+    var session = try Session.init(std.testing.allocator, TEST_PEER, try testOptions(), 1500);
+    defer session.deinit();
+
+    var first_buf: [768]u8 = undefined;
+    _ = try session.handle(try clientHelloRecord(&first_buf, "", 0), 1000);
+
+    var verify_out: [1500]u8 = undefined;
+    const cookie = try cookieFrom(session.nextOutbound(&verify_out).?);
+
+    var second_buf: [900]u8 = undefined;
+    const offering = try clientHelloRecordOfferingSrtp(&second_buf, cookie, &.{.SRTP_AES128_CM_HMAC_SHA1_80});
+
+    _ = try session.handle(offering, 1100);
+
+    try std.testing.expectEqual(State.AWAITING_FINISH, session.state);
+    try std.testing.expect(session.handshake.?.srtp_profile == null);
 }
 
 test "zix webrtc: dtls session, a fresh session is waiting with nothing to send" {
