@@ -11,7 +11,7 @@
 // connection and exits cleanly.
 //
 // Start Process A first, then run this:
-// zig build example-channel_ipc_b && ./zig-out/bin/example-channel_ipc_b
+// zig build example-channel_ipc_b && ./zig-out/bin/zix-example-channel_ipc_b
 
 const std = @import("std");
 const zix = @import("zix");
