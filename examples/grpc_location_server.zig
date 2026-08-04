@@ -17,10 +17,10 @@
 //!
 //! Run:
 //! zig build example-grpc_location_server
-//! ./zig-out/bin/example-grpc_location_server
+//! ./zig-out/bin/zix-example-grpc_location_server
 //!
 //! Test with the location client:
-//! ./zig-out/bin/example-grpc_location_client
+//! ./zig-out/bin/zix-example-grpc_location_client
 //!
 //! Benchmark with h2load (requires nghttp2):
 //! h2load -n 999999 -c 256 -t 4 -D 10 \
