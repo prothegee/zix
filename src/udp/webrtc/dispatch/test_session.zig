@@ -130,6 +130,11 @@ pub const Driver = struct {
     echo_buf: [MAX_DATAGRAM]u8,
     echo_len: usize,
     sent: bool,
+    /// Whether the channel is open, which is when this half has finished joining.
+    open: bool,
+    /// Whether to speak as soon as the channel opens. Set it false for a test where somebody else
+    /// is the one speaking, and call `say` once the whole room has joined.
+    speak: bool,
 
     /// Bind the dialing socket and start the session's clock.
     ///
@@ -158,6 +163,8 @@ pub const Driver = struct {
             .echo_buf = undefined,
             .echo_len = 0,
             .sent = false,
+            .open = false,
+            .speak = true,
         };
     }
 
@@ -186,11 +193,9 @@ pub const Driver = struct {
             while (try self.peer.nextEvent(now_ms)) |event| switch (event) {
                 .CHANNEL_OPEN => |channel| {
                     self.peer.onChannelOpen(channel);
+                    self.open = true;
 
-                    if (!self.sent) {
-                        try self.peer.send(.STRING, MESSAGE, now_ms);
-                        self.sent = true;
-                    }
+                    if (self.speak) try self.say(now_ms);
                 },
                 .MESSAGE => |incoming| {
                     self.echo_len = @min(incoming.payload.len, self.echo_buf.len);
@@ -203,6 +208,27 @@ pub const Driver = struct {
         }
 
         _ = try self.peer.tick(common.monotonicMs());
+    }
+
+    /// Send the round trip message, once. What `speak` does on channel open, for a driver that was
+    /// told to stay quiet until the rest of the room had joined.
+    ///
+    /// Param:
+    /// now_ms - u64 (monotonic milliseconds)
+    ///
+    /// Return:
+    /// - void, and nothing at all when this driver has already spoken
+    pub fn say(self: *Driver, now_ms: u64) !void {
+        if (self.sent) return;
+
+        try self.peer.send(.STRING, MESSAGE, now_ms);
+
+        self.sent = true;
+    }
+
+    /// True once this half has a channel, which is when it has finished joining.
+    pub fn opened(self: *const Driver) bool {
+        return self.open;
     }
 
     /// True once the echo is in, or once the dialer gave up.
