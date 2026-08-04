@@ -5,16 +5,19 @@
 //!   carry, and the context it replies through. Everything under this file is protocol.
 //!
 //! Note:
-//! - `Context` reaches the data channels and nothing else. A handler cannot touch the socket, the
-//!   DTLS session, or the peer table, because none of those are reachable from here. That is
-//!   deliberate: the layers below are driven by the engine loop in one order, and a handler
-//!   reaching into the middle of them would break it.
+//! - `Context` reaches data channels and nothing else. A handler cannot touch the socket, the DTLS
+//!   session, or the peer table, because none of those are reachable from here. That is deliberate:
+//!   the layers below are driven by the engine loop in one order, and a handler reaching into the
+//!   middle of them would break it.
+//! - `broadcast` is the one call that leaves this peer, and it still only reaches channels. The
+//!   worker owns the walk, so what a handler holds is one call, not the table (fanout.zig).
 //! - A message payload is borrowed and valid for the length of the handler call. Anything worth
 //!   keeping is copied.
 
 const std = @import("std");
 
 const datachannel = @import("datachannel/peer.zig");
+const fanout = @import("fanout.zig");
 const payload = @import("datachannel/payload.zig");
 
 const IpAddress = std.Io.net.IpAddress;
@@ -68,6 +71,10 @@ pub const Context = struct {
     address: IpAddress,
     /// The engine's clock reading for this call, in monotonic milliseconds.
     now_ms: u64,
+    /// How a broadcast reaches the worker's other peers. Null when there is no worker behind this
+    /// context, which is a caller driving one connection on its own, and then a broadcast has
+    /// nobody to reach and says so.
+    fanout: ?fanout.Sink = null,
 
     /// Send a message on an open channel.
     ///
@@ -86,6 +93,29 @@ pub const Context = struct {
     /// - error.NotEstablished, error.NoSpace, error.OutOfMemory
     pub fn send(self: *Context, stream_identifier: u16, kind: Kind, bytes: []const u8) Error!void {
         return self.channels.sendMessage(stream_identifier, kind, bytes, self.now_ms);
+    }
+
+    /// Send a message to every peer but this one.
+    ///
+    /// Note:
+    /// - It goes on every open channel each of those peers has, and leaves on the same flush as a
+    ///   reply to this peer would.
+    /// - The reach is the peers of ONE worker: all of them under `.ASYNC`, and the share this core
+    ///   was given under `.EPOLL` and `.URING`, where the kernel puts a peer on a worker by its
+    ///   address. A room that has to be whole belongs on `.ASYNC`.
+    /// - A peer that cannot take it is skipped rather than raised, so one full send queue never
+    ///   costs everybody else the message. The count says how many took it.
+    ///
+    /// Param:
+    /// kind - Kind
+    /// bytes - []const u8 (copied)
+    ///
+    /// Return:
+    /// - usize (how many peers took it, zero when this peer is alone)
+    pub fn broadcast(self: *Context, kind: Kind, bytes: []const u8) usize {
+        const sink = self.fanout orelse return 0;
+
+        return sink.broadcast(self.address, self.now_ms, kind, bytes);
     }
 
     /// Open a channel from this side.
@@ -185,6 +215,52 @@ test "zix webrtc: core context, the address and clock are carried through untouc
 
     try std.testing.expect(ctx.address.eql(&TEST_ADDRESS));
     try std.testing.expectEqual(@as(u64, 4242), ctx.now_ms);
+}
+
+test "zix webrtc: core context, a broadcast with no worker behind it reaches nobody" {
+    const peer = try TestPeer.init(std.testing.allocator);
+    defer peer.deinit(std.testing.allocator);
+
+    // A caller driving one connection by hand has no other peers, so this answers zero rather than
+    // needing a worker that is not there.
+    var ctx: Context = .{ .channels = &peer.channels, .address = TEST_ADDRESS, .now_ms = 1000 };
+
+    try std.testing.expectEqual(@as(usize, 0), ctx.broadcast(.STRING, "nobody home"));
+}
+
+test "zix webrtc: core context, a broadcast hands the worker this peer's address and clock" {
+    const peer = try TestPeer.init(std.testing.allocator);
+    defer peer.deinit(std.testing.allocator);
+
+    const Reached = struct {
+        var from: ?IpAddress = null;
+        var at_ms: u64 = 0;
+        var kind: Kind = .STRING;
+        var bytes: []const u8 = &.{};
+
+        fn deliver(_: *anyopaque, sender: IpAddress, now_ms: u64, sent: Kind, payload_bytes: []const u8) usize {
+            from = sender;
+            at_ms = now_ms;
+            kind = sent;
+            bytes = payload_bytes;
+
+            return 2;
+        }
+    };
+
+    var worker: usize = 0;
+    var ctx: Context = .{
+        .channels = &peer.channels,
+        .address = TEST_ADDRESS,
+        .now_ms = 7000,
+        .fanout = .{ .worker = @ptrCast(&worker), .deliver = Reached.deliver },
+    };
+
+    try std.testing.expectEqual(@as(usize, 2), ctx.broadcast(.BINARY, "to the room"));
+    try std.testing.expect(Reached.from.?.eql(&TEST_ADDRESS));
+    try std.testing.expectEqual(@as(u64, 7000), Reached.at_ms);
+    try std.testing.expectEqual(Kind.BINARY, Reached.kind);
+    try std.testing.expectEqualStrings("to the room", Reached.bytes);
 }
 
 test "zix webrtc: core event, every variant carries what its name says" {
