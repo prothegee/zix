@@ -3,21 +3,24 @@
 const std = @import("std");
 
 const site_cfg = @import("site_cfg.zig");
+const site_serve = @import("site_serve.zig");
 
 /// One started site inside the daemon.
 ///
 /// Note:
-/// - Phase 2 binds and holds the socket, so the port is owned and a collision
-///   surfaces at start time. The engine loop attaches in a later phase.
+/// - An http1 site with upstreams serves the proxy loop (phase 3). Every
+///   other engine binds and holds its socket, so the port is owned and a
+///   collision surfaces at start time, the loop attaches in its own phase.
 pub const SiteRuntime = struct {
     name: []const u8,
     engine: site_cfg.Engine,
     port: u16,
     listener: Listener,
 
-    /// Bound socket by transport: tcp engines listen, udp engines bind a
-    /// datagram socket.
+    /// What the site holds: a serving proxy edge, or the bare bound socket
+    /// (tcp engines listen, udp engines bind a datagram socket).
     const Listener = union(enum) {
+        http1_proxy: *site_serve.ServeState,
         tcp: std.Io.net.Server,
         udp: std.Io.net.Socket,
     };
@@ -43,19 +46,36 @@ pub const SiteRuntime = struct {
         const owned_name = try allocator.dupe(u8, name);
         errdefer allocator.free(owned_name);
 
-        // Reuse flags stay off on purpose: a second bind on the same ip:port
-        // must fail with AddressInUse, that collision check is the point here.
+        // Tcp listens with reuse_address like every zix engine: without it a
+        // restart right after live traffic hits TIME_WAIT and fails the
+        // rebind. Same-port collisions between sites are the daemon
+        // registry's check, the kernel no longer reports them here. Udp has
+        // no TIME_WAIT, so it keeps the strict bind.
         const listener: Listener = switch (engine) {
-            .HTTP1, .HTTP2, .GRPC => .{ .tcp = try addr.listen(io, .{ .kernel_backlog = kernel_backlog }) },
+            .HTTP1, .HTTP2, .GRPC => blk: {
+                var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
+
+                if (engine == .HTTP1 and cfg.upstreams.len > 0) {
+                    const state = site_serve.ServeState.create(allocator, io, server, cfg.upstreams, cfg.ip, port) catch |err| {
+                        server.deinit(io);
+                        return err;
+                    };
+
+                    break :blk .{ .http1_proxy = state };
+                }
+
+                break :blk .{ .tcp = server };
+            },
             .HTTP3, .UDP => .{ .udp = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp }) },
         };
 
         return .{ .name = owned_name, .engine = engine, .port = port, .listener = listener };
     }
 
-    /// Close the listener and release the name. The runtime is dead after.
+    /// Stop any serve loop, close the listener, release the name.
     pub fn unbind(runtime: *SiteRuntime, allocator: std.mem.Allocator, io: std.Io) void {
         switch (runtime.listener) {
+            .http1_proxy => |state| state.shutdown(),
             .tcp => |*server| server.deinit(io),
             .udp => |socket| socket.close(io),
         }
@@ -79,7 +99,7 @@ test "zix zixer: site runtime, incomplete cfg refuses to bind" {
     try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_port, 64));
 }
 
-test "zix zixer: site runtime, tcp bind owns the port and unbind frees it" {
+test "zix zixer: site runtime, tcp bind rebinds cleanly after unbind" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -89,11 +109,12 @@ test "zix zixer: site runtime, tcp bind owns the port and unbind frees it" {
     var first = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, 64);
     try std.testing.expectEqualStrings("a.cfg", first.name);
     try std.testing.expectEqual(@as(u16, 39861), first.port);
-
-    try std.testing.expectError(error.AddressInUse, SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, 64));
+    try std.testing.expect(first.listener == .tcp);
 
     first.unbind(std.testing.allocator, io);
 
+    // reuse_address makes the rebind immediate. Same-port collisions between
+    // sites are the daemon registry's check, not the kernel's.
     var again = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, 64);
     again.unbind(std.testing.allocator, io);
 }
@@ -111,6 +132,25 @@ test "zix zixer: site runtime, udp engine binds a datagram socket" {
     try std.testing.expectError(error.AddressInUse, SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, 64));
 
     runtime.unbind(std.testing.allocator, io);
+}
+
+test "zix zixer: site runtime, http1 with upstreams serves and unbind frees the port" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39859 }};
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39872, .upstreams = &upstreams };
+
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, 64);
+    try std.testing.expect(runtime.listener == .http1_proxy);
+
+    runtime.unbind(std.testing.allocator, io);
+
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, 64);
+    rebound.unbind(std.testing.allocator, io);
 }
 
 test "zix zixer: site runtime, http3 engine also takes the udp path" {
