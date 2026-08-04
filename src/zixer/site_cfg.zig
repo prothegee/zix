@@ -206,6 +206,12 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         try faults.add("spa_fallback", "needs public_dir", .{});
     }
 
+    // Without a prefix bound, every backend miss on a proxied site would
+    // swallow into the fallback page instead of reaching the upstream.
+    if (cfg.spa_fallback != null and cfg.upstreams.len > 0 and cfg.public_prefix == null) {
+        try faults.add("spa_fallback", "needs public_prefix when upstreams are set", .{});
+    }
+
     if (cfg.acme_webroot != null and cfg.acme_proxy != null) {
         try faults.add("acme_proxy", "choose acme_webroot or acme_proxy, not both", .{});
     }
@@ -466,6 +472,39 @@ test "zix zixer: site cfg, prefix and spa fallback need public_dir" {
     try testing.expectEqual(@as(usize, 2), faults.slice().len);
     try testing.expectEqualStrings("public_prefix", faults.slice()[0].key);
     try testing.expectEqualStrings("spa_fallback", faults.slice()[1].key);
+}
+
+test "zix zixer: site cfg, spa fallback beside upstreams needs a prefix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const bare =
+        "engine: http1\n" ++
+        "port: 8080\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "public_dir: /www\n" ++
+        "spa_fallback: index.html\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), bare, &faults);
+
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("spa_fallback", faults.slice()[0].key);
+    try testing.expectEqualStrings("needs public_prefix when upstreams are set", faults.slice()[0].hint);
+
+    // With the prefix bound, the same site is clean.
+    const bounded =
+        "engine: http1\n" ++
+        "port: 8080\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "public_dir: /www\n" ++
+        "public_prefix: /app\n" ++
+        "spa_fallback: index.html\n";
+
+    var bounded_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), bounded, &bounded_faults);
+
+    try testing.expectEqual(@as(usize, 0), bounded_faults.slice().len);
 }
 
 test "zix zixer: site cfg, prefix without leading slash faults" {
