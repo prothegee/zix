@@ -11,7 +11,7 @@
 // GET /stream: SSE stream, queries UDS every 500 ms via Channel, streams events
 //
 // Run:
-// zig build example-uds_http && ./zig-out/bin/example-uds_http
+// zig build example-uds_http && ./zig-out/bin/zix-example-uds_http
 // curl http://localhost:9055/data
 // curl -N http://localhost:9055/stream
 // browser: http://localhost:9055/
