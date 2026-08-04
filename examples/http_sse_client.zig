@@ -4,8 +4,8 @@
 //! until the server closes the stream after 10 ticks.
 //!
 //! Run:
-//! zig build example-http_sse && ./zig-out/bin/example-http_sse &
-//! zig build example-http_sse_client && ./zig-out/bin/example-http_sse_client
+//! zig build example-http_sse && ./zig-out/bin/zix-example-http_sse &
+//! zig build example-http_sse_client && ./zig-out/bin/zix-example-http_sse_client
 //! kill %1
 
 const std = @import("std");
