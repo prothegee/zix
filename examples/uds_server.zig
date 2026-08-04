@@ -7,10 +7,10 @@
 //   [u32 payload_len, 4 bytes, big-endian] [payload bytes]
 //
 // Run Process A first:
-// zig build example-uds_server && ./zig-out/bin/example-uds_server
+// zig build example-uds_server && ./zig-out/bin/zix-example-uds_server
 //
 // Then Process B in a second terminal:
-// zig build example-uds_http && ./zig-out/bin/example-uds_http
+// zig build example-uds_http && ./zig-out/bin/zix-example-uds_http
 // curl http://localhost:9055/data
 // curl -N http://localhost:9055/stream
 
