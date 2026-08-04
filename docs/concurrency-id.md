@@ -245,9 +245,12 @@ Hanya primitive byte-identical yang dibagikan, di `src/multiplexers/`. Saat ini 
 | TCP (raw stream) | ya | ya, Linux-only | hanya callback framed, handler per-connection melipat ke `.EPOLL` |
 | FIX 4.x | ya | ya, Linux-only | ya, Linux-only |
 | UDP (raw) | ya (single worker) | ya, Linux-only | ya, Linux-only |
+| WebRTC | ya (single worker) | ya, Linux-only | ya, Linux-only |
 | UDS (stream) | ya (io.concurrent() per koneksi) | n/a | n/a |
 
 Http3 di bawah `.EPOLL` / `.URING` menjalankan worker per-core sungguhan (CID steering lintas core untuk migrasi mid-connection adalah v2, ADR-049 fase 3).
+
+WebRTC di bawah `.EPOLL` / `.URING` juga menjalankan worker per-core sungguhan, tetapi sama sekali tanpa knob steering CPU: satu peer adalah 4-tuple-nya, jadi steering berdasarkan CPU penerima bisa memecah satu sesi ke dua worker di tengah handshake (ADR-067).
 
 ---
 
@@ -265,7 +268,7 @@ Setiap model menamai dua hal sekaligus: bentuk konkurensi (single atau multi-cor
 
 `.EPOLL`, `.KQUEUE`, dan `.IOCP` adalah ide multi-core per-core yang sama, satu per sistem operasi. Masing-masing berada di file `dispatch/<model>.zig` sendiri, sehingga folder-nya self-documenting: buka, lihat setiap model, tiap baris header menyatakan perilaku core dan OS-nya.
 
-Seperti `.EPOLL` dan `.URING` saat ini, backend ini whole-family: setiap engine yang memilih `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) mendapat backend platform-nya lewat enum yang sama.
+Seperti `.EPOLL` dan `.URING` saat ini, backend ini whole-family: setiap engine yang memilih `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) mendapat backend platform-nya lewat enum yang sama.
 
 Tidak ada keyword auto-select. Kode portable memilih `.ASYNC` langsung atau menamai backend yang tepat dengan satu baris comptime switch pada `builtin.os.tag`. Dua ketidakcocokan ditangani berbeda:
 

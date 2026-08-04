@@ -155,6 +155,26 @@ Layer HTTP/3 (QUIC) adalah pure-Zig dari RFC, jadi tiap modul membawa worked exa
 | `udp/http3/config.zig` / `server.zig` | `refAllDecls` + perilaku: field config wajib dan default, `Tls.Context` null ditolak saat run |
 | `udp/http3/static.zig` | `refAllDecls` + perilaku: content-encoding hanya memetakan yang bisa dikirim jalur respons, serve menolak ketika caching mati (body harus hidup lebih lama dari handler, jadi hanya bisa dari cache), respons diisi dari byte cache dan pin DITAHAN, body tetap terbaca setelah frame handler hilang, sibling `.br` dipilih dan dinamai, traversal dan file hilang ditolak, tepat satu pin ditahan dan `releasePin` mengembalikannya, pin yang dilepas membuat entry bisa di-reclaim, body in-flight kebal terhadap file yang ditulis ulang di tempat |
 
+### zix.Webrtc
+
+Setiap lapis WebRTC ditulis dari RFC-nya sendiri, jadi setiap berkas membawa test-nya di dalam
+berkas dan lapis yang punya vector terbit dipatok byte demi byte terhadapnya. `zix.Webrtc` juga
+mengekspor lapisnya sebagai primitif, sehingga peer atau harness test bisa membangun sisi seberang.
+
+| Modul | Cakupan |
+| :- | :- |
+| `udp/webrtc/demux.zig` | `refAllDecls` + perilaku: setiap byte pertama dirutekan ke kind RFC 7983 bagian 7 miliknya, termasuk rentang yang belum ada di teks RFC 5764 |
+| `udp/webrtc/stun/message.zig` | `refAllDecls` + perilaku: vector XOR-MAPPED-ADDRESS `192.0.2.1:32853` byte demi byte, framing ketat (byte sisa dan attribute terakhir tanpa padding ditolak), MESSAGE-INTEGRITY di atas panjang header yang ditulis ulang |
+| `udp/webrtc/stun/binding.zig` | `refAllDecls` + perilaku: aturan request RFC 8489 bagian 6.3.1, silent discard dan buffer terlalu kecil sama-sama melaporkan null |
+| `udp/webrtc/ice/*.zig` | `refAllDecls` + perilaku: sample request RFC 5769 bagian 2.1 memaku MAC, CRC dan dua tipe atribut sekaligus, pemisahan USERNAME dengan ufrag agent ini di depan, 487 untuk setiap tiebreaker, 400 dan 401 tanpa tanda tangan berbanding 420 dan 487 yang ditandatangani |
+| `udp/webrtc/sctp/*.zig` | `refAllDecls` + perilaku di 20 berkas: CRC32c ditulis little endian dengan polinomial Castagnoli, gap ack block sebagai offset, missing report hanya dihitung di bawah TSN tertinggi yang baru di-ack, handshake 4 arah penuh plus data, heartbeat, shutdown dan abort antara dua association di memori |
+| `udp/webrtc/datachannel/*.zig` | `refAllDecls` + perilaku: tujuh payload type, round-trip DCEP OPEN dan ACK, paritas stream identifier menurut role DTLS, pesan dilaporkan mendahului penutupan, pemrosesan reset yang ditunda, dua peer bicara di memori |
+| `udp/webrtc/sdp/*.zig` | `refAllDecls` + perilaku di 18 berkas: CRLF dan LF telanjang sama-sama terbaca, pencarian media section mendahului level session, `a=sctp-port` yang hilang ditolak, session id dibatasi 62 bit, dan candidate ditulis di setiap media section yang dibawa |
+| `udp/webrtc/media/*.zig` | `refAllDecls` + perilaku: RFC 3711 B.2 dan B.3 serta RFC 2202 kasus 1 dipatok byte demi byte, label KDF di-XOR pada byte 7, satu profile membawa dua panjang tag, estimate ROC dipisah dari accept, index SRTCP berhenti alih-alih berputar |
+| `udp/webrtc/dispatch/*.zig` | `refAllDecls` + perilaku: `pass()` tiap model menjalankan sesi utuh terhadap socket sungguhan yang di-bind dengan `Dialer` sungguhan, sehingga perbedaan antar model adalah perbedaan pada loop |
+| `udp/webrtc/config.zig` / `server.zig` | `refAllDecls` + perilaku: setiap penolakan `run()` berurutan (port, credential ICE ada, credential ICE sah, TLS ada, kunci ECDSA P-256, dispatch model terhadap platform) |
+| `tls/dtls_*.zig` | `refAllDecls` + perilaku: anti-replay diperiksa sebelum AEAD dan diperbarui sesudahnya, perakitan ulang dilacak bitmap sehingga fragment tumpang tindih tetap sah, record sequence dibawa melewati HelloVerifyRequest, ekspor RFC 5705 dalam bentuk seed tanpa context |
+
 ### zix.Logger
 
 | Modul | Cakupan |
@@ -390,6 +410,20 @@ yang akan dibingkai engine, termasuk pin cache yang dikembalikannya.
 | Router menjaga path ber-route di depan fallback static | handler ber-route menang atas file yang akan menutupinya |
 | Router 404 untuk path static ketika caching mati | file-nya ada, tapi engine ini tidak punya sumber body yang aman tanpa cache |
 | Router menyajikan body multi-paket yang hidup lebih lama dari panggilan dispatch | body 64 KiB terbaca utuh setelah Context hilang |
+
+### tests/integration/webrtc/
+
+#### `exchange_test.zig`
+
+Gerbang exit CI untuk engine ini: satu sesi utuh antara dua peer di memori, tanpa port dan tanpa
+sleep. Inilah yang membuktikan delapan lapis sans-I/O sepakat ketika dua instance independen bertemu.
+
+| Test | Yang diverifikasi |
+| :- | :- |
+| Dialer dan answerer membawa satu pesan dari ujung ke ujung | ICE, DTLS, SCTP dan DCEP semuanya selesai, dan payload selamat pulang pergi |
+| Answerer menominasikan pair asal check tersebut | agent ice-lite memilih berdasarkan check terverifikasi, bukan candidate karangannya sendiri |
+| Channel mendarat di identifier genap karena dialer yang membukanya | role DTLS menentukan paritas, dan salah di sini tidak terlihat terhadap peer yang berbagi kesalahan yang sama |
+| Tidak ada peer yang ditinggali deadline yang tidak akan pernah terpenuhi | setiap timer yang dipasang sesi itu terpenuhi atau dipensiunkan |
 
 ### tests/integration/grpc/
 
@@ -700,6 +734,18 @@ Dukungan QUERY RFC 10008 lewat permukaan publik `zix.Http1`.
 | Field static disimpan apa adanya | ketiganya round-trip |
 | Penyajian static butuh caching, berbeda dari engine lain | mengunci asimetri yang disengaja: di Http3 ttl 0 mematikan penyajian static sepenuhnya, karena body respons hidup lebih lama dari handler-nya |
 
+### tests/behaviour/webrtc/
+
+#### `session_test.zig`
+
+| Test | Yang diverifikasi |
+| :- | :- |
+| Peer menjawab connectivity check sebelum apa pun dinegosiasikan | ICE berjalan mendahului DTLS, jadi check dijawab pada peer yang belum punya sesi |
+| Association baru ada setelah handshake selesai | SCTP berada di dalam DTLS, jadi tidak ada yang terbaca sebelum handshake selesai |
+| Peer yang diam dilepas pada deadline idle-nya | `peer_idle_ms` ditegakkan, dan itulah yang menangani browser menutup tab |
+| Setiap datagram mendorong mundur deadline idle | peer yang hidup tapi diam tidak ikut dilepas |
+| Dialer terus bertanya sampai satu check dijawab | timer retransmit yang menggerakkan sisi client, bukan hitungan tetap |
+
 ### tests/behaviour/grpc/
 
 #### `config_test.zig`
@@ -982,6 +1028,23 @@ Batas-batas di mana engine harus menolak alih-alih menyerahkan body yang tidak b
 | Byte selamat dari pemotongan ke file lebih pendek | bentuk berbahaya: file menyusut saat respons masih dikirim |
 | Menolak setiap path tidak aman sebelum menyentuh disk | traversal, absolut, dan kosong |
 | Byte di-snapshot sekali dan dipakai ulang antar request | satu salinan menopang respons konkuren, dan masing-masing menahan pin sendiri |
+
+### tests/edge/webrtc/
+
+#### `session_test.zig`
+
+Semuanya datang di satu port lalu dipilah dari byte pertamanya, jadi batas-batas di sini soal apa
+yang dilakukan peer terhadap datagram yang tidak bisa ia pakai.
+
+| Test | Yang diverifikasi |
+| :- | :- |
+| Peer selamat menghadapi semua kemungkinan byte pertama | ke-256 nilai diklasifikasikan dan tidak ada yang panik |
+| Datagram kosong dibuang dan tidak mengubah apa pun | tidak ada state yang bergerak pada receive berukuran nol |
+| Record DTLS yang panjangnya melampaui ujung buffer tidak dibaca melewatinya | panjang yang dideklarasikan tidak pernah dipercaya melebihi buffer |
+| Pesan STUN dengan byte pertama benar dan selebihnya kosong ditolak | routing bukan validasi, magic cookie tetap harus cocok |
+| Application data sebelum handshake selesai tidak sampai ke mana pun | record epoch 1 ditolak sampai ada kunci epoch 1 |
+| Sampah yang sama seribu kali tetap membiarkan peer hidup | datagram buruk berulang tidak menghabiskan apa pun |
+| Dialer menolak respons yang membawa transaction milik orang lain | transaction id ikut diperiksa, bukan hanya tipe pesannya |
 
 ### tests/edge/grpc/
 

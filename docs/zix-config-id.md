@@ -267,6 +267,38 @@ QUIC di atas UDP. Membutuhkan TLS 1.3 context (tidak ada mode cleartext).
 | tls | null (wajib) | TLS 1.3 context: cert, key, ALPN, QUIC butuh TLS 1.3 | mengaktifkan QUIC | pasang TLS 1.3 context | | | null ditolak, QUIC tidak punya mode cleartext |
 | logger | null | logger opsional untuk baris lifecycle | | pasang untuk logging | | | |
 
+## WebRTC (`WebrtcServerConfig`)
+
+ICE-lite, DTLS 1.2, data channel SCTP, forwarding media SRTP opsional, semuanya di satu port UDP. Butuh TLS context yang kuncinya ECDSA P-256 (tidak ada mode cleartext).
+
+| field | default | fungsi | dampak performa | cara menyetel | jika lebih kecil | jika lebih besar | konsekuensi salah atur |
+| :- | :- | :- | :- | :- | :- | :- | :- |
+| io | wajib | backend std.Io | | | | | |
+| allocator | wajib | allocator penopang, general-purpose | | | | | |
+| ip | wajib | alamat bind | | | | | |
+| port | wajib | port bind, non-zero | | | | | nilai nol ditolak saat run() |
+| dispatch_model | wajib | concurrency: .ASYNC satu worker portable, .EPOLL dan .URING satu worker SO_REUSEPORT per core | menentukan strategi | `.EPOLL`/`.URING` di Linux untuk skala multicore | | | di luar Linux hanya `.ASYNC` yang jalan. Tidak ada knob steering CPU: satu peer adalah 4-tuple-nya dan steering akan memecah sesi |
+| workers | 0 | jumlah worker untuk model per-core, 0 = cpu_count | paralelisme | biarkan 0 (otomatis) | lebih sedikit core terpakai | context-switching | diabaikan oleh `.ASYNC` |
+| worker_stack_size_bytes | 524288 | stack thread worker untuk model per-core | RSS per thread (demand-paged) | naikkan untuk handler dalam, turunkan untuk memangkas RSS | stack overflow pada handler dalam | RSS terbuang per worker | diabaikan oleh `.ASYNC` |
+| max_recv_buf | 1500 | ukuran datagram maksimum, buffer penerima per slot | memori per slot | samakan dengan MTU path | datagram terpotong | lebih banyak memori | 1500 adalah MTU Ethernet umum |
+| socket_rcvbuf | 1048576 | SO_RCVBUF yang diminta dalam byte | datagram hilang saat burst | biarkan besar, turunkan hanya untuk memangkas memori | lebih banyak kehilangan saat burst | lebih banyak memori socket kernel | 0 memakai default kernel |
+| socket_sndbuf | 1048576 | SO_SNDBUF yang diminta dalam byte | pengiriman tertahan saat flight besar | biarkan besar, turunkan hanya untuk memangkas memori | flight tertahan pada buffer kecil | lebih banyak memori socket kernel | 0 memakai default kernel |
+| ice_ufrag | "" (wajib) | ufrag agent ini, paruh pertama USERNAME yang dibawa setiap check | | isi, lalu publikasikan nilai yang sama di SDP answer | | | kosong ditolak saat run() |
+| ice_password | "" (wajib) | password agent ini, kunci yang dipakai memverifikasi setiap check | | isi, lalu publikasikan nilai yang sama di SDP answer | | | kosong ditolak saat run(), dan inilah satu-satunya gerbang yang nyata |
+| peer_ice_ufrag | "" | ufrag peer, paruh kedua USERNAME tersebut | | isi bila signalling sudah memberi tahu ufrag peer | | | kosong berarti check ditolak dengan 401 sampai diketahui. Diabaikan bila accept_any_peer_ice_ufrag menyala |
+| accept_any_peer_ice_ufrag | false | menerima check apa pun sebutan peer, menyisakan ice_password sebagai satu-satunya gerbang | | set true untuk client browser mana pun | | | browser menarik ufrag baru per peer connection, jadi tanpa ini setiap check ditolak. Mati secara default supaya server yang menyebut satu peer tetap menolak yang lain |
+| tls | null (wajib) | TLS context: certificate dan kunci yang menandatangani ServerKeyExchange | mengaktifkan DTLS | pasang context yang kuncinya ECDSA P-256 | | | null ditolak saat run(), begitu juga kunci yang bukan ECDSA P-256 (satu-satunya suite DTLS 1.2 di sini adalah ECDHE-ECDSA, RFC 5289) |
+| max_handshake_fragment | 1024 | badan fragment handshake terbesar yang dikeluarkan server ini | jumlah record per flight | turunkan bila MTU path kecil | lebih banyak fragment per flight | record bisa melampaui MTU path lalu dibuang | diukur supaya satu record muat di MTU path |
+| carry_media | false | apakah server ini meneruskan audio dan video antar peer-nya | mengaktifkan jalur SRTP dan buffer-nya | set true untuk server forwarding | | buffer media dialokasikan per peer | mati berarti tidak ada kunci diekspor dan RTP dibuang di tempat ia dirutekan. SDP answer punya switch terpisah, nyalakan keduanya |
+| path_max_bytes | 1200 | paket SCTP terbesar yang muat di path, overhead DTLS sudah dikurangi | jumlah fragment per pesan | naikkan hanya bila MTU path diketahui besar | lebih banyak fragment per pesan | paket bisa melampaui MTU path | 1200 sesuai default WebRTC yang konservatif |
+| outbound_streams | 128 | berapa stream keluar yang diminta association | state per association | naikkan untuk banyak channel bersamaan | lebih sedikit channel tersedia | lebih banyak state per association | dinegosiasikan turun ke yang ditawarkan peer |
+| inbound_streams | 128 | berapa stream masuk yang diterima association | state per association | naikkan untuk banyak channel bersamaan | peer dibatasi lebih awal | lebih banyak state per association | |
+| max_channels | 64 | berapa channel yang boleh terbuka pada satu peer, dihitung dari kedua sisi | registry per peer | naikkan untuk peer dengan banyak channel | open ditolak lebih awal | lebih banyak memori per peer | |
+| max_peers | 64 | berapa peer yang dipegang satu worker sekaligus | memori per worker | naikkan untuk room lebih besar | peer baru dibuang lebih awal | lebih banyak memori per worker | dihitung PER WORKER, jadi N worker menampung sampai N * max_peers. Datagram dari peer baru di atas batas dibuang, yang terbaca oleh peer itu sebagai check yang tidak dijawab |
+| peer_idle_ms | 30000 | berapa lama peer boleh tanpa datagram sebelum dilepas | kecepatan reklamasi | turunkan untuk reklamasi lebih cepat | peer hidup tapi diam ikut dilepas | peer mati bertahan lebih lama | menangani kasus browser menutup tab tanpa shutdown yang rapi |
+| tick_interval_ms | 250 | seberapa sering engine melihat peer-nya saat tidak ada datagram datang | CPU saat idle, dan batas bawah keterlambatan retransmit | turunkan untuk timer lebih ketat, naikkan untuk menenangkan server idle | lebih banyak bangun di server idle | retransmit atau pelepasan idle bisa terlambat sebesar ini | waktu tunggu diturunkan dari deadline dan dibatasi nilai ini, jadi ini juga biaya server yang sepenuhnya sunyi |
+| logger | null | logger opsional untuk baris lifecycle | | pasang untuk logging | | | engine bisu tanpa logger, dan itu default yang keliru untuk demo browser |
+
 ## FIX (`FixServerConfig`)
 
 | field | default | fungsi | dampak performa | cara menyetel | jika lebih kecil | jika lebih besar | konsekuensi salah atur |
@@ -333,7 +365,7 @@ Bangun satu Logger dengan config ini dan lampirkan lewat pointer ke field `logge
 
 ## Catatan
 
-- Field wajib (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`) tidak punya default dan harus diisi. Port nol ditolak saat init oleh `zix.Tcp` / `zix.Udp` / `zix.Fix` (dan client-nya), dan saat `run()` oleh `zix.Http2` / `zix.Grpc` / `zix.Http3`. `zix.Http1` dan `zix.Http` tidak memvalidasinya (port 0 bind ke port ephemeral pilihan kernel).
+- Field wajib (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`, `ice_ufrag`, `ice_password`) tidak punya default dan harus diisi. Port nol ditolak saat init oleh `zix.Tcp` / `zix.Udp` / `zix.Fix` (dan client-nya), dan saat `run()` oleh `zix.Http2` / `zix.Grpc` / `zix.Http3` / `zix.Webrtc`. `zix.Http1` dan `zix.Http` tidak memvalidasinya (port 0 bind ke port ephemeral pilihan kernel).
 - `io`, `logger`, dan `tls` dimiliki pemanggil: dilewatkan lewat handle atau pointer dan harus hidup lebih lama dari server.
 - `.EPOLL` dan `.URING` khusus Linux. Di luar Linux `run()` mengembalikan `error.DispatchModelUnsupported`, jadi pilih `.ASYNC` di sana. Jalur TLS mengikuti model: `.EPOLL` / `.URING` terminasi di worker tls_mux yang multiplexed, `.ASYNC` di tls_serve.
 - Fitur compression dan response-cache aktif hanya pada `.EPOLL` dan `.URING` (shared-nothing, satu pemilik per worker).

@@ -49,6 +49,7 @@ pub fn addSteps(
         .{ "test-runner-udp", "tests/runner/udp_runner.zig", "tr-server-udp", "examples/udp_server.zig", "9054", "", "", "" },
         .{ "test-runner-udp-raw", "tests/runner/udp_raw_runner.zig", "tr-server-udp-raw", "examples/udp_server_raw.zig", "9064", "", "", "" },
         .{ "test-runner-http3", "tests/runner/http3_runner.zig", "tr-server-http3", "examples/tls/http3_basic.zig", "9063", "", "", "" },
+        .{ "test-runner-webrtc", "tests/runner/webrtc_datachannel_runner.zig", "tr-server-webrtc", "examples/webrtc/webrtc_datachannel_echo.zig", "9083", "", "", "" },
         .{ "test-runner-uds", "tests/runner/uds_runner.zig", "tr-server-uds", "examples/uds_server.zig", "0", "", "", "" },
         // http feature runners (http_get_runner: arg4=route, arg5=origin, arg6=expected)
         .{ "test-runner-http-json", "tests/runner/http_get_runner.zig", "tr-server-http-json", "examples/http_json.zig", "9005", "/status", "", "server" },
@@ -312,6 +313,9 @@ pub fn addSteps(
 
             // dual listener (config.tls_port, ADR-060): appended last, argv order stays stable
             .{ "tr-all-server-tls-http1-dual", "examples/tls/tls_http1_dual.zig" },
+
+            // webrtc data channel: appended last, argv order stays stable
+            .{ "tr-all-server-webrtc", "examples/webrtc/webrtc_datachannel_echo.zig" },
         };
 
         const all_runner_mod = b.createModule(.{

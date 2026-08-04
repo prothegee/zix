@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>zix WebRTC chat</title></head>
+<body>
+<h2>zix WebRTC data channel chat</h2>
+<p>
+  Open this page in two or three tabs. Each one opens a data channel to zix, and zix takes every
+  message to the other channels it holds. Your own message never comes back: the fan-out skips
+  whoever sent it, and the line below is put there by this page.
+</p>
+<p>
+  <button id="join" onclick="join()">Join the room</button>
+  channel: <b id="channel">closed</b>
+</p>
+<p>
+  <input id="text" size="48" placeholder="say something" disabled>
+  <button id="send" onclick="sendMessage()" disabled>Send</button>
+</p>
+<pre id="log" style="font-family:monospace"></pre>
+<script>
+let channel = null;
+
+function log(line) {
+  document.getElementById('log').textContent += line + '\n';
+}
+
+async function join() {
+  document.getElementById('join').disabled = true;
+
+  try {
+    await connect();
+  } catch (failure) {
+    // Without this a rejected step leaves the page exactly as it was, and the only sign that
+    // anything happened is a channel that never opens.
+    log('[join failed: ' + failure + ']');
+    document.getElementById('join').disabled = false;
+  }
+}
+
+async function connect() {
+  // No ICE servers. zix answers with the one address it listens on, and the browser sends its
+  // connectivity checks straight there.
+  const peer = new RTCPeerConnection({ iceServers: [] });
+
+  // The two states worth watching, and the order they settle in. ICE reaching connected while the
+  // connection stays connecting means the addresses found each other and DTLS did not finish.
+  peer.oniceconnectionstatechange = () => log('[ice ' + peer.iceConnectionState + ']');
+  peer.onconnectionstatechange = () => log('[connection ' + peer.connectionState + ']');
+
+  channel = peer.createDataChannel('chat');
+
+  channel.onopen = () => {
+    document.getElementById('channel').textContent = 'open';
+    document.getElementById('text').disabled = false;
+    document.getElementById('send').disabled = false;
+  };
+
+  channel.onclose = () => {
+    document.getElementById('channel').textContent = 'closed';
+    document.getElementById('join').disabled = false;
+  };
+
+  channel.onerror = e => log('[channel error: ' + (e.error || e) + ']');
+  channel.onmessage = e => log('them: ' + e.data);
+
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+
+  // Sent without waiting for candidate gathering. zix never sends checks of its own, so the
+  // browser's candidates are of no use to it: what matters is the one address in the answer.
+  const reply = await fetch('/offer', {
+    method: 'POST',
+    headers: { 'content-type': 'application/sdp' },
+    body: offer.sdp
+  });
+
+  if (!reply.ok) throw new Error('the signalling server answered ' + reply.status);
+
+  await peer.setRemoteDescription({ type: 'answer', sdp: await reply.text() });
+  log('[answer accepted, waiting for the channel]');
+}
+
+function sendMessage() {
+  const box = document.getElementById('text');
+
+  if (!channel || channel.readyState !== 'open' || !box.value) return;
+
+  channel.send(box.value);
+  log('you: ' + box.value);
+  box.value = '';
+}
+</script>
+</body>
+</html>

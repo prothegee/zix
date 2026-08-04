@@ -66,6 +66,14 @@ pub fn addSteps(
         .{ "example-udp_server_raw", "examples/udp_server_raw.zig", "udp" },
         .{ "example-http3_basic", "examples/tls/http3_basic.zig", "http3" },
         .{ "example-http3_static", "examples/tls/http3_static.zig", "http3" },
+        .{ "example-webrtc_datachannel_echo", "examples/webrtc/webrtc_datachannel_echo.zig", "webrtc" },
+        .{ "example-webrtc_native_pair", "examples/webrtc/webrtc_native_pair.zig", "webrtc" },
+        .{ "example-webrtc_signaling", "examples/webrtc/webrtc_signaling.zig", "webrtc" },
+        .{ "example-webrtc_stun", "examples/webrtc/webrtc_stun.zig", "webrtc" },
+        .{ "example-webrtc_datachannel_chat", "examples/webrtc/webrtc_datachannel_chat.zig", "webrtc" },
+        .{ "example-webrtc_file_transfer", "examples/webrtc/webrtc_file_transfer.zig", "webrtc" },
+        .{ "example-webrtc_video_call", "examples/webrtc/webrtc_video_call.zig", "webrtc" },
+        .{ "example-webrtc_sfu_broadcast", "examples/webrtc/webrtc_sfu_broadcast.zig", "webrtc" },
         .{ "example-uds_server", "examples/uds_server.zig", "uds" },
         .{ "example-uds_client", "examples/uds_client.zig", "uds" },
         .{ "example-uds_http", "examples/uds_http.zig", "uds" },
@@ -102,6 +110,7 @@ pub fn addSteps(
     const group_uds = b.step("example-uds", "Build all uds examples");
     const group_tls = b.step("example-tls", "Build all tls examples");
     const group_http3 = b.step("example-http3", "Build all http3 examples");
+    const group_webrtc = b.step("example-webrtc", "Build all webrtc examples");
 
     examples_step.dependOn(group_tcp);
     examples_step.dependOn(group_http1);
@@ -114,6 +123,7 @@ pub fn addSteps(
     examples_step.dependOn(group_uds);
     examples_step.dependOn(group_tls);
     examples_step.dependOn(group_http3);
+    examples_step.dependOn(group_webrtc);
 
     inline for (examples) |pair| {
         const exe_mod = b.createModule(.{
@@ -150,6 +160,8 @@ pub fn addSteps(
             group_tls
         else if (comptime std.mem.eql(u8, pair[2], "http3"))
             group_http3
+        else if (comptime std.mem.eql(u8, pair[2], "webrtc"))
+            group_webrtc
         else
             @compileError("unknown example group tag: " ++ pair[2]);
 

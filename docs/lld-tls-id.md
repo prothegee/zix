@@ -148,3 +148,11 @@ Jalur `.EPOLL` / `.URING` (ADR-052). `runTlsMux` men-spawn satu worker per core,
 ## tls12_*.zig
 
 Track 1.2 mencerminkan lapisan 1.3: `tls12_prf` (key schedule PRF SHA-256), `tls12_record` (AES-GCM 1.2 dengan nonce eksplisit 8-byte), `tls12_version` (`selectVersion` + downgrade sentinel di ServerHello.random, RFC 8446 4.1.3), `tls12_connection` (`serverFlight1` + `serverFinish`, ECDHE-ECDSA-AES128-GCM, secp256r1), dan `tls12_client`.
+
+## dtls_*.zig
+
+Track DTLS 1.2 (RFC 6347), hanya dijangkau `zix.Webrtc`. Sembilan berkas, dan `zix.Tls` tidak mengekspor ulang satu pun. Internal per berkas ada di [`docs/lld-webrtc-id.md`](lld-webrtc-id.md), karena setiap jebakan di sana menghadap WebRTC. Tiga yang paling penting bagi pembaca TLS:
+
+- `dtls_connection.zig` menyusun flight-nya **sendiri** (2, 4 dan 6) dan hanya memakai ulang primitif daun dari track 1.2. Ia tidak bisa memakai ulang `tls12_connection.zig`: berkas itu meng-hash byte berbingkai TLS, sementara RFC 6347 bagian 4.2.6 menuntut transcript diambil di atas header DTLS 12 byte seolah tidak terfragmentasi, tanpa ClientHello pertama dan HelloVerifyRequest. Ketidakcocokan ini tidak terlihat sampai peer sungguhan menolak pesan Finished.
+- `dtls_record.zig` menambahkan epoch, sequence 48 bit, dan window anti-replay di atas AEAD yang sama. Window harus diperiksa sebelum AEAD lalu diperbarui sesudahnya, kalau tidak sequence palsu yang jauh di depan akan membersihkannya.
+- `dtls_exporter.zig` adalah ekspor keying material RFC 5705 plus pemisahan SRTP RFC 5764. DTLS-SRTP memakai bentuk seed **tanpa context**: mengoper slice kosong menambahkan dua byte nol dan diam-diam merusak interop.

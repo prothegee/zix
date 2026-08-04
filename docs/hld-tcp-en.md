@@ -68,7 +68,7 @@ pub const Tcp = @import("tcp/Tcp.zig");
 - The handler or callback is baked into the server type at `init` (comptime), and `io` is a config field, so `run()` takes no argument (ADR-038, ADR-039).
 - `initFramed` is a genuinely different contract, not a convenience wrapper. The per-connection `HandlerFn` owns the socket and blocks on synchronous reads, which a single-threaded completion loop cannot drive, so the ring path needs the non-blocking per-frame `FrameFn` instead. For the per-connection handler, `.URING` folds to `.EPOLL`.
 - `initArgs` / `initFramedArgs` only add `--ip` / `--port` parsing, so one built binary can bind a different address or port without a rebuild. The examples use the plain `init` / `initFramed`. Reach for the `Args` variants when you want runtime override.
-- `zix.Udp` has the same `init` / `initArgs` split. The five engine servers (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`) have only `init`.
+- `zix.Udp` has the same `init` / `initArgs` split. The seven engine servers (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Fix`) have only `init`.
 
 ---
 

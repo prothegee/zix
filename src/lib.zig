@@ -23,6 +23,7 @@ pub const Http = @import("tcp/http/Http.zig");
 pub const Http1 = @import("tcp/http1/Http1.zig");
 pub const Http2 = @import("tcp/http2/Http2.zig");
 pub const Http3 = @import("udp/http3/Http3.zig");
+pub const Webrtc = @import("udp/webrtc/Webrtc.zig");
 pub const Grpc = @import("tcp/http2/grpc/Grpc.zig");
 pub const Fix = @import("tcp/fix/Fix.zig");
 pub const Uds = @import("uds/Uds.zig");
@@ -55,6 +56,7 @@ pub const utils = struct {
     pub const fd_io = @import("utils/fd_io.zig");
     pub const socket_pair = @import("utils/socket_pair.zig");
     pub const socket_poll = @import("utils/socket_poll.zig");
+    pub const secure_random = @import("utils/secure_random.zig");
     pub const async_cache = @import("utils/async_cache.zig");
     pub const socket_path = @import("utils/socket_path.zig");
 
@@ -177,7 +179,18 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tls/tls12_connection.zig"));
     std.testing.refAllDecls(@import("tls/client.zig"));
     std.testing.refAllDecls(@import("tls/tls12_client.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_client.zig"));
     std.testing.refAllDecls(@import("tls/cert_verify.zig"));
+
+    // # DTLS 1.2
+    std.testing.refAllDecls(@import("tls/dtls_record.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_handshake.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_hello.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_cookie.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_flight.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_exporter.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_use_srtp.zig"));
+    std.testing.refAllDecls(@import("tls/dtls_connection.zig"));
 
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/ring.zig"));
@@ -227,6 +240,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/fd_io.zig"));
     std.testing.refAllDecls(@import("utils/socket_pair.zig"));
     std.testing.refAllDecls(@import("utils/socket_poll.zig"));
+    std.testing.refAllDecls(@import("utils/secure_random.zig"));
     std.testing.refAllDecls(@import("utils/async_cache.zig"));
     std.testing.refAllDecls(@import("utils/socket_path.zig"));
     std.testing.refAllDecls(@import("utils/counter_scale.zig"));
@@ -280,6 +294,91 @@ test "zix: unit test" {
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/http3/dispatch/epoll.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/http3/dispatch/uring.zig"));
     std.testing.refAllDecls(@import("udp/http3/Http3.zig"));
+
+    // # webrtc
+    std.testing.refAllDecls(@import("udp/webrtc/stun/message.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/stun/binding.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/candidate.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/credentials.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/check.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/ice/lite.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/checksum.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/chunk.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/parameter.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/packet.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/init.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/cookie.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/error_cause.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/teardown.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/heartbeat.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/serial.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/data.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/sack.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/reassembly.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/rto.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/congestion.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/receive_queue.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/forward_tsn.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/send_queue.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/reconfig.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sctp/association.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/payload.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/dcep.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/stream_id.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/channel.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/registry.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/reset.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/datachannel/peer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/line.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/attribute.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/address.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/media.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/session.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/fingerprint.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/setup.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/candidate.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/offer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/answer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/builder.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/direction.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/rtpmap.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/fmtp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/rtcp_feedback.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/format.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/media_offer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/sdp/media_answer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/profile.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/rtp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/mux.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/rtcp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/report.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/feedback.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_cipher.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_key.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_auth.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp_index.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/srtcp.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/forward.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/stream_set.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/route.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/peer_media.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/demux.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/config.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/timer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/dtls_session.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/fanout.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/core.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/connection.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/table.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/dialer.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/server.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/dispatch/common.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/dispatch/worker.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/dispatch/async.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/webrtc/dispatch/epoll.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("udp/webrtc/dispatch/uring.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/Webrtc.zig"));
 
     // # zix.Tcp (raw)
     std.testing.refAllDecls(@import("tcp/config.zig"));

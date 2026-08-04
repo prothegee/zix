@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>zix WebRTC file transfer</title></head>
+<body>
+<h2>zix WebRTC data channel file transfer</h2>
+<p>
+  Pick a file and it goes up one data channel in 16 KB pieces. zix counts what arrives and sends
+  the running total back down the same channel. Nothing is written to disk on either side.
+</p>
+<p>
+  Sending pauses whenever the browser's own send queue passes 1 MB and starts again once it has
+  drained to 256 KB. That pause is the whole point of the example: a channel that is written to
+  faster than the network drains it grows a queue in the browser, and the page is what has to
+  notice.
+</p>
+<p>
+  <button id="join" onclick="join()">Connect</button>
+  channel: <b id="channel">closed</b>
+</p>
+<p>
+  <input type="file" id="file" disabled>
+  <button id="send" onclick="sendFile()" disabled>Send it</button>
+</p>
+<p>progress: <b id="progress">nothing sent yet</b></p>
+<p>pauses for backpressure: <b id="pauses">0</b></p>
+<pre id="log" style="font-family:monospace"></pre>
+<script>
+const CHUNK = 16 * 1024;
+const HIGH_WATER = 1024 * 1024;
+const LOW_WATER = 256 * 1024;
+
+let channel = null;
+let pauses = 0;
+
+function log(line) {
+  document.getElementById('log').textContent += line + '\n';
+}
+
+async function join() {
+  document.getElementById('join').disabled = true;
+
+  try {
+    await connect();
+  } catch (failure) {
+    // Without this a rejected step leaves the page exactly as it was, and the only sign that
+    // anything happened is a channel that never opens.
+    log('[connect failed: ' + failure + ']');
+    document.getElementById('join').disabled = false;
+  }
+}
+
+async function connect() {
+  // No ICE servers. zix answers with the one address it listens on, and the browser sends its
+  // connectivity checks straight there.
+  const peer = new RTCPeerConnection({ iceServers: [] });
+
+  // The two states worth watching, and the order they settle in. ICE reaching connected while the
+  // connection stays connecting means the addresses found each other and DTLS did not finish.
+  peer.oniceconnectionstatechange = () => log('[ice ' + peer.iceConnectionState + ']');
+  peer.onconnectionstatechange = () => log('[connection ' + peer.connectionState + ']');
+
+  channel = peer.createDataChannel('file');
+  channel.binaryType = 'arraybuffer';
+  channel.bufferedAmountLowThreshold = LOW_WATER;
+
+  channel.onopen = () => {
+    document.getElementById('channel').textContent = 'open';
+    document.getElementById('file').disabled = false;
+    document.getElementById('send').disabled = false;
+  };
+
+  channel.onclose = () => {
+    document.getElementById('channel').textContent = 'closed';
+    document.getElementById('join').disabled = false;
+  };
+
+  channel.onmessage = e => {
+    if (e.data.startsWith('ack ')) {
+      document.getElementById('progress').textContent = e.data.slice(4) + ' bytes counted by zix';
+
+      return;
+    }
+
+    log(e.data);
+  };
+
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+
+  // Sent without waiting for candidate gathering. zix never sends checks of its own, so the
+  // browser's candidates are of no use to it: what matters is the one address in the answer.
+  const reply = await fetch('/offer', {
+    method: 'POST',
+    headers: { 'content-type': 'application/sdp' },
+    body: offer.sdp
+  });
+
+  if (!reply.ok) throw new Error('the signalling server answered ' + reply.status);
+
+  await peer.setRemoteDescription({ type: 'answer', sdp: await reply.text() });
+  log('[answer accepted, waiting for the channel]');
+}
+
+// Wait until the browser has drained its send queue below the low water mark. Without this the
+// queue grows for as long as the file lasts, and a big enough file tears the channel down.
+function drained() {
+  if (channel.bufferedAmount <= HIGH_WATER) return Promise.resolve();
+
+  pauses += 1;
+  document.getElementById('pauses').textContent = pauses;
+
+  return new Promise(resume => channel.addEventListener('bufferedamountlow', resume, { once: true }));
+}
+
+async function sendFile() {
+  const picked = document.getElementById('file').files[0];
+
+  if (!picked || !channel || channel.readyState !== 'open') return;
+
+  document.getElementById('send').disabled = true;
+  pauses = 0;
+  document.getElementById('pauses').textContent = '0';
+  log('sending ' + picked.name + ', ' + picked.size + ' bytes');
+
+  channel.send('start');
+
+  for (let at = 0; at < picked.size; at += CHUNK) {
+    await drained();
+
+    channel.send(await picked.slice(at, at + CHUNK).arrayBuffer());
+  }
+
+  channel.send('done');
+  document.getElementById('send').disabled = false;
+}
+</script>
+</body>
+</html>

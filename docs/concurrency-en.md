@@ -246,9 +246,12 @@ Only byte-identical primitives are shared, in `src/multiplexers/`. Today that is
 | TCP (raw stream) | yes | yes, Linux-only | framed callback only, per-connection handler folds to `.EPOLL` |
 | FIX 4.x | yes | yes, Linux-only | yes, Linux-only |
 | UDP (raw) | yes (single worker) | yes, Linux-only | yes, Linux-only |
+| WebRTC | yes (single worker) | yes, Linux-only | yes, Linux-only |
 | UDS (stream) | yes (io.concurrent() per connection) | n/a | n/a |
 
 Http3 under `.EPOLL` / `.URING` runs real per-core workers (cross-core CID steering for mid-connection migration is v2, ADR-049 phase 3).
+
+WebRTC under `.EPOLL` / `.URING` also runs real per-core workers, but with no CPU steering knob at all: a peer is its 4-tuple, so steering by receiving CPU could split one session across two workers mid-handshake (ADR-067).
 
 ---
 
@@ -266,7 +269,7 @@ Each model names two things at once: a concurrency shape (single or multi-core) 
 
 `.EPOLL`, `.KQUEUE`, and `.IOCP` are the same multi-core per-core idea, one per operating system. Each lives in its own `dispatch/<model>.zig` file, so the folder is self-documenting: open it, see every model, each header line states its core behavior and OS.
 
-Like `.EPOLL` and `.URING` today, these backends are family-wide: every engine that selects a `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) gets its platform's backend through the same enum.
+Like `.EPOLL` and `.URING` today, these backends are family-wide: every engine that selects a `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) gets its platform's backend through the same enum.
 
 There is no auto-select keyword. Portable code either picks `.ASYNC` outright or names the exact backend with a one-line comptime switch on `builtin.os.tag`. Two mismatches are handled differently:
 

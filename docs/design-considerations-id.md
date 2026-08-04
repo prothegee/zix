@@ -49,7 +49,7 @@ Connection table EPOLL / URING `zix.Http1` mengalokasikan satu slab virtual `MAX
 ## Design Patterns
 
 **Type-Per-Domain Methods (Namespace Struct):**<br>
-Setiap protokol adalah namespace file-as-struct Zig tersendiri yang diekspor dari `lib.zig` (`zix.Http`, `zix.Http1`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), hanya mengekspos method domain tersebut (`Server.init`, `run`, ...).
+Setiap protokol adalah namespace file-as-struct Zig tersendiri yang diekspor dari `lib.zig` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), hanya mengekspos method domain tersebut (`Server.init`, `run`, ...).
 
 > Gunakan ketika sebuah subsistem punya permukaan yang mandiri: beri satu namespace type alih-alih free function yang berserakan.
 

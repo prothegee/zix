@@ -3,6 +3,7 @@
 # - Do not use this for ci/cd.
 # - This meant to be check for developer & maintainer.
 # - Test for runner are execute based on native platform.
+# - `install` is skiped, not exists yet.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +13,7 @@ parse_target_filter "${1:-zig}" "${2:-}"
 
 # --------------------------------------------------------- #
 
-matrix "zix" . install test-all examples test-runner-all
+matrix "zix" . test-all examples test-runner-all
 
 # --------------------------------------------------------- #
 # Drivers are standalone packages with their own build.zig. On a foreign
@@ -23,9 +24,9 @@ matrix "zix" . install test-all examples test-runner-all
 # no container and run on every target.
 # prometheuz has no test-integration step (its container coverage is test-runner).
 
-matrix "postgrez" src/driver/postgrez install test-unit test-behaviour test-edge test-integration examples test-runner
-matrix "rediz" src/driver/rediz install test-unit test-behaviour test-edge test-integration examples test-runner
-matrix "prometheuz" src/driver/prometheuz install test-unit test-behaviour test-edge examples test-runner
+matrix "postgrez" src/driver/postgrez test-unit test-behaviour test-edge test-integration examples test-runner
+matrix "rediz" src/driver/rediz test-unit test-behaviour test-edge test-integration examples test-runner
+matrix "prometheuz" src/driver/prometheuz test-unit test-behaviour test-edge examples test-runner
 
 # --------------------------------------------------------- #
 

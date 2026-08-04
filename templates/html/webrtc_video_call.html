@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>zix WebRTC video call</title></head>
+<body>
+<h2>zix WebRTC video call</h2>
+<p>
+  Open this page in two or more tabs. Give yourself a name, press <b>Start camera</b>, then
+  <b>Join the room</b>. zix carries the offer, the answer, and the candidates between everyone in
+  the room and then steps out: every picture and every sound goes straight from one tab to another
+  and never reaches this server.
+</p>
+<p>Room: <b id="room"></b> (change it with a #name at the end of the address)</p>
+<p id="context" style="color:#b00000"></p>
+<p>
+  you are <input id="name" size="16">
+  <button id="camera" onclick="startCamera()">Start camera</button>
+  <button id="join" onclick="joinRoom()" disabled>Join the room</button>
+  relay: <b id="relay">connecting...</b>
+</p>
+<p>In the room: <b id="summary">nobody yet</b></p>
+<table id="roster" cellpadding="4"></table>
+<div id="tiles" style="display:flex;flex-wrap:wrap;margin-top:8px">
+  <div style="margin:0 8px 8px 0">
+    <video id="local" autoplay playsinline muted width="240" style="background:#202020;display:block"></video>
+    <b id="localLabel">you</b>
+  </div>
+</div>
+<pre id="log" style="font-family:monospace"></pre>
+<script>
+// Audio and video together, which is what a call is. The published getUserMedia sample asks for
+// video alone, so it needs no microphone permission.
+const constraints = { audio: true, video: true };
+
+const room = location.hash.slice(1) || 'lobby';
+const myId = 'peer-' + Math.random().toString(16).slice(2, 6);
+
+document.getElementById('room').textContent = room;
+document.getElementById('name').value = myId;
+
+const relay = new WebSocket('ws://' + location.host + '/ws/' + room);
+
+// Everyone else in the room, by identifier. One entry holds that person's connection, their tile,
+// and what has been heard from them so far.
+const members = new Map();
+
+let localStream = null;
+let joined = false;
+
+function log(line) {
+  document.getElementById('log').textContent += line + '\n';
+}
+
+function myName() {
+  return document.getElementById('name').value.trim() || myId;
+}
+
+// Every message says who it is from, and the ones meant for one person say who for. zix relays all
+// of them to the whole room without reading any of it, so the addressing is done here.
+function signal(message) {
+  message.from = myId;
+  relay.send(JSON.stringify(message));
+}
+
+// getUserMedia is handed out in a secure context only, and a plain http page on a network address
+// is not one: navigator.mediaDevices is undefined there. Say that here, because the alternative is
+// a TypeError on a property nobody expected to be missing.
+function mediaAvailable() {
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) return true;
+
+  document.getElementById('context').textContent =
+    'No camera available on this address. getUserMedia needs a secure context, and http://' +
+    location.hostname + ' is not one. Open this page at http://localhost:' +
+    (location.port || '9088') + '/ instead, or serve it over TLS.';
+
+  return false;
+}
+
+// The published sample names these two errors because they are the two a reader hits first: a
+// constraint no device satisfies, and a permission the page was never given.
+function handleError(error) {
+  if (error.name === 'OverconstrainedError') {
+    log('OverconstrainedError: no device matches ' + JSON.stringify(constraints));
+  } else if (error.name === 'NotAllowedError') {
+    log('NotAllowedError: this page was not allowed the camera and the microphone');
+  }
+
+  log('getUserMedia error: ' + error.name);
+}
+
+// --------------------------------------------------------- //
+// the room, as a reader sees it
+
+// One picture per person, created the moment that person is heard of rather than when their media
+// arrives. An empty labelled tile is what says somebody is here but not connected yet.
+function tileFor(id) {
+  const known = members.get(id);
+
+  if (known) return known;
+
+  const tile = document.createElement('div');
+  tile.style.cssText = 'margin:0 8px 8px 0';
+
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.playsInline = true;
+  video.controls = true;
+  video.width = 240;
+  video.style.cssText = 'background:#202020;display:block';
+
+  const label = document.createElement('b');
+  label.textContent = id;
+
+  tile.appendChild(video);
+  tile.appendChild(label);
+  document.getElementById('tiles').appendChild(tile);
+
+  const member = {
+    id: id,
+    name: id,
+    connection: null,
+    video: video,
+    label: label,
+    state: 'in the room',
+    heard: new Set(),
+  };
+
+  members.set(id, member);
+
+  return member;
+}
+
+function nameMember(member, name) {
+  member.name = name || member.id;
+  member.label.textContent = member.name;
+}
+
+function forgetMember(id) {
+  const member = members.get(id);
+
+  if (!member) return;
+
+  if (member.connection) member.connection.close();
+
+  member.video.parentNode.remove();
+  members.delete(id);
+
+  log('[' + member.name + ' left]');
+  renderRoster();
+}
+
+// The roster is built out of nodes rather than a string of markup, because a name comes from
+// somebody else's tab, and what another person typed is not markup this page trusts.
+function renderRoster() {
+  const table = document.getElementById('roster');
+  table.textContent = '';
+
+  const head = document.createElement('tr');
+
+  for (const title of ['who', 'connection', 'picture', 'sound']) {
+    const cell = document.createElement('th');
+    cell.textContent = title;
+    cell.style.textAlign = 'left';
+    head.appendChild(cell);
+  }
+
+  table.appendChild(head);
+  table.appendChild(rosterRow(
+    'you (' + myName() + ')',
+    joined ? 'this tab' : 'not joined yet',
+    localStream ? 'on' : 'off',
+    localStream ? 'on' : 'off',
+  ));
+
+  for (const member of members.values()) {
+    table.appendChild(rosterRow(
+      member.name,
+      member.state,
+      member.heard.has('video') ? 'on' : '-',
+      member.heard.has('audio') ? 'on' : '-',
+    ));
+  }
+
+  const others = members.size;
+  const connected = [...members.values()].filter(member => member.state === 'connected').length;
+
+  document.getElementById('summary').textContent = others === 0
+    ? (joined ? 'just you so far' : 'nobody yet')
+    : others + ' other' + (others === 1 ? '' : 's') + ', ' + connected + ' connected' +
+      (connected === others ? ', everyone is in' : '');
+}
+
+function rosterRow(who, state, picture, sound) {
+  const row = document.createElement('tr');
+
+  for (const text of [who, state, picture, sound]) {
+    const cell = document.createElement('td');
+    cell.textContent = text;
+    row.appendChild(cell);
+  }
+
+  return row;
+}
+
+// --------------------------------------------------------- //
+// one connection per other person
+
+// Exactly one side of each pair offers, and both sides work out which from the two identifiers
+// alone. Without a rule like this, two tabs that arrive together offer each other at the same
+// moment, and neither answer fits the offer the other is already holding.
+function shouldOffer(theirId) {
+  return myId < theirId;
+}
+
+function newConnection(member) {
+  const connection = new RTCPeerConnection({ iceServers: [] });
+
+  connection.onicecandidate = e => {
+    if (e.candidate) signal({ kind: 'candidate', to: member.id, candidate: e.candidate });
+  };
+
+  connection.onconnectionstatechange = () => {
+    member.state = connection.connectionState;
+
+    if (connection.connectionState === 'connected') log('[' + member.name + ' connected]');
+
+    renderRoster();
+  };
+
+  // Both tracks of one person arrive in the same stream, so the tile is attached once and the
+  // sound comes with the picture.
+  connection.ontrack = e => {
+    member.heard.add(e.track.kind);
+    member.video.srcObject = e.streams[0];
+
+    // autoplay covers this in a tab that has already been clicked, and asking explicitly is what
+    // reports the one case where it does not: a browser that refuses to start a picture with sound
+    // in it. Every tile carries controls so a refusal is something a reader can press past.
+    //
+    // Only a refusal is worth saying. Attaching the stream interrupts the play that is already
+    // under way, and that rejects with AbortError on an element which then plays perfectly well,
+    // so reporting every rejection tells a reader to fix something that is not broken.
+    member.video.play().catch(error => {
+      if (error.name === 'NotAllowedError') log('[' + member.name + ': press play on the picture]');
+    });
+
+    renderRoster();
+  };
+
+  if (localStream) {
+    for (const track of localStream.getTracks()) connection.addTrack(track, localStream);
+  }
+
+  member.connection = connection;
+
+  return connection;
+}
+
+// Somebody is known about. Put them in the room, then offer if this is the side that offers.
+async function meet(id, name) {
+  const member = tileFor(id);
+  nameMember(member, name);
+
+  renderRoster();
+
+  if (member.connection) return;
+  if (!shouldOffer(id)) return;
+
+  const connection = newConnection(member);
+
+  const offer = await connection.createOffer();
+  await connection.setLocalDescription(offer);
+
+  signal({ kind: 'offer', to: member.id, name: myName(), sdp: offer.sdp });
+}
+
+// --------------------------------------------------------- //
+
+async function startCamera() {
+  if (!mediaAvailable()) return;
+
+  document.getElementById('camera').disabled = true;
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (error) {
+    document.getElementById('camera').disabled = false;
+    handleError(error);
+
+    return;
+  }
+
+  document.getElementById('local').srcObject = localStream;
+
+  if (relay.readyState === WebSocket.OPEN) document.getElementById('join').disabled = false;
+
+  log('[camera and microphone open]');
+  renderRoster();
+}
+
+function joinRoom() {
+  joined = true;
+
+  document.getElementById('join').disabled = true;
+  document.getElementById('name').disabled = true;
+  document.getElementById('localLabel').textContent = 'you (' + myName() + ')';
+
+  signal({ kind: 'hello', name: myName() });
+
+  log('[joined as ' + myName() + ']');
+  renderRoster();
+}
+
+relay.onopen = () => {
+  document.getElementById('relay').textContent = 'connected';
+
+  if (localStream) document.getElementById('join').disabled = false;
+};
+
+relay.onclose = () => { document.getElementById('relay').textContent = 'disconnected'; };
+
+relay.onmessage = async e => {
+  const message = JSON.parse(e.data);
+
+  // The relay hands every frame to the whole room, so a tab drops its own and anything addressed
+  // to somebody else.
+  if (message.from === myId) return;
+  if (message.to && message.to !== myId) return;
+
+  if (message.kind === 'hello') {
+    // Answer so the newcomer learns this tab is here. Whether a connection follows is worked out
+    // the same way on both sides, so this is not the offer.
+    if (joined) signal({ kind: 'here', to: message.from, name: myName() });
+
+    await meet(message.from, message.name);
+
+    return;
+  }
+
+  if (message.kind === 'here') {
+    await meet(message.from, message.name);
+
+    return;
+  }
+
+  if (message.kind === 'offer') {
+    const member = tileFor(message.from);
+    nameMember(member, message.name);
+
+    const connection = member.connection || newConnection(member);
+    await connection.setRemoteDescription({ type: 'offer', sdp: message.sdp });
+
+    const answer = await connection.createAnswer();
+    await connection.setLocalDescription(answer);
+
+    signal({ kind: 'answer', to: member.id, name: myName(), sdp: answer.sdp });
+    renderRoster();
+
+    return;
+  }
+
+  if (message.kind === 'answer') {
+    const member = members.get(message.from);
+
+    if (member && member.connection) {
+      await member.connection.setRemoteDescription({ type: 'answer', sdp: message.sdp });
+    }
+
+    return;
+  }
+
+  if (message.kind === 'candidate') {
+    const member = members.get(message.from);
+
+    if (member && member.connection) await member.connection.addIceCandidate(message.candidate);
+
+    return;
+  }
+
+  if (message.kind === 'bye') forgetMember(message.from);
+};
+
+// A tab that closes says so, which empties its tile at once rather than leaving it there until the
+// connection times out.
+window.addEventListener('beforeunload', () => {
+  if (joined) signal({ kind: 'bye' });
+});
+
+renderRoster();
+</script>
+</body>
+</html>
