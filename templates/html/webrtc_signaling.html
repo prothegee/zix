@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>zix WebRTC signalling</title></head>
+<body>
+<h2>zix WebRTC signalling relay</h2>
+<p>
+  Open this page in two tabs. zix carries the offer, the answer, and the candidates between them,
+  and then steps out: the chat below runs on a data channel straight from one tab to the other.
+</p>
+<p>Room: <b id="room"></b> (change it with a #name at the end of the address)</p>
+<p>
+  <button id="start" onclick="startCall()" disabled>Start the call</button>
+  relay: <b id="relay">connecting...</b>, channel: <b id="channel">closed</b>
+</p>
+<p>
+  <input id="text" size="48" placeholder="say something" disabled>
+  <button id="send" onclick="sendMessage()" disabled>Send</button>
+</p>
+<pre id="log" style="font-family:monospace"></pre>
+<script>
+const room = location.hash.slice(1) || 'lobby';
+document.getElementById('room').textContent = room;
+
+const relay = new WebSocket('ws://' + location.host + '/ws/' + room);
+let peer = null;
+let channel = null;
+
+function log(line) {
+  document.getElementById('log').textContent += line + '\n';
+}
+
+function signal(message) {
+  relay.send(JSON.stringify(message));
+}
+
+// One peer connection, made the same way on both sides. No ICE servers: two tabs on one machine
+// reach each other on their host candidates, which is all zix relays here.
+function newPeer() {
+  const pc = new RTCPeerConnection({ iceServers: [] });
+
+  pc.onicecandidate = e => { if (e.candidate) signal({ kind: 'candidate', candidate: e.candidate }); };
+  pc.ondatachannel = e => bind(e.channel);
+
+  return pc;
+}
+
+// The channel both tabs end up holding: the one tab created, or the one the other tab announced.
+function bind(open) {
+  channel = open;
+
+  channel.onopen = () => {
+    document.getElementById('channel').textContent = 'open, peer to peer';
+    document.getElementById('text').disabled = false;
+    document.getElementById('send').disabled = false;
+    log('[channel open, nothing below goes through zix]');
+  };
+
+  channel.onclose = () => { document.getElementById('channel').textContent = 'closed'; };
+  channel.onmessage = e => log('them: ' + e.data);
+}
+
+async function startCall() {
+  document.getElementById('start').disabled = true;
+
+  peer = newPeer();
+  bind(peer.createDataChannel('signal-demo'));
+
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+
+  signal({ kind: 'offer', sdp: offer.sdp });
+  log('[offer sent through the relay]');
+}
+
+function sendMessage() {
+  const box = document.getElementById('text');
+
+  if (!channel || channel.readyState !== 'open' || !box.value) return;
+
+  channel.send(box.value);
+  log('you: ' + box.value);
+  box.value = '';
+}
+
+relay.onopen = () => {
+  document.getElementById('relay').textContent = 'connected';
+  document.getElementById('start').disabled = false;
+};
+
+relay.onclose = () => { document.getElementById('relay').textContent = 'disconnected'; };
+
+relay.onmessage = async e => {
+  const message = JSON.parse(e.data);
+
+  if (message.kind === 'offer') {
+    document.getElementById('start').disabled = true;
+
+    peer = newPeer();
+    await peer.setRemoteDescription({ type: 'offer', sdp: message.sdp });
+
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+
+    signal({ kind: 'answer', sdp: answer.sdp });
+    log('[offer received, answer sent]');
+
+    return;
+  }
+
+  if (message.kind === 'answer') {
+    await peer.setRemoteDescription({ type: 'answer', sdp: message.sdp });
+    log('[answer received]');
+
+    return;
+  }
+
+  if (message.kind === 'candidate' && peer) await peer.addIceCandidate(message.candidate);
+};
+</script>
+</body>
+</html>
