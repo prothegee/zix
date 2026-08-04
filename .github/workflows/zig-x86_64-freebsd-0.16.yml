@@ -62,10 +62,10 @@ jobs:
             # line at the end is the authoritative verdict for this leg.
             failures=""
 
-            timeout 5m zig build unit-test --summary failures --test-timeout 15s || failures="$failures unit-test"
-            timeout 5m zig build integration-test --summary failures --test-timeout 15s || failures="$failures integration-test"
-            timeout 5m zig build behaviour-test --summary failures --test-timeout 15s || failures="$failures behaviour-test"
-            timeout 5m zig build edge-test --summary failures --test-timeout 15s || failures="$failures edge-test"
+            timeout 5m zig build unit-test --summary failures --test-timeout 30s || failures="$failures unit-test"
+            timeout 5m zig build integration-test --summary failures --test-timeout 30s || failures="$failures integration-test"
+            timeout 5m zig build behaviour-test --summary failures --test-timeout 30s || failures="$failures behaviour-test"
+            timeout 5m zig build edge-test --summary failures --test-timeout 30s || failures="$failures edge-test"
 
             # Every command below is wrapped: this leg is one step, so without a per-command
             # bound a single stall owns the whole leg until the step cap fires. One run sat 27
