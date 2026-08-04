@@ -126,6 +126,9 @@ pub const Mapping = struct {
 ///   behind it for the outgoing tag, which is not always the same size as the incoming one.
 /// - The incoming packet is opened first, so a forged one is refused before any work is done on
 ///   behalf of the destination.
+/// - One destination. A packet going to a room is opened once with `open` and sealed once per
+///   member with `reseal`, because opening it a second time is a replay of an index the source
+///   stream has already accepted.
 ///
 /// Param:
 /// source - *srtp.Session (the sending peer's stream, opened for reading)
@@ -145,10 +148,55 @@ pub fn relay(
     buffer: []u8,
     packet_len: usize,
 ) Error![]const u8 {
+    const opened = try open(source, buffer, packet_len);
+
+    return reseal(destination, mapping, buffer, opened.len);
+}
+
+/// Open one packet from the peer that sent it.
+///
+/// Note:
+/// - Works in place, and the plain packet is shorter than what came in.
+///
+/// Param:
+/// source - *srtp.Session (the sending peer's stream, opened for reading)
+/// buffer - []u8 (working buffer, rewritten in place)
+/// packet_len - usize (how much of it is the protected incoming packet)
+///
+/// Return:
+/// - []const u8, the plain packet, borrowing `buffer`
+/// - error.Truncated, error.UnsupportedVersion, error.Replayed, error.AuthenticationFailed,
+///   error.SegmentTooLong
+pub fn open(source: *srtp.Session, buffer: []u8, packet_len: usize) Error![]const u8 {
     if (packet_len > buffer.len) return error.Truncated;
 
-    const opened = try source.unprotect(buffer[0..packet_len]);
-    const body_len = opened.len;
+    return source.unprotect(buffer[0..packet_len]);
+}
+
+/// Renumber an opened packet for one destination and seal it under that destination's key.
+///
+/// Note:
+/// - `buffer` holds the plain packet at its start and needs room behind it for the outgoing tag.
+/// - The whole cost of a fan-out is here. What goes to each member of a room is a different
+///   ciphertext, because no two members share a key.
+///
+/// Param:
+/// destination - *srtp.Session (the receiving peer's stream, opened for writing)
+/// mapping - Mapping (how the source's numbering is presented to this destination)
+/// buffer - []u8 (working buffer, rewritten in place)
+/// body_len - usize (how much of it is the plain packet)
+///
+/// Return:
+/// - []const u8, the packet to send to the destination
+/// - error.Truncated, error.UnsupportedVersion, error.NoSpace, error.SegmentTooLong
+pub fn reseal(
+    destination: *srtp.Session,
+    mapping: Mapping,
+    buffer: []u8,
+    body_len: usize,
+) Error![]const u8 {
+    if (body_len > buffer.len) return error.Truncated;
+
     const header = (try rtp.read(buffer[0..body_len])).header;
 
     try rtp.setSsrc(buffer[0..body_len], mapping.ssrc);
@@ -506,6 +554,98 @@ test "zix media: forward relay, a buffer with no room for the outgoing tag is re
         tight[0 .. packet_len - 1],
         packet_len,
     ));
+}
+
+test "zix media: forward open then reseal, the two halves do what relay does in one call" {
+    var split = try Relay.open(.SRTP_AES128_CM_HMAC_SHA1_80);
+    var whole = try Relay.open(.SRTP_AES128_CM_HMAC_SHA1_80);
+
+    var split_buf: [128]u8 = undefined;
+    var whole_buf: [128]u8 = undefined;
+
+    const split_protected = try sent(&split, &split_buf, 42, 9000, "same both ways");
+    const whole_protected = try sent(&whole, &whole_buf, 42, 9000, "same both ways");
+
+    const opened = try open(&split.inbound, &split_buf, split_protected.len);
+    const by_halves = try reseal(&split.outbound, .{ .ssrc = 0x2222_2222 }, &split_buf, opened.len);
+
+    const at_once = try relay(
+        &whole.inbound,
+        &whole.outbound,
+        .{ .ssrc = 0x2222_2222 },
+        &whole_buf,
+        whole_protected.len,
+    );
+
+    try std.testing.expectEqualSlices(u8, at_once, by_halves);
+}
+
+test "zix media: forward reseal, one packet goes to a room as one ciphertext per member" {
+    // The shape a fan-out takes: opened once, because opening it twice is a replay, and sealed
+    // once per member, because no two members hold the same key.
+    var pair = try Relay.open(.SRTP_AES128_CM_HMAC_SHA1_80);
+
+    const SECOND_MASTER_KEY: [srtp_key.MASTER_KEY_LEN]u8 = @splat(0x55);
+    const SECOND_MASTER_SALT: [srtp_key.MASTER_SALT_LEN]u8 = @splat(0x66);
+
+    var second_outbound = try srtp.Session.init(
+        .SRTP_AES128_CM_HMAC_SHA1_80,
+        SECOND_MASTER_KEY,
+        SECOND_MASTER_SALT,
+    );
+    var second_receiver = try srtp.Session.init(
+        .SRTP_AES128_CM_HMAC_SHA1_80,
+        SECOND_MASTER_KEY,
+        SECOND_MASTER_SALT,
+    );
+
+    var buffer: [128]u8 = undefined;
+    const protected = try sent(&pair, &buffer, 100, 9000, "one to the room");
+
+    const opened = try open(&pair.inbound, &buffer, protected.len);
+    const body_len = opened.len;
+
+    var plain: [128]u8 = undefined;
+    @memcpy(plain[0..body_len], buffer[0..body_len]);
+
+    var first_out: [128]u8 = undefined;
+    @memcpy(first_out[0..body_len], plain[0..body_len]);
+    const for_first = try reseal(&pair.outbound, .{ .ssrc = 0x2222_2222 }, &first_out, body_len);
+
+    var second_out: [128]u8 = undefined;
+    @memcpy(second_out[0..body_len], plain[0..body_len]);
+    const for_second = try reseal(&second_outbound, .{ .ssrc = 0x2222_2222 }, &second_out, body_len);
+
+    try std.testing.expect(!std.mem.eql(u8, for_first, for_second));
+
+    // And each member opens its own copy and finds the payload the sender put in.
+    var received: [128]u8 = undefined;
+    @memcpy(received[0..for_first.len], for_first);
+    try std.testing.expectEqualStrings(
+        "one to the room",
+        (try rtp.read(try pair.receiver.unprotect(received[0..for_first.len]))).payload,
+    );
+
+    @memcpy(received[0..for_second.len], for_second);
+    try std.testing.expectEqualStrings(
+        "one to the room",
+        (try rtp.read(try second_receiver.unprotect(received[0..for_second.len]))).payload,
+    );
+}
+
+test "zix media: forward open, a packet opened twice is refused the second time" {
+    var pair = try Relay.open(.SRTP_AES128_CM_HMAC_SHA1_80);
+
+    var buffer: [128]u8 = undefined;
+    var again: [128]u8 = undefined;
+
+    const protected = try sent(&pair, &buffer, 1, 0, "once only");
+    @memcpy(again[0..protected.len], protected);
+    const packet_len = protected.len;
+
+    _ = try open(&pair.inbound, &buffer, packet_len);
+
+    try std.testing.expectError(error.Replayed, open(&pair.inbound, &again, packet_len));
 }
 
 test "zix media: forward bufferLenFor, it covers what relay writes" {
