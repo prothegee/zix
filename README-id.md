@@ -633,7 +633,7 @@ Entry point yang sebenarnya adalah step bernama. Daftarkan kapan saja dengan `zi
 | `zig build` | Hanya meng-compile module graph. Tidak ada artifact yang dihasilkan, karena zix adalah source module. |
 | `zig build test-all` | Menjalankan tes unit, integration, behaviour, dan edge. |
 | `zig build unit-test` | Menjalankan tes unit saja. Juga `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `example-<name>-<arch>-<os>`, jadi hasil build beberapa target bisa hidup berdampingan. |
+| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `zix-example-<name>-<arch>-<os>`, jadi hasil build beberapa target bisa hidup berdampingan. |
 | `zig build example-<group>` | Membangun satu grup example, misalnya `example-http1` atau `example-grpc`. |
 | `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Binary yang terinstal membawa target triple, jalankan dari sana. |
 | `zig build test-runner-<name>` | Menjalankan pengecekan integrasi server plus client, misalnya `test-runner-http1-websocket`. |
@@ -643,7 +643,7 @@ Binary example yang dibangun ada di `zig-out/bin/`. Untuk membangun semua exampl
 
 ```sh
 zig build examples                                   # bangun setiap example ke zig-out/bin/
-./zig-out/bin/example-http1_websocket-x86_64-linux & # jalankan satu di background
+./zig-out/bin/zix-example-http1_websocket-x86_64-linux & # jalankan satu di background
 kill %1                                              # hentikan
 ```
 
