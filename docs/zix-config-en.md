@@ -267,6 +267,38 @@ QUIC over UDP. Requires a TLS 1.3 context (no cleartext mode).
 | tls | null (required) | TLS 1.3 context: cert, key, ALPN, QUIC needs TLS 1.3 | enables QUIC | attach a TLS 1.3 context | | | null is rejected, QUIC has no cleartext mode |
 | logger | null | optional logger for lifecycle lines | | attach for logging | | | |
 
+## WebRTC (`WebrtcServerConfig`)
+
+ICE-lite, DTLS 1.2, SCTP data channels, optional SRTP media forwarding, all on one UDP port. Requires a TLS context whose key is ECDSA P-256 (no cleartext mode).
+
+| field | default | controls | perf impact | how to tweak | if lower | if higher | knob consequence |
+| :- | :- | :- | :- | :- | :- | :- | :- |
+| io | required | std.Io backend | | | | | |
+| allocator | required | backing allocator, general-purpose | | | | | |
+| ip | required | bind address | | | | | |
+| port | required | bind port, non-zero | | | | | zero is rejected at run() |
+| dispatch_model | required | concurrency: .ASYNC is one portable worker, .EPOLL and .URING are one SO_REUSEPORT worker per core | picks the strategy | `.EPOLL`/`.URING` on Linux for multicore scale | | | off Linux only `.ASYNC` runs. There is no CPU steering knob: a peer is its 4-tuple and steering would split a session |
+| workers | 0 | worker count for the per-core models, 0 = cpu_count | parallelism | leave 0 (auto) | fewer cores used | context-switching | ignored by `.ASYNC` |
+| worker_stack_size_bytes | 524288 | worker thread stack for the per-core workers | per-thread RSS (demand-paged) | raise for deep handlers, lower to trim RSS | stack overflow in deep handlers | wasted RSS per worker | ignored by `.ASYNC` |
+| max_recv_buf | 1500 | max datagram size, receive buffer per slot | per-slot memory | match to path MTU | datagrams truncated | more memory | 1500 is the common Ethernet MTU |
+| socket_rcvbuf | 1048576 | requested SO_RCVBUF in bytes | dropped datagrams under burst | leave high, lower only to trim memory | more loss under burst | more kernel socket memory | 0 keeps the kernel default |
+| socket_sndbuf | 1048576 | requested SO_SNDBUF in bytes | send throttling under a large flight | leave high, lower only to trim memory | a flight stalls on a small buffer | more kernel socket memory | 0 keeps the kernel default |
+| ice_ufrag | "" (required) | this agent's ufrag, the first half of the USERNAME every check carries | | set it, or publish the same value in the SDP answer | | | empty is rejected at run() |
+| ice_password | "" (required) | this agent's password, the key every check is verified against | | set it, or publish the same value in the SDP answer | | | empty is rejected at run(), and it is the only real gate |
+| peer_ice_ufrag | "" | the peer's ufrag, the second half of that USERNAME | | set when signalling has told you the peer's ufrag | | | empty means checks are refused with 401 until it is known. Ignored when accept_any_peer_ice_ufrag is set |
+| accept_any_peer_ice_ufrag | false | take a check whatever the peer calls itself, leaving ice_password as the only gate | | set to true for any browser client | | | a browser draws a fresh ufrag per peer connection, so without this every check is refused. Off by default so a server that names one peer keeps refusing everybody else |
+| tls | null (required) | TLS context: the certificate and the key that signs the ServerKeyExchange | enables DTLS | attach a context whose key is ECDSA P-256 | | | null is rejected at run(), and so is a key that is not ECDSA P-256 (the one DTLS 1.2 suite here is ECDHE-ECDSA, RFC 5289) |
+| max_handshake_fragment | 1024 | largest handshake fragment body this server emits | records per flight | lower if the path MTU is small | more fragments per flight | a record may exceed the path MTU and be dropped | sized so a record fits the path MTU |
+| carry_media | false | whether this server forwards audio and video between its peers | enables the SRTP path and its buffers | set to true for a forwarding server | | media buffers are allocated per peer | off means no keys are exported and RTP is dropped where it is routed. The SDP answer has its own separate switch, set both |
+| path_max_bytes | 1200 | largest SCTP packet that fits the path, DTLS overhead already taken off | fragments per message | raise only where the path MTU is known large | more fragments per message | packets may exceed the path MTU | 1200 matches the conservative WebRTC default |
+| outbound_streams | 128 | how many outbound streams the association asks for | per-association state | raise for many concurrent channels | fewer channels available | more per-association state | negotiated down to what the peer offers |
+| inbound_streams | 128 | how many inbound streams the association accepts | per-association state | raise for many concurrent channels | peer limited sooner | more per-association state | |
+| max_channels | 64 | how many channels one peer may have open at once, counted from both sides | per-peer registry | raise for channel-heavy peers | opens refused sooner | more per-peer memory | |
+| max_peers | 64 | how many peers one worker holds at once | per-worker memory | raise for a bigger room | new peers dropped sooner | more memory per worker | counted PER WORKER, so N workers hold up to N * max_peers. A datagram from a new peer past the ceiling is dropped, which reads to that peer as an unanswered check |
+| peer_idle_ms | 30000 | how long a peer may go without a datagram before it is dropped | reclaim speed | lower for faster reclaim | live but quiet peers dropped | dead peers linger | covers a browser closing its tab without a graceful shutdown |
+| tick_interval_ms | 250 | how often the engine looks at its peers when no datagram is arriving | idle CPU, and the floor on retransmit lateness | lower for tighter timers, raise to quiet an idle server | more wakeups on an idle server | a retransmit or an idle drop can be this late | the wait is deadline-derived and capped by this, so it is also the cost of a fully silent server |
+| logger | null | optional logger for lifecycle lines | | attach for logging | | | the engine is silent without one, which is the wrong default for a browser demo |
+
 ## FIX (`FixServerConfig`)
 
 | field | default | controls | perf impact | how to tweak | if lower | if higher | knob consequence |
@@ -333,7 +365,7 @@ Build one Logger with this config and attach it by pointer to any engine's `logg
 
 ## Notes
 
-- Required fields (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`) have no default and must be set. A zero `port` is rejected at init by `zix.Tcp` / `zix.Udp` / `zix.Fix` (and their clients), and at `run()` by `zix.Http2` / `zix.Grpc` / `zix.Http3`. `zix.Http1` and `zix.Http` do not validate it (port 0 binds a kernel-chosen ephemeral port).
+- Required fields (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`, `ice_ufrag`, `ice_password`) have no default and must be set. A zero `port` is rejected at init by `zix.Tcp` / `zix.Udp` / `zix.Fix` (and their clients), and at `run()` by `zix.Http2` / `zix.Grpc` / `zix.Http3` / `zix.Webrtc`. `zix.Http1` and `zix.Http` do not validate it (port 0 binds a kernel-chosen ephemeral port).
 - `io`, `logger`, and `tls` are caller-owned: they are passed by handle or pointer and must outlive the server.
 - `.EPOLL` and `.URING` are Linux-only. Off Linux `run()` returns `error.DispatchModelUnsupported`, so pick `.ASYNC` there. The TLS paths follow the model: `.EPOLL` / `.URING` terminate in the multiplexed tls_mux workers, `.ASYNC` in tls_serve.
 - The compression and response-cache features are active only under `.EPOLL` and `.URING` (shared-nothing, one owner per worker).
