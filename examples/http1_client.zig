@@ -5,8 +5,8 @@ const zix = @import("zix");
 // (e.g. example-http1_basic with routes / /echo /about).
 //
 // Usage:
-// 1. start a server:  ./zig-out/bin/example-http1_basic
-// 2. run this client:  ./zig-out/bin/example-http1_client
+// 1. start a server:  ./zig-out/bin/zix-example-http1_basic
+// 2. run this client:  ./zig-out/bin/zix-example-http1_client
 //
 // zix.Http.Client speaks HTTP/1.1 over std.http.Client, so it works against the
 // raw zix.Http1 server. The version selector is forward-looking: HTTP_1 is the
