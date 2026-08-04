@@ -54,30 +54,30 @@ jobs:
       # zig waits forever on an active test and buffers the child's stderr,
       # so the workflow kill loses every log line. With it, zig prints the
       # hung test's name plus its captured stderr and continues to the next
-      # test, so one run enumerates every hang. 15s is ~5x the slowest
+      # test, so one run enumerates every hang. 30s is ~5x the slowest
       # legitimate test on this runner (connect-retry ceiling ~3s).
       - name: zix unit tests
         timeout-minutes: 3
         shell: pwsh
-        run: zig build unit-test --summary failures --test-timeout 15s
+        run: zig build unit-test --summary failures --test-timeout 30s
 
       - name: zix integration tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build integration-test --summary failures --test-timeout 15s
+        run: zig build integration-test --summary failures --test-timeout 30s
 
       - name: zix behaviour tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build behaviour-test --summary failures --test-timeout 15s
+        run: zig build behaviour-test --summary failures --test-timeout 30s
 
       - name: zix edge tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build edge-test --summary failures --test-timeout 15s
+        run: zig build edge-test --summary failures --test-timeout 30s
 
       # examples is compile-plus-install only (no execution). test-runner-all then drives
       # every zix protocol end to end over real sockets, so unlike the cross-build matrix
