@@ -11,6 +11,7 @@
         "zix-build-tests.zig",
         "zix-build-examples.zig",
         "zix-build-test_runner.zig",
+        "zix-build-zixer.zig",
         "build.zig.zon",
         "src",
         "LICENSE-BSD",
