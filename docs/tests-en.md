@@ -155,6 +155,26 @@ The HTTP/3 (QUIC) layers are pure-Zig from the RFCs, so each carries the spec's 
 | `udp/http3/config.zig` / `server.zig` | `refAllDecls` + behavioral: required config fields and defaults, a null `Tls.Context` is rejected at run |
 | `udp/http3/static.zig` | `refAllDecls` + behavioral: content-encoding maps only what the response path can emit, serve declines when caching is off (the body must outlive the handler, so it can only come from the cache), the response is filled from cached bytes and the pin is KEPT, the body stays readable after the handler frame is gone, a `.br` sibling is picked and named, traversal and a missing file are rejected, exactly one pin is held and `releasePin` returns it, a released pin lets the entry be reclaimed, an in-flight body is immune to the file being rewritten in place |
 
+### zix.Webrtc
+
+Every WebRTC layer is written from its own RFC, so each file carries its tests in-file and the
+layers with published vectors are pinned byte for byte against them. `zix.Webrtc` exports the
+layers as primitives too, so a peer or a test harness can build the other side of the wire.
+
+| Module | Coverage |
+| :- | :- |
+| `udp/webrtc/demux.zig` | `refAllDecls` + behavioral: every first byte routes to its RFC 7983 section 7 kind, including the ranges the RFC 5764 text did not have |
+| `udp/webrtc/stun/message.zig` | `refAllDecls` + behavioral: the XOR-MAPPED-ADDRESS vector `192.0.2.1:32853` byte for byte, strict framing (trailing bytes and unpadded final attributes refused), MESSAGE-INTEGRITY over a rewritten header length |
+| `udp/webrtc/stun/binding.zig` | `refAllDecls` + behavioral: the RFC 8489 section 6.3.1 request rules, silent discard and a too-small buffer both reporting null |
+| `udp/webrtc/ice/*.zig` | `refAllDecls` + behavioral: the RFC 5769 section 2.1 sample request pins the MAC, the CRC and two attribute types at once, USERNAME split with this agent's ufrag first, 487 for every tiebreaker, 400 and 401 unsigned against 420 and 487 signed |
+| `udp/webrtc/sctp/*.zig` | `refAllDecls` + behavioral across 20 files: CRC32c written little endian with the Castagnoli polynomial, gap ack blocks as offsets, missing reports counted below the highest newly acked TSN only, a full 4-way handshake plus data, heartbeat, shutdown and abort between two in-memory associations |
+| `udp/webrtc/datachannel/*.zig` | `refAllDecls` + behavioral: the seven payload types, DCEP OPEN and ACK round-trip, stream identifier parity by DTLS role, messages reported ahead of closes, deferred reset processing, two peers talking in memory |
+| `udp/webrtc/sdp/*.zig` | `refAllDecls` + behavioral across 18 files: CRLF and bare LF both read, media-section lookup ahead of session level, a missing `a=sctp-port` refused, the session id capped at 62 bits, and a candidate written into every carried media section |
+| `udp/webrtc/media/*.zig` | `refAllDecls` + behavioral: RFC 3711 B.2 and B.3 and RFC 2202 case 1 pinned byte for byte, the KDF label XORed at byte 7, one profile carrying two tag lengths, ROC estimate kept separate from accept, the SRTCP index stopping rather than wrapping |
+| `udp/webrtc/dispatch/*.zig` | `refAllDecls` + behavioral: each model's `pass()` drives a whole session against a real bound socket with the real `Dialer`, so a difference between the models is a difference in the loop |
+| `udp/webrtc/config.zig` / `server.zig` | `refAllDecls` + behavioral: every `run()` rejection in order (port, ICE credentials present, ICE credentials legal, TLS present, key is ECDSA P-256, dispatch model against the platform) |
+| `tls/dtls_*.zig` | `refAllDecls` + behavioral: anti-replay checked before the AEAD and updated after, reassembly tracked by bitmap so overlapping fragments are legal, the record sequence carried past the HelloVerifyRequest, RFC 5705 export in its no-context seed form |
+
 ### zix.Logger
 
 | Module | Coverage |
@@ -390,6 +410,20 @@ the engine would go on to frame, including the cache pin it hands back.
 | Router keeps routed paths ahead of the static fallback | a routed handler wins over a file that would shadow it |
 | Router 404s static paths when caching is off | the file exists, but this engine has no safe body source without the cache |
 | Router serves a multi-packet body that outlives the dispatch call | a 64 KiB body reads back intact after the Context is gone |
+
+### tests/integration/webrtc/
+
+#### `exchange_test.zig`
+
+The CI exit gate for the engine: a whole session between two in-memory peers, no port and no sleep.
+This is what proves the eight sans-I/O layers agree when two independent instances meet.
+
+| Test | What it verifies |
+| :- | :- |
+| A dialer and an answerer carry a message end to end | ICE, DTLS, SCTP and DCEP all complete, and a payload survives the round trip |
+| The answerer nominates the pair the checks came from | an ice-lite agent selects on a verified check, not on a candidate it invented |
+| The channel lands on an even identifier because the dialer opened it | the DTLS role decides parity, and getting it wrong is invisible against a peer that shares the mistake |
+| Neither peer is left with a deadline it will never meet | every timer the session armed is either met or retired |
 
 ### tests/integration/grpc/
 
@@ -700,6 +734,18 @@ RFC 10008 QUERY support through the public `zix.Http1` surface.
 | Static fields are stored as set | all three round-trip |
 | Static serving needs caching, unlike the other engines | pins the deliberate asymmetry: on Http3 a ttl of 0 disables static serving entirely, because the response body outlives its handler |
 
+### tests/behaviour/webrtc/
+
+#### `session_test.zig`
+
+| Test | What it verifies |
+| :- | :- |
+| A peer answers a connectivity check before anything is negotiated | ICE runs ahead of DTLS, so a check is answered on a peer with no session yet |
+| The association only exists once the handshake finishes | SCTP is inside DTLS, so nothing is readable before the handshake completes |
+| A peer that says nothing is dropped on its idle deadline | `peer_idle_ms` is enforced, which is what covers a browser closing its tab |
+| Every datagram pushes the idle deadline back | a live but quiet peer is not dropped |
+| A dialer keeps asking until a check is answered | the retransmit timer drives the client half, not a fixed count |
+
 ### tests/behaviour/grpc/
 
 #### `config_test.zig`
@@ -982,6 +1028,23 @@ The boundaries where the engine has to decline rather than hand its send path a 
 | Bytes survive a truncation to a shorter file | the dangerous shape: the file shrinks while a response is still sending |
 | Declines every unsafe path before touching the disk | traversal, absolute, and empty |
 | Bytes are snapshotted once and reused across requests | one copy backs concurrent responses, and each holds its own pin |
+
+### tests/edge/webrtc/
+
+#### `session_test.zig`
+
+Everything arrives on one port and is sorted by its first byte, so the boundaries here are about
+what a peer does with a datagram it cannot use.
+
+| Test | What it verifies |
+| :- | :- |
+| A peer survives every first byte there is | all 256 values are classified and none of them panics |
+| An empty datagram is dropped and changes nothing | no state moves on a zero-length receive |
+| A DTLS record whose length runs off the end is not read past | the declared length is never trusted over the buffer |
+| A STUN message with the right first byte and nothing else is refused | routing is not validation, the magic cookie still has to check out |
+| Application data before the handshake finishes goes nowhere | epoch 1 records are refused until there are epoch 1 keys |
+| The same garbage a thousand times still leaves the peer alive | a repeated bad datagram exhausts nothing |
+| A dialer refuses a response carrying somebody else's transaction | the transaction id is checked, not just the message type |
 
 ### tests/edge/grpc/
 
