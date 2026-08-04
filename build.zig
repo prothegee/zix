@@ -121,6 +121,11 @@ pub fn build(b: *std.Build) void {
 
     // --------------------------------------------------------- //
 
+    // zixer executable (src/zixer ships with the package, so no gate needed).
+    @import("zix-build-zixer.zig").addSteps(b, target, optimize, zix);
+
+    // --------------------------------------------------------- //
+
     // Per-test bound handed to every driver suite that runs without a container.
     // A test hung mid-body waits forever on its own, and a nested zig build buffers the child's
     // stderr until it finishes, so a hang inside a driver suite reports nothing at all: one CI leg
