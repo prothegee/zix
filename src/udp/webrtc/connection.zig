@@ -24,7 +24,13 @@ const core = @import("core.zig");
 const datachannel = @import("datachannel/peer.zig");
 const demux = @import("demux.zig");
 const dtls_cookie = @import("../../tls/dtls_cookie.zig");
+const dtls_exporter = @import("../../tls/dtls_exporter.zig");
 const dtls_session = @import("dtls_session.zig");
+const feedback = @import("media/feedback.zig");
+const mux = @import("media/mux.zig");
+const peer_media = @import("media/peer_media.zig");
+const rtcp = @import("media/rtcp.zig");
+const rtp = @import("media/rtp.zig");
 const ice_credentials = @import("ice/credentials.zig");
 const ice_lite = @import("ice/lite.zig");
 const association = @import("sctp/association.zig");
@@ -36,6 +42,14 @@ const IpAddress = std.Io.net.IpAddress;
 
 /// What a DTLS record adds around one SCTP packet: the header, the explicit nonce, and the tag.
 pub const DTLS_OVERHEAD: usize = 13 + 8 + 16;
+
+/// The identifier zix puts on the control packets it sends.
+///
+/// Note:
+/// - A forwarder sends no media of its own, so it needs one identifier for the whole control path
+///   rather than one per stream. What matters is only that it is not a stream identifier any peer
+///   is sending under, and a browser draws those at random across the full range.
+pub const FORWARDER_SSRC: u32 = 0x7A69_7800;
 
 /// How many packets one received datagram may leave queued for sending.
 ///
@@ -78,6 +92,11 @@ pub const Options = struct {
     signing_key: EcdsaP256.KeyPair,
     max_handshake_fragment: usize = 1024,
 
+    /// The SRTP profiles this endpoint offers in the use_srtp extension, best first. Borrowed.
+    /// Empty answers no media: the handshake exports no keys, and RTP from the peer is dropped
+    /// where it is routed, which is what a data-channel-only server wants.
+    srtp_profiles: []const dtls_exporter.SrtpProfile = &.{},
+
     /// Largest datagram this connection sends.
     path_max_bytes: usize = 1200,
     /// Largest datagram this connection is handed.
@@ -102,6 +121,10 @@ pub const Outcome = struct {
     established: bool = false,
     /// Messages may be waiting, see `nextEvent`.
     delivered: bool = false,
+    /// A media packet was opened and is waiting for whoever forwards it, see `openedMedia`.
+    media: bool = false,
+    /// A receiver asked for a keyframe, see `takeKeyframeRequest`.
+    keyframe_requested: bool = false,
     /// The connection is finished and the engine should drop it.
     dead: bool = false,
 };
@@ -152,6 +175,20 @@ pub const Connection = struct {
     /// Where one SCTP packet is built before it is wrapped.
     scratch: []u8,
 
+    /// This peer's SRTP keys and streams, once the handshake has agreed on a profile. Null on a
+    /// peer that offered no use_srtp, and on every peer of a server that answers no media.
+    media: ?peer_media.PeerMedia,
+    /// Where one media datagram is opened, in place. Held until the next datagram arrives, which
+    /// is what lets a forwarder seal it for everybody else in between.
+    media_buf: []u8,
+    /// The source's own header of the packet in `media_buf`, before any renumbering.
+    media_header: rtp.Header,
+    media_len: usize,
+    media_ready: bool,
+    /// The stream a receiver asked for a keyframe on, named as its SOURCE sends it. Cleared when
+    /// the engine takes it.
+    keyframe_for: ?u32,
+
     dead: bool,
 
     /// Build a connection for a peer that has just been heard from.
@@ -181,6 +218,7 @@ pub const Connection = struct {
             .server_eph_secret = secrets.server_eph_secret,
             .max_fragment_len = options.max_handshake_fragment,
             .path_max_bytes = options.path_max_bytes,
+            .srtp_profiles = options.srtp_profiles,
         }, options.max_datagram_bytes);
         errdefer dtls.deinit();
 
@@ -188,6 +226,14 @@ pub const Connection = struct {
         errdefer allocator.free(queue);
 
         const scratch = try allocator.alloc(u8, options.path_max_bytes);
+        errdefer allocator.free(scratch);
+
+        // Only a server that answers media ever opens one, so a data-channel-only peer pays
+        // nothing for this.
+        const media_buf = if (options.srtp_profiles.len == 0)
+            try allocator.alloc(u8, 0)
+        else
+            try allocator.alloc(u8, options.max_datagram_bytes);
 
         var deadlines: timer.Deadlines = .{};
         deadlines.armIn(.IDLE, now_ms, options.peer_idle_ms);
@@ -215,6 +261,12 @@ pub const Connection = struct {
             .queue_taken = 0,
             .queue_offset = 0,
             .scratch = scratch,
+            .media = null,
+            .media_buf = media_buf,
+            .media_header = undefined,
+            .media_len = 0,
+            .media_ready = false,
+            .keyframe_for = null,
             .dead = false,
         };
     }
@@ -231,6 +283,7 @@ pub const Connection = struct {
         self.dtls.deinit();
         self.allocator.free(self.queue);
         self.allocator.free(self.scratch);
+        self.allocator.free(self.media_buf);
     }
 
     /// Whether the engine should drop this peer.
@@ -261,6 +314,7 @@ pub const Connection = struct {
         if (self.dead) return .{ .dead = true };
 
         self.resetQueue();
+        self.media_ready = false;
         self.deadlines.armIn(.IDLE, now_ms, self.options.peer_idle_ms);
 
         var outcome: Outcome = .{};
@@ -268,9 +322,7 @@ pub const Connection = struct {
         switch (demux.classify(datagram)) {
             .STUN => self.onStun(datagram, now_ms),
             .DTLS => try self.onDtls(datagram, now_ms, &outcome),
-            // Media is routed correctly and then dropped. Answering it is phase 12, and a peer
-            // that was never offered media has no reason to send any.
-            .RTP => {},
+            .RTP => self.onMedia(datagram, &outcome),
             else => {},
         }
 
@@ -396,6 +448,111 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Whether this peer negotiated media, so packets can cross it.
+    pub fn carriesMedia(self: Connection) bool {
+        return self.media != null;
+    }
+
+    /// The media packet the last datagram carried, opened and waiting to be forwarded.
+    ///
+    /// Note:
+    /// - Borrows this connection and is valid until its next datagram, which is as long as the
+    ///   engine's fan-out for that datagram lasts.
+    /// - The header is the SOURCE's own, before any renumbering, because each receiver renumbers
+    ///   it differently.
+    ///
+    /// Return:
+    /// - ?peer_media.Opened
+    pub fn openedMedia(self: *Connection) ?peer_media.Opened {
+        if (!self.media_ready) return null;
+
+        return .{ .header = self.media_header, .plain = self.media_buf[0..self.media_len] };
+    }
+
+    /// Whether this peer is the one sending under a stream identifier.
+    ///
+    /// Param:
+    /// ssrc - u32
+    ///
+    /// Return:
+    /// - bool
+    pub fn sendsStream(self: *Connection, ssrc: u32) bool {
+        const held = if (self.media) |*media| media else return false;
+
+        return held.inbound.find(ssrc) != null;
+    }
+
+    /// Whether this peer has never been given anything from a source.
+    ///
+    /// Note:
+    /// - True for exactly one packet, since sealing the first one puts the route in the table.
+    ///   That is the moment the source has to be asked for a keyframe: a stream joined partway
+    ///   through is undecodable until one arrives.
+    ///
+    /// Param:
+    /// ssrc - u32 (the source's own identifier)
+    ///
+    /// Return:
+    /// - bool
+    pub fn isNewSource(self: *Connection, ssrc: u32) bool {
+        const held = if (self.media) |*media| media else return false;
+
+        return held.routes.find(ssrc) == null;
+    }
+
+    /// Seal one opened packet for this peer.
+    ///
+    /// Note:
+    /// - A peer that cannot take it is not an error. One member of a room past its stream ceiling,
+    ///   or one that negotiated no media, costs everybody else nothing.
+    ///
+    /// Param:
+    /// opened - peer_media.Opened (from the peer that sent it)
+    /// out - []u8 (destination, needs the plain packet plus the outgoing tag)
+    ///
+    /// Return:
+    /// - ?[]const u8 (a datagram borrowing `out`, or null when this peer cannot take it)
+    pub fn sealMedia(self: *Connection, opened: peer_media.Opened, out: []u8) ?[]const u8 {
+        const held = if (self.media) |*media| media else return null;
+
+        if (out.len < opened.plain.len) return null;
+
+        @memcpy(out[0..opened.plain.len], opened.plain);
+
+        return held.sealFor(opened.header, out, opened.plain.len) catch null;
+    }
+
+    /// The stream a receiver asked a keyframe for, named as its source sends it.
+    ///
+    /// Note:
+    /// - Taking it clears the request, so one ask produces one request forwarded.
+    ///
+    /// Return:
+    /// - ?u32
+    pub fn takeKeyframeRequest(self: *Connection) ?u32 {
+        const asked = self.keyframe_for orelse return null;
+
+        self.keyframe_for = null;
+
+        return asked;
+    }
+
+    /// Build a keyframe request for this peer, about one of the streams it is sending.
+    ///
+    /// Param:
+    /// source_ssrc - u32 (the stream to ask about, as this peer sends it)
+    /// out - []u8 (destination, needs the request plus the outgoing index and tag)
+    ///
+    /// Return:
+    /// - ?[]const u8 (a datagram borrowing `out`, or null when this peer carries no media)
+    pub fn sealKeyframeRequest(self: *Connection, source_ssrc: u32, out: []u8) ?[]const u8 {
+        const held = if (self.media) |*media| media else return null;
+
+        const written = feedback.writePictureLoss(out, FORWARDER_SSRC, source_ssrc) catch return null;
+
+        return held.sealControl(out, written.len) catch null;
+    }
+
     /// Answer one datagram that demux routed to STUN.
     fn onStun(self: *Connection, datagram: []const u8, now_ms: u64) void {
         const outcome = self.ice.respond(datagram, &self.address, &self.ice_reply);
@@ -419,6 +576,8 @@ pub const Connection = struct {
 
         if (result.established) {
             try self.startAssociation();
+            self.startMedia();
+
             outcome.established = true;
         }
 
@@ -458,6 +617,72 @@ pub const Connection = struct {
             .role = .DTLS_SERVER,
             .limits = .{ .max_channels = self.options.max_channels },
         });
+    }
+
+    /// Open this peer's SRTP streams, which the finished handshake has now keyed.
+    ///
+    /// Note:
+    /// - Nothing to do when the peer offered no use_srtp or this endpoint answered none, and that
+    ///   is not a failure: the connection carries data channels either way.
+    fn startMedia(self: *Connection) void {
+        const negotiated = self.dtls.srtp_profile orelse return;
+        const keys = self.dtls.srtp_keys orelse return;
+
+        self.media = peer_media.PeerMedia.init(negotiated, keys) catch null;
+    }
+
+    /// Take one datagram that demux routed to media: open it, or answer what it asked for.
+    ///
+    /// Note:
+    /// - Nothing is forwarded here. The connection opens what its own peer sent and stops, because
+    ///   who else wants it is the engine's business and this file holds one peer.
+    /// - A packet that will not open is dropped in silence. Media arrives before the answer's
+    ///   first keyframe request is out and after a peer has gone, and neither is worth a log line
+    ///   at thirty of them a second.
+    fn onMedia(self: *Connection, datagram: []const u8, outcome: *Outcome) void {
+        const held = if (self.media) |*media| media else return;
+
+        if (datagram.len > self.media_buf.len) return;
+
+        const kind = mux.classify(datagram) orelse return;
+
+        @memcpy(self.media_buf[0..datagram.len], datagram);
+
+        switch (kind) {
+            .RTP => {
+                const opened = held.open(self.media_buf, datagram.len) catch return;
+
+                self.media_header = opened.header;
+                self.media_len = opened.plain.len;
+                self.media_ready = true;
+
+                outcome.media = true;
+            },
+            .RTCP => self.onControl(held, datagram.len, outcome),
+        }
+    }
+
+    /// Read one control packet from this peer.
+    ///
+    /// Note:
+    /// - A forwarder answers the control path rather than relaying it, because a report names
+    ///   streams by the numbers they had before the rewrite. What is acted on here is the one
+    ///   message that has to cross peers: a receiver asking the sender for a fresh keyframe.
+    fn onControl(self: *Connection, media: *peer_media.PeerMedia, packet_len: usize, outcome: *Outcome) void {
+        const compound = media.openControl(self.media_buf, packet_len) catch return;
+        var walk = rtcp.begin(compound) catch return;
+
+        while (walk.next()) |packet| {
+            if (packet.packet_type != .PSFB) continue;
+            if ((feedback.payloadFormat(packet) catch continue) != .PLI) continue;
+
+            const asked = feedback.read(packet) catch continue;
+
+            // The receiver names the identifier it was given, and the peer that has to answer is
+            // whichever source is behind it.
+            self.keyframe_for = media.routes.sourceOf(asked.media_ssrc) orelse asked.media_ssrc;
+            outcome.keyframe_requested = true;
+        }
     }
 
     /// Bring the deadline set in line with what the layers below are actually waiting on.
@@ -692,7 +917,7 @@ test "zix webrtc: connection, silence after a nominated check lapses consent" {
     try std.testing.expect(conn.tick(31_000).dead);
 }
 
-test "zix webrtc: connection, media is routed and then left alone until it is answered" {
+test "zix webrtc: connection, media is dropped by a peer that negotiated none" {
     var conn = try Connection.init(std.testing.allocator, TEST_ADDRESS, try testOptions(), testSecrets(), 0);
     defer conn.deinit();
 
@@ -701,6 +926,9 @@ test "zix webrtc: connection, media is routed and then left alone until it is an
 
     try std.testing.expect(!outcome.dead);
     try std.testing.expect(!outcome.delivered);
+    try std.testing.expect(!outcome.media);
+    try std.testing.expect(!conn.carriesMedia());
+    try std.testing.expect(conn.openedMedia() == null);
 
     var out: [1500]u8 = undefined;
     try std.testing.expectEqual(@as(?[]const u8, null), try conn.nextOutbound(1000, &out));
@@ -720,6 +948,235 @@ const dtls_handshake = @import("../../tls/dtls_handshake.zig");
 const dtls_hello = @import("../../tls/dtls_hello.zig");
 const dtls_record = @import("../../tls/dtls_record.zig");
 const dtls_connection = @import("../../tls/dtls_connection.zig");
+const srtcp = @import("media/srtcp.zig");
+const stream_set = @import("media/stream_set.zig");
+
+const TEST_PROFILE: dtls_exporter.SrtpProfile = .SRTP_AES128_CM_HMAC_SHA1_80;
+
+const TEST_KEYS: dtls_exporter.SrtpKeys = .{
+    .client_write_key = @splat(0x11),
+    .server_write_key = @splat(0x22),
+    .client_write_salt = @splat(0x33),
+    .server_write_salt = @splat(0x44),
+};
+
+const OTHER_KEYS: dtls_exporter.SrtpKeys = .{
+    .client_write_key = @splat(0x55),
+    .server_write_key = @splat(0x66),
+    .client_write_salt = @splat(0x77),
+    .server_write_salt = @splat(0x88),
+};
+
+/// The browser half of one peer's media, which writes with the client key and reads with the
+/// server key. The mirror of what a Connection holds.
+const TestBrowser = struct {
+    sending: stream_set.StreamSet,
+    receiving: stream_set.StreamSet,
+    control_sending: srtcp.Session,
+    control_receiving: srtcp.Session,
+
+    fn init(keys: dtls_exporter.SrtpKeys) !TestBrowser {
+        return .{
+            .sending = try stream_set.StreamSet.init(TEST_PROFILE, keys.client_write_key, keys.client_write_salt),
+            .receiving = try stream_set.StreamSet.init(TEST_PROFILE, keys.server_write_key, keys.server_write_salt),
+            .control_sending = try srtcp.Session.init(TEST_PROFILE, keys.client_write_key, keys.client_write_salt),
+            .control_receiving = try srtcp.Session.init(TEST_PROFILE, keys.server_write_key, keys.server_write_salt),
+        };
+    }
+
+    fn send(self: *TestBrowser, buffer: []u8, ssrc: u32, sequence: u16, payload: []const u8) ![]const u8 {
+        const written = try rtp.write(buffer, .{
+            .payload_type = 96,
+            .sequence = sequence,
+            .timestamp = 90 * @as(u32, sequence),
+            .ssrc = ssrc,
+        }, payload);
+
+        return (try self.sending.sessionFor(ssrc)).protect(buffer, written.len);
+    }
+
+    fn receive(self: *TestBrowser, buffer: []u8, packet_len: usize) !rtp.Packet {
+        const ssrc = (try rtp.read(buffer[0..packet_len])).header.ssrc;
+
+        return rtp.read(try (try self.receiving.sessionFor(ssrc)).unprotect(buffer[0..packet_len]));
+    }
+
+    fn askForKeyframe(self: *TestBrowser, buffer: []u8, media_ssrc: u32) ![]const u8 {
+        const written = try feedback.writePictureLoss(buffer, 0x9999_9999, media_ssrc);
+
+        return self.control_sending.protect(buffer, written.len);
+    }
+
+    fn receiveControl(self: *TestBrowser, buffer: []u8, packet_len: usize) ![]const u8 {
+        return self.control_receiving.unprotect(buffer[0..packet_len]);
+    }
+};
+
+/// Options for a server that answers media, which is what allocates the media buffer.
+fn testMediaOptions() !Options {
+    var options = try testOptions();
+    options.srtp_profiles = &.{TEST_PROFILE};
+
+    return options;
+}
+
+/// One connection already keyed, standing in for a finished handshake. What the handshake itself
+/// does with use_srtp is tested where it happens, in dtls_connection.zig and dtls_session.zig.
+fn keyedConnection(keys: dtls_exporter.SrtpKeys) !Connection {
+    var conn = try Connection.init(std.testing.allocator, TEST_ADDRESS, try testMediaOptions(), testSecrets(), 0);
+    errdefer conn.deinit();
+
+    conn.media = try peer_media.PeerMedia.init(TEST_PROFILE, keys);
+
+    return conn;
+}
+
+test "zix webrtc: connection, a media packet from a keyed peer is opened and offered on" {
+    var conn = try keyedConnection(TEST_KEYS);
+    defer conn.deinit();
+
+    var browser = try TestBrowser.init(TEST_KEYS);
+
+    var buffer: [256]u8 = undefined;
+    const protected = try browser.send(&buffer, 0x1111_1111, 100, "camera bytes");
+
+    const outcome = try conn.handle(protected, 1000);
+
+    try std.testing.expect(outcome.media);
+    try std.testing.expect(conn.carriesMedia());
+
+    const opened = conn.openedMedia().?;
+
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), opened.header.ssrc);
+    try std.testing.expectEqual(@as(u16, 100), opened.header.sequence);
+    try std.testing.expectEqualStrings("camera bytes", (try rtp.read(opened.plain)).payload);
+    try std.testing.expect(conn.sendsStream(0x1111_1111));
+    try std.testing.expect(!conn.sendsStream(0x2222_2222));
+
+    // Media never goes out through the connection's own queue. It is not wrapped in DTLS, and who
+    // else wants it is the engine's business.
+    var out: [1500]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), try conn.nextOutbound(1000, &out));
+}
+
+test "zix webrtc: connection, a forged media packet leaves nothing for the engine to forward" {
+    var conn = try keyedConnection(TEST_KEYS);
+    defer conn.deinit();
+
+    var stranger = try TestBrowser.init(OTHER_KEYS);
+
+    var buffer: [256]u8 = undefined;
+    const protected = try stranger.send(&buffer, 0x1111_1111, 1, "not from here");
+
+    const outcome = try conn.handle(protected, 1000);
+
+    try std.testing.expect(!outcome.media);
+    try std.testing.expect(!outcome.dead);
+    try std.testing.expect(conn.openedMedia() == null);
+}
+
+test "zix webrtc: connection, one peer's packet is sealed for another under its own key" {
+    var sender = try keyedConnection(TEST_KEYS);
+    defer sender.deinit();
+
+    var receiver = try keyedConnection(OTHER_KEYS);
+    defer receiver.deinit();
+
+    var sending_browser = try TestBrowser.init(TEST_KEYS);
+    var receiving_browser = try TestBrowser.init(OTHER_KEYS);
+
+    var buffer: [256]u8 = undefined;
+    const protected = try sending_browser.send(&buffer, 0x1111_1111, 100, "across the room");
+
+    _ = try sender.handle(protected, 1000);
+
+    var out: [1500]u8 = undefined;
+    const sealed = receiver.sealMedia(sender.openedMedia().?, &out).?;
+    const sealed_len = sealed.len;
+
+    const arrived = try receiving_browser.receive(&out, sealed_len);
+
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), arrived.header.ssrc);
+    try std.testing.expectEqual(@as(u16, 100), arrived.header.sequence);
+    try std.testing.expectEqualStrings("across the room", arrived.payload);
+}
+
+test "zix webrtc: connection, a peer that negotiated no media takes nothing sealed for it" {
+    var sender = try keyedConnection(TEST_KEYS);
+    defer sender.deinit();
+
+    var plain = try Connection.init(std.testing.allocator, TEST_ADDRESS, try testOptions(), testSecrets(), 0);
+    defer plain.deinit();
+
+    var browser = try TestBrowser.init(TEST_KEYS);
+
+    var buffer: [256]u8 = undefined;
+    _ = try sender.handle(try browser.send(&buffer, 0x1111_1111, 1, "nowhere to go"), 1000);
+
+    var out: [1500]u8 = undefined;
+    try std.testing.expect(plain.sealMedia(sender.openedMedia().?, &out) == null);
+}
+
+test "zix webrtc: connection, a keyframe request names the source behind what the receiver sees" {
+    var receiver = try keyedConnection(TEST_KEYS);
+    defer receiver.deinit();
+
+    var browser = try TestBrowser.init(TEST_KEYS);
+
+    // The receiver has to be carrying the stream before it can ask about it, which is what puts
+    // the route in the table.
+    var media = try peer_media.PeerMedia.init(TEST_PROFILE, TEST_KEYS);
+    _ = try media.routes.admit(0x1111_1111);
+    receiver.media = media;
+
+    var buffer: [256]u8 = undefined;
+    const asked = try browser.askForKeyframe(&buffer, 0x1111_1111);
+    const outcome = try receiver.handle(asked, 1000);
+
+    try std.testing.expect(outcome.keyframe_requested);
+    try std.testing.expectEqual(@as(?u32, 0x1111_1111), receiver.takeKeyframeRequest());
+
+    // Taking it clears it, so one ask produces one request forwarded.
+    try std.testing.expectEqual(@as(?u32, null), receiver.takeKeyframeRequest());
+}
+
+test "zix webrtc: connection, a keyframe request is built for the peer that has to answer it" {
+    var sender = try keyedConnection(TEST_KEYS);
+    defer sender.deinit();
+
+    var browser = try TestBrowser.init(TEST_KEYS);
+
+    var out: [1500]u8 = undefined;
+    const request = sender.sealKeyframeRequest(0x1111_1111, &out).?;
+    const request_len = request.len;
+
+    const compound = try browser.receiveControl(&out, request_len);
+    var walk = try rtcp.begin(compound);
+    const packet = walk.next().?;
+
+    try std.testing.expectEqual(rtcp.PacketType.PSFB, packet.packet_type);
+    try std.testing.expectEqual(feedback.PayloadFormat.PLI, try feedback.payloadFormat(packet));
+
+    const read_back = try feedback.read(packet);
+
+    try std.testing.expectEqual(@as(u32, 0x1111_1111), read_back.media_ssrc);
+    try std.testing.expectEqual(FORWARDER_SSRC, read_back.sender_ssrc);
+}
+
+test "zix webrtc: connection, a media packet larger than the buffer is dropped" {
+    var conn = try keyedConnection(TEST_KEYS);
+    defer conn.deinit();
+
+    var oversized: [2048]u8 = undefined;
+    @memset(&oversized, 0);
+    oversized[0] = 0x80;
+    oversized[1] = 96;
+
+    const outcome = try conn.handle(&oversized, 1000);
+
+    try std.testing.expect(!outcome.media);
+    try std.testing.expect(!outcome.dead);
+}
 
 /// One plaintext ClientHello record, with or without a cookie.
 fn testClientHello(out: []u8, cookie: []const u8, record_seq: u48) ![]const u8 {
