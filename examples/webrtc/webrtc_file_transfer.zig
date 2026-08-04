@@ -1,6 +1,6 @@
 // Usage:
 // zig build example-webrtc_file_transfer
-// ./zig-out/bin/example-webrtc_file_transfer
+// ./zig-out/bin/zix-example-webrtc_file_transfer
 // browser: http://<this machine's address>:9086/
 // use `ip -4 -o addr show` to check machine address.
 //
