@@ -4,8 +4,8 @@
 //! and a ping, reads the pong and the broadcast echo, then closes.
 //!
 //! Run:
-//! zig build example-http_websocket && ./zig-out/bin/example-http_websocket &
-//! zig build example-http_ws_client && ./zig-out/bin/example-http_ws_client
+//! zig build example-http_websocket && ./zig-out/bin/zix-example-http_websocket &
+//! zig build example-http_ws_client && ./zig-out/bin/zix-example-http_ws_client
 //! kill %1
 
 const std = @import("std");
