@@ -47,6 +47,10 @@ pub fn ensure(io: std.Io, exe_path: []const u8, root_path: []const u8, socket_pa
 // --------------------------------------------------------- //
 
 fn answerOnePing(io: std.Io, socket_path: []const u8) void {
+    // A crashed earlier run may have left the socket file behind, the same
+    // stale-file rule the real daemon applies before binding.
+    std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+
     const unix_addr = std.Io.net.UnixAddress.init(socket_path) catch return;
     var server = unix_addr.listen(io, .{}) catch return;
     defer server.deinit(io);
