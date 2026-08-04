@@ -13,7 +13,7 @@ parse_target_filter "${1:-zig}" "${2:-}"
 
 # --------------------------------------------------------- #
 
-matrix "zix" . test-all examples test-runner-all
+matrix "zix" . test-all examples zixer test-runner-all
 
 # --------------------------------------------------------- #
 # Drivers are standalone packages with their own build.zig. On a foreign
