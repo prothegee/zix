@@ -3,7 +3,7 @@
 //!
 //! Run (grpc_multi_server must be running on port 9042):
 //! zig build example-grpc_multi_client
-//! ./zig-out/bin/example-grpc_multi_client
+//! ./zig-out/bin/zix-example-grpc_multi_client
 
 const std = @import("std");
 const zix = @import("zix");
