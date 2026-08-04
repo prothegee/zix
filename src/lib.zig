@@ -360,6 +360,9 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("udp/webrtc/media/srtp.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/media/srtcp.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/media/forward.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/stream_set.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/route.zig"));
+    std.testing.refAllDecls(@import("udp/webrtc/media/peer_media.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/demux.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/config.zig"));
     std.testing.refAllDecls(@import("udp/webrtc/timer.zig"));
