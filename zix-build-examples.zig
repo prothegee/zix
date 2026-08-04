@@ -72,6 +72,8 @@ pub fn addSteps(
         .{ "example-webrtc_stun", "examples/webrtc/webrtc_stun.zig", "webrtc" },
         .{ "example-webrtc_datachannel_chat", "examples/webrtc/webrtc_datachannel_chat.zig", "webrtc" },
         .{ "example-webrtc_file_transfer", "examples/webrtc/webrtc_file_transfer.zig", "webrtc" },
+        .{ "example-webrtc_video_call", "examples/webrtc/webrtc_video_call.zig", "webrtc" },
+        .{ "example-webrtc_sfu_broadcast", "examples/webrtc/webrtc_sfu_broadcast.zig", "webrtc" },
         .{ "example-uds_server", "examples/uds_server.zig", "uds" },
         .{ "example-uds_client", "examples/uds_client.zig", "uds" },
         .{ "example-uds_http", "examples/uds_http.zig", "uds" },
