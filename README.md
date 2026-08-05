@@ -15,24 +15,24 @@
 <hr>
 
 <h4 align="center">
-    <b><i>License:</i></b>
-</h4>
-
-<div align="center">
-
-[BSD-3-Clause License](LICENSE-BSD)
-
-</div>
-
-<br>
-
-<h4 align="center">
     <b><i>Repositories:</i></b>
 </h4>
 
 <div align="center">
 
 [Main](https://codeberg.org/prothegee/zix) | [Mirror](https://github.com/prothegee/zix)
+
+</div>
+
+<br>
+
+<h4 align="center">
+    <b><i>License:</i></b>
+</h4>
+
+<div align="center">
+
+[BSD-3-Clause License](LICENSE-BSD)
 
 </div>
 
@@ -48,7 +48,7 @@
 
 </div>
 
-<hr>
+<br>
 
 <h4 align="center">
     <b><i>Platform Development Status:</i></b>
@@ -62,11 +62,11 @@
     <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
     <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 </div>
-<!-- <p align="center"> -->
-    <!-- <code><i>Green: Maintained | Yellow: Cross-Compiled</i></code> -->
+<p align="center">
+    <code style="font-size: 6px;"><i>Green: Maintained | Yellow: Cross-Compiled</i></code>
     <!-- <br> -->
     <!-- <code><i>Looking for maintaner & contributor.</i></code> -->
-<!-- </p> -->
+</p>
 
 <!-- <hr> -->
 
