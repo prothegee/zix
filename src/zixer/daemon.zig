@@ -548,7 +548,31 @@ test "zix zixer: daemon handleLine, tls site with a missing cert file refuses" {
     try std.testing.expect(std.mem.indexOf(u8, reply, "cannot read the tls_cert file") != null);
 }
 
+/// True when this process may bind the privileged http-01 port. Probed
+/// with raw syscalls: a failing privileged bind through std prints the
+/// unexpected-errno trace in debug builds, the probe keeps unprivileged
+/// runs silent.
+fn canBindPort80() bool {
+    const linux = std.os.linux;
+
+    const fd_raw = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (@as(isize, @bitCast(fd_raw)) < 0) return false;
+    const fd: i32 = @intCast(fd_raw);
+    defer _ = linux.close(fd);
+
+    const addr = linux.sockaddr.in{
+        .port = std.mem.nativeToBig(u16, 80),
+        .addr = std.mem.nativeToBig(u32, 0x7F00_0001),
+    };
+
+    return linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)) == 0;
+}
+
 test "zix zixer: daemon handleLine, tls acme site starts or names the port 80 need" {
+    if (comptime @import("builtin").os.tag == .linux) {
+        if (!canBindPort80()) return error.SkipZigTest;
+    }
+
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
