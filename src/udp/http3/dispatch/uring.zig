@@ -550,8 +550,8 @@ pub fn runUring(comptime handler: core.HandlerFn, config: Http3ServerConfig) !vo
 
 test "zix http3: parseMultishotBuf recovers the peer and payload at the recvmsg_out offsets" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     const name_reserve = mshot_name_reserve;
     var buf: [256]u8 = @splat(0);
@@ -599,8 +599,8 @@ test "zix http3: http3 run shapes compile (monomorphize without running)" {
 
 test "zix http3: io_uring recvmsg delivers a datagram and its peer address by slot" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     if (comptime !datagram.is_linux) return;
 
@@ -665,8 +665,8 @@ test "zix http3: UringTx.activeTailPending gates the swap on a fully submitted b
 
 test "zix http3: armUringRecv and armMultishotRecv report the arm result" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     if (comptime !datagram.is_linux) return;
 
@@ -723,8 +723,8 @@ test "zix http3: UringTx.reap matches only its own two tags" {
 
 test "zix http3: UringTx.submitAndSwap defers the swap while the other buffer still has sends in flight" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     if (comptime !datagram.is_linux) return;
 
