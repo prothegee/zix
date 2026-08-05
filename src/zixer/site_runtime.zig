@@ -12,10 +12,10 @@ const ACME_HTTP_PORT: u16 = 80;
 /// One started site inside the daemon.
 ///
 /// Note:
-/// - An http1 site with upstreams or public_dir serves the edge loop
-///   (phases 3 and 4). Every other engine binds and holds its socket, so
-///   the port is owned and a collision surfaces at start time, the loop
-///   attaches in its own phase.
+/// - An http1 or http2 site with upstreams or public_dir serves the edge
+///   loop (phases 3, 4, and 7). Every other engine binds and holds its
+///   socket, so the port is owned and a collision surfaces at start time,
+///   the loop attaches in its own phase.
 /// - A TLS site with acme keys also owns the port 80 companion listener,
 ///   see companionPort.
 pub const SiteRuntime = struct {
@@ -29,7 +29,7 @@ pub const SiteRuntime = struct {
     /// What the site holds: a serving proxy edge, or the bare bound socket
     /// (tcp engines listen, udp engines bind a datagram socket).
     const Listener = union(enum) {
-        http1_proxy: *site_serve.ServeState,
+        proxy_edge: *site_serve.ServeState,
         tcp: std.Io.net.Server,
         udp: std.Io.net.Socket,
     };
@@ -64,13 +64,13 @@ pub const SiteRuntime = struct {
             .HTTP1, .HTTP2, .GRPC => blk: {
                 var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
-                if (engine == .HTTP1 and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
+                if ((engine == .HTTP1 or engine == .HTTP2) and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
                     const state = site_serve.ServeState.create(allocator, io, server, &cfg, port) catch |err| {
                         server.deinit(io);
                         return err;
                     };
 
-                    break :blk .{ .http1_proxy = state };
+                    break :blk .{ .proxy_edge = state };
                 }
 
                 break :blk .{ .tcp = server };
@@ -117,7 +117,7 @@ pub const SiteRuntime = struct {
 
 fn closeListener(listener: *SiteRuntime.Listener, io: std.Io) void {
     switch (listener.*) {
-        .http1_proxy => |state| state.shutdown(),
+        .proxy_edge => |state| state.shutdown(),
         .tcp => |*server| server.deinit(io),
         .udp => |socket| socket.close(io),
     }
@@ -195,7 +195,7 @@ test "zix zixer: site runtime, http1 with upstreams serves and unbind frees the 
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39872, .upstreams = &upstreams };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, 64);
-    try std.testing.expect(runtime.listener == .http1_proxy);
+    try std.testing.expect(runtime.listener == .proxy_edge);
 
     runtime.unbind(std.testing.allocator, io);
 
@@ -213,7 +213,7 @@ test "zix zixer: site runtime, http1 static-only site serves without upstreams" 
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39882, .public_dir = "/var/www/pages" };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "static.cfg", cfg, 64);
-    try std.testing.expect(runtime.listener == .http1_proxy);
+    try std.testing.expect(runtime.listener == .proxy_edge);
 
     runtime.unbind(std.testing.allocator, io);
 }
@@ -263,8 +263,29 @@ test "zix zixer: site runtime, owns port covers the main listener" {
     runtime.unbind(std.testing.allocator, io);
 }
 
+/// True when this process may bind the privileged http-01 port. Probed
+/// with raw syscalls: a failing privileged bind through std prints the
+/// unexpected-errno trace in debug builds, the probe keeps unprivileged
+/// runs silent.
+fn canBindPort80() bool {
+    const linux = std.os.linux;
+
+    const fd_raw = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (@as(isize, @bitCast(fd_raw)) < 0) return false;
+    const fd: i32 = @intCast(fd_raw);
+    defer _ = linux.close(fd);
+
+    const addr = linux.sockaddr.in{
+        .port = std.mem.nativeToBig(u16, 80),
+        .addr = std.mem.nativeToBig(u32, 0x7F00_0001),
+    };
+
+    return linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)) == 0;
+}
+
 test "zix zixer: site runtime, tls acme site binds the port 80 companion" {
     if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (!canBindPort80()) return error.SkipZigTest;
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
