@@ -180,16 +180,29 @@ pub const Daemon = struct {
 
         // Tcp sites listen with reuse_address (restart survives TIME_WAIT),
         // so a same-port collision between sites must be caught here, the
-        // kernel would happily share the port.
-        for (self.sites.items) |site| {
-            if (site.port == cfg.port.?)
+        // kernel would happily share the port. A site owns its main port
+        // plus, on a TLS acme site, the port 80 companion.
+        for (self.sites.items) |*site| {
+            if (site.ownsPort(cfg.port.?))
                 return print(reply_buf, "error: {s} port {d} is already used by {s}", .{ name, cfg.port.?, site.name });
+
+            if (site_runtime.companionPort(&cfg)) |challenge_port| {
+                if (site.ownsPort(challenge_port))
+                    return print(reply_buf, "error: {s} challenge port {d} is already used by {s}", .{ name, challenge_port, site.name });
+            }
         }
 
         const backlog = cfg.kernel_backlog orelse self.cfg.kernel_backlog;
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, backlog) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
-            else => return print(reply_buf, "error: {s} bind failed ({s})", .{ name, @errorName(err) }),
+            error.TlsCertFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_cert file", .{name}),
+            error.TlsKeyFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_key file", .{name}),
+            else => {
+                if (site_runtime.companionPort(&cfg) != null)
+                    return print(reply_buf, "error: {s} bind failed ({s}), the acme challenge listener needs port 80", .{ name, @errorName(err) });
+
+                return print(reply_buf, "error: {s} bind failed ({s})", .{ name, @errorName(err) });
+            },
         };
 
         self.sites.append(self.allocator, runtime) catch {
@@ -511,4 +524,55 @@ test "zix zixer: daemon end to end, socket round trip start ping shutdown" {
     daemon_thread.join();
 
     try std.testing.expectEqual(@as(usize, 0), daemon.sites.items.len);
+}
+
+test "zix zixer: daemon handleLine, tls site with a missing cert file refuses" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_tlscert/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_tlscert") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    try writeSiteFile(io, arena.allocator(), test_root, "tls_bad.cfg", "engine: http1\nip: 127.0.0.1\nport: 39898\n" ++
+        "tls: true\ntls_cert: examples/certs/absent.pem\ntls_key: examples/certs/ecdsa_p256_key.pem\n" ++
+        "public_dir: /var/www/pages\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    const reply = daemon.handleLine("start tls_bad.cfg", &reply_buf);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "cannot read the tls_cert file") != null);
+}
+
+test "zix zixer: daemon handleLine, tls acme site starts or names the port 80 need" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_tlsacme/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_tlsacme") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    try writeSiteFile(io, arena.allocator(), test_root, "tls_acme.cfg", "engine: http1\nip: 127.0.0.1\nport: 39899\n" ++
+        "tls: true\ntls_cert: examples/certs/ecdsa_p256_cert.pem\ntls_key: examples/certs/ecdsa_p256_key.pem\n" ++
+        "acme_webroot: /var/www/acme\npublic_dir: /var/www/pages\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    const reply = daemon.handleLine("start tls_acme.cfg", &reply_buf);
+
+    // with the privilege (root, capability) the companion binds and the
+    // site starts, without it the reply names the port 80 need.
+    if (std.mem.startsWith(u8, reply, "ok: ")) {
+        try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("stop tls_acme.cfg", &reply_buf), "ok: "));
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, reply, "needs port 80") != null);
+    }
 }
