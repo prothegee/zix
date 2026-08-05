@@ -5,6 +5,7 @@ const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
 const http1_proxy = @import("http1_proxy.zig");
+const http2_edge = @import("http2_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 const static_files = @import("static_files.zig");
 const tls_edge = @import("tls_edge.zig");
@@ -26,6 +27,7 @@ const MAX_ACCEPT_FAILURES: usize = 100;
 pub const ServeState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    engine: site_cfg.Engine,
     server: std.Io.net.Server,
     pool: ?upstream_pool.Pool,
     idle: ?upstream_conn.IdleCache,
@@ -97,13 +99,15 @@ pub const ServeState = struct {
         // Loading here (not at validate) keeps restart the cert reload path.
         var tls_ctx: ?zix.Tls.Context = null;
         errdefer if (tls_ctx) |*ctx| ctx.deinit();
+        const engine = cfg.engine orelse .HTTP1;
         if (cfg.tls) {
-            tls_ctx = try tls_edge.buildContext(allocator, io, cfg.tls_cert.?, cfg.tls_key.?);
+            tls_ctx = try tls_edge.buildContext(allocator, io, cfg.tls_cert.?, cfg.tls_key.?, tls_edge.alpnPrefs(engine));
         }
 
         state.* = .{
             .allocator = allocator,
             .io = io,
+            .engine = engine,
             .server = server,
             .pool = pool,
             .idle = idle,
@@ -204,7 +208,7 @@ fn acceptLoop(state: *ServeState) void {
             return;
         }
 
-        const task = ConnTask{ .proxy = proxy, .stream = stream, .tls_ctx = tls_ctx };
+        const task = ConnTask{ .proxy = proxy, .stream = stream, .tls_ctx = tls_ctx, .engine = state.engine };
         state.conns.concurrent(io, serveTask, .{task}) catch serveTask(task);
     }
 }
@@ -213,11 +217,19 @@ const ConnTask = struct {
     proxy: http1_proxy.Proxy,
     stream: std.Io.net.Stream,
     tls_ctx: ?*const zix.Tls.Context,
+    engine: site_cfg.Engine,
 };
 
 fn serveTask(task: ConnTask) void {
     if (task.tls_ctx) |ctx| {
-        tls_edge.serveConn(&task.proxy, ctx, task.stream);
+        tls_edge.serveConn(&task.proxy, ctx, task.stream, task.engine);
+        return;
+    }
+
+    // A cleartext http2 site sniffs the preface and falls back to the h1
+    // loop for anything else (rfc 9113 3.3 prior knowledge).
+    if (task.engine == .HTTP2) {
+        http2_edge.serveConn(&task.proxy, task.stream);
         return;
     }
 
