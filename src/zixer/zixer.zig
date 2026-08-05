@@ -213,6 +213,9 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("http1_head.zig"));
     std.testing.refAllDecls(@import("http1_proxy.zig"));
     std.testing.refAllDecls(@import("static_files.zig"));
+    std.testing.refAllDecls(@import("tls_edge.zig"));
+    std.testing.refAllDecls(@import("acme_challenge.zig"));
+    std.testing.refAllDecls(@import("acme_listener.zig"));
     std.testing.refAllDecls(@import("site_serve.zig"));
 }
 
