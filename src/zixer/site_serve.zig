@@ -1,10 +1,13 @@
 //! zixer site serve loop: accept thread for one started proxy site
 
 const std = @import("std");
+const zix = @import("zix");
 
+const acme_challenge = @import("acme_challenge.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const site_cfg = @import("site_cfg.zig");
 const static_files = @import("static_files.zig");
+const tls_edge = @import("tls_edge.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
@@ -17,6 +20,9 @@ const MAX_ACCEPT_FAILURES: usize = 100;
 /// Note:
 /// - pool and idle exist only when the site has upstreams. A static-only
 ///   site serves public_dir alone and leaves both null.
+/// - tls_ctx exists only when the site terminates TLS: built from the cfg
+///   cert / key paths at create, so a restart re-reads renewed cert files
+///   (the certbot deploy-hook path).
 pub const ServeState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -26,8 +32,15 @@ pub const ServeState = struct {
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
+    tls_ctx: ?zix.Tls.Context,
+    acme_webroot: ?[]const u8,
+    acme_relay: ?site_cfg.Upstream,
     stop: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
+    /// Live connection tasks. A concurrent group member releases its
+    /// resources when the task returns, shutdown cancels the stragglers
+    /// before the pool and strings are freed.
+    conns: std.Io.Group = .init,
     wake_ip: []const u8,
     port: u16,
 
@@ -74,6 +87,19 @@ pub const ServeState = struct {
         errdefer freeOptional(allocator, public_prefix);
         const spa_fallback = try dupeOptional(allocator, cfg.spa_fallback);
         errdefer freeOptional(allocator, spa_fallback);
+        const acme_webroot = try dupeOptional(allocator, cfg.acme_webroot);
+        errdefer freeOptional(allocator, acme_webroot);
+        var acme_relay = cfg.acme_proxy;
+        if (cfg.acme_proxy) |relay| acme_relay.?.host = try allocator.dupe(u8, relay.host);
+        errdefer if (acme_relay) |relay| allocator.free(relay.host);
+
+        // Validation guarantees cert and key paths exist when tls is on.
+        // Loading here (not at validate) keeps restart the cert reload path.
+        var tls_ctx: ?zix.Tls.Context = null;
+        errdefer if (tls_ctx) |*ctx| ctx.deinit();
+        if (cfg.tls) {
+            tls_ctx = try tls_edge.buildContext(allocator, io, cfg.tls_cert.?, cfg.tls_key.?);
+        }
 
         state.* = .{
             .allocator = allocator,
@@ -84,6 +110,9 @@ pub const ServeState = struct {
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
+            .tls_ctx = tls_ctx,
+            .acme_webroot = acme_webroot,
+            .acme_relay = acme_relay,
             .wake_ip = wake_ip,
             .port = port,
         };
@@ -106,14 +135,18 @@ pub const ServeState = struct {
         state.stop.store(true, .release);
         wake(io, state.wake_ip, state.port);
         if (state.thread) |thread| thread.join();
+        state.conns.cancel(io);
 
         state.server.deinit(io);
         if (state.idle) |*idle| idle.deinit(state.allocator, io);
         if (state.pool) |*pool| pool.deinit(state.allocator);
+        if (state.tls_ctx) |*ctx| ctx.deinit();
         state.allocator.free(state.wake_ip);
         freeOptional(state.allocator, state.public_dir);
         freeOptional(state.allocator, state.public_prefix);
         freeOptional(state.allocator, state.spa_fallback);
+        freeOptional(state.allocator, state.acme_webroot);
+        if (state.acme_relay) |relay| state.allocator.free(relay.host);
 
         const allocator = state.allocator;
         allocator.destroy(state);
@@ -141,7 +174,19 @@ fn acceptLoop(state: *ServeState) void {
         .public_prefix = state.public_prefix,
         .spa_fallback = state.spa_fallback,
     } else null;
-    const proxy = http1_proxy.Proxy{ .io = io, .pool = pool, .idle = idle, .static = static_site };
+    const acme: ?acme_challenge.AcmeSite = if (state.acme_webroot != null or state.acme_relay != null)
+        .{ .webroot = state.acme_webroot, .relay = state.acme_relay }
+    else
+        null;
+    const tls_ctx: ?*const zix.Tls.Context = if (state.tls_ctx) |*ctx| ctx else null;
+    const proxy = http1_proxy.Proxy{
+        .io = io,
+        .pool = pool,
+        .idle = idle,
+        .static = static_site,
+        .acme = acme,
+        .tls_cert_der = if (tls_ctx) |ctx| ctx.cert_der else null,
+    };
 
     var accept_failures: usize = 0;
     while (!state.stop.load(.acquire)) {
@@ -159,19 +204,23 @@ fn acceptLoop(state: *ServeState) void {
             return;
         }
 
-        const task = ConnTask{ .proxy = proxy, .stream = stream };
-        if (io.concurrent(serveTask, .{task})) |_| {} else |_| {
-            serveTask(task);
-        }
+        const task = ConnTask{ .proxy = proxy, .stream = stream, .tls_ctx = tls_ctx };
+        state.conns.concurrent(io, serveTask, .{task}) catch serveTask(task);
     }
 }
 
 const ConnTask = struct {
     proxy: http1_proxy.Proxy,
     stream: std.Io.net.Stream,
+    tls_ctx: ?*const zix.Tls.Context,
 };
 
 fn serveTask(task: ConnTask) void {
+    if (task.tls_ctx) |ctx| {
+        tls_edge.serveConn(&task.proxy, ctx, task.stream);
+        return;
+    }
+
     http1_proxy.serveConn(&task.proxy, task.stream);
 }
 
@@ -251,4 +300,128 @@ test "zix zixer: site serve, wake tolerates a dead port" {
 
     wake(io, "0.0.0.0", 39871);
     wake(io, "not an ip", 39871);
+}
+
+test "zix zixer: site serve, tls site create refuses a missing cert file" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 39895,
+        .tls = true,
+        .tls_cert = "examples/certs/absent.pem",
+        .tls_key = "examples/certs/ecdsa_p256_key.pem",
+        .public_dir = "/var/www/static-test",
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39895);
+    var server = try addr.listen(io, .{ .kernel_backlog = 8 });
+
+    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 39895));
+    server.deinit(io);
+}
+
+test "zix zixer: site serve, tls site terminates and serves the static plane" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.writeFile(std.testing.io, .{ .sub_path = "index.html", .data = "tls-static" }) catch @panic("fixture write failed");
+
+    var root_buf: [128]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 39894,
+        .tls = true,
+        .tls_cert = "examples/certs/ecdsa_p256_cert.pem",
+        .tls_key = "examples/certs/ecdsa_p256_key.pem",
+        .public_dir = root,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39894);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39894);
+    try std.testing.expect(state.tls_ctx != null);
+
+    // manual TLS 1.3 client over the real socket: hello record, read the
+    // three-record server flight, finish, then one https request.
+    const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    var read_buf: [8 * 1024]u8 = undefined;
+    var write_buf: [8 * 1024]u8 = undefined;
+    var client_reader = stream.reader(io, &read_buf);
+    var client_writer = stream.writer(io, &write_buf);
+
+    var hello_buf: [512]u8 = undefined;
+    const started = try zix.Tls.Client.start(.{
+        .client_random = @splat(0x11),
+        .ephemeral_secret = @splat(0x42),
+        .alpn = &.{.HTTP_1_1},
+    }, &hello_buf);
+    var client_state = started.state;
+
+    var hello_rec: [600]u8 = undefined;
+    hello_rec[0] = 22;
+    std.mem.writeInt(u16, hello_rec[1..3], 0x0303, .big);
+    std.mem.writeInt(u16, hello_rec[3..5], @intCast(started.client_hello.len), .big);
+    @memcpy(hello_rec[5 .. 5 + started.client_hello.len], started.client_hello);
+    try client_writer.interface.writeAll(hello_rec[0 .. 5 + started.client_hello.len]);
+    try client_writer.interface.flush();
+
+    var flight_buf: [8 * 1024]u8 = undefined;
+    var flight_len: usize = 0;
+    for (0..3) |_| {
+        try client_reader.interface.readSliceAll(flight_buf[flight_len..][0..5]);
+        const body_len = std.mem.readInt(u16, flight_buf[flight_len + 3 ..][0..2], .big);
+        try client_reader.interface.readSliceAll(flight_buf[flight_len + 5 ..][0..body_len]);
+        flight_len += 5 + body_len;
+    }
+
+    var finish_buf: [256]u8 = undefined;
+    const finished = try zix.Tls.Client.finish(&client_state, flight_buf[0..flight_len], &finish_buf);
+    var client_conn = finished.connection;
+    try client_writer.interface.writeAll(finished.client_finished);
+    try client_writer.interface.flush();
+
+    var request_out: [256]u8 = undefined;
+    const request_rec = client_conn.writeAppData("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", &request_out);
+    try client_writer.interface.writeAll(request_rec);
+    try client_writer.interface.flush();
+
+    // collect the sealed response records until the server closes, then
+    // decrypt them in order.
+    var reply: [2048]u8 = undefined;
+    var reply_len: usize = 0;
+    var wire: [4096]u8 = undefined;
+    collect: while (true) {
+        client_reader.interface.readSliceAll(wire[0..5]) catch break :collect;
+        const body_len = std.mem.readInt(u16, wire[3..5], .big);
+        client_reader.interface.readSliceAll(wire[5..][0..body_len]) catch break :collect;
+
+        var plain: [2048]u8 = undefined;
+        const piece = client_conn.readAppData(wire[0 .. 5 + body_len], &plain) catch break :collect;
+        @memcpy(reply[reply_len..][0..piece.len], piece);
+        reply_len += piece.len;
+    }
+    stream.close(io);
+
+    const response = reply[0..reply_len];
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, response, "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, response, "tls-static"));
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
 }
