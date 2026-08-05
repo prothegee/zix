@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>Jaringan backend library & engine yang ditulis dalam Zig.</i>
+    <i>Sebuah high-performance network backend library & engine yang ditulis dalam Zig.</i>
 </p>
 
 <div align="center">

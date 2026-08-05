@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>A network backend library & engine written in Zig.</i>
+    <i>A high-performance network backend library & engine written in Zig.</i>
 </p>
 
 <div align="center">

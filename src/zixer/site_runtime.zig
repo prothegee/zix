@@ -5,6 +5,7 @@ const std = @import("std");
 const acme_listener = @import("acme_listener.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_serve = @import("site_serve.zig");
+const udp_forward = @import("udp_forward.zig");
 
 /// The port the CA validates http-01 on (rfc 8555 8.3).
 const ACME_HTTP_PORT: u16 = 80;
@@ -13,7 +14,8 @@ const ACME_HTTP_PORT: u16 = 80;
 ///
 /// Note:
 /// - An http1, http2, or grpc site with upstreams or public_dir serves
-///   the edge loop (phases 3, 4, 7, and 8). Every other engine binds and
+///   the edge loop, and a udp site with upstreams serves the per-flow
+///   forward (phases 3, 4, 7, 8, and 9). Every other engine binds and
 ///   holds its socket, so the port is owned and a collision surfaces at
 ///   start time, the loop attaches in its own phase.
 /// - A TLS site with acme keys also owns the port 80 companion listener,
@@ -26,10 +28,12 @@ pub const SiteRuntime = struct {
     /// The bound acme companion, held only by a TLS site with acme keys.
     challenge: ?*acme_listener.State = null,
 
-    /// What the site holds: a serving proxy edge, or the bare bound socket
-    /// (tcp engines listen, udp engines bind a datagram socket).
+    /// What the site holds: a serving proxy edge, a serving udp forward,
+    /// or the bare bound socket (tcp engines listen, udp engines bind a
+    /// datagram socket).
     const Listener = union(enum) {
         proxy_edge: *site_serve.ServeState,
+        udp_forward: *udp_forward.ForwardState,
         tcp: std.Io.net.Server,
         udp: std.Io.net.Socket,
     };
@@ -75,7 +79,20 @@ pub const SiteRuntime = struct {
 
                 break :blk .{ .tcp = server };
             },
-            .HTTP3, .UDP => .{ .udp = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp }) },
+            .HTTP3, .UDP => blk: {
+                const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+
+                if (engine == .UDP and cfg.upstreams.len > 0) {
+                    const state = udp_forward.ForwardState.create(allocator, io, socket, &cfg, port) catch |err| {
+                        socket.close(io);
+                        return err;
+                    };
+
+                    break :blk .{ .udp_forward = state };
+                }
+
+                break :blk .{ .udp = socket };
+            },
         };
         errdefer closeListener(&listener, io);
 
@@ -118,6 +135,7 @@ pub const SiteRuntime = struct {
 fn closeListener(listener: *SiteRuntime.Listener, io: std.Io) void {
     switch (listener.*) {
         .proxy_edge => |state| state.shutdown(),
+        .udp_forward => |state| state.shutdown(),
         .tcp => |*server| server.deinit(io),
         .udp => |socket| socket.close(io),
     }
@@ -216,6 +234,26 @@ test "zix zixer: site runtime, http1 static-only site serves without upstreams" 
     try std.testing.expect(runtime.listener == .proxy_edge);
 
     runtime.unbind(std.testing.allocator, io);
+}
+
+test "zix zixer: site runtime, udp site with upstreams serves the forward" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39839 }};
+    const cfg = site_cfg.SiteCfg{ .engine = .UDP, .ip = "127.0.0.1", .port = 39888, .upstreams = &upstreams };
+
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, 64);
+    try std.testing.expect(runtime.listener == .udp_forward);
+
+    runtime.unbind(std.testing.allocator, io);
+
+    // Udp binds strict, so a clean rebind proves unbind released the port.
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, 64);
+    rebound.unbind(std.testing.allocator, io);
 }
 
 test "zix zixer: site runtime, http3 engine also takes the udp path" {
