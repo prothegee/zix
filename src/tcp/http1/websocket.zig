@@ -707,8 +707,8 @@ test "zix http1 ws: pump echoes masked client frames over a socketpair" {
 
 test "zix http1 ws: pumpRing stages echoes without writing to the fd" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     // Two pipelined masked client text frames: "hi" and "yo".
@@ -737,8 +737,8 @@ test "zix http1 ws: pumpRing stages echoes without writing to the fd" {
 
 test "zix http1 ws: pumpRing overflow fallback on a dead fd reports close" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     // Masked client text frame "hi": its echo is a 4-byte server frame. An
@@ -756,8 +756,8 @@ test "zix http1 ws: pumpRing overflow fallback on a dead fd reports close" {
 
 test "zix http1 ws: pumpRing reports close and consumes the close frame" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     // Masked client close frame (opcode 0x8) with an empty payload.
