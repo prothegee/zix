@@ -1,7 +1,9 @@
 //! zixer http1 proxy edge: one client connection, re-originate to the pool
 
 const std = @import("std");
+const zix = @import("zix");
 
+const acme_challenge = @import("acme_challenge.zig");
 const http1_head = @import("http1_head.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const static_files = @import("static_files.zig");
@@ -19,12 +21,20 @@ const MAX_INTERIM = 4;
 
 /// What one site's edge connections share. A proxied site carries pool and
 /// idle together, a static-only site leaves both null and serves public_dir
-/// alone.
+/// alone. acme answers the challenge path ahead of everything, and
+/// tls_cert_der (set on a terminated TLS edge) arms the misdirected-request
+/// gate.
 pub const Proxy = struct {
     io: std.Io,
     pool: ?*upstream_pool.Pool = null,
     idle: ?*upstream_conn.IdleCache = null,
     static: ?static_files.StaticSite = null,
+    acme: ?acme_challenge.AcmeSite = null,
+    tls_cert_der: ?[]const u8 = null,
+    /// The acme companion listener sets this to the site's https port:
+    /// everything past the challenge path answers 301 to https (443 keeps
+    /// the Location port-free).
+    redirect_https: ?u16 = null,
 };
 
 /// After one exchange: keep the edge connection or close it.
@@ -33,14 +43,8 @@ const EdgeResult = enum {
     CLOSE,
 };
 
-/// Serve one accepted client connection until it closes.
-///
-/// Note:
-/// - Every request is re-originated: zixer parses the client framing and
-///   builds its own upstream message, raw client bytes never splice through
-///   (rfc 9112 smuggling defense).
-/// - A site with public_dir answers matching file requests at the edge
-///   before the pool is consulted, see staticAnswer.
+/// Serve one accepted cleartext client connection until it closes. A TLS
+/// site reaches the same loop through tls_edge.serveConn instead.
 pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     const io = proxy.io;
     defer client_stream.close(io);
@@ -49,24 +53,63 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
     var client_reader = client_stream.reader(io, &read_buf);
     var client_writer = client_stream.writer(io, &write_buf);
-    const client_addr = client_stream.socket.address;
 
+    serveLoop(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address);
+}
+
+/// The edge request loop over reader / writer interfaces (plain stream or
+/// a terminated TLS session).
+///
+/// Note:
+/// - Every request is re-originated: zixer parses the client framing and
+///   builds its own upstream message, raw client bytes never splice through
+///   (rfc 9112 smuggling defense).
+/// - Answer order per request: misdirected gate (TLS only), the acme
+///   challenge plane, the static plane, then the pool. An earlier plane
+///   answering means the later ones never see the request.
+pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress) void {
     while (true) {
         var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
-        const head_bytes = http1_head.readHead(&client_reader.interface, &head_buf) catch |err| {
-            if (err == error.HeadTooLarge) writeEdgeError(&client_writer.interface, 431, "head too large", "http_request_error");
+        const head_bytes = http1_head.readHead(client_r, &head_buf) catch |err| {
+            if (err == error.HeadTooLarge) writeEdgeError(client_w, 431, "head too large", "http_request_error");
             return;
         };
 
         const request = http1_head.parseRequest(head_bytes) catch {
-            writeEdgeError(&client_writer.interface, 400, "bad request", "http_request_error");
+            writeEdgeError(client_w, 400, "bad request", "http_request_error");
             return;
         };
 
-        // The static plane answers first: on a hit or a local status the
+        // RFC 9110 7.4: under TLS, a Host this certificate does not serve
+        // is a misdirected request. 421, then close.
+        if (misdirected(proxy, &request)) {
+            writeLocalStatus(client_w, 421, "misdirected request", "", true);
+            client_w.flush() catch {};
+            return;
+        }
+
+        if (acmeAnswer(proxy, &request, client_w)) |result| {
+            client_w.flush() catch return;
+            if (result == .CLOSE) return;
+
+            continue;
+        }
+
+        // The companion listener proxies nothing: past the challenge path
+        // everything moves to https.
+        if (proxy.redirect_https) |https_port| {
+            const result = httpsRedirectAnswer(&request, client_w, https_port);
+
+            client_w.flush() catch return;
+            if (result == .CLOSE) return;
+
+            continue;
+        }
+
+        // The static plane answers next: on a hit or a local status the
         // upstream never sees the request.
-        if (staticAnswer(proxy, &request, &client_writer.interface)) |result| {
-            client_writer.interface.flush() catch return;
+        if (staticAnswer(proxy, &request, client_w)) |result| {
+            client_w.flush() catch return;
             if (result == .CLOSE) return;
 
             continue;
@@ -74,7 +117,7 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
 
         var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
         const upstream_head = buildUpstreamHead(&build_buf, &request, client_addr) catch {
-            writeEdgeError(&client_writer.interface, 400, "bad request", "http_request_error");
+            writeEdgeError(client_w, 400, "bad request", "http_request_error");
             return;
         };
 
@@ -82,15 +125,102 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
         // the body. zixer answers the interim itself, the Expect header was
         // dropped from the rebuilt head.
         if (expectsContinue(&request)) {
-            client_writer.interface.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
-            client_writer.interface.flush() catch return;
+            client_w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
+            client_w.flush() catch return;
         }
 
-        const outcome = exchange(proxy, &client_reader.interface, &client_writer.interface, &request, upstream_head);
+        const outcome = exchange(proxy, client_r, client_w, &request, upstream_head);
 
-        client_writer.interface.flush() catch return;
+        client_w.flush() catch return;
         if (outcome == .CLOSE) return;
     }
+}
+
+/// Whether a TLS-terminated request names an authority the site's
+/// certificate does not serve. Cleartext edges never arm this.
+fn misdirected(proxy: *const Proxy, request: *const http1_head.RequestHead) bool {
+    const cert_der = proxy.tls_cert_der orelse return false;
+    if (request.host.len == 0) return false;
+
+    const host = stripHostPort(request.host);
+    zix.Tls.verifyCertIdentity(cert_der, host) catch return true;
+
+    return false;
+}
+
+/// The Host value without its port. A bracketed IPv6 literal keeps its
+/// inner address, a bare IPv6 literal (several colons) stays whole.
+fn stripHostPort(host: []const u8) []const u8 {
+    if (host.len == 0) return host;
+
+    if (host[0] == '[') {
+        if (std.mem.indexOfScalar(u8, host, ']')) |close| return host[1..close];
+
+        return host;
+    }
+
+    if (std.mem.indexOfScalar(u8, host, ':')) |first| {
+        if (std.mem.lastIndexOfScalar(u8, host, ':').? == first) return host[0..first];
+    }
+
+    return host;
+}
+
+/// Answer the acme challenge path (rfc 8555 8.3) ahead of any site logic.
+///
+/// Return:
+/// - EdgeResult when a response was written here
+/// - null when the request is not the challenge path or acme is off
+fn acmeAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, client_w: *std.Io.Writer) ?EdgeResult {
+    const acme: *const acme_challenge.AcmeSite = if (proxy.acme) |*inner| inner else return null;
+    if (!acme_challenge.handles(request.target)) return null;
+
+    if (!static_files.fileMethod(request.method)) {
+        writeLocalStatus(client_w, 405, "method not allowed", "Allow: GET, HEAD\r\n", requestCloses(request));
+        return closeOrKeep(request);
+    }
+
+    if (acme.webroot) |webroot| {
+        if (acme_challenge.resolveWebroot(proxy.io, webroot, request.target)) |resolved| {
+            return sendResolved(proxy.io, client_w, resolved, request);
+        }
+
+        writeLocalStatus(client_w, 404, "not found", "", requestCloses(request));
+        return closeOrKeep(request);
+    }
+
+    if (acme.relay) |upstream| {
+        if (acme_challenge.relay(proxy.io, upstream, request.method, request.target, request.host, client_w)) return .CLOSE;
+
+        writeEdgeError(client_w, 502, "acme relay unreachable", "connection_refused");
+        return .CLOSE;
+    }
+
+    return null;
+}
+
+/// 301 to the https origin. Without a Host there is no authority to form
+/// the Location from, so the reply is a local 404.
+fn httpsRedirectAnswer(request: *const http1_head.RequestHead, client_w: *std.Io.Writer, https_port: u16) EdgeResult {
+    if (request.host.len == 0) {
+        writeLocalStatus(client_w, 404, "not found", "", requestCloses(request));
+        return closeOrKeep(request);
+    }
+
+    const host = stripHostPort(request.host);
+    const edge_close = requestCloses(request);
+
+    client_w.writeAll("HTTP/1.1 301 Moved Permanently\r\n") catch return .CLOSE;
+    if (https_port == 443) {
+        client_w.print("Location: https://{s}{s}\r\n", .{ host, request.target }) catch return .CLOSE;
+    } else {
+        client_w.print("Location: https://{s}:{d}{s}\r\n", .{ host, https_port, request.target }) catch return .CLOSE;
+    }
+    client_w.writeAll("Content-Length: 0\r\n") catch return .CLOSE;
+    if (edge_close) client_w.writeAll("Connection: close\r\n") catch return .CLOSE;
+    client_w.writeAll("\r\n") catch return .CLOSE;
+
+    return if (edge_close) .CLOSE else .KEEP;
 }
 
 /// Answer the request from public_dir when the site serves static files.
@@ -1120,4 +1250,122 @@ test "zix zixer: http1 proxy, mixed site serves static beside the pool end to en
     fake_thread.join();
 
     try std.testing.expectEqual(@as(usize, 1), fake.conns_accepted);
+}
+
+test "zix zixer: http1 proxy, acme webroot answers ahead of the static plane" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    tmp.dir.createDirPath(testing.io, "www") catch @panic("fixture dir failed");
+    tmp.dir.createDirPath(testing.io, "acme/.well-known/acme-challenge") catch @panic("fixture dir failed");
+    writeFixture(tmp.dir, "www/index.html", "static-index");
+    writeFixture(tmp.dir, "acme/.well-known/acme-challenge/tok1", "acme-answer");
+
+    var www_buf: [128]u8 = undefined;
+    var acme_buf: [128]u8 = undefined;
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+    const www = std.fmt.bufPrint(&www_buf, "{s}/www", .{root}) catch unreachable;
+    const webroot = std.fmt.bufPrint(&acme_buf, "{s}/acme", .{root}) catch unreachable;
+
+    const proxy = Proxy{
+        .io = testing.io,
+        .static = .{ .public_dir = www, .public_prefix = null, .spa_fallback = null },
+        .acme = .{ .webroot = webroot },
+    };
+
+    var src = std.Io.Reader.fixed("GET /.well-known/acme-challenge/tok1 HTTP/1.1\r\nHost: t\r\n\r\n" ++
+        "GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+    var out_buf: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40001 } };
+
+    serveLoop(&proxy, &src, &out, addr);
+    const reply = out.buffered();
+
+    const first = std.mem.indexOf(u8, reply, "acme-answer") orelse return error.TestUnexpectedResult;
+    const second = std.mem.indexOf(u8, reply, "static-index") orelse return error.TestUnexpectedResult;
+    try testing.expect(first < second);
+
+    // the challenge reply is identity with no content negotiation promise.
+    try testing.expect(std.mem.indexOf(u8, reply[0..first], "Content-Encoding") == null);
+}
+
+test "zix zixer: http1 proxy, acme relay unreachable answers 502 proxy-status" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const proxy = Proxy{
+        .io = io,
+        .acme = .{ .relay = .{ .host = "127.0.0.1", .port = 39892 } },
+    };
+
+    const request = try http1_head.parseRequest("GET /.well-known/acme-challenge/tok HTTP/1.1\r\nHost: t\r\n\r\n");
+    var out_buf: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const result = acmeAnswer(&proxy, &request, &out).?;
+    const reply = out.buffered();
+
+    try testing.expectEqual(EdgeResult.CLOSE, result);
+    try testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 502 "));
+    try testing.expect(std.mem.indexOf(u8, reply, "Proxy-Status: zixer; error=\"connection_refused\"\r\n") != null);
+}
+
+test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, "examples/certs/ecdsa_p256_cert.pem", testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(cert_pem);
+    var der_buf: [4096]u8 = undefined;
+    const cert_der = try zix.Tls.pemToDer(&der_buf, cert_pem);
+
+    const proxy = Proxy{ .io = io, .tls_cert_der = cert_der };
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40002 } };
+
+    var foreign = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    var foreign_buf: [512]u8 = undefined;
+    var foreign_out = std.Io.Writer.fixed(&foreign_buf);
+    serveLoop(&proxy, &foreign, &foreign_out, addr);
+
+    try testing.expect(std.mem.startsWith(u8, foreign_out.buffered(), "HTTP/1.1 421 misdirected request\r\n"));
+    try testing.expect(std.mem.indexOf(u8, foreign_out.buffered(), "Connection: close\r\n") != null);
+
+    // the certificate's own SAN passes the gate and reaches the next plane
+    // (here: the static-only local 404).
+    var own = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
+    var own_buf: [512]u8 = undefined;
+    var own_out = std.Io.Writer.fixed(&own_buf);
+    serveLoop(&proxy, &own, &own_out, addr);
+
+    try testing.expect(std.mem.startsWith(u8, own_out.buffered(), "HTTP/1.1 404 "));
+}
+
+test "zix zixer: http1 proxy, https redirect carries the site port" {
+    const proxy = Proxy{ .io = testing.io, .redirect_https = 8443 };
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40003 } };
+
+    var src = std.Io.Reader.fixed("GET /app/page HTTP/1.1\r\nHost: site.test:80\r\n\r\n");
+    var out_buf: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+    serveLoop(&proxy, &src, &out, addr);
+
+    try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 301 Moved Permanently\r\n"));
+    try testing.expect(std.mem.indexOf(u8, out.buffered(), "Location: https://site.test:8443/app/page\r\n") != null);
+
+    // port 443 keeps the Location port-free, no Host answers a local 404.
+    const on_443 = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: site.test\r\n\r\n");
+    var plain_buf: [512]u8 = undefined;
+    var plain_out = std.Io.Writer.fixed(&plain_buf);
+    try testing.expectEqual(EdgeResult.KEEP, httpsRedirectAnswer(&on_443, &plain_out, 443));
+    try testing.expect(std.mem.indexOf(u8, plain_out.buffered(), "Location: https://site.test/x\r\n") != null);
+
+    const no_host = try http1_head.parseRequest("GET /x HTTP/1.1\r\n\r\n");
+    var nh_buf: [512]u8 = undefined;
+    var nh_out = std.Io.Writer.fixed(&nh_buf);
+    _ = httpsRedirectAnswer(&no_host, &nh_out, 443);
+    try testing.expect(std.mem.startsWith(u8, nh_out.buffered(), "HTTP/1.1 404 "));
 }
