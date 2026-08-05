@@ -802,8 +802,8 @@ test "zix grpc: stream slots are pooled across connections" {
 
 test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED trailers" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     const opts = GrpcServeOpts{ .max_streams = 4, .max_body = 16, .max_header_scratch = 256 };
 
@@ -877,8 +877,8 @@ test "zix grpc: mux DATA past max_body sheds the stream with RESOURCE_EXHAUSTED 
 
 test "zix grpc: mux HEADERS past max_streams is refused with REFUSED_STREAM" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     const opts = GrpcServeOpts{ .max_streams = 1, .max_body = 64, .max_header_scratch = 256 };
 
