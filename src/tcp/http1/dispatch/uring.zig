@@ -1728,8 +1728,8 @@ fn testUringWorker(comptime handler: HandlerFn, body_buf: []u8, arena: *std.heap
 
 test "zix http1: URING dispatch decodes a fully-present chunked body" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1889,8 +1889,8 @@ test "zix http1: URING dispatch answers 413 for a chunked body past the body buf
 
 test "zix http1: URING dispatch adopts a reserve-committed response with its staged offset" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1923,8 +1923,8 @@ test "zix http1: URING dispatch adopts a reserve-committed response with its sta
 
 test "zix http1: URING dispatch resumes a split head scan from the watermark" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1966,8 +1966,8 @@ test "zix http1: URING dispatch resumes a split head scan from the watermark" {
 
 test "zix http1: URING dispatch defers an oversized body and serves the counted total" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2100,8 +2100,8 @@ test "zix http1: URING keeps a deferred request parked while its drain is unfini
 
 test "zix http1: URING dispatch compacts the deferred head behind a pipelined request" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2702,8 +2702,8 @@ test "zix http1: URING destroyConn frees a heap-grown send_buf and recycles the 
 
 test "zix http1: URING dispatch grows a slab-backed send_buf onto the heap for an oversized response" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2740,8 +2740,8 @@ test "zix http1: URING dispatch grows a slab-backed send_buf onto the heap for a
 
 test "zix http1: URING cache hit replays zero-copy with the slot pinned until teardown" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
