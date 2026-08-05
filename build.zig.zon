@@ -14,6 +14,6 @@
         "zix-build-zixer.zig",
         "build.zig.zon",
         "src",
-        "LICENSE-BSD",
+        "LICENSE",
     },
 }
