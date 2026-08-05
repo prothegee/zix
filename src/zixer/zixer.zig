@@ -225,6 +225,8 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("acme_challenge.zig"));
     std.testing.refAllDecls(@import("acme_listener.zig"));
     std.testing.refAllDecls(@import("site_serve.zig"));
+    std.testing.refAllDecls(@import("udp_flow_table.zig"));
+    std.testing.refAllDecls(@import("udp_forward.zig"));
 }
 
 test "zix zixer: cli args, command dir flag and filters split out" {
