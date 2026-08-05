@@ -218,6 +218,15 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
 
     const engine = cfg.engine orelse return;
 
+    // A cleartext http1 site answers the challenge path on its own
+    // listener, a TLS site gets the port 80 companion. On a cleartext
+    // non-http1 site the acme keys would never be served (udp keeps its
+    // own message below).
+    if (!cfg.tls and engine != .HTTP1 and engine != .UDP) {
+        if (cfg.acme_webroot != null) try faults.add("acme_webroot", "needs tls: true or an http1 site", .{});
+        if (cfg.acme_proxy != null) try faults.add("acme_proxy", "needs tls: true or an http1 site", .{});
+    }
+
     switch (engine) {
         .HTTP1, .HTTP2 => {},
         .HTTP3 => {
@@ -579,4 +588,21 @@ test "zix zixer: site cfg, engine names round trip" {
     try testing.expectEqualStrings("grpc", engineName(.GRPC));
     try testing.expectEqualStrings("http3", engineName(.HTTP3));
     try testing.expectEqualStrings("udp", engineName(.UDP));
+}
+
+test "zix zixer: site cfg, cleartext non-http1 site rejects acme keys" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var h2_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: http2\nport: 39899\nupstreams: 127.0.0.1:3000\nacme_webroot: /var/www/acme\n", &h2_faults);
+    try testing.expectEqual(@as(usize, 1), h2_faults.slice().len);
+    try testing.expectEqualStrings("acme_webroot", h2_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs tls: true or an http1 site", h2_faults.slice()[0].hint);
+
+    // the same keys are fine on a cleartext http1 site (own listener) and
+    // on a TLS site (port 80 companion).
+    var h1_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: http1\nport: 80\nupstreams: 127.0.0.1:3000\nacme_webroot: /var/www/acme\n", &h1_faults);
+    try testing.expectEqual(@as(usize, 0), h1_faults.slice().len);
 }
