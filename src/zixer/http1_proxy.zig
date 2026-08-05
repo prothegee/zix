@@ -9,6 +9,7 @@ const proxy_headers = @import("proxy_headers.zig");
 const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_pool = @import("upstream_pool.zig");
+const ws_tunnel = @import("ws_tunnel.zig");
 
 /// Stream buffer size for each leg of the relay.
 const STREAM_BUF_SIZE: usize = 8 * 1024;
@@ -54,7 +55,7 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     var client_reader = client_stream.reader(io, &read_buf);
     var client_writer = client_stream.writer(io, &write_buf);
 
-    serveLoop(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address);
+    serveLoop(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream);
 }
 
 /// The edge request loop over reader / writer interfaces (plain stream or
@@ -67,7 +68,12 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
 /// - Answer order per request: misdirected gate (TLS only), the acme
 ///   challenge plane, the static plane, then the pool. An earlier plane
 ///   answering means the later ones never see the request.
-pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress) void {
+/// - A websocket upgrade request reaching the pool becomes a raw tunnel
+///   after the upstream's 101, pick pinned for the tunnel life.
+/// - client_stream is the raw client socket behind the interfaces, the
+///   tunnel needs it to unblock a waiting read. Null (socket-less rigs)
+///   only softens tunnel teardown when the upstream ends first.
+pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream) void {
     while (true) {
         var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
         const head_bytes = http1_head.readHead(client_r, &head_buf) catch |err| {
@@ -115,8 +121,10 @@ pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.I
             continue;
         }
 
+        const upgrade = ws_tunnel.wantsUpgrade(&request);
+
         var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
-        const upstream_head = buildUpstreamHead(&build_buf, &request, client_addr) catch {
+        const upstream_head = buildUpstreamHead(&build_buf, &request, client_addr, upgrade) catch {
             writeEdgeError(client_w, 400, "bad request", "http_request_error");
             return;
         };
@@ -129,7 +137,7 @@ pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.I
             client_w.flush() catch return;
         }
 
-        const outcome = exchange(proxy, client_r, client_w, &request, upstream_head);
+        const outcome = exchange(proxy, client_r, client_w, client_stream, &request, upstream_head, upgrade);
 
         client_w.flush() catch return;
         if (outcome == .CLOSE) return;
@@ -324,13 +332,17 @@ fn writeLocalStatus(client_w: *std.Io.Writer, status: u16, reason: []const u8, e
     client_w.print("\r\n{s}\n", .{reason}) catch return;
 }
 
-/// One request against the pool: pick, forward, relay, bounded retry.
+/// One request against the pool: pick, forward, relay, bounded retry. An
+/// upgrade exchange whose upstream answers 101 becomes the raw tunnel and
+/// always closes the edge after.
 fn exchange(
     proxy: *const Proxy,
     client_r: *std.Io.Reader,
     client_w: *std.Io.Writer,
+    client_stream: ?std.Io.net.Stream,
     request: *const http1_head.RequestHead,
     upstream_head: []const u8,
+    upgrade: bool,
 ) EdgeResult {
     const io = proxy.io;
     const no_body = request.framing == .none;
@@ -382,7 +394,7 @@ fn exchange(
                 writeEdgeError(client_w, 502, "upstream send failed", "connection_terminated");
                 return .CLOSE;
             },
-            .chunked => pumpChunked(client_r, &up_writer.interface) catch {
+            .chunked => pumpChunked(client_r, &up_writer.interface, false) catch {
                 conn.stream.close(io);
                 writeEdgeError(client_w, 502, "upstream send failed", "connection_terminated");
                 return .CLOSE;
@@ -401,7 +413,7 @@ fn exchange(
         };
 
         var resp_head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
-        const response = readResponseHead(&up_reader.interface, &resp_head_buf, request.method, client_w) orelse {
+        const response = readResponseHead(&up_reader.interface, &resp_head_buf, request.method, client_w, upgrade) orelse {
             conn.stream.close(io);
             if (no_body) {
                 // A stale idle conn answers EOF here. Bodyless requests are
@@ -413,6 +425,30 @@ fn exchange(
             writeEdgeError(client_w, 502, "upstream closed early", "connection_terminated");
             return .CLOSE;
         };
+
+        // The upstream took the upgrade: relay the 101 and hand both legs
+        // to the tunnel. The pick stays pinned on this one connection for
+        // the whole session, and the edge closes with it.
+        if (upgrade and response.status == 101) {
+            const switched = blk: {
+                ws_tunnel.writeSwitchHead(client_w, &response) catch break :blk false;
+                client_w.flush() catch break :blk false;
+                break :blk true;
+            };
+
+            if (switched) ws_tunnel.run(.{
+                .io = io,
+                .client_r = client_r,
+                .client_w = client_w,
+                .client_stream = client_stream,
+                .up_stream = conn.stream,
+                .up_r = &up_reader.interface,
+                .up_w = &up_writer.interface,
+            });
+            conn.stream.close(io);
+
+            return .CLOSE;
+        }
 
         const edge_close = request.connection_close or response.framing == .until_close;
         writeResponseHead(client_w, &response, edge_close) catch {
@@ -426,7 +462,7 @@ fn exchange(
             .content_length => |len| pumpExact(&up_reader.interface, client_w, len) catch {
                 relay_failed = true;
             },
-            .chunked => pumpChunked(&up_reader.interface, client_w) catch {
+            .chunked => pumpChunked(&up_reader.interface, client_w, true) catch {
                 relay_failed = true;
             },
             .until_close => pumpUntilClose(&up_reader.interface, client_w),
@@ -446,13 +482,16 @@ fn exchange(
 }
 
 /// Read the upstream response head, relaying interim 1xx responses to the
-/// client on the way. Null when the upstream connection failed first.
-fn readResponseHead(up_r: *std.Io.Reader, head_buf: []u8, method: []const u8, client_w: *std.Io.Writer) ?http1_head.ResponseHead {
+/// client on the way. Null when the upstream connection failed first. A
+/// 101 is final on an upgrade exchange (tunnel bytes follow it), on any
+/// other exchange it was never asked for and counts as a failure.
+fn readResponseHead(up_r: *std.Io.Reader, head_buf: []u8, method: []const u8, client_w: *std.Io.Writer, upgrade: bool) ?http1_head.ResponseHead {
     var interim: usize = 0;
     while (interim <= MAX_INTERIM) : (interim += 1) {
         const bytes = http1_head.readHead(up_r, head_buf) catch return null;
         const response = http1_head.parseResponse(bytes, method) catch return null;
 
+        if (response.status == 101) return if (upgrade) response else null;
         if (response.status / 100 != 1) return response;
 
         client_w.writeAll(bytes) catch return null;
@@ -463,8 +502,9 @@ fn readResponseHead(up_r: *std.Io.Reader, head_buf: []u8, method: []const u8, cl
 }
 
 /// Rebuild the client head for the upstream leg: filtered headers plus Via,
-/// Forwarded, and zixer's own framing header.
-fn buildUpstreamHead(buf: []u8, request: *const http1_head.RequestHead, client_addr: std.Io.net.IpAddress) ![]const u8 {
+/// Forwarded, and zixer's own framing header. An upgrade rebuild re-adds
+/// the websocket pair the hop-by-hop strip removed.
+fn buildUpstreamHead(buf: []u8, request: *const http1_head.RequestHead, client_addr: std.Io.net.IpAddress, upgrade: bool) ![]const u8 {
     var fixed = std.Io.Writer.fixed(buf);
 
     try fixed.print("{s} {s} HTTP/1.1\r\n", .{ request.method, request.target });
@@ -485,6 +525,7 @@ fn buildUpstreamHead(buf: []u8, request: *const http1_head.RequestHead, client_a
         .chunked => try fixed.writeAll("Transfer-Encoding: chunked\r\n"),
         .until_close => unreachable,
     }
+    if (upgrade) try ws_tunnel.writeUpgradeHeaders(&fixed);
 
     try fixed.writeAll("\r\n");
 
@@ -557,8 +598,11 @@ fn pumpExact(src: *std.Io.Reader, dst: *std.Io.Writer, len: u64) !void {
 }
 
 /// Relay a chunked body, re-emitting the chunk framing zixer parsed. The
-/// trailer section is relayed line by line.
-fn pumpChunked(src: *std.Io.Reader, dst: *std.Io.Writer) !void {
+/// trailer section is relayed line by line. flush_each delivers every
+/// chunk as it completes (the client leg of a streamed response, an SSE
+/// backend sends one event per chunk), the upstream leg leaves batching
+/// to the writer buffer.
+fn pumpChunked(src: *std.Io.Reader, dst: *std.Io.Writer, flush_each: bool) !void {
     while (true) {
         var line_buf: [256]u8 = undefined;
         const size_line = try readLine(src, &line_buf);
@@ -583,17 +627,22 @@ fn pumpChunked(src: *std.Io.Reader, dst: *std.Io.Writer) !void {
         const after = try readLine(src, &line_buf);
         if (after.len != 0) return error.BadChunk;
         try dst.writeAll("\r\n");
+        if (flush_each) try dst.flush();
     }
 }
 
-/// Relay until the source closes. The destination is closed by the caller.
+/// Relay until the source closes, delivering each burst as it arrives so
+/// stream semantics survive the hop (an SSE event reaches the client when
+/// the upstream sends it, not when a buffer fills). The destination is
+/// closed by the caller.
 fn pumpUntilClose(src: *std.Io.Reader, dst: *std.Io.Writer) void {
-    var chunk: [PUMP_CHUNK]u8 = undefined;
     while (true) {
-        const got = src.readSliceShort(&chunk) catch return;
-        if (got == 0) return;
+        // A zero return stored into the reader buffer instead of the
+        // writer (interface readers may), the next pass drains it.
+        const got = src.stream(dst, .limited(PUMP_CHUNK)) catch return;
+        if (got == 0) continue;
 
-        dst.writeAll(chunk[0..got]) catch return;
+        dst.flush() catch return;
     }
 }
 
@@ -619,7 +668,7 @@ test "zix zixer: http1 proxy, upstream head is rebuilt with forwarded and via" {
 
     var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 7 }, .port = 55000 } };
-    const head = try buildUpstreamHead(&build_buf, &request, addr);
+    const head = try buildUpstreamHead(&build_buf, &request, addr, false);
 
     try std.testing.expect(std.mem.startsWith(u8, head, "POST /api HTTP/1.1\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, head, "Host: app.example\r\n") != null);
@@ -673,12 +722,12 @@ test "zix zixer: http1 proxy, pumpChunked re-emits chunks and the trailer" {
     var out_buf: [128]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
 
-    try pumpChunked(&src, &out);
+    try pumpChunked(&src, &out, false);
     try std.testing.expectEqualStrings("5\r\nhello\r\n6\r\n world\r\n0\r\nX-Sum: ok\r\n\r\n", out.buffered());
 
     var bad = std.Io.Reader.fixed("nope\r\n");
     var bad_out = std.Io.Writer.fixed(&out_buf);
-    try std.testing.expectError(error.BadChunk, pumpChunked(&bad, &bad_out));
+    try std.testing.expectError(error.BadChunk, pumpChunked(&bad, &bad_out, false));
 }
 
 test "zix zixer: http1 proxy, edge error carries proxy-status" {
@@ -1280,7 +1329,7 @@ test "zix zixer: http1 proxy, acme webroot answers ahead of the static plane" {
     var out = std.Io.Writer.fixed(&out_buf);
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40001 } };
 
-    serveLoop(&proxy, &src, &out, addr);
+    serveLoop(&proxy, &src, &out, addr, null);
     const reply = out.buffered();
 
     const first = std.mem.indexOf(u8, reply, "acme-answer") orelse return error.TestUnexpectedResult;
@@ -1329,7 +1378,7 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
     var foreign = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     var foreign_buf: [512]u8 = undefined;
     var foreign_out = std.Io.Writer.fixed(&foreign_buf);
-    serveLoop(&proxy, &foreign, &foreign_out, addr);
+    serveLoop(&proxy, &foreign, &foreign_out, addr, null);
 
     try testing.expect(std.mem.startsWith(u8, foreign_out.buffered(), "HTTP/1.1 421 misdirected request\r\n"));
     try testing.expect(std.mem.indexOf(u8, foreign_out.buffered(), "Connection: close\r\n") != null);
@@ -1339,7 +1388,7 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
     var own = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
     var own_buf: [512]u8 = undefined;
     var own_out = std.Io.Writer.fixed(&own_buf);
-    serveLoop(&proxy, &own, &own_out, addr);
+    serveLoop(&proxy, &own, &own_out, addr, null);
 
     try testing.expect(std.mem.startsWith(u8, own_out.buffered(), "HTTP/1.1 404 "));
 }
@@ -1351,7 +1400,7 @@ test "zix zixer: http1 proxy, https redirect carries the site port" {
     var src = std.Io.Reader.fixed("GET /app/page HTTP/1.1\r\nHost: site.test:80\r\n\r\n");
     var out_buf: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
-    serveLoop(&proxy, &src, &out, addr);
+    serveLoop(&proxy, &src, &out, addr, null);
 
     try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 301 Moved Permanently\r\n"));
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Location: https://site.test:8443/app/page\r\n") != null);
@@ -1368,4 +1417,395 @@ test "zix zixer: http1 proxy, https redirect carries the site port" {
     var nh_out = std.Io.Writer.fixed(&nh_buf);
     _ = httpsRedirectAnswer(&no_host, &nh_out, 443);
     try testing.expect(std.mem.startsWith(u8, nh_out.buffered(), "HTTP/1.1 404 "));
+}
+
+// --------------------------------------------------------- //
+
+test "zix zixer: http1 proxy, upgrade head rebuild carries the handshake pair" {
+    const request = try http1_head.parseRequest("GET /chat HTTP/1.1\r\nHost: app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: c2FtcGxlIG5vbmNl\r\nSec-WebSocket-Version: 13\r\n\r\n");
+
+    var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 7 }, .port = 55001 } };
+    const head = try buildUpstreamHead(&build_buf, &request, addr, true);
+
+    try testing.expect(std.mem.startsWith(u8, head, "GET /chat HTTP/1.1\r\n"));
+    try testing.expect(std.mem.indexOf(u8, head, "Sec-WebSocket-Key: c2FtcGxlIG5vbmNl\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "Sec-WebSocket-Version: 13\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "Via: 1.1 zixer\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "Connection: Upgrade\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "Upgrade: websocket\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "Content-Length") == null);
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, head, "Connection:"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, head, "Upgrade:"));
+}
+
+/// Writer probe for flush timing: records what the first flush delivered
+/// and everything delivered overall.
+const FlushProbe = struct {
+    writer: std.Io.Writer,
+    stage: [256]u8,
+    delivered: [1024]u8,
+    delivered_len: usize,
+    first_flush: [256]u8,
+    first_flush_len: usize,
+    flush_count: usize,
+
+    const vtable = std.Io.Writer.VTable{ .drain = drain, .flush = flush };
+
+    fn bind(probe: *FlushProbe) void {
+        probe.writer = .{ .vtable = &vtable, .buffer = &probe.stage, .end = 0 };
+        probe.delivered_len = 0;
+        probe.first_flush_len = 0;
+        probe.flush_count = 0;
+    }
+
+    fn deliver(probe: *FlushProbe, bytes: []const u8) void {
+        @memcpy(probe.delivered[probe.delivered_len..][0..bytes.len], bytes);
+        probe.delivered_len += bytes.len;
+    }
+
+    fn drain(interface: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const probe: *FlushProbe = @alignCast(@fieldParentPtr("writer", interface));
+
+        probe.deliver(interface.buffer[0..interface.end]);
+        interface.end = 0;
+
+        var consumed: usize = 0;
+        for (data[0 .. data.len - 1]) |slice| {
+            probe.deliver(slice);
+            consumed += slice.len;
+        }
+        const last = data[data.len - 1];
+        for (0..splat) |_| {
+            probe.deliver(last);
+            consumed += last.len;
+        }
+
+        return consumed;
+    }
+
+    fn flush(interface: *std.Io.Writer) std.Io.Writer.Error!void {
+        const probe: *FlushProbe = @alignCast(@fieldParentPtr("writer", interface));
+
+        probe.flush_count += 1;
+        if (probe.flush_count == 1) {
+            const staged = interface.buffer[0..interface.end];
+            @memcpy(probe.first_flush[0..staged.len], staged);
+            probe.first_flush_len = staged.len;
+        }
+
+        probe.deliver(interface.buffer[0..interface.end]);
+        interface.end = 0;
+    }
+};
+
+test "zix zixer: http1 proxy, chunked response relay flushes each chunk" {
+    var src = std.Io.Reader.fixed("3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n");
+    var probe: FlushProbe = undefined;
+    probe.bind();
+
+    try pumpChunked(&src, &probe.writer, true);
+    try probe.writer.flush();
+
+    // The first chunk left on its own flush, ahead of the second chunk.
+    try testing.expectEqualStrings("3\r\none\r\n", probe.first_flush[0..probe.first_flush_len]);
+    try testing.expect(probe.flush_count >= 3);
+    try testing.expectEqualStrings("3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n", probe.delivered[0..probe.delivered_len]);
+}
+
+// --------------------------------------------------------- //
+
+/// Test upstream that takes the websocket upgrade: answers 101, echoes raw
+/// bytes until the peer ends, serves one session then exits. A connection
+/// that never sends a head unblocks the accept wait (test teardown).
+const FakeWsUpstream = struct {
+    io: std.Io,
+    port: u16,
+    seen_head: [2048]u8 = undefined,
+    seen_len: usize = 0,
+    sessions: usize = 0,
+    ready: std.atomic.Value(bool) = .init(false),
+
+    fn serve(fake: *FakeWsUpstream) void {
+        const io = fake.io;
+
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
+        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        defer server.deinit(io);
+        fake.ready.store(true, .release);
+
+        const stream = server.accept(io) catch return;
+        defer stream.close(io);
+
+        var read_buf: [4096]u8 = undefined;
+        var write_buf: [4096]u8 = undefined;
+        var reader = stream.reader(io, &read_buf);
+        var writer = stream.writer(io, &write_buf);
+
+        const head = http1_head.readHead(&reader.interface, fake.seen_head[0..]) catch return;
+        fake.seen_len = head.len;
+
+        writer.interface.writeAll("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: test-accept\r\n\r\n") catch return;
+        writer.interface.flush() catch return;
+        fake.sessions += 1;
+
+        while (true) {
+            const got = reader.interface.stream(&writer.interface, .limited(1024)) catch break;
+            if (got == 0) continue;
+
+            writer.interface.flush() catch break;
+        }
+    }
+};
+
+/// Connect and close: unblocks a fake stuck in accept during teardown.
+fn poke(io: std.Io, port: u16) void {
+    const addr = std.Io.net.IpAddress.parse("127.0.0.1", port) catch return;
+    const stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch return;
+
+    stream.close(io);
+}
+
+fn waitReadyFlag(io: std.Io, flag: *std.atomic.Value(bool)) !void {
+    var tries: usize = 0;
+    while (tries < 100 and !flag.load(.acquire)) : (tries += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+
+    try std.testing.expect(tries < 100);
+}
+
+test "zix zixer: http1 proxy, ws upgrade tunnels end to end and pins one upstream" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake_a = FakeWsUpstream{ .io = io, .port = 39883 };
+    var fake_b = FakeWsUpstream{ .io = io, .port = 39884 };
+    const thread_a = try std.Thread.spawn(.{}, FakeWsUpstream.serve, .{&fake_a});
+    const thread_b = try std.Thread.spawn(.{}, FakeWsUpstream.serve, .{&fake_b});
+    try waitReadyFlag(io, &fake_a.ready);
+    try waitReadyFlag(io, &fake_b.ready);
+
+    const upstreams = [_]site_cfg.Upstream{
+        .{ .host = "127.0.0.1", .port = 39883 },
+        .{ .host = "127.0.0.1", .port = 39884 },
+    };
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 2);
+    defer idle.deinit(std.testing.allocator, io);
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    var read_buf: [4096]u8 = undefined;
+    var write_buf: [512]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var writer = client.writer(io, &write_buf);
+
+    try writer.interface.writeAll("GET /chat HTTP/1.1\r\nHost: t\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: c2FtcGxlIG5vbmNl\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    try writer.interface.flush();
+
+    var head_buf: [2048]u8 = undefined;
+    const switch_head = try http1_head.readHead(&reader.interface, &head_buf);
+    try std.testing.expect(std.mem.startsWith(u8, switch_head, "HTTP/1.1 101 "));
+    try std.testing.expect(std.mem.indexOf(u8, switch_head, "Sec-WebSocket-Accept: test-accept\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, switch_head, "Connection: Upgrade\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, switch_head, "Upgrade: websocket\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, switch_head, "Via: 1.1 zixer\r\n") != null);
+
+    // Two echoes across one tunnel: both frames cross the same upstream.
+    var echo: [9]u8 = undefined;
+    try writer.interface.writeAll("frame-one");
+    try writer.interface.flush();
+    try reader.interface.readSliceAll(&echo);
+    try std.testing.expectEqualStrings("frame-one", &echo);
+
+    try writer.interface.writeAll("frame-two");
+    try writer.interface.flush();
+    try reader.interface.readSliceAll(&echo);
+    try std.testing.expectEqualStrings("frame-two", &echo);
+
+    client.close(io);
+    edge_thread.join();
+
+    poke(io, 39883);
+    poke(io, 39884);
+    thread_a.join();
+    thread_b.join();
+
+    // The pinned pick: exactly one upstream carried the whole session.
+    try std.testing.expectEqual(@as(usize, 1), fake_a.sessions + fake_b.sessions);
+
+    const seen = if (fake_a.seen_len != 0) fake_a.seen_head[0..fake_a.seen_len] else fake_b.seen_head[0..fake_b.seen_len];
+    try std.testing.expect(std.mem.indexOf(u8, seen, "Connection: Upgrade\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seen, "Upgrade: websocket\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seen, "Sec-WebSocket-Key: c2FtcGxlIG5vbmNl\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seen, "Via: 1.1 zixer\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seen, "Forwarded: ") != null);
+}
+
+test "zix zixer: http1 proxy, ws upgrade refused relays the plain response" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // FakeUpstream never upgrades: the offer crosses, the answer is 200.
+    var fake = FakeUpstream{ .io = io, .port = 39889, .request_quota = 1 };
+    const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
+    try waitReady(io, &fake);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39889 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    {
+        var write_buf: [512]u8 = undefined;
+        var writer = client.writer(io, &write_buf);
+        try writer.interface.writeAll("GET /chat HTTP/1.1\r\nHost: t\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: c2FtcGxlIG5vbmNl\r\n\r\n");
+        try writer.interface.flush();
+    }
+
+    var read_buf: [4096]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var head_buf: [2048]u8 = undefined;
+    const head = try http1_head.readHead(&reader.interface, &head_buf);
+    const response = try http1_head.parseResponse(head, "GET");
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expect(std.mem.indexOf(u8, head, "Via: 1.1 zixer\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, head, "Upgrade") == null);
+
+    var body: [64]u8 = undefined;
+    const body_len: usize = @intCast(response.framing.content_length);
+    try reader.interface.readSliceAll(body[0..body_len]);
+    try std.testing.expectEqualStrings("echo:", body[0..body_len]);
+
+    client.close(io);
+    edge_thread.join();
+    fake_thread.join();
+
+    const seen = fake.seen_head[0..fake.seen_len];
+    try std.testing.expect(std.mem.indexOf(u8, seen, "Connection: Upgrade\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seen, "Upgrade: websocket\r\n") != null);
+}
+
+/// Test upstream for the SSE shape: an until-close response, one event
+/// now, the second only after the client acknowledged the first. saw_ack
+/// records whether the acknowledgment arrived inside the bounded wait.
+const FakeSseUpstream = struct {
+    io: std.Io,
+    port: u16,
+    release_second: std.atomic.Value(bool) = .init(false),
+    saw_ack: bool = false,
+    ready: std.atomic.Value(bool) = .init(false),
+
+    fn serve(fake: *FakeSseUpstream) void {
+        const io = fake.io;
+
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
+        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        defer server.deinit(io);
+        fake.ready.store(true, .release);
+
+        const stream = server.accept(io) catch return;
+        defer stream.close(io);
+
+        var read_buf: [4096]u8 = undefined;
+        var write_buf: [4096]u8 = undefined;
+        var reader = stream.reader(io, &read_buf);
+        var writer = stream.writer(io, &write_buf);
+
+        var head_buf: [2048]u8 = undefined;
+        _ = http1_head.readHead(&reader.interface, &head_buf) catch return;
+
+        writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: one\n\n") catch return;
+        writer.interface.flush() catch return;
+
+        var tries: usize = 0;
+        while (tries < 400 and !fake.release_second.load(.acquire)) : (tries += 1) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        }
+        fake.saw_ack = fake.release_second.load(.acquire);
+
+        writer.interface.writeAll("data: two\n\n") catch return;
+        writer.interface.flush() catch return;
+    }
+};
+
+test "zix zixer: http1 proxy, sse stream relays each event as it arrives" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = FakeSseUpstream{ .io = io, .port = 39876 };
+    const fake_thread = try std.Thread.spawn(.{}, FakeSseUpstream.serve, .{&fake});
+    try waitReadyFlag(io, &fake.ready);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39876 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    var read_buf: [4096]u8 = undefined;
+    var write_buf: [512]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var writer = client.writer(io, &write_buf);
+
+    try writer.interface.writeAll("GET /events HTTP/1.1\r\nHost: t\r\n\r\n");
+    try writer.interface.flush();
+
+    var head_buf: [2048]u8 = undefined;
+    const head = try http1_head.readHead(&reader.interface, &head_buf);
+    try std.testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, head, "Content-Type: text/event-stream\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, head, "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, head, "Content-Length") == null);
+
+    // The first event arrives while the upstream still holds the stream
+    // open, that is the streamed passthrough.
+    var event_one: [11]u8 = undefined;
+    try reader.interface.readSliceAll(&event_one);
+    try std.testing.expectEqualStrings("data: one\n\n", &event_one);
+    fake.release_second.store(true, .release);
+
+    var rest_buf: [64]u8 = undefined;
+    var rest_len: usize = 0;
+    while (rest_len < rest_buf.len) {
+        const got = reader.interface.readSliceShort(rest_buf[rest_len .. rest_len + 1]) catch break;
+        if (got == 0) break;
+        rest_len += got;
+    }
+    try std.testing.expectEqualStrings("data: two\n\n", rest_buf[0..rest_len]);
+
+    client.close(io);
+    edge_thread.join();
+    fake_thread.join();
+
+    try std.testing.expect(fake.saw_ack);
 }
