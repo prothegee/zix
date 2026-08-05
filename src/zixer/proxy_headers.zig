@@ -41,6 +41,25 @@ pub fn namedInConnection(name: []const u8, connection_value: []const u8) bool {
     return false;
 }
 
+/// The Host or authority value without its port. A bracketed IPv6 literal
+/// keeps its inner address, a bare IPv6 literal (several colons) stays
+/// whole.
+pub fn stripHostPort(host: []const u8) []const u8 {
+    if (host.len == 0) return host;
+
+    if (host[0] == '[') {
+        if (std.mem.indexOfScalar(u8, host, ']')) |close| return host[1..close];
+
+        return host;
+    }
+
+    if (std.mem.indexOfScalar(u8, host, ':')) |first| {
+        if (std.mem.lastIndexOfScalar(u8, host, ':').? == first) return host[0..first];
+    }
+
+    return host;
+}
+
 /// Write the Forwarded header line for one client (rfc 7239).
 ///
 /// Note:
@@ -91,6 +110,15 @@ test "zix zixer: proxy headers, connection tokens mark extra hop-by-hop names" {
 
     try std.testing.expect(!namedInConnection("Accept", "close, X-Custom-Hop"));
     try std.testing.expect(!namedInConnection("Accept", ""));
+}
+
+test "zix zixer: proxy headers, host port strip keeps every literal shape" {
+    try std.testing.expectEqualStrings("example.com", stripHostPort("example.com:8443"));
+    try std.testing.expectEqualStrings("example.com", stripHostPort("example.com"));
+    try std.testing.expectEqualStrings("::1", stripHostPort("[::1]:443"));
+    try std.testing.expectEqualStrings("::1", stripHostPort("[::1]"));
+    try std.testing.expectEqualStrings("fe80::1:2", stripHostPort("fe80::1:2"));
+    try std.testing.expectEqualStrings("", stripHostPort(""));
 }
 
 test "zix zixer: proxy headers, forwarded line quotes the node and carries host" {
