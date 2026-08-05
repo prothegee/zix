@@ -43,6 +43,10 @@ pub const alertRecordForError = connection.alertRecordForError;
 pub const Client = @import("client.zig");
 pub const Client12 = @import("tls12_client.zig");
 
+/// The server-side TLS 1.2 handshake (RFC 5246, ECDHE-ECDSA): serverFlight1 answers the
+/// ClientHello, serverFinish completes the handshake into a 1.2 Connection (sans-I/O).
+pub const Server12 = @import("tls12_connection.zig");
+
 /// Layer V: peer certificate verification (the trust step of mTLS).
 /// verifyCertChain = chain + validity (RFC 5280). verifyCertHostname = identity (RFC 6125).
 pub const verifyCertChain = @import("cert_verify.zig").verifyCertChain;
@@ -68,3 +72,10 @@ pub const parseInboundAlert = alert.parseInbound;
 pub const ContentType = record.ContentType;
 pub const CipherSuite = handshake.CipherSuite;
 pub const NamedGroup = handshake.NamedGroup;
+
+/// Record-layer bounds for a caller that owns its own socket loop: max_plaintext caps one
+/// record's payload, max_record_wire sizes a full-record read buffer, sealedLen sizes the
+/// sealed output for a given plaintext length.
+pub const max_plaintext = record.max_plaintext;
+pub const max_record_wire = record.max_record_wire;
+pub const sealedLen = record.sealedLen;
