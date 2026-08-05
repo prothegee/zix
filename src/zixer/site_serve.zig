@@ -5,6 +5,7 @@ const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
 const http1_proxy = @import("http1_proxy.zig");
+const grpc_edge = @import("grpc_edge.zig");
 const http2_edge = @import("http2_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 const static_files = @import("static_files.zig");
@@ -227,9 +228,14 @@ fn serveTask(task: ConnTask) void {
     }
 
     // A cleartext http2 site sniffs the preface and falls back to the h1
-    // loop for anything else (rfc 9113 3.3 prior knowledge).
+    // loop for anything else (rfc 9113 3.3 prior knowledge). A grpc site
+    // requires the preface outright, prior knowledge is the grpc norm.
     if (task.engine == .HTTP2) {
         http2_edge.serveConn(&task.proxy, task.stream);
+        return;
+    }
+    if (task.engine == .GRPC) {
+        grpc_edge.serveConn(&task.proxy, task.stream);
         return;
     }
 
