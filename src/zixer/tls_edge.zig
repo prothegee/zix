@@ -398,7 +398,7 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     var session: Session = undefined;
     handshake(&session, io, ctx, &stream_reader.interface, &stream_writer.interface) catch return;
 
-    http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address);
+    http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
     session.sendCloseNotify();
 }
 
