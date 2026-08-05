@@ -63,9 +63,9 @@
     <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 </div>
 <p align="center">
-    <code style="font-size: 6px;"><i>Green: Maintained | Yellow: Cross-Compiled</i></code>
-    <!-- <br> -->
-    <!-- <code><i>Looking for maintaner & contributor.</i></code> -->
+    <code><i>Green: Maintained</i></code>
+    <br>
+    <code><i>Yellow: Cross-Compiled (Looking for maintainer & contributor)</i></code>
 </p>
 
 <!-- <hr> -->
