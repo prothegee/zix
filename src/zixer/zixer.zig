@@ -227,6 +227,12 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("site_serve.zig"));
     std.testing.refAllDecls(@import("udp_flow_table.zig"));
     std.testing.refAllDecls(@import("udp_forward.zig"));
+    std.testing.refAllDecls(@import("h3_qpack.zig"));
+    std.testing.refAllDecls(@import("h3_frames.zig"));
+    std.testing.refAllDecls(@import("h3_streams.zig"));
+    std.testing.refAllDecls(@import("h3_translate.zig"));
+    std.testing.refAllDecls(@import("h3_conn.zig"));
+    std.testing.refAllDecls(@import("h3_edge.zig"));
 }
 
 test "zix zixer: cli args, command dir flag and filters split out" {
