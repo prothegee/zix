@@ -157,7 +157,7 @@ pub fn main(process: std.process.Init) !void {
     try waitForNodeExporter(io, allocator);
     std.debug.print("waiting for prometheus on {s}:{d} ...\n", .{ PROMETHEUS_IP, PROMETHEUS_PORT });
     try waitForPrometheus(io, allocator);
-    std.debug.print("both ready, running {d} example(s)\n\n", .{paths.items.len});
+    std.debug.print("both ready, running {d} example(s)\n", .{paths.items.len});
 
     const output_buf = try allocator.alloc(u8, MAX_CAPTURED_OUTPUT);
 
@@ -180,5 +180,5 @@ pub fn main(process: std.process.Init) !void {
         return error.ExamplesFailed;
     }
 
-    std.debug.print("\nall {d} examples passed\n", .{paths.items.len});
+    std.debug.print("all {d} examples passed\n", .{paths.items.len});
 }

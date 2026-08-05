@@ -141,7 +141,7 @@ pub fn main(process: std.process.Init) !void {
 
     std.debug.print("waiting for the container on {s}:{d} ...\n", .{ IP, PORT });
     try waitForServer(io, allocator);
-    std.debug.print("server ready, running {d} example(s)\n\n", .{paths.items.len});
+    std.debug.print("server ready, running {d} example(s)\n", .{paths.items.len});
 
     const output_buf = try allocator.alloc(u8, MAX_CAPTURED_OUTPUT);
 
@@ -164,5 +164,5 @@ pub fn main(process: std.process.Init) !void {
         return error.ExamplesFailed;
     }
 
-    std.debug.print("\nall {d} examples passed\n", .{paths.items.len});
+    std.debug.print("all {d} examples passed\n", .{paths.items.len});
 }
