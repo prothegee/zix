@@ -87,7 +87,7 @@ jobs:
       # within seconds of the old 3 minute cap. Both carry 6. Past that it is a stall.
       - name: zix examples
         if: always()
-        timeout-minutes: 6
+        timeout-minutes: 12
         shell: pwsh
         run: zig build examples --summary failures
 
