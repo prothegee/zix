@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const acme_listener = @import("acme_listener.zig");
+const h3_edge = @import("h3_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_serve = @import("site_serve.zig");
 const udp_forward = @import("udp_forward.zig");
@@ -14,10 +15,10 @@ const ACME_HTTP_PORT: u16 = 80;
 ///
 /// Note:
 /// - An http1, http2, or grpc site with upstreams or public_dir serves
-///   the edge loop, and a udp site with upstreams serves the per-flow
-///   forward (phases 3, 4, 7, 8, and 9). Every other engine binds and
-///   holds its socket, so the port is owned and a collision surfaces at
-///   start time, the loop attaches in its own phase.
+///   the edge loop, an http3 site with either serves the quic edge, and a
+///   udp site with upstreams serves the per-flow forward (phases 3, 4, 7,
+///   8, 9, and 10). Anything else binds and holds its socket, so the port
+///   is owned and a collision surfaces at start time.
 /// - A TLS site with acme keys also owns the port 80 companion listener,
 ///   see companionPort.
 pub const SiteRuntime = struct {
@@ -33,6 +34,7 @@ pub const SiteRuntime = struct {
     /// datagram socket).
     const Listener = union(enum) {
         proxy_edge: *site_serve.ServeState,
+        quic_edge: *h3_edge.EdgeState,
         udp_forward: *udp_forward.ForwardState,
         tcp: std.Io.net.Server,
         udp: std.Io.net.Socket,
@@ -91,6 +93,15 @@ pub const SiteRuntime = struct {
                     break :blk .{ .udp_forward = state };
                 }
 
+                if (engine == .HTTP3 and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
+                    const state = h3_edge.EdgeState.create(allocator, io, socket, &cfg, port) catch |err| {
+                        socket.close(io);
+                        return err;
+                    };
+
+                    break :blk .{ .quic_edge = state };
+                }
+
                 break :blk .{ .udp = socket };
             },
         };
@@ -135,6 +146,7 @@ pub const SiteRuntime = struct {
 fn closeListener(listener: *SiteRuntime.Listener, io: std.Io) void {
     switch (listener.*) {
         .proxy_edge => |state| state.shutdown(),
+        .quic_edge => |state| state.shutdown(),
         .udp_forward => |state| state.shutdown(),
         .tcp => |*server| server.deinit(io),
         .udp => |socket| socket.close(io),
@@ -256,7 +268,7 @@ test "zix zixer: site runtime, udp site with upstreams serves the forward" {
     rebound.unbind(std.testing.allocator, io);
 }
 
-test "zix zixer: site runtime, http3 engine also takes the udp path" {
+test "zix zixer: site runtime, http3 engine without planes only binds" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -267,6 +279,37 @@ test "zix zixer: site runtime, http3 engine also takes the udp path" {
     try std.testing.expect(runtime.listener == .udp);
 
     runtime.unbind(std.testing.allocator, io);
+}
+
+test "zix zixer: site runtime, http3 site with upstreams serves the quic edge" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site runtime quic edge test needs linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39801 }};
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP3,
+        .ip = "127.0.0.1",
+        .port = 39800,
+        .tls = true,
+        .tls_cert = "examples/certs/ecdsa_p256_cert.pem",
+        .tls_key = "examples/certs/ecdsa_p256_key.pem",
+        .upstreams = &upstreams,
+    };
+
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "pages_h3.cfg", cfg, 64);
+    try std.testing.expect(runtime.listener == .quic_edge);
+
+    runtime.unbind(std.testing.allocator, io);
+
+    // Udp binds strict, so a clean rebind proves unbind released the port.
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "pages_h3.cfg", cfg, 64);
+    rebound.unbind(std.testing.allocator, io);
 }
 
 test "zix zixer: site runtime, companion port only for tls acme sites off 80" {
