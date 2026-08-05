@@ -4,6 +4,8 @@ const std = @import("std");
 const zix = @import("zix");
 
 const http1_proxy = @import("http1_proxy.zig");
+const http2_edge = @import("http2_edge.zig");
+const site_cfg = @import("site_cfg.zig");
 
 const Tls = zix.Tls;
 
@@ -42,17 +44,29 @@ const content_type_alert: u8 = 21;
 const content_type_handshake: u8 = 22;
 const content_type_application_data: u8 = 23;
 
+/// ALPN preference list per site engine: an http2 site offers h2 first
+/// with the http/1.1 fallback, everything else pins http/1.1.
+pub fn alpnPrefs(engine: site_cfg.Engine) []const Tls.Alpn {
+    return switch (engine) {
+        .HTTP2 => &.{ .H2, .HTTP_1_1 },
+        else => &.{.HTTP_1_1},
+    };
+}
+
 /// Build the live TLS context for one site from its cert / key paths.
-/// ALPN pins http/1.1: the zixer edge loop is the http1 proxy.
+///
+/// Param:
+/// alpn - []const Tls.Alpn (protocol preferences, borrowed for the
+/// context lifetime, see alpnPrefs)
 ///
 /// Return:
 /// - Tls.Context (release with deinit)
 /// - the Tls.Context.init errors (missing file, bad PEM, unsupported key)
-pub fn buildContext(allocator: std.mem.Allocator, io: std.Io, cert_path: []const u8, key_path: []const u8) !Tls.Context {
+pub fn buildContext(allocator: std.mem.Allocator, io: std.Io, cert_path: []const u8, key_path: []const u8, alpn: []const Tls.Alpn) !Tls.Context {
     return Tls.Context.init(allocator, io, .{
         .cert_path = cert_path,
         .key_path = key_path,
-        .alpn = &.{.HTTP_1_1},
+        .alpn = alpn,
     });
 }
 
@@ -99,6 +113,9 @@ const RecordView = struct {
 ///   so a Session never moves after bind (heap or a stable stack frame).
 pub const Session = struct {
     conn: Conn,
+    /// The protocol the handshake negotiated, null when the client
+    /// offered no ALPN. The serve dispatch branches on it.
+    alpn: ?Tls.Alpn,
     stream_r: *std.Io.Reader,
     stream_w: *std.Io.Writer,
     reader: std.Io.Reader,
@@ -111,6 +128,7 @@ pub const Session = struct {
     /// path calls this, tests bind a hand-established pair directly.
     pub fn bind(session: *Session, conn: Conn, stream_r: *std.Io.Reader, stream_w: *std.Io.Writer) void {
         session.conn = conn;
+        session.alpn = null;
         session.stream_r = stream_r;
         session.stream_w = stream_w;
         session.reader = .{
@@ -326,6 +344,7 @@ pub fn handshake(session: *Session, io: std.Io, ctx: *const Tls.Context, stream_
     }
 
     session.bind(.{ .tls13 = conn }, stream_r, stream_w);
+    session.alpn = result.alpn;
 }
 
 /// TLS 1.2 fallback (RFC 5246, ECDHE-ECDSA): two-phase handshake, then the
@@ -373,6 +392,7 @@ fn handshake12(session: *Session, ctx: *const Tls.Context, opts: Tls.HandshakeOp
     try stream_w.flush();
 
     session.bind(.{ .tls12 = finish.connection }, stream_r, stream_w);
+    session.alpn = state.alpn;
 }
 
 /// Best-effort fatal alert in the clear (no keys yet) for a rejected hello.
@@ -385,8 +405,14 @@ fn sendAlertFor(stream_w: *std.Io.Writer, err: anyerror) void {
 }
 
 /// Serve one accepted edge connection with TLS terminated here: handshake,
-/// then the plain http1 proxy loop over the decrypted interfaces.
-pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, client_stream: std.Io.net.Stream) void {
+/// then the request loop the negotiated protocol picks, over the
+/// decrypted interfaces.
+///
+/// Note:
+/// - An http2 site serves h2 when ALPN settled on it, and still sniffs
+///   the prior-knowledge preface when the client offered no ALPN.
+///   Everything else runs the h1 loop.
+pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, client_stream: std.Io.net.Stream, engine: site_cfg.Engine) void {
     const io = proxy.io;
     defer client_stream.close(io);
 
@@ -398,7 +424,13 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     var session: Session = undefined;
     handshake(&session, io, ctx, &stream_reader.interface, &stream_writer.interface) catch return;
 
-    http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+    const wants_h2 = engine == .HTTP2 and
+        (session.alpn == .H2 or (session.alpn == null and http2_edge.prefersH2(&session.reader)));
+    if (wants_h2) {
+        http2_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+    } else {
+        http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+    }
     session.sendCloseNotify();
 }
 
@@ -423,7 +455,7 @@ const TestPair = struct {
 };
 
 fn establishPair(io: std.Io) !TestPair {
-    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY);
+    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY, &.{.HTTP_1_1});
     errdefer ctx.deinit();
 
     var hello_buf: [512]u8 = undefined;
@@ -469,13 +501,13 @@ test "zix zixer: tls edge, context builds from the shared cert fixtures" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY);
+    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY, &.{.HTTP_1_1});
     defer ctx.deinit();
 
     try testing.expect(ctx.cert_der.len > 0);
     try testing.expectEqual(@as(usize, 1), ctx.alpn.len);
 
-    try testing.expectError(error.TlsCertFileNotFound, buildContext(testing.allocator, io, "examples/certs/absent.pem", FIXTURE_KEY));
+    try testing.expectError(error.TlsCertFileNotFound, buildContext(testing.allocator, io, "examples/certs/absent.pem", FIXTURE_KEY, &.{.HTTP_1_1}));
 }
 
 test "zix zixer: tls edge, reader decrypts across records and ends on close notify" {
@@ -543,7 +575,7 @@ test "zix zixer: tls edge, tls12 session pumps the same interfaces" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY);
+    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY, &.{.HTTP_1_1});
     defer ctx.deinit();
     const ecdsa_key = switch (ctx.signing_key) {
         .ecdsa_p256 => |key_pair| key_pair,
@@ -633,7 +665,7 @@ test "zix zixer: tls edge, handshake terminates a tls13 client over loopback" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY);
+    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY, &.{.HTTP_1_1});
     defer ctx.deinit();
 
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39890);
