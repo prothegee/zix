@@ -12,10 +12,10 @@ const ACME_HTTP_PORT: u16 = 80;
 /// One started site inside the daemon.
 ///
 /// Note:
-/// - An http1 or http2 site with upstreams or public_dir serves the edge
-///   loop (phases 3, 4, and 7). Every other engine binds and holds its
-///   socket, so the port is owned and a collision surfaces at start time,
-///   the loop attaches in its own phase.
+/// - An http1, http2, or grpc site with upstreams or public_dir serves
+///   the edge loop (phases 3, 4, 7, and 8). Every other engine binds and
+///   holds its socket, so the port is owned and a collision surfaces at
+///   start time, the loop attaches in its own phase.
 /// - A TLS site with acme keys also owns the port 80 companion listener,
 ///   see companionPort.
 pub const SiteRuntime = struct {
@@ -64,7 +64,7 @@ pub const SiteRuntime = struct {
             .HTTP1, .HTTP2, .GRPC => blk: {
                 var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
-                if ((engine == .HTTP1 or engine == .HTTP2) and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
+                if ((engine == .HTTP1 or engine == .HTTP2 or engine == .GRPC) and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
                     const state = site_serve.ServeState.create(allocator, io, server, &cfg, port) catch |err| {
                         server.deinit(io);
                         return err;
