@@ -150,28 +150,10 @@ fn misdirected(proxy: *const Proxy, request: *const http1_head.RequestHead) bool
     const cert_der = proxy.tls_cert_der orelse return false;
     if (request.host.len == 0) return false;
 
-    const host = stripHostPort(request.host);
+    const host = proxy_headers.stripHostPort(request.host);
     zix.Tls.verifyCertIdentity(cert_der, host) catch return true;
 
     return false;
-}
-
-/// The Host value without its port. A bracketed IPv6 literal keeps its
-/// inner address, a bare IPv6 literal (several colons) stays whole.
-fn stripHostPort(host: []const u8) []const u8 {
-    if (host.len == 0) return host;
-
-    if (host[0] == '[') {
-        if (std.mem.indexOfScalar(u8, host, ']')) |close| return host[1..close];
-
-        return host;
-    }
-
-    if (std.mem.indexOfScalar(u8, host, ':')) |first| {
-        if (std.mem.lastIndexOfScalar(u8, host, ':').? == first) return host[0..first];
-    }
-
-    return host;
 }
 
 /// Answer the acme challenge path (rfc 8555 8.3) ahead of any site logic.
@@ -215,7 +197,7 @@ fn httpsRedirectAnswer(request: *const http1_head.RequestHead, client_w: *std.Io
         return closeOrKeep(request);
     }
 
-    const host = stripHostPort(request.host);
+    const host = proxy_headers.stripHostPort(request.host);
     const edge_close = requestCloses(request);
 
     client_w.writeAll("HTTP/1.1 301 Moved Permanently\r\n") catch return .CLOSE;
