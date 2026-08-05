@@ -4,6 +4,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const http1_proxy = @import("http1_proxy.zig");
+const grpc_edge = @import("grpc_edge.zig");
 const http2_edge = @import("http2_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 
@@ -45,10 +46,12 @@ const content_type_handshake: u8 = 22;
 const content_type_application_data: u8 = 23;
 
 /// ALPN preference list per site engine: an http2 site offers h2 first
-/// with the http/1.1 fallback, everything else pins http/1.1.
+/// with the http/1.1 fallback, a grpc site is h2 only, everything else
+/// pins http/1.1.
 pub fn alpnPrefs(engine: site_cfg.Engine) []const Tls.Alpn {
     return switch (engine) {
         .HTTP2 => &.{ .H2, .HTTP_1_1 },
+        .GRPC => &.{.H2},
         else => &.{.HTTP_1_1},
     };
 }
@@ -411,7 +414,8 @@ fn sendAlertFor(stream_w: *std.Io.Writer, err: anyerror) void {
 /// Note:
 /// - An http2 site serves h2 when ALPN settled on it, and still sniffs
 ///   the prior-knowledge preface when the client offered no ALPN.
-///   Everything else runs the h1 loop.
+/// - A grpc site always runs the grpc relay: only h2 was offered, and the
+///   relay itself requires the preface. Everything else runs the h1 loop.
 pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, client_stream: std.Io.net.Stream, engine: site_cfg.Engine) void {
     const io = proxy.io;
     defer client_stream.close(io);
@@ -426,7 +430,9 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
 
     const wants_h2 = engine == .HTTP2 and
         (session.alpn == .H2 or (session.alpn == null and http2_edge.prefersH2(&session.reader)));
-    if (wants_h2) {
+    if (engine == .GRPC) {
+        grpc_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+    } else if (wants_h2) {
         http2_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
     } else {
         http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
@@ -494,6 +500,12 @@ fn clientDecryptAll(client: *Tls.Client.ClientConnection, wire: []const u8, out:
     }
 
     return total;
+}
+
+test "zix zixer: tls edge, alpn preferences follow the site engine" {
+    try testing.expectEqualSlices(Tls.Alpn, &.{ .H2, .HTTP_1_1 }, alpnPrefs(.HTTP2));
+    try testing.expectEqualSlices(Tls.Alpn, &.{.H2}, alpnPrefs(.GRPC));
+    try testing.expectEqualSlices(Tls.Alpn, &.{.HTTP_1_1}, alpnPrefs(.HTTP1));
 }
 
 test "zix zixer: tls edge, context builds from the shared cert fixtures" {
