@@ -83,6 +83,7 @@
     - [WebRTC](./README-en.md#webrtc)
     - [Logger](./README-en.md#logger)
 - [Drivers](./README-en.md#drivers)
+- [zixer](./README-en.md#zixer)
 
 <br>
 
@@ -2309,6 +2310,52 @@ Database and metrics drivers, written in pure Zig on the standard library like t
 | [`prometheuz`](docs/driver/prometheuz/README-en.md) | Prometheus: scrape, remote write, PromQL instant and range query |
 
 Each linked README covers install, quickstart, both init styles, and points to its own hld, lld, and config docs.
+
+<br>
+
+## zixer
+
+`zixer` is the proxy gateway that ships with the engines. It is a program you run, not a library you link: every behavior comes from plain text config files, so a service goes behind it without a line of code. One daemon holds every site, and a site is one file naming an engine, a port, and where the traffic goes.
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+```
+
+```bash
+zig build zixer            # builds zig-out/bin/zixer-<arch>-<os>
+zixer init                 # scaffold the root dir: main.cfg, sites/, logs/
+zixer status               # validate every config, exit 1 on any fault
+zixer start example.cfg    # spawns the daemon when none is running
+zixer restart example.cfg  # re-read one site file, what a certbot deploy hook calls
+zixer daemon stop          # unbind every site and exit
+```
+
+The `engine` key picks the edge, and every engine except `udp` re-originates the request rather than forwarding it byte for byte:
+
+| Engine | Client side | Upstream leg |
+| :- | :- | :- |
+| http1 | HTTP/1.1, optional TLS, websocket upgrade, SSE, static files | HTTP/1.1, keep-alive |
+| http2 | h2 with a prior-knowledge sniff, rfc 8441 websocket | HTTP/1.1 per stream |
+| grpc | h2 only | h2, so trailers survive the hop |
+| http3 | QUIC and HTTP/3, TLS always | HTTP/1.1 |
+| udp | raw datagrams, one flow per client | raw datagrams |
+
+| Document | Description |
+| :- | :- |
+| [`docs/zixer/how-to-use-en.md`](docs/zixer/how-to-use-en.md) | zixer: build, first site, one recipe per shape, certbot renewal, troubleshooting |
+| [`docs/zixer/config-en.md`](docs/zixer/config-en.md) | zixer config reference: every main.cfg and site key, defaults, cross-field rules, fault texts |
+| [`docs/zixer/hld-en.md`](docs/zixer/hld-en.md) | zixer: process model, components, site lifecycle, engines, concurrency model, TLS and ACME |
+| [`docs/zixer/lld-en.md`](docs/zixer/lld-en.md) | zixer: config grammar, control wire, registry rules, per-edge internals, fixed limits |
+
+Runnable demos for every shape live in [`examples/proxies/`](examples/proxies/README-en.md), one upstream plus one site config each, and `zig build zixer-test-runner-all` drives all 13 through a throwaway root.
+
+**When to use:** put it in front of services you already run when you want TLS termination, static files, round-robin upstreams, or a protocol change at the edge, and you want that described in a file rather than written in code. Reach for the engines directly instead when the behavior belongs inside your own program.
 
 <br>
 
