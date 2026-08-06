@@ -2771,13 +2771,13 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     defer _ = linux.close(client_fd);
 
     const Handler = struct {
-        fn h(_: *Request, res: *Response, _: *Context) anyerror!void {
+        fn handle(_: *Request, res: *Response, _: *Context) anyerror!void {
             try res.sendRaw("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         }
     };
     const Srv = struct {
         fn run(fd: std.posix.fd_t) void {
-            serveConn(fd, Handler.h, .{ .large_body_rcvbuf = 1 << 20, .max_recv_buf = 8 * 1024 }, undefined);
+            serveConn(fd, Handler.handle, .{ .large_body_rcvbuf = 1 << 20, .max_recv_buf = 8 * 1024 }, undefined);
 
             _ = linux.close(fd);
         }
