@@ -376,6 +376,23 @@ Response ditulis ke `std.Io.Writer` yang mendasarinya. Buffer header 4 KB membat
 3. `send()` membaca `res.date_cache` langsung tanpa pemindaian header saat pengiriman.
 4. Format IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
+### Kebijakan error handler
+
+Handler mengembalikan `anyerror!void`. Saat handler mengembalikan error, engine yang menyelesaikan response, tetapi hanya bila handler belum menulis apa pun (`Response.sent`), sehingga response yang terkirim sebagian tidak pernah rusak:
+
+| Kondisi | Yang dikirim engine sebagai penutup |
+| :- | :- |
+| `req.body_too_large`: body chunked melewati `max_request_body` | `413`, `text/plain`, body `Payload Too Large` |
+| `req.body_malformed`: framing chunk tidak bisa di-parse | `400`, `text/plain`, body `Bad Request` |
+| error lainnya | `500`, `text/plain`, body `Internal Server Error` |
+
+Dua yang pertama adalah kesalahan client, jadi tidak menjadi `500`. Hanya body chunked yang sampai ke cabang itu: `Content-Length` yang dideklarasikan melewati batas ditolak sebelum handler berjalan.
+
+Dua konsekuensi yang perlu diketahui:
+
+- `send()` yang gagal tidak pernah menghasilkan `500`. `send()` menandai response sebagai terkirim sebelum menulis ke socket, jadi `try res.send(...)` yang gagal sampai ke engine dengan `Response.sent` sudah true. Error dibuang dan koneksi mati pada read atau write berikutnya, satu-satunya penanganan yang tersisa: socket yang baru saja menolak write juga tidak bisa membawa `500`.
+- Penulisan penutup itu best effort. Saat gagal, tidak ada percobaan kedua dan tidak ada baris log dari jalur itu.
+
 ---
 
 ## Routing
