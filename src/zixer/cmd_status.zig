@@ -225,8 +225,7 @@ fn checkPathExists(io: std.Io, faults: *fault.FaultList, key: []const u8, path: 
 
 const cmd_init = @import("cmd_init.zig");
 
-fn writeSiteFile(io: std.Io, arena: std.mem.Allocator, root: []const u8, name: []const u8, content: []const u8) !void {
-    const path = try std.fs.path.join(arena, &.{ root, "sites", name });
+fn writeWholeFile(io: std.Io, path: []const u8, content: []const u8) !void {
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
 
@@ -234,6 +233,12 @@ fn writeSiteFile(io: std.Io, arena: std.mem.Allocator, root: []const u8, name: [
     var writer = file.writer(io, &write_buf);
     try writer.interface.writeAll(content);
     try writer.interface.flush();
+}
+
+fn writeSiteFile(io: std.Io, arena: std.mem.Allocator, root: []const u8, name: []const u8, content: []const u8) !void {
+    const path = try std.fs.path.join(arena, &.{ root, "sites", name });
+
+    try writeWholeFile(io, path, content);
 }
 
 test "zix zixer: cmd status, initialized root with a valid site reports ok" {
@@ -338,6 +343,64 @@ test "zix zixer: cmd status, filter narrows and unknown filter fails" {
 
     try std.testing.expectEqual(@as(u8, 1), unknown_code);
     try std.testing.expect(std.mem.indexOf(u8, unknown.buffered(), "no config named nope") != null);
+}
+
+test "zix zixer: cmd status, a custom sites_dir is where site configs are read" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_status_sitesdir_test/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_status_sitesdir_test") catch {};
+
+    const elsewhere = try std.fs.path.join(arena.allocator(), &.{ test_root, "elsewhere" });
+    const logs = try std.fs.path.join(arena.allocator(), &.{ test_root, "logs" });
+    try std.Io.Dir.cwd().createDirPath(io, elsewhere);
+    try std.Io.Dir.cwd().createDirPath(io, logs);
+
+    const main_content = try std.fmt.allocPrint(arena.allocator(), "logs_dir: {s}\nsites_dir: {s}\n", .{ logs, elsewhere });
+    const main_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "main.cfg" });
+    try writeWholeFile(io, main_path, main_content);
+
+    const moved_path = try std.fs.path.join(arena.allocator(), &.{ elsewhere, "moved.cfg" });
+    try writeWholeFile(io, moved_path, "engine: http1\nport: 9710\nupstreams: 127.0.0.1:3000\n");
+
+    var report_buf: [8192]u8 = undefined;
+    var report = std.Io.Writer.fixed(&report_buf);
+    const code = try run(io, arena.allocator(), &report, .{ .path = test_root, .source = .ARG }, &.{});
+
+    try std.testing.expectEqual(@as(u8, 0), code);
+    try std.testing.expect(std.mem.indexOf(u8, report.buffered(), "moved.cfg:\nstatus: ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report.buffered(), "elsewhere") != null);
+}
+
+test "zix zixer: cmd status, a logs_dir that does not exist faults" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_status_logsdir_test/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_status_logsdir_test") catch {};
+
+    var init_buf: [2048]u8 = undefined;
+    var init_report = std.Io.Writer.fixed(&init_buf);
+    _ = try cmd_init.run(io, arena.allocator(), &init_report, .{ .path = test_root, .source = .ARG });
+
+    const logs = try std.fs.path.join(arena.allocator(), &.{ test_root, "logs" });
+    try std.Io.Dir.cwd().deleteTree(io, logs);
+
+    var report_buf: [8192]u8 = undefined;
+    var report = std.Io.Writer.fixed(&report_buf);
+    const code = try run(io, arena.allocator(), &report, .{ .path = test_root, .source = .ARG }, &.{"main.cfg"});
+
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, report.buffered(), "logs_dir: directory does not exist") != null);
 }
 
 test "zix zixer: cmd status, render main block matches the documented shape" {
