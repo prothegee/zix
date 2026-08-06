@@ -36,6 +36,7 @@
 const std = @import("std");
 const common = @import("common.zig");
 const isolate = @import("isolate.zig");
+const group_run = @import("group_run.zig");
 const report_name = @import("report_name.zig");
 const checks_http = @import("checks_http.zig");
 const checks_tls = @import("checks_tls.zig");
@@ -458,20 +459,11 @@ fn forwardResult(io: std.Io, result: isolate.Result, tally: *Tally) void {
 
 // --------------------------------------------------------- //
 
-/// Max attempts per check. A startup-contention failure (a fresh server's accept threads starved by
-/// a concurrent startup burst, so the probe or first client connect is refused) is transient, so
-/// respawning the whole check almost always clears it. Real assertion failures are never retried.
-const MAX_ATTEMPTS = 3;
-
-/// One concurrent task: run a check in its own child process, retrying the whole check on a transient
-/// startup error. The check is self-contained (the child spawns its own server and kills it on return,
-/// even on error), so each retry respawns from a clean slate. A short backoff between attempts lets a
-/// momentary load spike clear instead of respawning straight back into it.
-///
-/// Note:
-/// - A TIMED_OUT check is never retried. The parent killed that child, so it ran no defers and left
-///   its server running on the check's port. A second attempt would talk to the orphan rather than a
-///   fresh server, which is worse than reporting the failure.
+/// One concurrent task: run a check in its own child process, retrying the whole check while its
+/// verdict says another attempt is worth spawning (see isolate.attemptCap). The check is
+/// self-contained (the child spawns its own server and kills it on return, even on error), so each
+/// retry respawns from a clean slate. A short backoff between attempts lets a momentary load spike
+/// clear instead of respawning straight back into it.
 fn runIsolatedCheck(
     io: std.Io,
     self_exe: []const u8,
@@ -483,7 +475,7 @@ fn runIsolatedCheck(
     var attempt: usize = 1;
     while (true) : (attempt += 1) {
         const result = isolate.runIsolated(io, self_exe, label, paths, timeout_ms, report_buf);
-        if (result.verdict != .RETRIABLE or attempt >= MAX_ATTEMPTS) return result;
+        if (attempt >= isolate.attemptCap(result.verdict)) return result;
 
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(750), .awake) catch {};
     }
@@ -491,7 +483,14 @@ fn runIsolatedCheck(
 
 /// Child mode: run exactly one check, print its result line, and exit with the code the parent reads.
 /// One attempt only, since retries belong to the parent.
+///
+/// Note:
+/// - The first thing this does is take a process group of its own, before the check spawns any
+///   server. A check that parks is killed by the parent, and a killed process runs no defers, so
+///   the group is the only handle left on the server it started.
 fn runOneCheck(io: std.Io, arg_iter: *std.process.Args.Iterator) noreturn {
+    group_run.leadOwnGroup();
+
     const label = arg_iter.next() orelse exitMissing(isolate.ONLY_FLAG);
     const check = findCheck(label) orelse {
         std.debug.print("FAIL: no check named {s}\n", .{label});
