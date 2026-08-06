@@ -13,7 +13,13 @@ parse_target_filter "${1:-zig}" "${2:-}"
 
 # --------------------------------------------------------- #
 
-matrix "zix" . test-all examples zixer
+matrix "zix" . test-all examples
+
+# --------------------------------------------------------- #
+# zixer keeps its own build files and its own steps, so its unit tests and
+# demo upstreams are separate legs from zix's.
+
+matrix "zixer" . zixer zixer-unit-test zixer-examples
 
 # --------------------------------------------------------- #
 # Drivers are standalone packages with their own build.zig. On a foreign
@@ -22,7 +28,7 @@ matrix "zix" . test-all examples zixer
 # container lifecycle and need docker running.
 # prometheuz has no test-integration step yet (unit + examples).
 
-matrix "postgrez" src/driver/postgrez est-unit test-integration examples
+matrix "postgrez" src/driver/postgrez test-unit test-integration examples
 matrix "rediz" src/driver/rediz test-unit test-integration examples
 matrix "prometheuz" src/driver/prometheuz test-unit examples
 
