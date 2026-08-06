@@ -5,7 +5,7 @@
 //!
 //! Run:
 //! zig build example-grpc_timeout
-//! ./zig-out/bin/example-grpc_timeout
+//! ./zig-out/bin/zix-example-grpc_timeout
 //!
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \

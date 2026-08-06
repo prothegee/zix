@@ -1,6 +1,6 @@
 // Usage:
 // zig build example-webrtc_signaling
-// ./zig-out/bin/example-webrtc_signaling
+// ./zig-out/bin/zix-example-webrtc_signaling
 // browser: http://127.0.0.1:9081/ in two tabs
 //
 // The signalling half of WebRTC, and nothing else. Two browser tabs need to hand each other an

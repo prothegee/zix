@@ -1,6 +1,6 @@
 // Usage:
 // zig build example-webrtc_sfu_broadcast
-// ./zig-out/bin/example-webrtc_sfu_broadcast
+// ./zig-out/bin/zix-example-webrtc_sfu_broadcast
 // browser: http://localhost:9087/ to send, and the same page in more tabs to watch
 // use `ip -4 -o addr show` to find the address the page asks for
 //

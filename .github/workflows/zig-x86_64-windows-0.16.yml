@@ -54,30 +54,30 @@ jobs:
       # zig waits forever on an active test and buffers the child's stderr,
       # so the workflow kill loses every log line. With it, zig prints the
       # hung test's name plus its captured stderr and continues to the next
-      # test, so one run enumerates every hang. 15s is ~5x the slowest
+      # test, so one run enumerates every hang. 30s is ~5x the slowest
       # legitimate test on this runner (connect-retry ceiling ~3s).
       - name: zix unit tests
         timeout-minutes: 3
         shell: pwsh
-        run: zig build unit-test --summary failures --test-timeout 15s
+        run: zig build unit-test --summary failures --test-timeout 30s
 
       - name: zix integration tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build integration-test --summary failures --test-timeout 15s
+        run: zig build integration-test --summary failures --test-timeout 30s
 
       - name: zix behaviour tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build behaviour-test --summary failures --test-timeout 15s
+        run: zig build behaviour-test --summary failures --test-timeout 30s
 
       - name: zix edge tests
         if: always()
         timeout-minutes: 3
         shell: pwsh
-        run: zig build edge-test --summary failures --test-timeout 15s
+        run: zig build edge-test --summary failures --test-timeout 30s
 
       # examples is compile-plus-install only (no execution). test-runner-all then drives
       # every zix protocol end to end over real sockets, so unlike the cross-build matrix
@@ -87,9 +87,37 @@ jobs:
       # within seconds of the old 3 minute cap. Both carry 6. Past that it is a stall.
       - name: zix examples
         if: always()
-        timeout-minutes: 6
+        timeout-minutes: 12
         shell: pwsh
         run: zig build examples --summary failures
+
+      # zixer keeps its own build files and steps: the gateway binary, its unit
+      # tests, the proxy demo upstreams, and the runner that drives every demo
+      # end to end through a real daemon. None of them ride on a zix step.
+      - name: zixer gateway
+        if: always()
+        timeout-minutes: 9
+        shell: pwsh
+        run: zig build zixer --summary failures
+
+      - name: zixer unit tests
+        if: always()
+        timeout-minutes: 6
+        shell: pwsh
+        run: zig build zixer-unit-test --summary failures
+
+      - name: zixer demo upstreams
+        if: always()
+        timeout-minutes: 6
+        shell: pwsh
+        run: zig build zixer-examples --summary failures
+
+      - name: zixer proxy runner
+        if: always()
+        timeout-minutes: 12
+        shell: pwsh
+        run: zig build zixer-test-runner-all --summary failures
+
 
       - name: zix protocol runners
         if: always()

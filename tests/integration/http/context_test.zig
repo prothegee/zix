@@ -29,8 +29,8 @@ test "zix integration: Context.withTimeout and withDeadline, timing behavior" {
     defer threaded.deinit();
 
     var result = TimingResult{};
-    const t = try std.Thread.spawn(.{}, timingTestFn, .{ &result, threaded.io() });
-    t.join();
+    const timing_thread = try std.Thread.spawn(.{}, timingTestFn, .{ &result, threaded.io() });
+    timing_thread.join();
 
     try std.testing.expect(result.within_budget);
     try std.testing.expect(result.with_deadline);

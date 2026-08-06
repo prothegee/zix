@@ -34,10 +34,10 @@ fn dispatchRaw(raw: []const u8, fd: std.posix.fd_t) !void {
 
 /// Drain whatever the peer end holds right now.
 fn readPeer(peer: std.posix.fd_t, buf: []u8) []const u8 {
-    const rc = std.os.linux.read(peer, buf.ptr, buf.len);
-    if (std.posix.errno(rc) != .SUCCESS) return &.{};
+    const read_result = std.os.linux.read(peer, buf.ptr, buf.len);
+    if (std.posix.errno(read_result) != .SUCCESS) return &.{};
 
-    return buf[0..@intCast(rc)];
+    return buf[0..@intCast(read_result)];
 }
 
 fn writeFixture(dir: std.Io.Dir, name: []const u8, data: []const u8) void {

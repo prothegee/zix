@@ -75,9 +75,9 @@ test "zix behaviour: body(), chunked second call returns cached result" {
             "4\r\ntest\r\n0\r\n\r\n",
         arena.allocator(),
     );
-    const b1 = try req.body();
-    const b2 = try req.body();
-    try std.testing.expect(b1.ptr == b2.ptr);
+    const first = try req.body();
+    const second = try req.body();
+    try std.testing.expect(first.ptr == second.ptr);
 }
 
 test "zix behaviour: method(), resolves each method" {

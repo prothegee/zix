@@ -1,6 +1,6 @@
 // Usage:
 // zig build example-webrtc_video_call
-// ./zig-out/bin/example-webrtc_video_call
+// ./zig-out/bin/zix-example-webrtc_video_call
 // browser: http://localhost:9088/ in two or more tabs, and read the note about that address below
 //
 // A camera and microphone call between everyone in one room. zix carries the offer, the answer,

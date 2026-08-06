@@ -64,15 +64,15 @@ test "zix behaviour: GrpcContext.recvMessage empty body returns null" {
 test "zix behaviour: GrpcPrefix roundtrip" {
     var buf: [5]u8 = undefined;
     zix.Grpc.writePrefix(&buf, false, 1024);
-    const p = try zix.Grpc.readPrefix(&buf);
-    try std.testing.expect(!p.compress);
-    try std.testing.expectEqual(@as(u32, 1024), p.msg_len);
+    const prefix = try zix.Grpc.readPrefix(&buf);
+    try std.testing.expect(!prefix.compress);
+    try std.testing.expectEqual(@as(u32, 1024), prefix.msg_len);
 }
 
 test "zix behaviour: parsePath valid path" {
-    const p = zix.Grpc.parsePath("/helloworld.Greeter/SayHello").?;
-    try std.testing.expectEqualStrings("helloworld.Greeter", p.package_service);
-    try std.testing.expectEqualStrings("SayHello", p.method);
+    const parsed = zix.Grpc.parsePath("/helloworld.Greeter/SayHello").?;
+    try std.testing.expectEqualStrings("helloworld.Greeter", parsed.package_service);
+    try std.testing.expectEqualStrings("SayHello", parsed.method);
 }
 
 test "zix behaviour: parseTimeout seconds" {

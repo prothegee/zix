@@ -201,7 +201,7 @@ pub fn staticEntry(index: u64) ?Field {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -213,17 +213,17 @@ fn fieldIs(field: Field, name: []const u8, value: []const u8) bool {
 }
 
 test "zix http3: RFC 7541 C.1 prefixed integer decode and encode" {
-    try std.testing.expectEqual(@as(u64, 10), (try decodePrefixedInt(&h("0a"), 5)).value);
+    try std.testing.expectEqual(@as(u64, 10), (try decodePrefixedInt(&hexBytes("0a"), 5)).value);
 
-    const v1337 = try decodePrefixedInt(&h("1f9a0a"), 5);
+    const v1337 = try decodePrefixedInt(&hexBytes("1f9a0a"), 5);
     try std.testing.expect(v1337.value == 1337 and v1337.len == 3);
 
-    try std.testing.expectEqual(@as(u64, 42), (try decodePrefixedInt(&h("2a"), 8)).value);
+    try std.testing.expectEqual(@as(u64, 42), (try decodePrefixedInt(&hexBytes("2a"), 8)).value);
 
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, &h("0a"), buf[0..encodePrefixedInt(&buf, 5, 0, 10)]);
-    try std.testing.expectEqualSlices(u8, &h("1f9a0a"), buf[0..encodePrefixedInt(&buf, 5, 0, 1337)]);
-    try std.testing.expectEqualSlices(u8, &h("2a"), buf[0..encodePrefixedInt(&buf, 8, 0, 42)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("0a"), buf[0..encodePrefixedInt(&buf, 5, 0, 10)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("1f9a0a"), buf[0..encodePrefixedInt(&buf, 5, 0, 1337)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("2a"), buf[0..encodePrefixedInt(&buf, 8, 0, 42)]);
 
     const big: u64 = (1 << 62) - 1;
     const big_round = try decodePrefixedInt(buf[0..encodePrefixedInt(&buf, 5, 0, big)], 5);
@@ -251,19 +251,19 @@ test "zix http3: RFC 9204 Appendix A static table and 4.2 streams" {
 }
 
 test "zix http3: RFC 9204 4.5 static-table field line representations" {
-    const idx_path = try decodeIndexedFieldLine(&h("c1"));
+    const idx_path = try decodeIndexedFieldLine(&hexBytes("c1"));
     try std.testing.expect(idx_path.static and fieldIs(static_table[idx_path.index], ":path", "/"));
 
-    const idx_get = try decodeIndexedFieldLine(&h("d1"));
+    const idx_get = try decodeIndexedFieldLine(&hexBytes("d1"));
     try std.testing.expect(idx_get.static and fieldIs(static_table[idx_get.index], ":method", "GET"));
 
-    const idx_status = try decodeIndexedFieldLine(&h("d9"));
+    const idx_status = try decodeIndexedFieldLine(&hexBytes("d9"));
     try std.testing.expect(idx_status.static and fieldIs(static_table[idx_status.index], ":status", "200"));
 
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, &h("d9"), buf[0..encodeStaticIndexedFieldLine(&buf, 25)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("d9"), buf[0..encodeStaticIndexedFieldLine(&buf, 25)]);
 
-    const lit = try decodeLiteralNameRef(&h("500b6578616d706c652e636f6d"));
+    const lit = try decodeLiteralNameRef(&hexBytes("500b6578616d706c652e636f6d"));
     try std.testing.expect(lit.static and std.mem.eql(u8, static_table[lit.name_index].name, ":authority"));
     try std.testing.expect(std.mem.eql(u8, lit.value, "example.com") and !lit.huffman);
 }

@@ -92,9 +92,10 @@ pub fn addSteps(
         .{ "example-grpc_multi_client", "examples/grpc_multi_client.zig", "grpc" },
     };
 
-    // Installed binaries carry the target triple (example-<name>-<arch>-<os>), so
-    // building several targets in a row never overwrites a prior target's binary
-    // in zig-out/bin. Step names stay unsuffixed.
+    // Installed binaries carry the zix- prefix and the target triple
+    // (zix-example-<name>-<arch>-<os>), so a zig-out/bin listing reads as zix
+    // output and building several targets in a row never overwrites a prior
+    // target's binary. Step names stay unprefixed and unsuffixed.
     const triple = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
 
     const examples_step = b.step("examples", "Build all examples");
@@ -134,7 +135,7 @@ pub fn addSteps(
         exe_mod.addImport("zix", zix);
 
         const exe = b.addExecutable(.{
-            .name = b.fmt("{s}-{s}", .{ pair[0], triple }),
+            .name = b.fmt("zix-{s}-{s}", .{ pair[0], triple }),
             .root_module = exe_mod,
         });
 
@@ -170,7 +171,7 @@ pub fn addSteps(
 
         // `example-<name>` builds and installs the binary to zig-out/bin. It does not run it, so
         // building one (or all, via `zig build examples`) never blocks on a server example. Run a
-        // built example with `./zig-out/bin/example-<name>`.
+        // built example with `./zig-out/bin/zix-example-<name>-<arch>-<os>`.
         const build_step = b.step(pair[0], "Build " ++ pair[0]);
         build_step.dependOn(&install.step);
     }

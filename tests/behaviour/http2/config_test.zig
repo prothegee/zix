@@ -33,8 +33,8 @@ test "zix behaviour: Http2ServerConfig max_frame_size defaults to 16384" {
 }
 
 test "zix behaviour: Http2 HandlerFn can be assigned to a local variable" {
-    const h: zix.Http2.HandlerFn = struct {
-        fn f(
+    const handler: zix.Http2.HandlerFn = struct {
+        fn handle(
             req: *zix.Http2.Request,
             res: *zix.Http2.Response,
             ctx: *zix.Http2.Context,
@@ -43,8 +43,8 @@ test "zix behaviour: Http2 HandlerFn can be assigned to a local variable" {
             _ = res;
             _ = ctx;
         }
-    }.f;
-    _ = h;
+    }.handle;
+    _ = handler;
 }
 
 test "zix behaviour: Http2 PREFACE length is 24" {

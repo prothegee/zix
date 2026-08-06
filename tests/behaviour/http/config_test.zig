@@ -95,18 +95,18 @@ test "zix behaviour: HeaderSize, all tier values" {
     const minimal: zix.Http.HeaderSize = .MINIMAL;
     const common: zix.Http.HeaderSize = .COMMON;
     const large: zix.Http.HeaderSize = .LARGE;
-    const xl: zix.Http.HeaderSize = .EXTRA_LARGE;
+    const extra_large: zix.Http.HeaderSize = .EXTRA_LARGE;
     try std.testing.expectEqual(@as(usize, 16), minimal.value());
     try std.testing.expectEqual(@as(usize, 32), common.value());
     try std.testing.expectEqual(@as(usize, 64), large.value());
-    try std.testing.expectEqual(@as(usize, 128), xl.value());
+    try std.testing.expectEqual(@as(usize, 128), extra_large.value());
 }
 
 test "zix behaviour: HeaderSize.CUSTOM, value() returns the given N" {
-    const hs7: zix.Http.HeaderSize = .{ .CUSTOM = 7 };
-    const hs100: zix.Http.HeaderSize = .{ .CUSTOM = 100 };
-    try std.testing.expectEqual(@as(usize, 7), hs7.value());
-    try std.testing.expectEqual(@as(usize, 100), hs100.value());
+    const custom_7: zix.Http.HeaderSize = .{ .CUSTOM = 7 };
+    const custom_100: zix.Http.HeaderSize = .{ .CUSTOM = 100 };
+    try std.testing.expectEqual(@as(usize, 7), custom_7.value());
+    try std.testing.expectEqual(@as(usize, 100), custom_100.value());
 }
 
 // --------------------------------------------------------- //

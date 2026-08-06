@@ -22,7 +22,7 @@ test "zix edge: dispatch, no registered route sends 404" {
     if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
 
     var fds: [2]i32 = undefined;
     try socketPair(&fds);
@@ -31,9 +31,9 @@ test "zix edge: dispatch, no registered route sends 404" {
 
     const router = zix.Http.Router(&[_]zix.Http.Route{});
 
-    var req = try zix.Http.Request.fromRaw("GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(fds[1], false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(fds[1], false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     try router.dispatch(&req, &res, &ctx);
     try std.testing.expectEqual(zix.Http.Status.Code.NOT_FOUND, res.status);
@@ -46,7 +46,7 @@ test "zix edge: dispatch, prefix /api does NOT match /apiv2" {
     if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
 
     var fds: [2]i32 = undefined;
     try socketPair(&fds);
@@ -57,9 +57,9 @@ test "zix edge: dispatch, prefix /api does NOT match /apiv2" {
         .{ .path = "/api", .handler = handlerA, .kind = .PREFIX },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /apiv2/resource HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(fds[1], false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /apiv2/resource HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(fds[1], false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     try router.dispatch(&req, &res, &ctx);
     try std.testing.expectEqual(zix.Http.Status.Code.NOT_FOUND, res.status);

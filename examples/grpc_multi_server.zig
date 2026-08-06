@@ -8,10 +8,10 @@
 //!
 //! Run:
 //! zig build example-grpc_multi_server
-//! ./zig-out/bin/example-grpc_multi_server
+//! ./zig-out/bin/zix-example-grpc_multi_server
 //!
 //! Test with the multi client:
-//! ./zig-out/bin/example-grpc_multi_client
+//! ./zig-out/bin/zix-example-grpc_multi_client
 //!
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \

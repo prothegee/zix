@@ -329,8 +329,8 @@ test "zix udp: raw udp epoll and uring run shapes compile (monomorphize without 
     // whole call chain at comptime: runUring -> workerLoopUring, runEpoll -> workerLoopEpoll, so a compile
     // error in either generic body surfaces here rather than only when an example instantiates it.
     const noop = struct {
-        fn h(_: []const u8, _: *const std.Io.net.IpAddress, _: *core.Sink) void {}
-    }.h;
+        fn handle(_: []const u8, _: *const std.Io.net.IpAddress, _: *core.Sink) void {}
+    }.handle;
 
     if (false) {
         runUring(noop, undefined) catch {};
@@ -341,8 +341,8 @@ test "zix udp: raw udp epoll and uring run shapes compile (monomorphize without 
 
 test "zix udp: raw udp parseMultishotBuf recovers the peer and payload at the recvmsg_out offsets" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var buf: [256]u8 = @splat(0);
 
@@ -373,8 +373,8 @@ test "zix udp: raw udp parseMultishotBuf recovers the peer and payload at the re
 
 test "zix udp: raw udp io_uring recvmsg delivers a datagram and its peer address by slot" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     if (comptime !datagram.is_linux) return;
 

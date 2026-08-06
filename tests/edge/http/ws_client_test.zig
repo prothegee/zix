@@ -9,16 +9,16 @@ test "zix edge: WsClient.connect, wss:// returns TlsNotSupported" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
-    const wsc = zix.Http.WsClient.init(.{ .io = threaded.io() });
-    try std.testing.expectError(error.TlsNotSupported, wsc.connect("wss://example.com/ws"));
+    const ws_client = zix.Http.WsClient.init(.{ .io = threaded.io() });
+    try std.testing.expectError(error.TlsNotSupported, ws_client.connect("wss://example.com/ws"));
 }
 
 test "zix edge: WsClient.connect, non-ws scheme returns InvalidUrl" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
-    const wsc = zix.Http.WsClient.init(.{ .io = threaded.io() });
-    try std.testing.expectError(error.InvalidUrl, wsc.connect("http://127.0.0.1:9000/ws"));
+    const ws_client = zix.Http.WsClient.init(.{ .io = threaded.io() });
+    try std.testing.expectError(error.InvalidUrl, ws_client.connect("http://127.0.0.1:9000/ws"));
 }
 
 test "zix edge: WsConn.send mask bit present in every frame header" {

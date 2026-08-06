@@ -1,6 +1,6 @@
 // Usage:
 // zig build example-webrtc_stun
-// ./zig-out/bin/example-webrtc_stun
+// ./zig-out/bin/zix-example-webrtc_stun
 // browser: http://<this machine's address>:9082/, not localhost, see the note below
 // use `ip -4 -o addr show` to check machine address.
 //

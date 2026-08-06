@@ -139,13 +139,13 @@ test "zix edge: gRPC serveConn closes cleanly on immediate client disconnect" {
     const io = threaded.io();
 
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT);
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT);
 
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT);
     const stream = try addr.connect(io, .{ .mode = .stream });
     zix.utils.fd_io.close(stream.socket.handle);
 
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
 }
 
@@ -158,7 +158,7 @@ test "zix edge: gRPC finish-only handler delivers error status to client" {
     const io = threaded.io();
 
     var ctx: ServerCtx = undefined;
-    const t = try spawnErrorServer(&ctx, io, TEST_PORT + 1);
+    const server_thread = try spawnErrorServer(&ctx, io, TEST_PORT + 1);
 
     var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 1 }, io);
     defer client.deinit();
@@ -173,7 +173,7 @@ test "zix edge: gRPC finish-only handler delivers error status to client" {
     try std.testing.expectEqual(zix.Grpc.Status.INVALID_ARGUMENT, resp.status);
 
     zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }

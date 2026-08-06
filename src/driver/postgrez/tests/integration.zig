@@ -634,11 +634,13 @@ test "postgrez integration: 18 executor pipelines a batch of prepared reads in o
     for (0..count) |slot| try testing.expectEqual(@as(i64, @intCast(100 + slot)), ExecutorProbe.results[slot]);
 
     // stats settle just after the consumer signals done (the driver records
-    // the batch once run_batch returns), so accumulate drained snapshots
+    // the batch once run_batch returns), so accumulate drained snapshots.
+    // jobs and batches land independently: a jobs-only exit can drain all
+    // 8 jobs while the batch count arrives a beat later, so wait for both.
     var seen_jobs: u64 = 0;
     var seen_batches: u64 = 0;
     var spins: usize = 0;
-    while (seen_jobs < count) : (spins += 1) {
+    while (seen_jobs < count or seen_batches < 1) : (spins += 1) {
         if (spins > 50_000_000) return error.StatsNeverSettled;
 
         const stats = executor.snapshot();

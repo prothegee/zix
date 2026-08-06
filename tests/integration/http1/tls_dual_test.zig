@@ -49,11 +49,11 @@ fn serveDual(io: std.Io, tls: *zix.Tls.Context, logger: *zix.Logger, args: Serve
 }
 
 fn connectRetry(io: std.Io, port: u16) !std.Io.net.Stream {
-    const sa = try std.Io.net.IpAddress.resolve(io, IP, port);
+    const server_addr = try std.Io.net.IpAddress.resolve(io, IP, port);
 
     var attempt: usize = 0;
     while (attempt < 100) : (attempt += 1) {
-        if (sa.connect(io, .{ .mode = .stream })) |stream| {
+        if (server_addr.connect(io, .{ .mode = .stream })) |stream| {
             return stream;
         } else |_| {
             std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
@@ -64,11 +64,11 @@ fn connectRetry(io: std.Io, port: u16) !std.Io.net.Stream {
 }
 
 /// Read exactly one TLS record (5-byte header + body) into buf.
-fn readRecord(rd: *std.Io.Reader, buf: []u8) ![]const u8 {
-    try rd.readSliceAll(buf[0..5]);
+fn readRecord(reader: *std.Io.Reader, buf: []u8) ![]const u8 {
+    try reader.readSliceAll(buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
-    try rd.readSliceAll(buf[5 .. 5 + length]);
+    try reader.readSliceAll(buf[5 .. 5 + length]);
 
     return buf[0 .. 5 + length];
 }
@@ -123,45 +123,45 @@ fn expectTlsOk(io: std.Io, tls_port: u16) !void {
     var stream = try connectRetry(io, tls_port);
     defer stream.close(io);
 
-    var rd_buf: [8 * 1024]u8 = undefined;
-    var wr_buf: [4 * 1024]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [8 * 1024]u8 = undefined;
+    var write_buf: [4 * 1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     // TLS 1.3 handshake via the zix client: ClientHello out, server flight in, Finished out.
     var ch_buf: [512]u8 = undefined;
     const started = try zix.Tls.Client.start(.{ .client_random = @splat(0x21), .ephemeral_secret = @splat(0x52) }, &ch_buf);
     var state = started.state;
 
-    var ch_rec: [600]u8 = undefined;
-    ch_rec[0] = 22; // handshake record
-    std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
-    std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
-    @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
-    try wr.interface.writeAll(ch_rec[0 .. 5 + started.client_hello.len]);
-    try wr.interface.flush();
+    var hello_record: [600]u8 = undefined;
+    hello_record[0] = 22; // handshake record
+    std.mem.writeInt(u16, hello_record[1..3], 0x0303, .big);
+    std.mem.writeInt(u16, hello_record[3..5], @intCast(started.client_hello.len), .big);
+    @memcpy(hello_record[5 .. 5 + started.client_hello.len], started.client_hello);
+    try writer.interface.writeAll(hello_record[0 .. 5 + started.client_hello.len]);
+    try writer.interface.flush();
 
     var flight_buf: [4096]u8 = undefined;
-    var flen: usize = 0;
+    var flight_len: usize = 0;
     for (0..3) |_| {
-        const rec = try readRecord(&rd.interface, flight_buf[flen..]);
-        flen += rec.len;
+        const record = try readRecord(&reader.interface, flight_buf[flight_len..]);
+        flight_len += record.len;
     }
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try zix.Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
-    try wr.interface.writeAll(finished.client_finished);
-    try wr.interface.flush();
+    var finished = try zix.Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
+    try writer.interface.writeAll(finished.client_finished);
+    try writer.interface.flush();
 
     // Same route as cleartext, over TLS this time.
-    var enc: [512]u8 = undefined;
-    try wr.interface.writeAll(finished.connection.writeAppData("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", &enc));
-    try wr.interface.flush();
+    var cipher_buf: [512]u8 = undefined;
+    try writer.interface.writeAll(finished.connection.writeAppData("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", &cipher_buf));
+    try writer.interface.flush();
 
-    var rec_buf: [2048]u8 = undefined;
-    const rec = try readRecord(&rd.interface, &rec_buf);
+    var record_buf: [2048]u8 = undefined;
+    const record = try readRecord(&reader.interface, &record_buf);
     var plain: [2048]u8 = undefined;
-    const resp = try finished.connection.readAppData(rec, &plain);
+    const resp = try finished.connection.readAppData(record, &plain);
     try std.testing.expect(std.mem.indexOf(u8, resp, "200 OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp, "dual") != null);
 }
@@ -171,16 +171,16 @@ fn expectCleartextOk(io: std.Io, port: u16) !void {
     var stream = try connectRetry(io, port);
     defer stream.close(io);
 
-    var rd_buf: [1024]u8 = undefined;
-    var wr_buf: [1024]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [1024]u8 = undefined;
+    var write_buf: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
-    try wr.interface.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    try wr.interface.flush();
+    try writer.interface.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    try writer.interface.flush();
 
     var recv: [OK_RESPONSE.len]u8 = undefined;
-    try rd.interface.readSliceAll(&recv);
+    try reader.interface.readSliceAll(&recv);
     try std.testing.expectEqualStrings(OK_RESPONSE, &recv);
 }
 

@@ -19,7 +19,7 @@
 //!
 //! Run:
 //! zig build example-grpc_server
-//! ./zig-out/bin/example-grpc_server
+//! ./zig-out/bin/zix-example-grpc_server
 //!
 //! Test with grpcurl (requires grpcurl installed):
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \

@@ -69,6 +69,6 @@ test "zix edge: addHeader, max_headers=1 rejects second header without growth" {
 // --------------------------------------------------------- //
 
 test "zix edge: HeaderSize.CUSTOM(0), value() returns 0" {
-    const hs: zix.Http.HeaderSize = .{ .CUSTOM = 0 };
-    try std.testing.expectEqual(@as(usize, 0), hs.value());
+    const header_size: zix.Http.HeaderSize = .{ .CUSTOM = 0 };
+    try std.testing.expectEqual(@as(usize, 0), header_size.value());
 }

@@ -5,10 +5,10 @@
 // with an incrementing counter value as a decimal string.
 //
 // Run the server first:
-// zig build example-uds_server && ./zig-out/bin/example-uds_server
+// zig build example-uds_server && ./zig-out/bin/zix-example-uds_server
 //
 // Then this client in a second terminal:
-// zig build example-uds_client && ./zig-out/bin/example-uds_client
+// zig build example-uds_client && ./zig-out/bin/zix-example-uds_client
 
 const std = @import("std");
 const zix = @import("zix");

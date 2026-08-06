@@ -120,11 +120,11 @@ fn startServersOnce() !void {
 // --------------------------------------------------------- //
 
 fn connectRetry(io: std.Io, port: u16) !std.Io.net.Stream {
-    const sa = try std.Io.net.IpAddress.resolve(io, IP, port);
+    const server_addr = try std.Io.net.IpAddress.resolve(io, IP, port);
 
     var attempt: usize = 0;
     while (attempt < 100) : (attempt += 1) {
-        if (sa.connect(io, .{ .mode = .stream })) |stream| {
+        if (server_addr.connect(io, .{ .mode = .stream })) |stream| {
             return stream;
         } else |_| {
             std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
@@ -135,11 +135,11 @@ fn connectRetry(io: std.Io, port: u16) !std.Io.net.Stream {
 }
 
 /// Read exactly one TLS record (5-byte header + body) into buf.
-fn readRecord(rd: *std.Io.Reader, buf: []u8) ![]const u8 {
-    try rd.readSliceAll(buf[0..5]);
+fn readRecord(reader: *std.Io.Reader, buf: []u8) ![]const u8 {
+    try reader.readSliceAll(buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
-    try rd.readSliceAll(buf[5 .. 5 + length]);
+    try reader.readSliceAll(buf[5 .. 5 + length]);
 
     return buf[0 .. 5 + length];
 }
@@ -147,46 +147,46 @@ fn readRecord(rd: *std.Io.Reader, buf: []u8) ![]const u8 {
 /// A live TLS connection with the handshake already done.
 const Session = struct {
     stream: std.Io.net.Stream,
-    rd_buf: []u8,
-    wr_buf: []u8,
-    rd: std.Io.net.Stream.Reader,
-    wr: std.Io.net.Stream.Writer,
+    read_buf: []u8,
+    write_buf: []u8,
+    reader: std.Io.net.Stream.Reader,
+    writer: std.Io.net.Stream.Writer,
     conn: zix.Tls.Client.ClientConnection,
 };
 
 /// Handshake against a TLS port and hand back the established connection.
 fn handshake(io: std.Io, allocator: std.mem.Allocator, port: u16, session: *Session) !void {
     session.stream = try connectRetry(io, port);
-    session.rd_buf = try allocator.alloc(u8, 64 * 1024);
-    session.wr_buf = try allocator.alloc(u8, 8 * 1024);
-    session.rd = session.stream.reader(io, session.rd_buf);
-    session.wr = session.stream.writer(io, session.wr_buf);
+    session.read_buf = try allocator.alloc(u8, 64 * 1024);
+    session.write_buf = try allocator.alloc(u8, 8 * 1024);
+    session.reader = session.stream.reader(io, session.read_buf);
+    session.writer = session.stream.writer(io, session.write_buf);
 
     var ch_buf: [512]u8 = undefined;
     const started = try zix.Tls.Client.start(.{ .client_random = @splat(0x31), .ephemeral_secret = @splat(0x62) }, &ch_buf);
     var state = started.state;
 
-    var ch_rec: [600]u8 = undefined;
-    ch_rec[0] = 22;
-    std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
-    std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
-    @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
+    var hello_record: [600]u8 = undefined;
+    hello_record[0] = 22;
+    std.mem.writeInt(u16, hello_record[1..3], 0x0303, .big);
+    std.mem.writeInt(u16, hello_record[3..5], @intCast(started.client_hello.len), .big);
+    @memcpy(hello_record[5 .. 5 + started.client_hello.len], started.client_hello);
 
-    try session.wr.interface.writeAll(ch_rec[0 .. 5 + started.client_hello.len]);
-    try session.wr.interface.flush();
+    try session.writer.interface.writeAll(hello_record[0 .. 5 + started.client_hello.len]);
+    try session.writer.interface.flush();
 
     var flight_buf: [4096]u8 = undefined;
     var flight_len: usize = 0;
     for (0..3) |_| {
-        const rec = try readRecord(&session.rd.interface, flight_buf[flight_len..]);
-        flight_len += rec.len;
+        const record = try readRecord(&session.reader.interface, flight_buf[flight_len..]);
+        flight_len += record.len;
     }
 
     var fin_buf: [256]u8 = undefined;
     const finished = try zix.Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
 
-    try session.wr.interface.writeAll(finished.client_finished);
-    try session.wr.interface.flush();
+    try session.writer.interface.writeAll(finished.client_finished);
+    try session.writer.interface.flush();
 
     session.conn = finished.connection;
 }
@@ -202,11 +202,11 @@ fn fetch(session: *Session, path: []const u8, out: []u8) !Fetched {
     var request_buf: [256]u8 = undefined;
     const request = try std.fmt.bufPrint(&request_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\n\r\n", .{path});
 
-    var enc: [512]u8 = undefined;
-    try session.wr.interface.writeAll(session.conn.writeAppData(request, &enc));
-    try session.wr.interface.flush();
+    var cipher_buf: [512]u8 = undefined;
+    try session.writer.interface.writeAll(session.conn.writeAppData(request, &cipher_buf));
+    try session.writer.interface.flush();
 
-    var rec_buf: [17 * 1024]u8 = undefined;
+    var record_buf: [17 * 1024]u8 = undefined;
     var plain: [(1 << 14) + 1]u8 = undefined;
     var filled: usize = 0;
     var body_start: ?usize = null;
@@ -216,8 +216,8 @@ fn fetch(session: *Session, path: []const u8, out: []u8) !Fetched {
     // Keep pulling records until the headers name a length and that many body bytes have arrived.
     // A response past one record's worth of plaintext only completes after several.
     while (true) {
-        const rec = try readRecord(&session.rd.interface, &rec_buf);
-        const opened = try session.conn.readAppData(rec, &plain);
+        const record = try readRecord(&session.reader.interface, &record_buf);
+        const opened = try session.conn.readAppData(record, &plain);
         records += 1;
 
         if (filled + opened.len > out.len) return error.ResponseTooLarge;
@@ -278,8 +278,8 @@ test "zix integration: TLS serves a body spanning one two three and four records
     try handshake(io, gpa, TLS_PORT, &session);
     defer {
         session.stream.close(io);
-        gpa.free(session.rd_buf);
-        gpa.free(session.wr_buf);
+        gpa.free(session.read_buf);
+        gpa.free(session.write_buf);
     }
 
     // Under, exactly at, and one past the single-record ceiling, then two and four records' worth.
@@ -306,8 +306,8 @@ test "zix integration: TLS keeps answering after a multi-record response" {
     try handshake(io, gpa, TLS_PORT, &session);
     defer {
         session.stream.close(io);
-        gpa.free(session.rd_buf);
-        gpa.free(session.wr_buf);
+        gpa.free(session.read_buf);
+        gpa.free(session.write_buf);
     }
 
     // A body over the ceiling used to take the process down, so the small request after it is the
@@ -333,8 +333,8 @@ test "zix integration: TLS on the URING model splits a large response the same w
     try handshake(io, gpa, URING_TLS_PORT, &session);
     defer {
         session.stream.close(io);
-        gpa.free(session.rd_buf);
-        gpa.free(session.wr_buf);
+        gpa.free(session.read_buf);
+        gpa.free(session.write_buf);
     }
 
     try std.testing.expect(try expectBody(&session, gpa, (1 << 14) + 1) >= 2);

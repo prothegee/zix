@@ -43,8 +43,8 @@ fn spawnServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
 
 fn clientConnect(io: std.Io, port: u16) !std.posix.fd_t {
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", port);
-    const s = try addr.connect(io, .{ .mode = .stream });
-    return s.socket.handle;
+    const stream = try addr.connect(io, .{ .mode = .stream });
+    return stream.socket.handle;
 }
 
 // --------------------------------------------------------- //
@@ -57,7 +57,7 @@ test "zix edge: bad PRI preface causes server to close connection" {
     const io = threaded.io();
 
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT);
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT);
 
     const fd = try clientConnect(io, TEST_PORT);
     defer zix.utils.fd_io.close(fd);
@@ -68,7 +68,7 @@ test "zix edge: bad PRI preface causes server to close connection" {
     const n = zix.utils.fd_io.readOnce(fd, &buf) catch 0;
     _ = n;
 
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
 }
 
@@ -80,7 +80,7 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
     const io = threaded.io();
 
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 1);
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT + 1);
 
     const fd = try clientConnect(io, TEST_PORT + 1);
     defer zix.utils.fd_io.close(fd);
@@ -91,10 +91,10 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
     var payload_buf: [64]u8 = undefined;
     var got_settings = false;
     while (!got_settings) {
-        const fh = try zix.Http2.readFrameHeader(fd);
-        const payload = payload_buf[0..fh.length];
-        if (fh.length > 0) try zix.Http2.recvExact(fd, payload);
-        if (fh.frame_type == zix.Http2.FRAME_TYPE_SETTINGS and (fh.flags & zix.Http2.FLAG_ACK) == 0) {
+        const frame = try zix.Http2.readFrameHeader(fd);
+        const payload = payload_buf[0..frame.length];
+        if (frame.length > 0) try zix.Http2.recvExact(fd, payload);
+        if (frame.frame_type == zix.Http2.FRAME_TYPE_SETTINGS and (frame.flags & zix.Http2.FLAG_ACK) == 0) {
             try zix.Http2.sendSettingsAckFD(fd);
             got_settings = true;
         }
@@ -102,7 +102,7 @@ test "zix edge: client sends GOAWAY and server connection loop exits" {
 
     try zix.Http2.sendGoawayFD(fd, 0, zix.Http2.ERR_NO_ERROR);
 
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
@@ -120,10 +120,10 @@ test "zix edge: Http2Server.run rejects port zero" {
 }
 
 test "zix edge: HpackDecoder decode of empty block returns zero headers" {
-    var dec = zix.Http2.HpackDecoder.init();
+    var hpack_decoder = zix.Http2.HpackDecoder.init();
     var out: [8]zix.Http2.Header = undefined;
     var scratch: [256]u8 = undefined;
-    const n = try dec.decode(&.{}, &out, &scratch);
+    const n = try hpack_decoder.decode(&.{}, &out, &scratch);
     try std.testing.expectEqual(@as(usize, 0), n);
 }
 

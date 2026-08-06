@@ -16,6 +16,8 @@
 #     one per load-gen hardware thread (the arena ratio), unless --load-threads.
 #   - Load generators run in Docker (LOADGEN_DOCKER=true default: a laptop rarely
 #     has an ngtcp2-enabled h2load native). Pre-set LOADGEN_DOCKER=false to override.
+#   - Load-gen `timeout 45` bounds gain a KILL escalation through a PATH shim
+#     (a TERM-trapping docker client otherwise hangs a run forever).
 #
 # Quiesce is an EXACT system_tune equivalent, nothing more, so the local run
 # matches the arena run knob for knob (including the cold first run after the
@@ -301,11 +303,13 @@ SAMPLER_PID=""
 PROBE_RESULT=""
 MEM_LOG=""
 SMAPS_FILE=""
+TIMEOUT_SHIM_DIR=""
 cleanup() {
     [ -n "$PINNER_PID" ] && kill "$PINNER_PID" 2>/dev/null || true
     [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null || true
 
     rm -f "$BENCH_PATCHED" "$FW_PATCHED" "$PROFILES_PATCHED"
+    [ -n "$TIMEOUT_SHIM_DIR" ] && rm -rf "$TIMEOUT_SHIM_DIR" || true
 
     if [ "$SOURCE" = "local" ]; then
         rm -f "$LOCAL_DOCKERFILE" "$LOCAL_BUILDSH"
@@ -646,6 +650,84 @@ fi
 API4_CPUS="$(server_pairs_head 2)"
 API16_CPUS="$(server_pairs_head 8)"
 
+# The multi-container profiles (gateway-64, gateway-h3, production-stack) keep
+# their cpusets inside their own compose files, which the profiles.sh patch
+# below never reaches. Derive the same arena proportions from the local pairs
+# and export them, so a compose file written as ${GATEWAY_PROXY_CPUS:-...}
+# asks for cores that exist here instead of the arena's numbering (a compose
+# file that still carries a bare literal fails at container start off the
+# arena, with "write to cpuset.cpus: Numerical result out of range").
+#   gateway-64, gateway-h3   arena proxy 20 : server 12 of the 32-pair half
+#   production-stack         arena edge 15 : cache 1 : authsvc 4 : server 12
+
+# `count` SMT pairs of the server half, starting at pair `start`.
+server_pairs_slice() {
+    local start=$1
+    local count=$2
+
+    (IFS=,; echo "${SERVER_PAIRS[*]:start:count}")
+}
+
+# An arena share of 32 pairs, rounded to the nearest whole local pair.
+scaled_pair_count() {
+    local arena_share=$1
+    local count=$(( (${#SERVER_PAIRS[@]} * arena_share + 16) / 32 ))
+
+    [ "$count" -lt 1 ] && count=1
+
+    echo "$count"
+}
+
+STACK_PAIR_COUNT=${#SERVER_PAIRS[@]}
+
+gateway_server_pairs="$(scaled_pair_count 12)"
+if [ "$gateway_server_pairs" -ge "$STACK_PAIR_COUNT" ] && [ "$STACK_PAIR_COUNT" -gt 1 ]; then
+    gateway_server_pairs=$(( STACK_PAIR_COUNT - 1 ))
+fi
+gateway_proxy_pairs=$(( STACK_PAIR_COUNT - gateway_server_pairs ))
+
+if [ "$gateway_proxy_pairs" -lt 1 ]; then
+    gateway_proxy_pairs=$STACK_PAIR_COUNT
+    gateway_server_pairs=$STACK_PAIR_COUNT
+    echo "[isol] one core on the server half: proxy and server share it (a busy-poll server reads 0 rps there)" >&2
+fi
+
+export GATEWAY_PROXY_CPUS="${GATEWAY_PROXY_CPUS:-$(server_pairs_slice 0 "$gateway_proxy_pairs")}"
+export GATEWAY_SERVER_CPUS="${GATEWAY_SERVER_CPUS:-$(server_pairs_slice $(( STACK_PAIR_COUNT - gateway_server_pairs )) "$gateway_server_pairs")}"
+
+# production-stack splits the same half four ways. Trim the two large shares
+# first so the sidecars always land somewhere, then hand the spare pairs to
+# cache and authsvc. On the arena the result is the stock literal set.
+stack_edge_pairs="$(scaled_pair_count 15)"
+stack_server_pairs="$(scaled_pair_count 12)"
+
+while [ $(( stack_edge_pairs + stack_server_pairs )) -ge "$STACK_PAIR_COUNT" ] &&
+      [ $(( stack_edge_pairs + stack_server_pairs )) -gt 2 ]; do
+    if [ "$stack_edge_pairs" -ge "$stack_server_pairs" ]; then
+        stack_edge_pairs=$(( stack_edge_pairs - 1 ))
+    else
+        stack_server_pairs=$(( stack_server_pairs - 1 ))
+    fi
+done
+
+stack_spare_pairs=$(( STACK_PAIR_COUNT - stack_edge_pairs - stack_server_pairs ))
+
+if [ "$stack_spare_pairs" -ge 2 ]; then
+    stack_cache_cpus="$(server_pairs_slice "$stack_edge_pairs" 1)"
+    stack_authsvc_cpus="$(server_pairs_slice $(( stack_edge_pairs + 1 )) $(( stack_spare_pairs - 1 )))"
+elif [ "$stack_spare_pairs" -eq 1 ]; then
+    stack_cache_cpus="$(server_pairs_slice "$stack_edge_pairs" 1)"
+    stack_authsvc_cpus="$stack_cache_cpus"
+else
+    stack_cache_cpus="$(server_pairs_slice $(( stack_edge_pairs - 1 )) 1)"
+    stack_authsvc_cpus="$stack_cache_cpus"
+fi
+
+export STACK_EDGE_CPUS="${STACK_EDGE_CPUS:-$(server_pairs_slice 0 "$stack_edge_pairs")}"
+export STACK_CACHE_CPUS="${STACK_CACHE_CPUS:-$stack_cache_cpus}"
+export STACK_AUTHSVC_CPUS="${STACK_AUTHSVC_CPUS:-$stack_authsvc_cpus}"
+export STACK_SERVER_CPUS="${STACK_SERVER_CPUS:-$(server_pairs_slice $(( STACK_PAIR_COUNT - stack_server_pairs )) "$stack_server_pairs")}"
+
 # Scale the profiles to this machine: the stock server cpuset (the arena's
 # 0-31,64-95 whole-core half) becomes the local SMT-aware half, the crud
 # profile's redis-carved variant (1-31,65-95) becomes the half minus the
@@ -684,6 +766,28 @@ export H3THREADS="$THREADS"
 export LOADGEN_DOCKER="${LOADGEN_DOCKER:-true}"
 export GCANNON_MODE="${GCANNON_MODE:-docker}"
 
+# The arena's load-generator wrappers bound every run with a bare `timeout 45`,
+# TERM only. In docker mode that child is a podman client, and an attached
+# client traps TERM to tear its container down: a wedged teardown then never
+# exits, `timeout` waits on it forever, and the bench hangs silently inside a
+# captured $() (observed on a gateway cell whose proxy had crashed mid-cell).
+# The bench child resolves `timeout` through this shim instead, which adds a
+# KILL escalation: TERM at the wrapper's own bound, 15s of teardown grace
+# (podman stops containers with a 10s grace), then KILL. Arena scripts stay
+# byte-identical, every `timeout N` call site picks the shim up via PATH.
+TIMEOUT_REAL="$(command -v timeout || true)"
+BENCH_PATH="$PATH"
+if [ -n "$TIMEOUT_REAL" ]; then
+    TIMEOUT_SHIM_DIR="$(mktemp -d)"
+    cat > "$TIMEOUT_SHIM_DIR/timeout" <<EOF
+#!/usr/bin/env bash
+exec "$TIMEOUT_REAL" --kill-after=15 "\$@"
+EOF
+    chmod +x "$TIMEOUT_SHIM_DIR/timeout"
+
+    BENCH_PATH="$TIMEOUT_SHIM_DIR:$PATH"
+fi
+
 # Write self-describing header to result file.
 {
     echo "$START_BANNER"
@@ -696,6 +800,8 @@ export GCANNON_MODE="${GCANNON_MODE:-docker}"
     echo "# source:       $SOURCE"
     echo "# server_cpus:  $SERVER_CPUS"
     echo "# loadgen_cpus: $LOADGEN_CPUS"
+    echo "# gateway_cpus: proxy=$GATEWAY_PROXY_CPUS server=$GATEWAY_SERVER_CPUS"
+    echo "# stack_cpus:   edge=$STACK_EDGE_CPUS cache=$STACK_CACHE_CPUS authsvc=$STACK_AUTHSVC_CPUS server=$STACK_SERVER_CPUS"
     echo "# threads:      $THREADS"
     echo "# quiesce:      $DO_QUIESCE (system_tune equivalent: governor/sysctls/lo-mtu-1500/docker-restart/drop-caches)"
     echo "# freq_pin:     ${FREQ_HZ:-(none, arena parity)}"
@@ -710,7 +816,7 @@ RUN_ARGS=("$FRAMEWORK")
 
 echo "[isol] running full bench, result -> $RESULT_TXT" >&2
 bench_rc=0
-"$BENCH_PATCHED" "${RUN_ARGS[@]}" 2>&1 | tee -a "$RESULT_TXT" || bench_rc=$?
+PATH="$BENCH_PATH" "$BENCH_PATCHED" "${RUN_ARGS[@]}" 2>&1 | tee -a "$RESULT_TXT" || bench_rc=$?
 [ "$bench_rc" -eq 0 ] || echo "[isol] note: bench exited $bench_rc, continuing to summary and restore" >&2
 
 echo "[isol] settling ${SETTLE}s before restore" >&2

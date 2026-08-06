@@ -60,58 +60,58 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
     n += Http2.PREFACE.len;
 
-    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
-    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var frame_head: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
 
-    var hbuf: [256]u8 = undefined;
-    var enc = Http2.HpackEncoder.init(&hbuf);
-    try enc.writeHeader(":method", "GET");
-    try enc.writeHeader(":path", "/");
-    try enc.writeHeader(":scheme", "http");
-    try enc.writeHeader(":authority", "localhost");
-    const hblock = enc.encoded();
-    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var header_buf: [256]u8 = undefined;
+    var hpack_encoder = Http2.HpackEncoder.init(&header_buf);
+    try hpack_encoder.writeHeader(":method", "GET");
+    try hpack_encoder.writeHeader(":path", "/");
+    try hpack_encoder.writeHeader(":scheme", "http");
+    try hpack_encoder.writeHeader(":authority", "localhost");
+    const hblock = hpack_encoder.encoded();
+    Http2.encodeFrameHeader(&frame_head, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
     @memcpy(req[n..][0..hblock.len], hblock);
     n += hblock.len;
 
     try fdWriteAll(fd, req[0..n]);
 
     // Read response frames until a HEADERS frame carries :status 200.
-    var acc: [16384]u8 = undefined;
-    var acc_len: usize = 0;
+    var recv_accum: [16384]u8 = undefined;
+    var recv_len: usize = 0;
     var rounds: usize = 0;
     while (rounds < 64) : (rounds += 1) {
-        const got = try fdReadOnce(fd, acc[acc_len..]);
+        const got = try fdReadOnce(fd, recv_accum[recv_len..]);
         if (got == 0) return error.ConnectionClosed;
-        acc_len += got;
+        recv_len += got;
 
         var off: usize = 0;
-        while (off + Http2.FRAME_HEADER_LEN <= acc_len) {
-            const frame = Http2.parseFrameHeader(acc[off..][0..Http2.FRAME_HEADER_LEN]);
+        while (off + Http2.FRAME_HEADER_LEN <= recv_len) {
+            const frame = Http2.parseFrameHeader(recv_accum[off..][0..Http2.FRAME_HEADER_LEN]);
             const total = Http2.FRAME_HEADER_LEN + @as(usize, frame.length);
-            if (off + total > acc_len) break;
+            if (off + total > recv_len) break;
 
-            const payload = acc[off + Http2.FRAME_HEADER_LEN .. off + total];
+            const payload = recv_accum[off + Http2.FRAME_HEADER_LEN .. off + total];
             if (frame.frame_type == Http2.FRAME_TYPE_HEADERS) {
-                var hdec = Http2.HpackDecoder.init();
+                var hpack_decoder = Http2.HpackDecoder.init();
                 var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
                 var scratch: [4096]u8 = undefined;
-                const cnt = try hdec.decode(payload, &hdrs, &scratch);
-                for (hdrs[0..cnt]) |h| {
+                const header_count = try hpack_decoder.decode(payload, &hdrs, &scratch);
+                for (hdrs[0..header_count]) |h| {
                     if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return;
                 }
             }
             off += total;
         }
-        if (off >= acc_len) {
-            acc_len = 0;
+        if (off >= recv_len) {
+            recv_len = 0;
         } else if (off > 0) {
-            std.mem.copyForwards(u8, acc[0 .. acc_len - off], acc[off..acc_len]);
-            acc_len -= off;
+            std.mem.copyForwards(u8, recv_accum[0 .. recv_len - off], recv_accum[off..recv_len]);
+            recv_len -= off;
         }
     }
 

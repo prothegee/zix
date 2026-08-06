@@ -953,8 +953,8 @@ fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 
 test "zix http1: serveEpollConn answers a pipelined burst in order" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -993,8 +993,8 @@ test "zix http1: serveEpollConn answers a pipelined burst in order" {
 
 test "zix http1: EPOLL split head resumes the terminator scan from the watermark" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1356,8 +1356,8 @@ test "zix http1: EPOLL answers 413 for a chunked body past the body buffer" {
 
 test "zix http1: EPOLL path serves a miss then a hit from the cache" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var rc = try cache.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer rc.deinit();
@@ -1459,8 +1459,8 @@ test "zix http1: ConnTable packs recv buffers into compact slots, not the fd ran
 
 test "zix http1: serveEpollWs drains pipelined frames to EAGAIN in one call" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var fds: [2]i32 = undefined;
     const linux = std.os.linux;

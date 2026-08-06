@@ -16,10 +16,10 @@ const Http2 = zix.Http2;
 const fd_io = zix.utils.fd_io;
 const socket_poll = zix.utils.socket_poll;
 
-/// Ceiling for one raw TLS record read. A check's server answers in well under a second, so this
+/// Ceiling for one raw descriptor read. A check's server answers in well under a second, so this
 /// only fires when it accepted the connection and then went silent. Without it the read has no end,
 /// and an infinite park is not an error the runner's retry layer can see.
-const TLS_READ_TIMEOUT_MS: u32 = 5000;
+const RAW_READ_TIMEOUT_MS: u32 = 5000;
 
 // --------------------------------------------------------- //
 
@@ -56,13 +56,38 @@ pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
     var filled: usize = 0;
 
     while (filled < buf.len) {
-        if (!socket_poll.readableWithin(fd, TLS_READ_TIMEOUT_MS)) return error.ReadTimeout;
+        if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ReadTimeout;
 
         const got = try fd_io.readOnce(fd, buf[filled..]);
         if (got == 0) return error.ConnectionClosed;
 
         filled += got;
     }
+}
+
+/// Read whatever has arrived on fd, once, bounded.
+///
+/// Note:
+/// - For a scan that cannot say in advance how many bytes it needs, i.e. the h2 frame scan below,
+///   which reads once and pushes what arrives. fd_io.readOnce is the same call without a bound.
+/// - A server can hold a connection open without ever sending what the scan is looking for: an h2
+///   edge that answers a status the scan does not accept then goes back to waiting for the next
+///   client frame, and neither side ever speaks again. That is a park, not a close, so the round
+///   counter above never advances and the check never fails on its own.
+/// - Raw descriptor, no reader buffer above it, so the readiness gate is safe to place directly in
+///   front of the read.
+///
+/// Param:
+/// fd - std.posix.fd_t (a connected, blocking descriptor)
+/// buf - []u8 (receives whatever arrived)
+///
+/// Return:
+/// - usize bytes read, 0 when the peer closed
+/// - error.ReadTimeout when nothing arrived inside the bound
+pub fn readOnceBounded(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ReadTimeout;
+
+    return fd_io.readOnce(fd, buf);
 }
 
 /// Write all bytes to fd, looping over short writes and retrying on EINTR.
@@ -74,8 +99,8 @@ pub fn tlsWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
 
 /// Look up a response header value by case-insensitive name, or null when absent.
 pub fn headerValue(head: []const u8, name: []const u8) ?[]const u8 {
-    var it = std.mem.tokenizeSequence(u8, head, "\r\n");
-    while (it.next()) |line| {
+    var line_iter = std.mem.tokenizeSequence(u8, head, "\r\n");
+    while (line_iter.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) {
             return std.mem.trim(u8, line[colon + 1 ..], " ");
@@ -111,33 +136,33 @@ pub fn parseContentLength(head: []const u8) ?usize {
 /// return error.NoStatus200;
 /// ```
 pub const H2Scanner = struct {
-    acc: [16384]u8 = undefined,
-    acc_len: usize = 0,
+    recv_accum: [16384]u8 = undefined,
+    recv_len: usize = 0,
 
     /// Append a plaintext chunk, parse complete frames, and report whether :status 200 was seen.
     /// Consumed frames are compacted out so the buffer only holds the unparsed tail.
     pub fn push(self: *H2Scanner, plain: []const u8) !bool {
-        @memcpy(self.acc[self.acc_len..][0..plain.len], plain);
-        self.acc_len += plain.len;
+        @memcpy(self.recv_accum[self.recv_len..][0..plain.len], plain);
+        self.recv_len += plain.len;
 
         var off: usize = 0;
-        while (off + Http2.FRAME_HEADER_LEN <= self.acc_len) {
-            const frame = Http2.parseFrameHeader(self.acc[off..][0..Http2.FRAME_HEADER_LEN]);
+        while (off + Http2.FRAME_HEADER_LEN <= self.recv_len) {
+            const frame = Http2.parseFrameHeader(self.recv_accum[off..][0..Http2.FRAME_HEADER_LEN]);
             const total = Http2.FRAME_HEADER_LEN + @as(usize, frame.length);
-            if (off + total > self.acc_len) break;
+            if (off + total > self.recv_len) break;
 
-            const payload = self.acc[off + Http2.FRAME_HEADER_LEN .. off + total];
+            const payload = self.recv_accum[off + Http2.FRAME_HEADER_LEN .. off + total];
             if (frame.frame_type == Http2.FRAME_TYPE_HEADERS) {
                 if (try headersHaveStatus200(payload)) return true;
             }
             off += total;
         }
 
-        if (off >= self.acc_len) {
-            self.acc_len = 0;
+        if (off >= self.recv_len) {
+            self.recv_len = 0;
         } else if (off > 0) {
-            std.mem.copyForwards(u8, self.acc[0 .. self.acc_len - off], self.acc[off..self.acc_len]);
-            self.acc_len -= off;
+            std.mem.copyForwards(u8, self.recv_accum[0 .. self.recv_len - off], self.recv_accum[off..self.recv_len]);
+            self.recv_len -= off;
         }
 
         return false;
@@ -146,12 +171,12 @@ pub const H2Scanner = struct {
 
 /// Decode an HPACK header block and report whether it carries :status 200.
 fn headersHaveStatus200(payload: []const u8) !bool {
-    var hdec = Http2.HpackDecoder.init();
+    var hpack_decoder = Http2.HpackDecoder.init();
     var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
     var scratch: [4096]u8 = undefined;
-    const cnt = try hdec.decode(payload, &hdrs, &scratch);
+    const header_count = try hpack_decoder.decode(payload, &hdrs, &scratch);
 
-    for (hdrs[0..cnt]) |h| {
+    for (hdrs[0..header_count]) |h| {
         if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return true;
     }
 

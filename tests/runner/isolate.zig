@@ -7,6 +7,7 @@
 // ordinary result, and the run reports the rest of the table.
 
 const std = @import("std");
+const group_run = @import("group_run.zig");
 
 /// Argv flag that puts a runner copy into child mode: run one check by label, report it, exit.
 pub const ONLY_FLAG = "--only";
@@ -79,9 +80,9 @@ pub const Verdict = enum {
 ///   accepted and then went quiet, and a respawn clears it. They only reach here because the check
 ///   clients carry common.RESPONSE_TIMEOUT_MS. Without that bound the identical condition is an
 ///   infinite park, which no retry can see, and the run dies where it stands.
-/// - Retrying these is safe in a way retrying a TIMED_OUT check is not. The check returned an
-///   error, so its defers ran and its server is gone. A killed child leaves its server listening,
-///   which is why Verdict.TIMED_OUT is never retried.
+/// - These are safe to retry for a reason of their own: the check returned an error, so its defers
+///   ran and its server is gone. A killed check needs its server taken down another way, which is
+///   what RETRY_TIMED_OUT covers.
 ///
 /// Param:
 /// err - anyerror (what the check body returned)
@@ -100,6 +101,43 @@ pub fn isRetriable(err: anyerror) bool {
         error.ReadTimeout,
         => true,
         else => false,
+    };
+}
+
+/// Whether a TIMED_OUT check is worth another attempt.
+///
+/// Note:
+/// - The kill takes the child's whole process group where the platform has one (see
+///   group_run.REAPS_GROUP), so the check's server dies with it and the next attempt starts from
+///   nothing. Where it does not, the killed child leaves that server listening and a second attempt
+///   would talk to the orphan, which is worse than reporting the timeout.
+/// - A park that is real rather than a host stall still gets reported: the attempt cap ends the
+///   retries and the last attempt's line stands.
+pub const RETRY_TIMED_OUT: bool = group_run.REAPS_GROUP;
+
+/// Max attempts for a check whose attempt hit a transient startup error (a fresh server's accept
+/// threads starved by a concurrent startup burst, so the probe or first client connect is refused).
+/// Respawning the whole check almost always clears it. Real assertion failures are never retried.
+pub const MAX_ATTEMPTS: usize = 3;
+
+/// Max attempts for a check whose attempt blew its bound and was killed. Lower than MAX_ATTEMPTS
+/// because each of these costs a full timeout_ms of wall clock, and the CI legs that see them run
+/// the whole leg under one step cap. One more attempt is enough: on a shared host the park is a
+/// stall of that one process, and a process spawned a moment later does not inherit it.
+pub const MAX_TIMEOUT_ATTEMPTS: usize = 2;
+
+/// How many attempts a verdict is allowed in total. One means the result stands as it is.
+///
+/// Param:
+/// verdict - Verdict (what the attempt just finished as)
+///
+/// Return:
+/// - usize (total attempts allowed, never below 1)
+pub fn attemptCap(verdict: Verdict) usize {
+    return switch (verdict) {
+        .RETRIABLE => MAX_ATTEMPTS,
+        .TIMED_OUT => if (RETRY_TIMED_OUT) MAX_TIMEOUT_ATTEMPTS else 1,
+        .PASSED, .FAILED => 1,
     };
 }
 
@@ -165,10 +203,10 @@ fn unreportedLine(label: []const u8, err: anyerror, timeout_ms: u32, buf: []u8) 
 /// Note:
 /// - The child prints its own PASS or FAIL line. This forwards those bytes untouched rather than
 ///   reformatting them, so the wrapped fallback note the child built survives intact.
-/// - A child killed on the bound leaves its own server child running, because a killed process runs
-///   no defers. That orphan holds one port, and since every check owns a unique port nothing else in
-///   the run can collide with it. It is also why a caller must not retry a TIMED_OUT check: a second
-///   attempt would talk to the orphan instead of a fresh server.
+/// - A killed child runs no defers, so the server it spawned has to be taken down from outside.
+///   group_run does that by killing the child's whole process group where the platform has one, and
+///   RETRY_TIMED_OUT says whether that happened, which is what decides if a caller may attempt the
+///   check again.
 ///
 /// Param:
 /// io - std.Io
@@ -194,20 +232,19 @@ pub fn runIsolated(
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    const finished = std.process.run(arena.allocator(), io, .{
-        .argv = argv,
-        .timeout = .{ .duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(@as(i64, timeout_ms)),
-            .clock = .real,
-        } },
-    }) catch |err| return .{
-        .verdict = if (err == error.Timeout) .TIMED_OUT else .FAILED,
+    const outcome = group_run.runBounded(arena.allocator(), io, argv, timeout_ms) catch |err| return .{
+        .verdict = .FAILED,
         .report = unreportedLine(label, err, timeout_ms, report_buf),
     };
 
+    const term = outcome.term orelse return .{
+        .verdict = .TIMED_OUT,
+        .report = unreportedLine(label, error.Timeout, timeout_ms, report_buf),
+    };
+
     return .{
-        .verdict = verdictOf(finished.term),
-        .report = copyReport(finished.stderr, report_buf),
+        .verdict = verdictOf(term),
+        .report = copyReport(outcome.stderr, report_buf),
     };
 }
 
@@ -287,10 +324,34 @@ test "zix runner: verdictOf treats a signalled child as failed" {
         // windows region: std.posix.SIG is a separate enum there with no KILL member. A child that
         // dies without choosing an exit code lands on the same else arm either way, which the
         // unknown-status case above covers on every target.
-        return error.SkipZigTest;
+        std.log.info("zix runner: std.posix.SIG has no KILL on windows, signalled-child case skipped", .{});
+        return;
     }
 
     try std.testing.expectEqual(Verdict.FAILED, verdictOf(.{ .signal = std.posix.SIG.KILL }));
+}
+
+test "zix runner: a timed-out check is worth another attempt only where the group is reaped" {
+    try std.testing.expectEqual(group_run.REAPS_GROUP, RETRY_TIMED_OUT);
+}
+
+test "zix runner: attemptCap lets a settled verdict stand on its first attempt" {
+    try std.testing.expectEqual(@as(usize, 1), attemptCap(.PASSED));
+    try std.testing.expectEqual(@as(usize, 1), attemptCap(.FAILED));
+}
+
+test "zix runner: attemptCap gives a transient startup error the full run of attempts" {
+    try std.testing.expectEqual(MAX_ATTEMPTS, attemptCap(.RETRIABLE));
+}
+
+test "zix runner: attemptCap gives a killed check one more attempt where the group is reaped" {
+    const expected: usize = if (RETRY_TIMED_OUT) MAX_TIMEOUT_ATTEMPTS else 1;
+
+    try std.testing.expectEqual(expected, attemptCap(.TIMED_OUT));
+}
+
+test "zix runner: a killed check costs less wall clock than a refused one" {
+    try std.testing.expect(MAX_TIMEOUT_ATTEMPTS < MAX_ATTEMPTS);
 }
 
 test "zix runner: copyReport passes a child line through unchanged" {

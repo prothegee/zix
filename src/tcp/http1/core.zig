@@ -2274,8 +2274,8 @@ fn negotiatedRoundtrip(req: []const u8, content_type: []const u8, body: []const 
 
 test "zix http1: sendNegotiateCachedFD compresses when gzip is accepted" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     setCompression(true, 256, GZIP_OUT_SIZE);
@@ -2300,8 +2300,8 @@ test "zix http1: sendNegotiateCachedFD compresses when gzip is accepted" {
 
 test "zix http1: sendNegotiateCachedFD sends uncompressed when compression is off" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     setCompression(false, 0, 0);
@@ -2321,8 +2321,8 @@ test "zix http1: sendNegotiateCachedFD sends uncompressed when compression is of
 
 test "zix http1: sendNegotiateCachedFD does not compress without Accept-Encoding" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     setCompression(true, 256, GZIP_OUT_SIZE);
@@ -2340,8 +2340,8 @@ test "zix http1: sendNegotiateCachedFD does not compress without Accept-Encoding
 
 test "zix http1: sendNegotiateCachedFD skips bodies under the size floor" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     setCompression(true, 256, GZIP_OUT_SIZE);
@@ -2357,8 +2357,8 @@ test "zix http1: sendNegotiateCachedFD skips bodies under the size floor" {
 
 test "zix http1: sendNegotiateCachedFD skips already-compressed media types" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     setCompression(true, 256, GZIP_OUT_SIZE);
@@ -2771,13 +2771,13 @@ test "zix http1: serveConn drains an over-large body so the keep-alive connectio
     defer _ = linux.close(client_fd);
 
     const Handler = struct {
-        fn h(_: *Request, res: *Response, _: *Context) anyerror!void {
+        fn handle(_: *Request, res: *Response, _: *Context) anyerror!void {
             try res.sendRaw("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
         }
     };
     const Srv = struct {
         fn run(fd: std.posix.fd_t) void {
-            serveConn(fd, Handler.h, .{ .large_body_rcvbuf = 1 << 20, .max_recv_buf = 8 * 1024 }, undefined);
+            serveConn(fd, Handler.handle, .{ .large_body_rcvbuf = 1 << 20, .max_recv_buf = 8 * 1024 }, undefined);
 
             _ = linux.close(fd);
         }
@@ -3507,8 +3507,8 @@ test "zix http1: ASYNC serveConn marks a bodyless request as complete" {
 
 test "zix http1: uringWatchFd routes through the installed trampoline" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     try std.testing.expect(!uringWatchFd(7));

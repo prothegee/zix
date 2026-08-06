@@ -159,6 +159,15 @@ __*Update:*__
 
 <br>
 
+- Test-suite identifiers renamed: every one-to-four character name whose meaning had to be guessed now says what it holds:
+    - `tests/runner/all_runner.zig` declared all 55 of its check trampolines as `fn f`, a name that carries nothing. They are `fn call`, the same shape `tests/zixer/all_runner.zig` already used. The scheduler locals follow: `c` is `check`, `Fut` / `futs` are `CheckFuture` / `futures`, `fill` is `path_idx`, and `cpu` is `cpu_count` because it holds a count rather than a core.
+    - The HTTP/3 test blocks each kept a private hex helper called `fn h`. It is `fn hexBytes` across all 15 files and 167 call sites. Handler stubs inside test blocks (`fn h`, `fn f`) are `fn handle`, and the `const H` handler factory in `src/tcp/http2/router.zig` is `Handlers`.
+    - About 48 files under `tests/` carried locals a reader had to trace back to a declaration line: `t` is `server_thread`, `sa` is `server_addr`, `al` is `allocator`, `rd` / `wr` are `reader` / `writer`, `fh` is `frame`, `hbuf` is `header_buf`, `hdec` / `enc` are `hpack_decoder` / `hpack_encoder`, `flen` is `flight_len`, `rnd` is `random_bytes`, `fba` is `pem_fixed_buf`. The HTTP/3 test client took the deepest pass, including `w` to `writer`, `u8v` / `u16v` to `writeU8` / `writeU16`, and `pp` / `fl` / `cl` / `rp` to `payload_len` / `fields_len` / `content_len` / `payload_pos`.
+    - Bounded, well-known abbreviations keep their natural length and were left alone: `io`, `ctx`, `buf`, `fd`, `len`, `pos`, `conn`, `req`, `res`, `gpa`, `cfg`, and the QUIC terms `sid`, `scid`, `dcid`.
+    - Names only, no behaviour change. Verified with the full test suite, all 55 runner protocols, and the 13 zixer proxy demos.
+
+<br>
+
 ## 0.5.x-rc2 (2026-07-27)
 
 __*Update:*__

@@ -158,7 +158,7 @@ pub fn decode(out: []u8, input: []const u8) ?usize {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -166,7 +166,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 }
 
 test "zix http3: RFC 7541 C.4 Huffman decode of www.example.com" {
-    const encoded = h("f1e3c2e5f23a6ba0ab90f4ff");
+    const encoded = hexBytes("f1e3c2e5f23a6ba0ab90f4ff");
     var out: [64]u8 = undefined;
     const len = decode(&out, &encoded).?;
 
@@ -175,7 +175,7 @@ test "zix http3: RFC 7541 C.4 Huffman decode of www.example.com" {
 
 test "zix http3: Huffman decode of a path with digits and symbols" {
     // "/baseline2?a=20&b=22" Huffman-encoded (every byte is a short code).
-    const encoded = h("6231a0b41aa28bfc1c0207c470085f");
+    const encoded = hexBytes("6231a0b41aa28bfc1c0207c470085f");
     var out: [64]u8 = undefined;
     const len = decode(&out, &encoded).?;
 

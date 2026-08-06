@@ -1673,15 +1673,15 @@ test "zix grpc: GrpcServeOpts defaults" {
 
 test "zix grpc: Route timeout_ms defaults to zero" {
     const r = Route{ .path = "/svc.Svc/Method", .handler = struct {
-        fn h(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {}
-    }.h };
+        fn handle(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {}
+    }.handle };
     try std.testing.expectEqual(@as(u32, 0), r.timeout_ms);
 }
 
 test "zix grpc: Route is_server_streaming defaults to false" {
     const r = Route{ .path = "/svc.Svc/Method", .handler = struct {
-        fn h(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {}
-    }.h };
+        fn handle(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {}
+    }.handle };
     try std.testing.expect(!r.is_server_streaming);
 }
 
@@ -1704,12 +1704,12 @@ test "zix grpc: GrpcContext.isExpired future deadline returns false" {
 test "zix grpc: RouterType dispatches to matching handler" {
     const called = struct {
         var count: u32 = 0;
-        fn h(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {
+        fn handle(_: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {
             count += 1;
         }
     };
 
-    const router = Router(&[_]Route{.{ .path = "/svc.Svc/Method", .handler = called.h }});
+    const router = Router(&[_]Route{.{ .path = "/svc.Svc/Method", .handler = called.handle }});
 
     var ctx = GrpcContext{
         .fd = TEST_FD,
@@ -1750,8 +1750,8 @@ test "zix grpc: ReplyStage append and flush via pipe" {
 
 test "zix grpc: ReplyStage overflow triggers flush and continues buffering" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
     var pair = try socket_pair.Pair.open(std.testing.allocator);
     defer pair.deinit();

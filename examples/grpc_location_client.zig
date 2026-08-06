@@ -7,7 +7,7 @@
 //!
 //! Run (server must be running on port 9038):
 //! zig build example-grpc_location_client
-//! ./zig-out/bin/example-grpc_location_client
+//! ./zig-out/bin/zix-example-grpc_location_client
 
 const std = @import("std");
 const zix = @import("zix");

@@ -12,9 +12,9 @@ test "zix edge: queryParam, key present with empty value returns empty string" {
         "GET /search?k= HTTP/1.1\r\nHost: localhost\r\n\r\n",
         std.testing.allocator,
     );
-    const v = req.queryParam("k");
-    try std.testing.expect(v != null);
-    try std.testing.expectEqualStrings("", v.?);
+    const value = req.queryParam("k");
+    try std.testing.expect(value != null);
+    try std.testing.expectEqualStrings("", value.?);
 }
 
 test "zix edge: queryParam, key absent returns null" {
@@ -56,8 +56,8 @@ test "zix edge: body(), chunked missing terminal chunk returns partial data" {
             "5\r\nhello\r\n",
         arena.allocator(),
     );
-    const b = try req.body();
-    try std.testing.expectEqualStrings("hello", b);
+    const body = try req.body();
+    try std.testing.expectEqualStrings("hello", body);
 }
 
 test "zix edge: body(), chunked single-byte chunks" {
@@ -68,6 +68,6 @@ test "zix edge: body(), chunked single-byte chunks" {
             "1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n",
         arena.allocator(),
     );
-    const b = try req.body();
-    try std.testing.expectEqualStrings("abc", b);
+    const body = try req.body();
+    try std.testing.expectEqualStrings("abc", body);
 }

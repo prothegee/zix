@@ -51,6 +51,16 @@ pub fn addSteps(
     const isolate_step = testRunStep(b, isolate_tests, foreign_target, "tests/runner/isolate.zig");
     isolate_step.dependOn(zix_tests_step);
 
+    // The bounded child process the isolation helper runs each check in, same again: std only.
+    const group_run_mod = b.createModule(.{
+        .root_source_file = b.path("tests/runner/group_run.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const group_run_tests = b.addTest(.{ .root_module = group_run_mod });
+    const group_run_step = testRunStep(b, group_run_tests, foreign_target, "tests/runner/group_run.zig");
+    group_run_step.dependOn(isolate_step);
+
     // The name a check reports itself as, for the same reason: std only, so it needs no slot in the
     // suite lists below.
     const report_name_mod = b.createModule(.{
@@ -60,11 +70,14 @@ pub fn addSteps(
     });
     const report_name_tests = b.addTest(.{ .root_module = report_name_mod });
     const report_name_step = testRunStep(b, report_name_tests, foreign_target, "tests/runner/report_name.zig");
-    report_name_step.dependOn(isolate_step);
+    report_name_step.dependOn(group_run_step);
 
+    // zixer is its own executable root (src/zixer) with its own build files, so
+    // its unit tests are `zig build zixer-unit-test`, not part of this step.
     const test_step = b.step("unit-test", "Run unit tests");
     test_step.dependOn(zix_tests_step);
     test_step.dependOn(isolate_step);
+    test_step.dependOn(group_run_step);
     test_step.dependOn(report_name_step);
 
     // --------------------------------------------------------- //
@@ -264,6 +277,8 @@ pub fn addSteps(
     const all_test_step = b.step("test-all", "Run unit, integration, behaviour, and edge tests");
     all_test_step.dependOn(zix_tests_step);
     all_test_step.dependOn(isolate_step);
+    all_test_step.dependOn(group_run_step);
+    all_test_step.dependOn(report_name_step);
     all_test_step.dependOn(integration_test_step);
     all_test_step.dependOn(behaviour_test_step);
     all_test_step.dependOn(edge_test_step);

@@ -182,7 +182,7 @@ pub fn buildHandshakeFlight(
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -191,8 +191,8 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 
 test "zix http3: transport parameters carry the validated connection ids" {
     var buf: [256]u8 = undefined;
-    const dcid = h("8394c8f03e515708");
-    const scid = h("c0ffee00");
+    const dcid = hexBytes("8394c8f03e515708");
+    const scid = hexBytes("c0ffee00");
     const len = encodeTransportParams(&buf, &dcid, &scid, 30000, 128);
     const params = buf[0..len];
 
@@ -209,7 +209,7 @@ test "zix http3: transport parameters carry the validated connection ids" {
 
 test "zix http3: EncryptedExtensions carries ALPN h3 and transport parameters" {
     var buf: [512]u8 = undefined;
-    const ee = buildEncryptedExtensions(&buf, &h("8394c8f03e515708"), &h("c0ffee00"), 30000, 128);
+    const ee = buildEncryptedExtensions(&buf, &hexBytes("8394c8f03e515708"), &hexBytes("c0ffee00"), 30000, 128);
 
     // EncryptedExtensions handshake type, and the 24-bit length matches the remaining bytes.
     try std.testing.expectEqual(@as(u8, 0x08), ee[0]);

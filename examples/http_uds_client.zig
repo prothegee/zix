@@ -7,7 +7,7 @@
 //! Unix socket (containerd, systemd socket activation, etc.).
 //!
 //! Run:
-//! zig build example-http_uds_client && ./zig-out/bin/example-http_uds_client
+//! zig build example-http_uds_client && ./zig-out/bin/zix-example-http_uds_client
 
 const std = @import("std");
 const zix = @import("zix");

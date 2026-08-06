@@ -193,7 +193,7 @@ pub const QpackError = enum(u16) {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -239,20 +239,20 @@ test "zix http3: RFC 9204 4.5.1 Required Insert Count and Base" {
 
 test "zix http3: RFC 9204 4.4 decoder instructions and section 6 error codes" {
     var buf: [16]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, &h("84"), buf[0..encodeSectionAck(&buf, 4)]);
-    try std.testing.expectEqualSlices(u8, &h("ff49"), buf[0..encodeSectionAck(&buf, 200)]);
-    try std.testing.expectEqualSlices(u8, &h("48"), buf[0..encodeStreamCancel(&buf, 8)]);
-    try std.testing.expectEqualSlices(u8, &h("0a"), buf[0..encodeInsertCountIncrement(&buf, 10)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("84"), buf[0..encodeSectionAck(&buf, 4)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("ff49"), buf[0..encodeSectionAck(&buf, 200)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("48"), buf[0..encodeStreamCancel(&buf, 8)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("0a"), buf[0..encodeInsertCountIncrement(&buf, 10)]);
 
-    const ack = try decodeDecoderInstruction(&h("84"));
+    const ack = try decodeDecoderInstruction(&hexBytes("84"));
     try std.testing.expect(ack == .section_ack and ack.section_ack == 4);
-    const ack_big = try decodeDecoderInstruction(&h("ff49"));
+    const ack_big = try decodeDecoderInstruction(&hexBytes("ff49"));
     try std.testing.expect(ack_big == .section_ack and ack_big.section_ack == 200);
-    const cancel = try decodeDecoderInstruction(&h("48"));
+    const cancel = try decodeDecoderInstruction(&hexBytes("48"));
     try std.testing.expect(cancel == .stream_cancel and cancel.stream_cancel == 8);
-    const increment = try decodeDecoderInstruction(&h("0a"));
+    const increment = try decodeDecoderInstruction(&hexBytes("0a"));
     try std.testing.expect(increment == .insert_count_increment and increment.insert_count_increment == 10);
-    try std.testing.expectError(error.DecoderStreamError, decodeDecoderInstruction(&h("00")));
+    try std.testing.expectError(error.DecoderStreamError, decodeDecoderInstruction(&hexBytes("00")));
 
     try std.testing.expectEqual(@as(u16, 0x0200), @intFromEnum(QpackError.decompression_failed));
     try std.testing.expectEqual(@as(u16, 0x0201), @intFromEnum(QpackError.encoder_stream_error));

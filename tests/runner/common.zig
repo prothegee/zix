@@ -149,8 +149,8 @@ pub fn printPass(label: []const u8) void {
     std.debug.print("{s}", .{INDENT});
     var line_len: usize = INDENT.len;
     var first = true;
-    var it = std.mem.tokenizeScalar(u8, rest, ' ');
-    while (it.next()) |word| {
+    var word_iter = std.mem.tokenizeScalar(u8, rest, ' ');
+    while (word_iter.next()) |word| {
         if (!first and line_len + 1 + word.len > WRAP) {
             std.debug.print("\n{s}{s}", .{ INDENT, word });
             line_len = INDENT.len + word.len;
@@ -182,11 +182,11 @@ fn captureFallbackNote(child: *std.process.Child) void {
     const fd = f.handle;
     const linux = std.os.linux;
 
-    const cur = linux.fcntl(fd, std.posix.F.GETFL, 0);
-    if (std.posix.errno(cur) != .SUCCESS) return;
+    const flags = linux.fcntl(fd, std.posix.F.GETFL, 0);
+    if (std.posix.errno(flags) != .SUCCESS) return;
 
     const nonblock: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    _ = linux.fcntl(fd, std.posix.F.SETFL, cur | @as(usize, nonblock));
+    _ = linux.fcntl(fd, std.posix.F.SETFL, flags | @as(usize, nonblock));
 
     var buf: [4096]u8 = undefined;
     const n = fd_io.readOnce(fd, &buf) catch return;
@@ -267,7 +267,13 @@ pub fn waitForUdsSocket(io: std.Io, path: []const u8, timeout_ms: u64) !void {
 }
 
 /// Spawn an executable as a background child process.
-/// stdout, stdin, and stderr are suppressed.
+/// stdin and stdout are discarded. stderr is piped only where something reads it.
+///
+/// Note:
+/// - captureFallbackNote is the only reader, and it scrapes the io_uring fallback line, which no
+///   kernel but Linux can emit. Everywhere else the pipe would be a buffer nobody drains, and a
+///   server that fills it blocks in write with nothing to unblock it. Discarding is what keeps a
+///   chatty server off that cliff.
 ///
 /// Param:
 /// io - std.Io
@@ -281,7 +287,7 @@ pub fn spawnServer(io: std.Io, server_path: []const u8) !std.process.Child {
         .argv = &.{server_path},
         .stdin = .ignore,
         .stdout = .ignore,
-        .stderr = .pipe,
+        .stderr = if (comptime builtin.os.tag == .linux) .pipe else .ignore,
     });
 }
 
@@ -392,14 +398,14 @@ fn tlsConnect(io: std.Io, port: u16) !TlsClientConn {
 
     // server flight: ServerHello + ChangeCipherSpec + the encrypted flight (three records).
     var flight: [4096]u8 = undefined;
-    var flen: usize = 0;
+    var flight_len: usize = 0;
     for (0..3) |_| {
-        const rec = try sseReadRecord(fd, flight[flen..]);
-        flen += rec.len;
+        const record = try sseReadRecord(fd, flight[flight_len..]);
+        flight_len += record.len;
     }
 
     var fin_out: [256]u8 = undefined;
-    const finished = try zix.Tls.Client.finish(&state, flight[0..flen], &fin_out);
+    const finished = try zix.Tls.Client.finish(&state, flight[0..flight_len], &fin_out);
 
     try sseWriteAll(fd, finished.client_finished);
 
@@ -419,11 +425,11 @@ fn tlsConnect(io: std.Io, port: u16) !TlsClientConn {
 /// - void on a confirmed SSE-over-TLS stream
 /// - error.NoSseOverTls when the markers never appear, plus the handshake / socket errors
 pub fn tlsSseFirstEvent(io: std.Io, port: u16) !void {
-    var tc = try tlsConnect(io, port);
-    defer fd_io.close(tc.fd);
+    var tls_conn = try tlsConnect(io, port);
+    defer fd_io.close(tls_conn.fd);
 
-    var enc: [512]u8 = undefined;
-    try sseWriteAll(tc.fd, tc.connection.writeAppData(SSE_TLS_REQUEST, &enc));
+    var cipher_buf: [512]u8 = undefined;
+    try sseWriteAll(tls_conn.fd, tls_conn.connection.writeAppData(SSE_TLS_REQUEST, &cipher_buf));
 
     // accumulate decrypted plaintext across records until both markers appear. The headers arrive
     // immediately, the first event one tick later, so a small bounded read suffices.
@@ -431,11 +437,11 @@ pub fn tlsSseFirstEvent(io: std.Io, port: u16) !void {
     var seen_len: usize = 0;
     var records: usize = 0;
     while (records < 8) : (records += 1) {
-        var rec_buf: [2048]u8 = undefined;
-        const rec = try sseReadRecord(tc.fd, &rec_buf);
+        var record_buf: [2048]u8 = undefined;
+        const record = try sseReadRecord(tls_conn.fd, &record_buf);
 
         var plain: [2048]u8 = undefined;
-        const data = tc.connection.readAppData(rec.full, &plain) catch break;
+        const data = tls_conn.connection.readAppData(record.full, &plain) catch break;
         if (seen_len + data.len > seen.len) break;
         @memcpy(seen[seen_len..][0..data.len], data);
         seen_len += data.len;
@@ -461,21 +467,21 @@ pub fn tlsSseFirstEvent(io: std.Io, port: u16) !void {
 /// - void on a confirmed echo
 /// - error.NoWsAccept / error.NoWsEcho on a missing handshake or echo, plus handshake / socket errors
 pub fn tlsWsEcho(io: std.Io, port: u16) !void {
-    var tc = try tlsConnect(io, port);
-    defer fd_io.close(tc.fd);
+    var tls_conn = try tlsConnect(io, port);
+    defer fd_io.close(tls_conn.fd);
 
-    var enc: [512]u8 = undefined;
-    try sseWriteAll(tc.fd, tc.connection.writeAppData(WS_TLS_UPGRADE, &enc));
+    var cipher_buf: [512]u8 = undefined;
+    try sseWriteAll(tls_conn.fd, tls_conn.connection.writeAppData(WS_TLS_UPGRADE, &cipher_buf));
 
     // read records until the encrypted 101 handshake response arrives.
     var got_accept = false;
     var records: usize = 0;
     while (records < 4) : (records += 1) {
-        var rec_buf: [2048]u8 = undefined;
-        const rec = try sseReadRecord(tc.fd, &rec_buf);
+        var record_buf: [2048]u8 = undefined;
+        const record = try sseReadRecord(tls_conn.fd, &record_buf);
 
         var plain: [2048]u8 = undefined;
-        const data = tc.connection.readAppData(rec.full, &plain) catch break;
+        const data = tls_conn.connection.readAppData(record.full, &plain) catch break;
         if (std.mem.indexOf(u8, data, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != null) {
             got_accept = true;
             break;
@@ -493,14 +499,14 @@ pub fn tlsWsEcho(io: std.Io, port: u16) !void {
     for (payload, 0..) |b, i| frame[6 + i] = b ^ mask[i % 4];
 
     var enc2: [128]u8 = undefined;
-    try sseWriteAll(tc.fd, tc.connection.writeAppData(&frame, &enc2));
+    try sseWriteAll(tls_conn.fd, tls_conn.connection.writeAppData(&frame, &enc2));
 
     // the server echoes one unmasked text frame, decrypt it and confirm the payload round-tripped.
-    var rec_buf: [2048]u8 = undefined;
-    const echo_rec = try sseReadRecord(tc.fd, &rec_buf);
+    var record_buf: [2048]u8 = undefined;
+    const echo_rec = try sseReadRecord(tls_conn.fd, &record_buf);
 
     var plain: [2048]u8 = undefined;
-    const data = try tc.connection.readAppData(echo_rec.full, &plain);
+    const data = try tls_conn.connection.readAppData(echo_rec.full, &plain);
     if (std.mem.indexOf(u8, data, payload) == null) return error.NoWsEcho;
 }
 

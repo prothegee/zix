@@ -15,6 +15,14 @@ pub const ZIG_SEMVER = struct {
     pub const PATCH: usize = builtin.zig_version.patch;
 };
 
+/// THE ONLY SOURCE OF TRUTH for the zix package version, taken from
+/// build.zig.zon at build time.
+///
+/// Note:
+/// - Anything shipped from this repository reports this string, so a binary
+///   never carries a version of its own to drift from the package.
+pub const VERSION: []const u8 = @import("zon_options").version;
+
 // --------------------------------------------------------- //
 
 pub const Tcp = @import("tcp/Tcp.zig");
@@ -65,6 +73,18 @@ pub const utils = struct {
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+test "zix version: the package version reaches every consumer of it" {
+    try std.testing.expect(VERSION.len != 0);
+
+    // A package version is one token. A space would mean the string came from
+    // somewhere other than build.zig.zon.
+    try std.testing.expect(std.mem.indexOfScalar(u8, VERSION, ' ') == null);
+
+    // The http client user agent is built from the same zon entry, so the two
+    // can never report different versions.
+    try std.testing.expect(std.mem.endsWith(u8, Http.default_user_agent, VERSION));
+}
 
 test "zix tests: canonical trio surface resolves on both http namespaces" {
     // Namespace-level names shared by zix.Http and zix.Http1.

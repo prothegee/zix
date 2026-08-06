@@ -65,8 +65,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     {
         const resp = try request(io, port, "/data", "br", &resp_buf);
         if (!statusIs200(resp)) return error.UnexpectedStatus;
-        const enc = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
-        if (!std.mem.eql(u8, enc, "br")) return error.WrongEncoding;
+        const encoding = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
+        if (!std.mem.eql(u8, encoding, "br")) return error.WrongEncoding;
 
         const restored = try brotli.decompressBrotliAlloc(alloc, bodyOf(resp), 1 << 20);
         if (!std.mem.startsWith(u8, restored, EXPECTED_PREFIX)) return error.BadRoundtrip;
@@ -76,8 +76,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     {
         const resp = try request(io, port, "/data", "gzip", &resp_buf);
         if (!statusIs200(resp)) return error.UnexpectedStatus;
-        const enc = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
-        if (!std.mem.eql(u8, enc, "gzip")) return error.WrongEncoding;
+        const encoding = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
+        if (!std.mem.eql(u8, encoding, "gzip")) return error.WrongEncoding;
 
         const restored = try flate.decompressGzipAlloc(alloc, bodyOf(resp), 4096);
         if (!std.mem.startsWith(u8, restored, EXPECTED_PREFIX)) return error.BadRoundtrip;
@@ -87,8 +87,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     {
         const resp = try request(io, port, "/data", "deflate", &resp_buf);
         if (!statusIs200(resp)) return error.UnexpectedStatus;
-        const enc = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
-        if (!std.mem.eql(u8, enc, "deflate")) return error.WrongEncoding;
+        const encoding = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
+        if (!std.mem.eql(u8, encoding, "deflate")) return error.WrongEncoding;
 
         const restored = try flate.decompressDeflateAlloc(alloc, bodyOf(resp), 4096);
         if (!std.mem.startsWith(u8, restored, EXPECTED_PREFIX)) return error.BadRoundtrip;
@@ -119,8 +119,8 @@ fn request(io: std.Io, port: u16, path: []const u8, accept_encoding: ?[]const u8
     defer stream.close(io);
 
     var req_buf: [256]u8 = undefined;
-    const req = if (accept_encoding) |enc|
-        try std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept-Encoding: {s}\r\nConnection: close\r\n\r\n", .{ path, enc })
+    const req = if (accept_encoding) |encoding|
+        try std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept-Encoding: {s}\r\nConnection: close\r\n\r\n", .{ path, encoding })
     else
         try std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", .{path});
 
@@ -164,7 +164,7 @@ fn headerValue(resp: []const u8, name: []const u8) ?[]const u8 {
 }
 
 fn bodyOf(resp: []const u8) []const u8 {
-    const sep = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return &.{};
+    const head_end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return &.{};
 
-    return resp[sep + 4 ..];
+    return resp[head_end + 4 ..];
 }

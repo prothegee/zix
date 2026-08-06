@@ -175,20 +175,20 @@ test "zix http2: dispatch, EXACT wins over PREFIX and longest prefix wins" {
     const hit = struct {
         var id: u8 = 0;
     };
-    const H = struct {
-        fn make(comptime n: u8) HandlerFn {
+    const Handlers = struct {
+        fn make(comptime route_id: u8) HandlerFn {
             return struct {
-                fn f(_: *Request, _: *Response, _: *Context) anyerror!void {
-                    hit.id = n;
+                fn handle(_: *Request, _: *Response, _: *Context) anyerror!void {
+                    hit.id = route_id;
                 }
-            }.f;
+            }.handle;
         }
     };
 
     const router = Router(&[_]Route{
-        .{ .path = "/json", .handler = H.make(1) },
-        .{ .path = "/json", .handler = H.make(2), .kind = .PREFIX },
-        .{ .path = "/json/special", .handler = H.make(3), .kind = .PREFIX },
+        .{ .path = "/json", .handler = Handlers.make(1) },
+        .{ .path = "/json", .handler = Handlers.make(2), .kind = .PREFIX },
+        .{ .path = "/json/special", .handler = Handlers.make(3), .kind = .PREFIX },
     });
 
     var res = Response{ .fd = TEST_FD, .sid = 1 };

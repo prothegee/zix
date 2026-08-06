@@ -54,11 +54,11 @@ fn serveDual(io: std.Io, tls: *zix.Tls.Context, logger: *zix.Logger, args: Serve
 }
 
 fn connectRetry(io: std.Io, port: u16) !std.Io.net.Stream {
-    const sa = try std.Io.net.IpAddress.resolve(io, IP, port);
+    const server_addr = try std.Io.net.IpAddress.resolve(io, IP, port);
 
     var attempt: usize = 0;
     while (attempt < 100) : (attempt += 1) {
-        if (sa.connect(io, .{ .mode = .stream })) |stream| {
+        if (server_addr.connect(io, .{ .mode = .stream })) |stream| {
             return stream;
         } else |_| {
             std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
@@ -69,11 +69,11 @@ fn connectRetry(io: std.Io, port: u16) !std.Io.net.Stream {
 }
 
 /// Read exactly one TLS record (5-byte header + body) into buf.
-fn readRecord(rd: *std.Io.Reader, buf: []u8) ![]const u8 {
-    try rd.readSliceAll(buf[0..5]);
+fn readRecord(reader: *std.Io.Reader, buf: []u8) ![]const u8 {
+    try reader.readSliceAll(buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
-    try rd.readSliceAll(buf[5 .. 5 + length]);
+    try reader.readSliceAll(buf[5 .. 5 + length]);
 
     return buf[0 .. 5 + length];
 }
@@ -121,18 +121,18 @@ fn expectH2cSettings(io: std.Io, port: u16) !void {
     var stream = try connectRetry(io, port);
     defer stream.close(io);
 
-    var rd_buf: [4 * 1024]u8 = undefined;
-    var wr_buf: [1024]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [4 * 1024]u8 = undefined;
+    var write_buf: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     const empty_settings = [_]u8{ 0, 0, 0, settings_frame_type, 0, 0, 0, 0, 0 };
-    try wr.interface.writeAll(h2_preface);
-    try wr.interface.writeAll(&empty_settings);
-    try wr.interface.flush();
+    try writer.interface.writeAll(h2_preface);
+    try writer.interface.writeAll(&empty_settings);
+    try writer.interface.flush();
 
     var frame_head: [9]u8 = undefined;
-    try rd.interface.readSliceAll(&frame_head);
+    try reader.interface.readSliceAll(&frame_head);
     try std.testing.expectEqual(settings_frame_type, frame_head[3]);
 }
 
@@ -142,10 +142,10 @@ fn expectGrpcTlsSettings(io: std.Io, tls_port: u16) !void {
     var stream = try connectRetry(io, tls_port);
     defer stream.close(io);
 
-    var rd_buf: [8 * 1024]u8 = undefined;
-    var wr_buf: [4 * 1024]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [8 * 1024]u8 = undefined;
+    var write_buf: [4 * 1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     var ch_buf: [512]u8 = undefined;
     const started = try zix.Tls.Client.start(.{
@@ -155,40 +155,40 @@ fn expectGrpcTlsSettings(io: std.Io, tls_port: u16) !void {
     }, &ch_buf);
     var state = started.state;
 
-    var ch_rec: [600]u8 = undefined;
-    ch_rec[0] = 22; // handshake record
-    std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
-    std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
-    @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
-    try wr.interface.writeAll(ch_rec[0 .. 5 + started.client_hello.len]);
-    try wr.interface.flush();
+    var hello_record: [600]u8 = undefined;
+    hello_record[0] = 22; // handshake record
+    std.mem.writeInt(u16, hello_record[1..3], 0x0303, .big);
+    std.mem.writeInt(u16, hello_record[3..5], @intCast(started.client_hello.len), .big);
+    @memcpy(hello_record[5 .. 5 + started.client_hello.len], started.client_hello);
+    try writer.interface.writeAll(hello_record[0 .. 5 + started.client_hello.len]);
+    try writer.interface.flush();
 
     var flight_buf: [4096]u8 = undefined;
-    var flen: usize = 0;
+    var flight_len: usize = 0;
     for (0..3) |_| {
-        const rec = try readRecord(&rd.interface, flight_buf[flen..]);
-        flen += rec.len;
+        const record = try readRecord(&reader.interface, flight_buf[flight_len..]);
+        flight_len += record.len;
     }
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try zix.Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    var finished = try zix.Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
     try std.testing.expectEqual(zix.Tls.Alpn.H2, finished.alpn.?);
-    try wr.interface.writeAll(finished.client_finished);
-    try wr.interface.flush();
+    try writer.interface.writeAll(finished.client_finished);
+    try writer.interface.flush();
 
     var plain_out: [128]u8 = undefined;
     @memcpy(plain_out[0..h2_preface.len], h2_preface);
     const empty_settings = [_]u8{ 0, 0, 0, settings_frame_type, 0, 0, 0, 0, 0 };
     @memcpy(plain_out[h2_preface.len..][0..empty_settings.len], &empty_settings);
 
-    var enc: [512]u8 = undefined;
-    try wr.interface.writeAll(finished.connection.writeAppData(plain_out[0 .. h2_preface.len + empty_settings.len], &enc));
-    try wr.interface.flush();
+    var cipher_buf: [512]u8 = undefined;
+    try writer.interface.writeAll(finished.connection.writeAppData(plain_out[0 .. h2_preface.len + empty_settings.len], &cipher_buf));
+    try writer.interface.flush();
 
-    var rec_buf: [2048]u8 = undefined;
-    const rec = try readRecord(&rd.interface, &rec_buf);
+    var record_buf: [2048]u8 = undefined;
+    const record = try readRecord(&reader.interface, &record_buf);
     var plain: [2048]u8 = undefined;
-    const reply = try finished.connection.readAppData(rec, &plain);
+    const reply = try finished.connection.readAppData(record, &plain);
     try std.testing.expect(reply.len >= 9);
     try std.testing.expectEqual(settings_frame_type, reply[3]);
 }

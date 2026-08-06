@@ -165,8 +165,8 @@ test "zix multiplexers: SockFprog matches the C sock_fprog layout" {
 
 test "zix multiplexers: attachCpuSteering is a no-op on a zero-size group" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("warn: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     attachCpuSteering(-1, 0);

@@ -1,6 +1,6 @@
 // Usage:
 // zig build example-webrtc_datachannel_chat
-// ./zig-out/bin/example-webrtc_datachannel_chat
+// ./zig-out/bin/zix-example-webrtc_datachannel_chat
 // browser: http://<this machine's address>:9085/ in as many tabs as you like
 // use `ip -4 -o addr show` to check machine address.
 //

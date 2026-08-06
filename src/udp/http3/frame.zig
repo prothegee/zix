@@ -125,7 +125,7 @@ pub fn framePermittedIn(frame_type: u64, space: Space) bool {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -133,33 +133,33 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 }
 
 test "zix http3: RFC 9000 19 frame parse" {
-    const padding = try parseFrame(&h("000000"));
+    const padding = try parseFrame(&hexBytes("000000"));
     try std.testing.expect(padding.frame.padding == 3 and padding.len == 3);
 
-    const ping = try parseFrame(&h("01"));
+    const ping = try parseFrame(&hexBytes("01"));
     try std.testing.expect(ping.frame == .ping and ping.len == 1);
 
-    const crypto = try parseFrame(&h("0600040a0b0c0d"));
+    const crypto = try parseFrame(&hexBytes("0600040a0b0c0d"));
     try std.testing.expectEqual(@as(u64, 0), crypto.frame.crypto.offset);
-    try std.testing.expectEqualSlices(u8, &h("0a0b0c0d"), crypto.frame.crypto.data);
+    try std.testing.expectEqualSlices(u8, &hexBytes("0a0b0c0d"), crypto.frame.crypto.data);
 
-    const stream_min = try parseFrame(&h("0804deadbeef"));
+    const stream_min = try parseFrame(&hexBytes("0804deadbeef"));
     try std.testing.expectEqual(@as(u64, 4), stream_min.frame.stream.id);
     try std.testing.expectEqual(@as(u64, 0), stream_min.frame.stream.offset);
     try std.testing.expect(!stream_min.frame.stream.fin);
-    try std.testing.expectEqualSlices(u8, &h("deadbeef"), stream_min.frame.stream.data);
+    try std.testing.expectEqualSlices(u8, &hexBytes("deadbeef"), stream_min.frame.stream.data);
 
-    const stream_full = try parseFrame(&h("0f04080241420000"));
+    const stream_full = try parseFrame(&hexBytes("0f04080241420000"));
     try std.testing.expectEqual(@as(u64, 8), stream_full.frame.stream.offset);
     try std.testing.expect(stream_full.frame.stream.fin);
-    try std.testing.expectEqualSlices(u8, &h("4142"), stream_full.frame.stream.data);
+    try std.testing.expectEqualSlices(u8, &hexBytes("4142"), stream_full.frame.stream.data);
     try std.testing.expectEqual(@as(usize, 6), stream_full.len);
 }
 
 test "zix http3: RFC 9000 12.4 frame type rules" {
-    try std.testing.expectError(error.FrameEncodingError, parseFrame(&h("20")));
-    try std.testing.expectError(error.ProtocolViolation, parseFrame(&h("4001")));
-    try std.testing.expectError(error.FrameEncodingError, parseFrame(&h("0700")));
+    try std.testing.expectError(error.FrameEncodingError, parseFrame(&hexBytes("20")));
+    try std.testing.expectError(error.ProtocolViolation, parseFrame(&hexBytes("4001")));
+    try std.testing.expectError(error.FrameEncodingError, parseFrame(&hexBytes("0700")));
 }
 
 test "zix http3: RFC 9000 12.5 / Table 3 number-space permission matrix" {

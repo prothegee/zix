@@ -9,7 +9,7 @@
 </p>
 
 <p align="center" style="color: #C3C3C3;font-color: #C3C3C3;">
-    <i>Jaringan backend library & engine yang ditulis dalam Zig.</i>
+    <i>Sebuah high-performance network backend library & engine yang ditulis dalam Zig.</i>
 </p>
 
 <div align="center">
@@ -83,6 +83,7 @@
     - [WebRTC](./README-id.md#webrtc)
     - [Logger](./README-id.md#logger)
 - [Driver](./README-id.md#driver)
+- [zixer](./README-id.md#zixer)
 
 <br>
 
@@ -569,7 +570,7 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
     - [x] 0.16.x:
         - 0.16.0
     - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1503+1f1bee62e
+        - 0.17.0-dev.1543+6db520a4c
 
 <br>
 
@@ -633,7 +634,7 @@ Entry point yang sebenarnya adalah step bernama. Daftarkan kapan saja dengan `zi
 | `zig build` | Hanya meng-compile module graph. Tidak ada artifact yang dihasilkan, karena zix adalah source module. |
 | `zig build test-all` | Menjalankan tes unit, integration, behaviour, dan edge. |
 | `zig build unit-test` | Menjalankan tes unit saja. Juga `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `example-<name>-<arch>-<os>`, jadi hasil build beberapa target bisa hidup berdampingan. |
+| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `zix-example-<name>-<arch>-<os>`, jadi hasil build beberapa target bisa hidup berdampingan. |
 | `zig build example-<group>` | Membangun satu grup example, misalnya `example-http1` atau `example-grpc`. |
 | `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Binary yang terinstal membawa target triple, jalankan dari sana. |
 | `zig build test-runner-<name>` | Menjalankan pengecekan integrasi server plus client, misalnya `test-runner-http1-websocket`. |
@@ -643,7 +644,7 @@ Binary example yang dibangun ada di `zig-out/bin/`. Untuk membangun semua exampl
 
 ```sh
 zig build examples                                   # bangun setiap example ke zig-out/bin/
-./zig-out/bin/example-http1_websocket-x86_64-linux & # jalankan satu di background
+./zig-out/bin/zix-example-http1_websocket-x86_64-linux & # jalankan satu di background
 kill %1                                              # hentikan
 ```
 
@@ -2318,6 +2319,52 @@ Driver database dan metrics, ditulis murni dengan Zig di atas standard library s
 | [`prometheuz`](docs/driver/prometheuz/README-id.md) | Prometheus: scrape, remote write, query PromQL instant dan range |
 
 Setiap README yang ditaut mencakup instalasi, mulai cepat, kedua gaya init, dan menunjuk ke dokumen hld, lld, dan config miliknya.
+
+<br>
+
+## zixer
+
+`zixer` adalah proxy gateway yang dikirim bersama para engine. Ia program yang kamu jalankan, bukan library yang kamu link: tiap perilaku datang dari file config teks biasa, jadi sebuah service bisa ditaruh di belakangnya tanpa satu baris kode. Satu daemon memegang semua site, dan satu site adalah satu file yang menyebut engine, port, dan ke mana trafiknya pergi.
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+```
+
+```bash
+zig build zixer            # membangun zig-out/bin/zixer-<arch>-<os>
+zixer init                 # membuat kerangka root dir: main.cfg, sites/, logs/
+zixer status               # memvalidasi tiap config, keluar 1 bila ada fault
+zixer start example.cfg    # men-spawn daemon bila belum ada yang berjalan
+zixer restart example.cfg  # membaca ulang satu file site, yang dipanggil deploy hook certbot
+zixer daemon stop          # melepas tiap site lalu keluar
+```
+
+Key `engine` memilih edge, dan tiap engine kecuali `udp` melakukan re-origination pada request alih-alih meneruskannya byte per byte:
+
+| Engine | Sisi client | Leg upstream |
+| :- | :- | :- |
+| http1 | HTTP/1.1, TLS opsional, upgrade websocket, SSE, file static | HTTP/1.1, keep-alive |
+| http2 | h2 dengan sniff prior knowledge, websocket rfc 8441 | HTTP/1.1 per stream |
+| grpc | h2 saja | h2, supaya trailer selamat melewati hop |
+| http3 | QUIC dan HTTP/3, TLS selalu | HTTP/1.1 |
+| udp | datagram mentah, satu flow per client | datagram mentah |
+
+| Dokumen | Keterangan |
+| :- | :- |
+| [`docs/zixer/how-to-use-id.md`](docs/zixer/how-to-use-id.md) | zixer: build, site pertama, satu resep per bentuk, renewal certbot, penelusuran masalah |
+| [`docs/zixer/config-id.md`](docs/zixer/config-id.md) | Rujukan config zixer: tiap key main.cfg dan site, default, aturan lintas field, teks fault |
+| [`docs/zixer/hld-id.md`](docs/zixer/hld-id.md) | zixer: process model, komponen, siklus hidup site, engine, concurrency model, TLS dan ACME |
+| [`docs/zixer/lld-id.md`](docs/zixer/lld-id.md) | zixer: grammar config, wire control, aturan registry, internal per edge, batas tetap |
+
+Demo yang bisa dijalankan untuk tiap bentuk ada di [`examples/proxies/`](examples/proxies/README-id.md), masing-masing satu upstream plus satu config site, dan `zig build zixer-test-runner-all` menjalankan ke-13-nya, masing-masing di root sementara sendiri dan child process sendiri yang dibatasi waktu.
+
+**Kapan digunakan:** taruh di depan service yang sudah kamu jalankan saat kamu ingin terminasi TLS, file static, upstream round-robin, atau perubahan protocol di edge, dan kamu ingin itu dijelaskan di sebuah file alih-alih ditulis sebagai kode. Pakai engine-nya langsung bila perilakunya memang milik program kamu sendiri.
 
 <br>
 
