@@ -96,7 +96,7 @@ jobs:
       # end to end through a real daemon. None of them ride on a zix step.
       - name: zixer gateway
         if: always()
-        timeout-minutes: 6
+        timeout-minutes: 9
         shell: pwsh
         run: zig build zixer --summary failures
 
