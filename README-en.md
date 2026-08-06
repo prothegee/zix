@@ -2353,7 +2353,7 @@ The `engine` key picks the edge, and every engine except `udp` re-originates the
 | [`docs/zixer/hld-en.md`](docs/zixer/hld-en.md) | zixer: process model, components, site lifecycle, engines, concurrency model, TLS and ACME |
 | [`docs/zixer/lld-en.md`](docs/zixer/lld-en.md) | zixer: config grammar, control wire, registry rules, per-edge internals, fixed limits |
 
-Runnable demos for every shape live in [`examples/proxies/`](examples/proxies/README-en.md), one upstream plus one site config each, and `zig build zixer-test-runner-all` drives all 13 through a throwaway root.
+Runnable demos for every shape live in [`examples/proxies/`](examples/proxies/README-en.md), one upstream plus one site config each, and `zig build zixer-test-runner-all` drives all 13, each in its own throwaway root and its own bounded child process.
 
 **When to use:** put it in front of services you already run when you want TLS termination, static files, round-robin upstreams, or a protocol change at the edge, and you want that described in a file rather than written in code. Reach for the engines directly instead when the behavior belongs inside your own program.
 
