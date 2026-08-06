@@ -314,7 +314,7 @@ fn decodeHeaders(section: []const u8) ?DecodedRequest {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -324,11 +324,11 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 test "zix http3: streamBytes sums stream payloads across streams, skipping non-stream frames" {
     // ACK (skipped, charges nothing), a 17-byte request STREAM on bidi stream 0, then a 3-byte
     // STREAM on client uni stream 2: connection-level flow control counts both (RFC 9000 4.1).
-    const payload = h("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532" ++ "0a0203" ++ "000400");
+    const payload = hexBytes("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532" ++ "0a0203" ++ "000400");
     try std.testing.expectEqual(@as(u64, 20), streamBytes(&payload));
 
     // A payload with no STREAM frame charges nothing.
-    const ack_only = h("0200000000");
+    const ack_only = hexBytes("0200000000");
     try std.testing.expectEqual(@as(u64, 0), streamBytes(&ack_only));
 }
 
@@ -336,7 +336,7 @@ test "zix http3: parseRequest decodes method and path past a leading ACK" {
     // ACK (0x02, largest 0, skipped) then STREAM frame on stream 0 carrying a HEADERS frame:
     // field section prefix 0000, :method GET as an indexed static line (0xd1), :path /baseline2 as a
     // literal-with-name-reference (0x51 = static name index 1, 0x0a = non-Huffman length 10).
-    const payload = h("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532");
+    const payload = hexBytes("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532");
 
     const decoded = parseRequest(&payload).?;
     try std.testing.expectEqualSlices(u8, "GET", decoded.method);
@@ -348,7 +348,7 @@ test "zix http3: parseRequest captures accept-encoding from the indexed static e
     // Like the test above but the HEADERS field section adds accept-encoding as an indexed static line
     // (0xdf = static index 31, value "gzip, deflate, br"). Field section is now 16 bytes (0x10), so the
     // HEADERS frame is 0x12 and the STREAM length 0x12. The scan runs past :method / :path to reach it.
-    const payload = h("0200000000" ++ "0a0012" ++ "0110" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532" ++ "df");
+    const payload = hexBytes("0200000000" ++ "0a0012" ++ "0110" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532" ++ "df");
 
     const decoded = parseRequest(&payload).?;
     try std.testing.expectEqualSlices(u8, "GET", decoded.method);
@@ -360,7 +360,7 @@ test "zix http3: parseRequest captures accept-encoding from the indexed static e
 test "zix http3: parseRequest leaves accept-encoding empty when the client sends none" {
     // The original request shape (no accept-encoding field): the value stays empty, and the serve path
     // then falls back to an identity response.
-    const payload = h("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532");
+    const payload = hexBytes("0200000000" ++ "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532");
 
     const decoded = parseRequest(&payload).?;
     try std.testing.expectEqual(@as(usize, 0), decoded.accept_encoding.len);
@@ -368,7 +368,7 @@ test "zix http3: parseRequest leaves accept-encoding empty when the client sends
 
 test "zix http3: parseRequest returns null when no request stream is present" {
     // A packet with only an ACK frame: nothing to decode.
-    try std.testing.expect(parseRequest(&h("0200000000")) == null);
+    try std.testing.expect(parseRequest(&hexBytes("0200000000")) == null);
 }
 
 test "zix http3: parseRequests decodes two coalesced requests with their stream ids" {
@@ -376,7 +376,7 @@ test "zix http3: parseRequests decodes two coalesced requests with their stream 
     // each a HEADERS frame with field section prefix 0000, :method GET (0xd1), :path literal.
     const one = "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532";
     const two = "0a0411" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532";
-    const payload = h("0200000000" ++ one ++ two);
+    const payload = hexBytes("0200000000" ++ one ++ two);
 
     var reqs: [4]StreamRequest = undefined;
     const count = parseRequests(&payload, &reqs);

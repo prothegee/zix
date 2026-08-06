@@ -122,7 +122,7 @@ pub const default_zero_rtt = ZeroRttPolicy{ .accepts = false };
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -130,7 +130,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 }
 
 test "zix http3: RFC 9001 4 CRYPTO-frame handshake reassembly" {
-    const client_hello = h("0100000401020304");
+    const client_hello = hexBytes("0100000401020304");
 
     var in_order = CryptoStream{};
     in_order.insert(0, client_hello[0..4]);
@@ -153,15 +153,15 @@ test "zix http3: RFC 9001 4 CRYPTO-frame handshake reassembly" {
 }
 
 test "zix http3: RFC 9001 5.1 per-level quic key derivation" {
-    const dcid = h("8394c8f03e515708");
+    const dcid = hexBytes("8394c8f03e515708");
     var initial_key: [16]u8 = undefined;
     quicKey(&initial_key, clientInitialSecret(&dcid));
-    try std.testing.expectEqualSlices(u8, &h("1f369613dd76d5467730efcbe3b1a22d"), &initial_key);
+    try std.testing.expectEqualSlices(u8, &hexBytes("1f369613dd76d5467730efcbe3b1a22d"), &initial_key);
 
-    const app_secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const app_secret: crypto.Secret = hexBytes("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     var app_key: [32]u8 = undefined;
     quicKey(&app_key, app_secret);
-    try std.testing.expectEqualSlices(u8, &h("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"), &app_key);
+    try std.testing.expectEqualSlices(u8, &hexBytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"), &app_key);
 
     try std.testing.expect(!std.mem.eql(u8, &initial_key, app_key[0..16]));
 }

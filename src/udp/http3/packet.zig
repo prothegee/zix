@@ -150,7 +150,7 @@ pub fn parseShortHeader(data: []const u8, dcid_len: usize) ParseError!ShortHeade
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -176,26 +176,26 @@ test "zix http3: RFC 9000 A.2 / A.3 packet number encode length and decode" {
 }
 
 test "zix http3: RFC 9000 17.2 long header parse and invariants" {
-    const long = h("c300000001088394c8f03e515708041122334400");
+    const long = hexBytes("c300000001088394c8f03e515708041122334400");
     const header = try parseLongHeader(&long);
     try std.testing.expectEqual(@as(u2, 0), header.packet_type);
     try std.testing.expectEqual(@as(u32, 1), header.version);
-    try std.testing.expectEqualSlices(u8, &h("8394c8f03e515708"), header.dcid);
-    try std.testing.expectEqualSlices(u8, &h("11223344"), header.scid);
-    try std.testing.expectEqualSlices(u8, &h("00"), header.rest);
+    try std.testing.expectEqualSlices(u8, &hexBytes("8394c8f03e515708"), header.dcid);
+    try std.testing.expectEqualSlices(u8, &hexBytes("11223344"), header.scid);
+    try std.testing.expectEqualSlices(u8, &hexBytes("00"), header.rest);
 
-    try std.testing.expectError(error.FixedBitZero, parseLongHeader(&h("830000000100")));
-    try std.testing.expectError(error.ConnectionIdTooLong, parseLongHeader(&h("c30000000115")));
+    try std.testing.expectError(error.FixedBitZero, parseLongHeader(&hexBytes("830000000100")));
+    try std.testing.expectError(error.ConnectionIdTooLong, parseLongHeader(&hexBytes("c30000000115")));
 }
 
 test "zix http3: RFC 9000 17.3 short header parse and invariants" {
-    const short = h("43cafebabe11223344aabbcc");
+    const short = hexBytes("43cafebabe11223344aabbcc");
     const sh = try parseShortHeader(&short, 8);
     try std.testing.expect(!sh.spin_bit);
     try std.testing.expect(!sh.key_phase);
     try std.testing.expectEqual(@as(usize, 4), sh.pn_length);
-    try std.testing.expectEqualSlices(u8, &h("cafebabe11223344"), sh.dcid);
-    try std.testing.expectEqualSlices(u8, &h("aabbcc"), sh.rest);
+    try std.testing.expectEqualSlices(u8, &hexBytes("cafebabe11223344"), sh.dcid);
+    try std.testing.expectEqualSlices(u8, &hexBytes("aabbcc"), sh.rest);
 
-    try std.testing.expectError(error.FixedBitZero, parseShortHeader(&h("03cafebabe11223344"), 8));
+    try std.testing.expectError(error.FixedBitZero, parseShortHeader(&hexBytes("03cafebabe11223344"), 8));
 }

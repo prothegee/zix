@@ -334,7 +334,7 @@ pub fn sealShort(out: []u8, keys: crypto.AesKeys, dcid: []const u8, packet_numbe
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -343,15 +343,15 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 
 test "zix http3: open the RFC 9001 A.2 protected client Initial" {
     // Build the byte-exact A.2 protected packet via the seal path, then open it back.
-    const dcid = h("8394c8f03e515708");
+    const dcid = hexBytes("8394c8f03e515708");
     const secrets = crypto.initialSecrets(&dcid);
     const client_keys = crypto.AesKeys.fromSecret(secrets.client);
 
-    const header = h("c300000001088394c8f03e5157080000449e00000002");
+    const header = hexBytes("c300000001088394c8f03e5157080000449e00000002");
     const pn_offset: usize = 18;
     const pn_length: usize = 4;
 
-    const crypto_frame = h("060040f1010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e868" ++
+    const crypto_frame = hexBytes("060040f1010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e868" ++
         "04fe3a47f06a2b69484c000004130113020100" ++ "00c000000010000e00000b6578" ++
         "616d706c652e636f6dff01000100000a00080006001d00170018001000070005" ++
         "04616c706e000500050100000000003300260024001d00209370b2c9caa47fba" ++
@@ -389,7 +389,7 @@ test "zix http3: open the RFC 9001 A.2 protected client Initial" {
 }
 
 test "zix http3: sealInitial then openInitial round-trips the payload" {
-    const dcid = h("8394c8f03e515708");
+    const dcid = hexBytes("8394c8f03e515708");
     const secrets = crypto.initialSecrets(&dcid);
     const server_keys = crypto.AesKeys.fromSecret(secrets.server);
 
@@ -397,11 +397,11 @@ test "zix http3: sealInitial then openInitial round-trips the payload" {
     // reach the header-protection sample length.
     var payload: [64]u8 = undefined;
     @memset(&payload, 0);
-    const frame_bytes = h("0600200200006c0303") ++ h("aabbccddeeff");
+    const frame_bytes = hexBytes("0600200200006c0303") ++ hexBytes("aabbccddeeff");
     @memcpy(payload[0..frame_bytes.len], &frame_bytes);
 
     var out: [256]u8 = undefined;
-    const sealed = try sealInitial(&out, server_keys, &dcid, &h("c0ffee00"), 0, &payload);
+    const sealed = try sealInitial(&out, server_keys, &dcid, &hexBytes("c0ffee00"), 0, &payload);
 
     var recovered: [256]u8 = undefined;
     const opened = try openInitial(sealed, server_keys, &recovered);
@@ -411,16 +411,16 @@ test "zix http3: sealInitial then openInitial round-trips the payload" {
 }
 
 test "zix http3: sealHandshake then openHandshake round-trips the payload" {
-    const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const secret: crypto.Secret = hexBytes("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = crypto.AesKeys.fromSecret(secret);
 
     var payload: [64]u8 = undefined;
     @memset(&payload, 0);
-    const frame_bytes = h("080041020800000e") ++ h("aabbccdd");
+    const frame_bytes = hexBytes("080041020800000e") ++ hexBytes("aabbccdd");
     @memcpy(payload[0..frame_bytes.len], &frame_bytes);
 
     var out: [256]u8 = undefined;
-    const sealed = try sealHandshake(&out, keys, &h("c0ffee00"), &h("1234"), 0, &payload);
+    const sealed = try sealHandshake(&out, keys, &hexBytes("c0ffee00"), &hexBytes("1234"), 0, &payload);
 
     var recovered: [256]u8 = undefined;
     const opened = try openHandshake(sealed, keys, &recovered);
@@ -430,13 +430,13 @@ test "zix http3: sealHandshake then openHandshake round-trips the payload" {
 }
 
 test "zix http3: sealShort then openShort round-trips the payload" {
-    const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const secret: crypto.Secret = hexBytes("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = crypto.AesKeys.fromSecret(secret);
-    const dcid = h("c0ffee0011223344");
+    const dcid = hexBytes("c0ffee0011223344");
 
     var payload: [64]u8 = undefined;
     @memset(&payload, 0);
-    const stream_frame = h("0800") ++ h("0102030405");
+    const stream_frame = hexBytes("0800") ++ hexBytes("0102030405");
     @memcpy(payload[0..stream_frame.len], &stream_frame);
 
     var out: [256]u8 = undefined;
@@ -481,15 +481,15 @@ fn sealShortTruncated1(out: []u8, keys: crypto.AesKeys, dcid: []const u8, full_p
 }
 
 test "zix http3: openShort reconstructs a truncated packet number past 256 (the ~256-packet stall)" {
-    const secret: crypto.Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const secret: crypto.Secret = hexBytes("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = crypto.AesKeys.fromSecret(secret);
-    const dcid = h("c0ffee0011223344");
+    const dcid = hexBytes("c0ffee0011223344");
 
     // Full packet number 300: on a 1-byte-truncated stream the wire carries 300 & 0xff = 44. Without
     // reconstruction the receiver builds the nonce from 44 and decryption fails, which is exactly the
     // connection death after ~256 packets.
     var payload: [40]u8 = @splat(0);
-    const frame = h("0800") ++ h("0102030405");
+    const frame = hexBytes("0800") ++ hexBytes("0102030405");
     @memcpy(payload[0..frame.len], &frame);
 
     var out: [256]u8 = undefined;
@@ -508,7 +508,7 @@ test "zix http3: openShort reconstructs a truncated packet number past 256 (the 
 }
 
 test "zix http3: openInitial rejects a tampered packet" {
-    const dcid = h("8394c8f03e515708");
+    const dcid = hexBytes("8394c8f03e515708");
     const secrets = crypto.initialSecrets(&dcid);
     const client_keys = crypto.AesKeys.fromSecret(secrets.client);
 

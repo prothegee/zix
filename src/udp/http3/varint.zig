@@ -67,7 +67,7 @@ pub fn write(out: []u8, value: u64) usize {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -75,26 +75,26 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 }
 
 test "zix http3: RFC 9000 A.1 varint decode" {
-    try std.testing.expectEqual(@as(u64, 151288809941952652), (try read(&h("c2197c5eff14e88c"))).value);
-    try std.testing.expectEqual(@as(usize, 8), (try read(&h("c2197c5eff14e88c"))).len);
-    try std.testing.expectEqual(@as(u64, 494878333), (try read(&h("9d7f3e7d"))).value);
-    try std.testing.expectEqual(@as(u64, 15293), (try read(&h("7bbd"))).value);
-    try std.testing.expectEqual(@as(u64, 37), (try read(&h("25"))).value);
+    try std.testing.expectEqual(@as(u64, 151288809941952652), (try read(&hexBytes("c2197c5eff14e88c"))).value);
+    try std.testing.expectEqual(@as(usize, 8), (try read(&hexBytes("c2197c5eff14e88c"))).len);
+    try std.testing.expectEqual(@as(u64, 494878333), (try read(&hexBytes("9d7f3e7d"))).value);
+    try std.testing.expectEqual(@as(u64, 15293), (try read(&hexBytes("7bbd"))).value);
+    try std.testing.expectEqual(@as(u64, 37), (try read(&hexBytes("25"))).value);
 
-    const non_minimal = try read(&h("4025"));
+    const non_minimal = try read(&hexBytes("4025"));
     try std.testing.expectEqual(@as(u64, 37), non_minimal.value);
     try std.testing.expectEqual(@as(usize, 2), non_minimal.len);
 
     try std.testing.expectError(error.Truncated, read(&[_]u8{}));
-    try std.testing.expectError(error.Truncated, read(&h("c2")));
+    try std.testing.expectError(error.Truncated, read(&hexBytes("c2")));
 }
 
 test "zix http3: RFC 9000 16 varint encode and length boundaries" {
     var buf: [8]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, &h("25"), buf[0..write(&buf, 37)]);
-    try std.testing.expectEqualSlices(u8, &h("7bbd"), buf[0..write(&buf, 15293)]);
-    try std.testing.expectEqualSlices(u8, &h("9d7f3e7d"), buf[0..write(&buf, 494878333)]);
-    try std.testing.expectEqualSlices(u8, &h("c2197c5eff14e88c"), buf[0..write(&buf, 151288809941952652)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("25"), buf[0..write(&buf, 37)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("7bbd"), buf[0..write(&buf, 15293)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("9d7f3e7d"), buf[0..write(&buf, 494878333)]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("c2197c5eff14e88c"), buf[0..write(&buf, 151288809941952652)]);
 
     try std.testing.expectEqual(@as(usize, 1), encodedLen(63));
     try std.testing.expectEqual(@as(usize, 2), encodedLen(64));

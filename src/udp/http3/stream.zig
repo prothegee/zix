@@ -169,7 +169,7 @@ pub const ConnIdPool = struct {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -209,12 +209,12 @@ test "zix http3: RFC 9000 3.2 receiving stream states" {
 }
 
 test "zix http3: RFC 9000 19.15 / 5.1.1 NEW_CONNECTION_ID validation and limit" {
-    const nci_ok = try parseNewConnectionId(&h("010008" ++ "f067a5502a4262b5" ++ "0102030405060708090a0b0c0d0e0f10"));
+    const nci_ok = try parseNewConnectionId(&hexBytes("010008" ++ "f067a5502a4262b5" ++ "0102030405060708090a0b0c0d0e0f10"));
     try std.testing.expect(nci_ok.seq == 1 and nci_ok.length == 8);
 
-    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&h("010000")));
-    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&h("010015")));
-    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&h("010208")));
+    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&hexBytes("010000")));
+    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&hexBytes("010015")));
+    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&hexBytes("010208")));
 
     var pool = ConnIdPool{ .limit = 2 };
     try pool.onNewConnectionId(.{ .seq = 1, .retire_prior_to = 0, .length = 8 });

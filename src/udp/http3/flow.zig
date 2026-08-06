@@ -133,7 +133,7 @@ pub fn pathValidates(sent_challenge: [8]u8, received_response: [8]u8) bool {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -159,36 +159,36 @@ test "zix http3: RFC 9000 4.1 stream and connection flow control" {
 }
 
 test "zix http3: RFC 9000 19.3 ACK frame parse and range arithmetic" {
-    const ack_single = try parseAck(&h("020a000003"), 0);
+    const ack_single = try parseAck(&hexBytes("020a000003"), 0);
     try std.testing.expectEqual(@as(u64, 10), ack_single.largest);
     try std.testing.expect(ack_single.range_len == 1 and ack_single.ranges[0].smallest == 7 and ack_single.ranges[0].largest == 10);
     try std.testing.expectEqual(@as(usize, 5), ack_single.consumed);
 
-    const ack_multi = try parseAck(&h("020a00010203" ++ "01"), 0);
+    const ack_multi = try parseAck(&hexBytes("020a00010203" ++ "01"), 0);
     try std.testing.expectEqual(@as(usize, 2), ack_multi.range_len);
     try std.testing.expect(ack_multi.ranges[0].smallest == 8 and ack_multi.ranges[0].largest == 10);
     try std.testing.expect(ack_multi.ranges[1].smallest == 2 and ack_multi.ranges[1].largest == 3);
     try std.testing.expectEqual(@as(usize, 7), ack_multi.consumed);
 
-    const ack_ecn = try parseAck(&h("030a000003" ++ "010203"), 0);
+    const ack_ecn = try parseAck(&hexBytes("030a000003" ++ "010203"), 0);
     try std.testing.expect(ack_ecn.ecn != null and ack_ecn.ecn.?[0] == 1 and ack_ecn.ecn.?[1] == 2 and ack_ecn.ecn.?[2] == 3);
     try std.testing.expectEqual(@as(usize, 8), ack_ecn.consumed);
 
-    const ack_delay = try parseAck(&h("020a" ++ "4064" ++ "0000"), 3);
+    const ack_delay = try parseAck(&hexBytes("020a" ++ "4064" ++ "0000"), 3);
     try std.testing.expectEqual(@as(u64, 800), ack_delay.delay_us);
 
-    try std.testing.expectError(error.FrameEncodingError, parseAck(&h("0202000005"), 0));
+    try std.testing.expectError(error.FrameEncodingError, parseAck(&hexBytes("0202000005"), 0));
 }
 
 test "zix http3: RFC 9000 19.17 / 19.18 path validation" {
-    const challenge = try parsePathData(&h("1a0102030405060708"));
+    const challenge = try parsePathData(&hexBytes("1a0102030405060708"));
     try std.testing.expect(challenge[0] == 0x01 and challenge[7] == 0x08);
 
-    const response = try parsePathData(&h("1b0102030405060708"));
+    const response = try parsePathData(&hexBytes("1b0102030405060708"));
     try std.testing.expect(pathValidates(challenge, response));
 
-    const wrong = try parsePathData(&h("1b01020304050607ff"));
+    const wrong = try parsePathData(&hexBytes("1b01020304050607ff"));
     try std.testing.expect(!pathValidates(challenge, wrong));
 
-    try std.testing.expectError(error.WrongType, parsePathData(&h("0c0102030405060708")));
+    try std.testing.expectError(error.WrongType, parsePathData(&hexBytes("0c0102030405060708")));
 }

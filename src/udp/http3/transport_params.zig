@@ -146,7 +146,7 @@ fn findExtension(client_hello: []const u8, want_type: u16) ?[]const u8 {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -156,7 +156,7 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 test "zix http3: parse extracts initial_max_data and initial_max_stream_data_bidi_local" {
     // Three params: 0x04 = 1048576 (varint c0..00100000), 0x05 = 262144 (varint 80040000),
     // 0x08 = 100 (varint 4064, skipped). Each entry is id, length, value.
-    const body = h("04" ++ "04" ++ "80100000" ++ "05" ++ "04" ++ "80040000" ++ "08" ++ "02" ++ "4064");
+    const body = hexBytes("04" ++ "04" ++ "80100000" ++ "05" ++ "04" ++ "80040000" ++ "08" ++ "02" ++ "4064");
     const params = parse(&body);
 
     try std.testing.expectEqual(@as(u64, 1048576), params.initial_max_data);
@@ -165,7 +165,7 @@ test "zix http3: parse extracts initial_max_data and initial_max_stream_data_bid
 
 test "zix http3: parse defaults absent parameters to zero" {
     // Only initial_max_data present, the per-stream limit defaults to 0.
-    const body = h("04" ++ "04" ++ "80100000");
+    const body = hexBytes("04" ++ "04" ++ "80100000");
     const params = parse(&body);
 
     try std.testing.expectEqual(@as(u64, 1048576), params.initial_max_data);
@@ -177,23 +177,23 @@ test "zix http3: parse defaults absent parameters to zero" {
 
 test "zix http3: parse extracts max_udp_payload_size and clamps below the 1200 floor" {
     // 0x03 = 8192 (varint 80002000), so the server may send up to 8 KiB datagrams to this client.
-    const body = h("03" ++ "04" ++ "80002000");
+    const body = hexBytes("03" ++ "04" ++ "80002000");
     try std.testing.expectEqual(@as(u64, 8192), parse(&body).max_udp_payload_size);
 
     // A value under the RFC minimum (0x03 = 512, varint 4200) is clamped up to 1200, never below.
-    const tiny = h("03" ++ "02" ++ "4200");
+    const tiny = hexBytes("03" ++ "02" ++ "4200");
     try std.testing.expectEqual(min_udp_payload_size, parse(&tiny).max_udp_payload_size);
 }
 
 test "zix http3: parse extracts ack_delay_exponent, clamped to the RFC 9000 18.2 valid range" {
-    const body = h("0a" ++ "01" ++ "06");
+    const body = hexBytes("0a" ++ "01" ++ "06");
     try std.testing.expectEqual(@as(u6, 6), parse(&body).ack_delay_exponent);
 
-    const oversized = h("0a" ++ "02" ++ "4064"); // varint 100, clamped to 20
+    const oversized = hexBytes("0a" ++ "02" ++ "4064"); // varint 100, clamped to 20
     try std.testing.expectEqual(@as(u6, 20), parse(&oversized).ack_delay_exponent);
 
     // 0x0b is max_ack_delay, not ack_delay_exponent (RFC 9000 Table 6), so it must not set the exponent.
-    const max_ack_delay = h("0b" ++ "01" ++ "06");
+    const max_ack_delay = hexBytes("0b" ++ "01" ++ "06");
     try std.testing.expectEqual(@as(u6, 3), parse(&max_ack_delay).ack_delay_exponent);
 }
 
@@ -203,7 +203,7 @@ const zero_random = "00000000000000000000000000000000000000000000000000000000000
 test "zix http3: fromClientHello returns null without the extension" {
     // A ClientHello with no extensions at all: handshake header + version + random + empty session id
     // + one cipher suite + null compression + empty extension list.
-    const client_hello = h("01" ++ "00002d" ++ "0303" ++ zero_random ++ "00" ++ "0002" ++ "1301" ++ "01" ++ "00" ++ "0000");
+    const client_hello = hexBytes("01" ++ "00002d" ++ "0303" ++ zero_random ++ "00" ++ "0002" ++ "1301" ++ "01" ++ "00" ++ "0000");
 
     try std.testing.expect(fromClientHello(&client_hello) == null);
 }
@@ -213,7 +213,7 @@ test "zix http3: fromClientHello finds and parses the transport parameters exten
     // value 1048576}.
     const ext_body = "04" ++ "04" ++ "80100000";
     const ext = "0039" ++ "0006" ++ ext_body;
-    const client_hello = h("01" ++ "000037" ++ "0303" ++ zero_random ++ "00" ++ "0002" ++ "1301" ++ "01" ++ "00" ++ "000a" ++ ext);
+    const client_hello = hexBytes("01" ++ "000037" ++ "0303" ++ zero_random ++ "00" ++ "0002" ++ "1301" ++ "01" ++ "00" ++ "000a" ++ ext);
 
     const params = fromClientHello(&client_hello).?;
     try std.testing.expectEqual(@as(u64, 1048576), params.initial_max_data);

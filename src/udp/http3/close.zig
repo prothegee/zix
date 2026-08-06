@@ -137,7 +137,7 @@ pub fn initialDatagramValid(size: usize) bool {
 // --------------------------------------------------------------- //
 // --------------------------------------------------------------- //
 
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -145,13 +145,13 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 }
 
 test "zix http3: RFC 9000 19.19 CONNECTION_CLOSE frame variants" {
-    const close_quic = try parseConnectionClose(&h("1c07000" ++ "26f6b"));
+    const close_quic = try parseConnectionClose(&hexBytes("1c07000" ++ "26f6b"));
     try std.testing.expect(!close_quic.is_application);
     try std.testing.expectEqual(@as(u64, 7), close_quic.error_code);
     try std.testing.expectEqual(@as(u64, 0), close_quic.frame_type);
     try std.testing.expectEqualSlices(u8, "ok", close_quic.reason);
 
-    const close_app = try parseConnectionClose(&h("1d0100"));
+    const close_app = try parseConnectionClose(&hexBytes("1d0100"));
     try std.testing.expect(close_app.is_application);
     try std.testing.expectEqual(@as(u64, 1), close_app.error_code);
     try std.testing.expectEqual(@as(usize, 0), close_app.reason.len);
@@ -170,9 +170,9 @@ test "zix http3: RFC 9000 10.2 closing and draining states" {
 test "zix http3: RFC 9000 10.3 stateless reset detection and size" {
     const token: [16]u8 = .{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf };
 
-    try std.testing.expect(isStatelessReset(&h("4111223344556677" ++ "88" ++ "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"), token));
-    try std.testing.expect(!isStatelessReset(&h("4111223344556677" ++ "88" ++ "ffffffffffffffffffffffffffffffff"), token));
-    try std.testing.expect(!isStatelessReset(&h("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf11223344"), token));
+    try std.testing.expect(isStatelessReset(&hexBytes("4111223344556677" ++ "88" ++ "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"), token));
+    try std.testing.expect(!isStatelessReset(&hexBytes("4111223344556677" ++ "88" ++ "ffffffffffffffffffffffffffffffff"), token));
+    try std.testing.expect(!isStatelessReset(&hexBytes("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf11223344"), token));
 
     try std.testing.expect(!resetSizeAllowed(20, 60));
     try std.testing.expect(resetSizeAllowed(20, 59));

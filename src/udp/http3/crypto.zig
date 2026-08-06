@@ -270,7 +270,7 @@ pub const KeyUsage = struct {
 // --------------------------------------------------------------- //
 
 /// Decode a hex literal (no separators) into a fixed array, for the RFC vectors.
-fn h(comptime text: []const u8) [text.len / 2]u8 {
+fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
     var out: [text.len / 2]u8 = undefined;
     _ = std.fmt.hexToBytes(&out, text) catch unreachable;
 
@@ -278,35 +278,35 @@ fn h(comptime text: []const u8) [text.len / 2]u8 {
 }
 
 test "zix http3: RFC 9001 A.1 Initial secrets and keys" {
-    const dcid = h("8394c8f03e515708");
+    const dcid = hexBytes("8394c8f03e515708");
     const secrets = initialSecrets(&dcid);
 
-    try std.testing.expectEqualSlices(u8, &h("7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44"), &secrets.initial);
-    try std.testing.expectEqualSlices(u8, &h("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea"), &secrets.client);
-    try std.testing.expectEqualSlices(u8, &h("3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b"), &secrets.server);
+    try std.testing.expectEqualSlices(u8, &hexBytes("7db5df06e7a69e432496adedb00851923595221596ae2ae9fb8115c1e9ed0a44"), &secrets.initial);
+    try std.testing.expectEqualSlices(u8, &hexBytes("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea"), &secrets.client);
+    try std.testing.expectEqualSlices(u8, &hexBytes("3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b"), &secrets.server);
 
     const client_keys = AesKeys.fromSecret(secrets.client);
-    try std.testing.expectEqualSlices(u8, &h("1f369613dd76d5467730efcbe3b1a22d"), &client_keys.key);
-    try std.testing.expectEqualSlices(u8, &h("fa044b2f42a3fd3b46fb255c"), &client_keys.iv);
-    try std.testing.expectEqualSlices(u8, &h("9f50449e04a0e810283a1e9933adedd2"), &client_keys.hp);
+    try std.testing.expectEqualSlices(u8, &hexBytes("1f369613dd76d5467730efcbe3b1a22d"), &client_keys.key);
+    try std.testing.expectEqualSlices(u8, &hexBytes("fa044b2f42a3fd3b46fb255c"), &client_keys.iv);
+    try std.testing.expectEqualSlices(u8, &hexBytes("9f50449e04a0e810283a1e9933adedd2"), &client_keys.hp);
 
     const server_keys = AesKeys.fromSecret(secrets.server);
-    try std.testing.expectEqualSlices(u8, &h("cf3a5331653c364c88f0f379b6067e37"), &server_keys.key);
-    try std.testing.expectEqualSlices(u8, &h("0ac1493ca1905853b0bba03e"), &server_keys.iv);
-    try std.testing.expectEqualSlices(u8, &h("c206b8d9b9f0f37644430b490eeaa314"), &server_keys.hp);
+    try std.testing.expectEqualSlices(u8, &hexBytes("cf3a5331653c364c88f0f379b6067e37"), &server_keys.key);
+    try std.testing.expectEqualSlices(u8, &hexBytes("0ac1493ca1905853b0bba03e"), &server_keys.iv);
+    try std.testing.expectEqualSlices(u8, &hexBytes("c206b8d9b9f0f37644430b490eeaa314"), &server_keys.hp);
 }
 
 test "zix http3: RFC 9001 A.2 client Initial packet protection" {
-    const dcid = h("8394c8f03e515708");
+    const dcid = hexBytes("8394c8f03e515708");
     const secrets = initialSecrets(&dcid);
     const client_keys = AesKeys.fromSecret(secrets.client);
 
-    const header = h("c300000001088394c8f03e5157080000449e00000002");
+    const header = hexBytes("c300000001088394c8f03e5157080000449e00000002");
     const pn_offset: usize = 18;
     const pn_length: usize = 4;
     const packet_number: u64 = 2;
 
-    const crypto_frame = h("060040f1010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e868" ++
+    const crypto_frame = hexBytes("060040f1010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e868" ++
         "04fe3a47f06a2b69484c000004130113020100" ++ "00c000000010000e00000b6578" ++
         "616d706c652e636f6dff01000100000a00080006001d00170018001000070005" ++
         "04616c706e000500050100000000003300260024001d00209370b2c9caa47fba" ++
@@ -328,27 +328,27 @@ test "zix http3: RFC 9001 A.2 client Initial packet protection" {
     const sample_start = pn_offset + 4 - header.len;
     var sample: [16]u8 = undefined;
     @memcpy(&sample, ciphertext[sample_start .. sample_start + 16]);
-    try std.testing.expectEqualSlices(u8, &h("d1b1c98dd7689fb8ec11d242b123dc9b"), &sample);
+    try std.testing.expectEqualSlices(u8, &hexBytes("d1b1c98dd7689fb8ec11d242b123dc9b"), &sample);
 
     const mask = headerMaskAes(client_keys.hp, sample);
-    try std.testing.expectEqualSlices(u8, &h("437b9aec36"), mask[0..5]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("437b9aec36"), mask[0..5]);
 
     var protected_header = header;
     protected_header[0] ^= mask[0] & 0x0f;
     for (0..pn_length) |i| protected_header[pn_offset + i] ^= mask[1 + i];
 
-    try std.testing.expectEqualSlices(u8, &h("c000000001088394c8f03e5157080000449e7b9aec34"), &protected_header);
-    try std.testing.expectEqualSlices(u8, &h("c000000001088394c8f03e5157080000"), protected_header[0..16]);
-    try std.testing.expectEqualSlices(u8, &h("e221af44860018ab0856972e194cd934"), &tag);
+    try std.testing.expectEqualSlices(u8, &hexBytes("c000000001088394c8f03e5157080000449e7b9aec34"), &protected_header);
+    try std.testing.expectEqualSlices(u8, &hexBytes("c000000001088394c8f03e5157080000"), protected_header[0..16]);
+    try std.testing.expectEqualSlices(u8, &hexBytes("e221af44860018ab0856972e194cd934"), &tag);
 }
 
 test "zix http3: RFC 9001 5.8 + A.4 Retry key, nonce, and integrity tag" {
     const kn = retryKeyNonce();
-    try std.testing.expectEqualSlices(u8, &h("be0c690b9f66575a1d766b54e368c84e"), &kn.key);
-    try std.testing.expectEqualSlices(u8, &h("461599d35d632bf2239825bb"), &kn.nonce);
+    try std.testing.expectEqualSlices(u8, &hexBytes("be0c690b9f66575a1d766b54e368c84e"), &kn.key);
+    try std.testing.expectEqualSlices(u8, &hexBytes("461599d35d632bf2239825bb"), &kn.nonce);
 
-    const odcid = h("8394c8f03e515708");
-    const retry_no_tag = h("ff000000010008f067a5502a4262b5746f6b656e");
+    const odcid = hexBytes("8394c8f03e515708");
+    const retry_no_tag = hexBytes("ff000000010008f067a5502a4262b5746f6b656e");
 
     var pseudo: [1 + odcid.len + retry_no_tag.len]u8 = undefined;
     pseudo[0] = @intCast(odcid.len);
@@ -356,26 +356,26 @@ test "zix http3: RFC 9001 5.8 + A.4 Retry key, nonce, and integrity tag" {
     @memcpy(pseudo[1 + odcid.len ..], &retry_no_tag);
 
     const tag = retryTag(kn.key, kn.nonce, &pseudo);
-    try std.testing.expectEqualSlices(u8, &h("04a265ba2eff4d829058fb3f0f2496ba"), &tag);
+    try std.testing.expectEqualSlices(u8, &hexBytes("04a265ba2eff4d829058fb3f0f2496ba"), &tag);
 }
 
 test "zix http3: RFC 9001 A.5 ChaCha20 keys, key update, and short-header protection" {
-    const secret: Secret = h("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
+    const secret: Secret = hexBytes("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b");
     const keys = ChaChaKeys.fromSecret(secret);
-    try std.testing.expectEqualSlices(u8, &h("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"), &keys.key);
-    try std.testing.expectEqualSlices(u8, &h("e0459b3474bdd0e44a41c144"), &keys.iv);
-    try std.testing.expectEqualSlices(u8, &h("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"), &keys.hp);
+    try std.testing.expectEqualSlices(u8, &hexBytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"), &keys.key);
+    try std.testing.expectEqualSlices(u8, &hexBytes("e0459b3474bdd0e44a41c144"), &keys.iv);
+    try std.testing.expectEqualSlices(u8, &hexBytes("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4"), &keys.hp);
 
     const ku = nextKeyUpdateSecret(secret);
-    try std.testing.expectEqualSlices(u8, &h("1223504755036d556342ee9361d253421a826c9ecdf3c7148684b36b714881f9"), &ku);
+    try std.testing.expectEqualSlices(u8, &hexBytes("1223504755036d556342ee9361d253421a826c9ecdf3c7148684b36b714881f9"), &ku);
 
     const packet_number: u64 = 654360564;
     const pn_length: usize = 3;
-    const hdr = h("4200bff4");
-    const plaintext = h("01");
+    const hdr = hexBytes("4200bff4");
+    const plaintext = hexBytes("01");
 
     const nonce = aeadNonce(keys.iv, packet_number);
-    try std.testing.expectEqualSlices(u8, &h("e0459b3474bdd0e46d417eb0"), &nonce);
+    try std.testing.expectEqualSlices(u8, &hexBytes("e0459b3474bdd0e46d417eb0"), &nonce);
 
     var ciphertext: [1]u8 = undefined;
     var tag: [ChaCha20Poly1305.tag_length]u8 = undefined;
@@ -384,18 +384,18 @@ test "zix http3: RFC 9001 A.5 ChaCha20 keys, key update, and short-header protec
     var sealed: [1 + ChaCha20Poly1305.tag_length]u8 = undefined;
     @memcpy(sealed[0..1], &ciphertext);
     @memcpy(sealed[1..], &tag);
-    try std.testing.expectEqualSlices(u8, &h("655e5cd55c41f69080575d7999c25a5bfb"), &sealed);
+    try std.testing.expectEqualSlices(u8, &hexBytes("655e5cd55c41f69080575d7999c25a5bfb"), &sealed);
 
     var sample: [16]u8 = undefined;
     @memcpy(&sample, sealed[1 .. 1 + 16]);
     const mask = headerMaskChaCha(keys.hp, sample);
-    try std.testing.expectEqualSlices(u8, &h("aefefe7d03"), &mask);
+    try std.testing.expectEqualSlices(u8, &hexBytes("aefefe7d03"), &mask);
 
     var protected_header = hdr;
     protected_header[0] ^= mask[0] & 0x1f;
     for (0..pn_length) |i| protected_header[1 + i] ^= mask[1 + i];
 
-    try std.testing.expectEqualSlices(u8, &h("4cfe4189"), &protected_header);
+    try std.testing.expectEqualSlices(u8, &hexBytes("4cfe4189"), &protected_header);
 }
 
 test "zix http3: RFC 9001 6.6 AEAD usage limits and accounting" {
