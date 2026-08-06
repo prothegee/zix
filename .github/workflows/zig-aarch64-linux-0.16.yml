@@ -86,10 +86,28 @@ jobs:
         timeout-minutes: 6
         run: zig build examples --summary failures
 
-      - name: zix zixer
+      # zixer keeps its own build files and steps: the gateway binary, its unit
+      # tests, the proxy demo upstreams, and the runner that drives every demo
+      # end to end through a real daemon. None of them ride on a zix step.
+      - name: zixer gateway
         if: always()
         timeout-minutes: 6
         run: zig build zixer --summary failures
+
+      - name: zixer unit tests
+        if: always()
+        timeout-minutes: 6
+        run: zig build zixer-unit-test --summary failures
+
+      - name: zixer demo upstreams
+        if: always()
+        timeout-minutes: 6
+        run: zig build zixer-examples --summary failures
+
+      - name: zixer proxy runner
+        if: always()
+        timeout-minutes: 10
+        run: zig build zixer-test-runner-all --summary failures
 
       - name: zix protocol runners
         if: always()
