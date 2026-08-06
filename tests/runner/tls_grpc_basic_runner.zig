@@ -62,21 +62,21 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     const fd = stream.socket.handle;
 
     // TLS 1.3 handshake via the native zix.Tls client, offering ALPN h2.
-    var rnd: [64]u8 = undefined;
-    io.random(&rnd);
+    var random_bytes: [64]u8 = undefined;
+    io.random(&random_bytes);
     var ch_buf: [600]u8 = undefined;
-    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].*, .alpn = &.{.H2} }, &ch_buf);
+    const started = try Tls.Client.start(.{ .client_random = random_bytes[0..32].*, .ephemeral_secret = random_bytes[32..64].*, .alpn = &.{.H2} }, &ch_buf);
     var state = started.state;
 
     try writeRecord(fd, 22, started.client_hello);
 
     // server flight: ServerHello + ChangeCipherSpec + the encrypted flight (3 records).
     var flight_buf: [8192]u8 = undefined;
-    var flen: usize = 0;
-    for (0..3) |_| flen += try readRecordInto(fd, flight_buf[flen..]);
+    var flight_len: usize = 0;
+    for (0..3) |_| flight_len += try readRecordInto(fd, flight_buf[flight_len..]);
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
     if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
 
     try verifyServerTrust(io, &finished);
@@ -90,24 +90,24 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
     n += Http2.PREFACE.len;
 
-    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
-    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var frame_head: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
 
-    var hbuf: [256]u8 = undefined;
-    var enc = Http2.HpackEncoder.init(&hbuf);
-    try enc.writeHeader(":method", "POST");
-    try enc.writeHeader(":path", "/helloworld.Greeter/SayHello");
-    try enc.writeHeader(":scheme", "https");
-    try enc.writeHeader(":authority", "localhost");
-    try enc.writeHeader("content-type", "application/grpc+proto");
-    try enc.writeHeader("te", "trailers");
-    const hblock = enc.encoded();
+    var header_buf: [256]u8 = undefined;
+    var hpack_encoder = Http2.HpackEncoder.init(&header_buf);
+    try hpack_encoder.writeHeader(":method", "POST");
+    try hpack_encoder.writeHeader(":path", "/helloworld.Greeter/SayHello");
+    try hpack_encoder.writeHeader(":scheme", "https");
+    try hpack_encoder.writeHeader(":authority", "localhost");
+    try hpack_encoder.writeHeader("content-type", "application/grpc+proto");
+    try hpack_encoder.writeHeader("te", "trailers");
+    const hblock = hpack_encoder.encoded();
 
-    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS, .stream_id = 1 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS, .stream_id = 1 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
     @memcpy(req[n..][0..hblock.len], hblock);
     n += hblock.len;
 
@@ -118,9 +118,9 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     std.mem.writeInt(u32, msg[1..5], payload.len, .big);
     @memcpy(msg[5..], payload);
 
-    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(msg.len), .frame_type = Http2.FRAME_TYPE_DATA, .flags = Http2.FLAG_END_STREAM, .stream_id = 1 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = @intCast(msg.len), .frame_type = Http2.FRAME_TYPE_DATA, .flags = Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
     @memcpy(req[n..][0..msg.len], &msg);
     n += msg.len;
 
@@ -128,42 +128,42 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     try writeAll(fd, finished.connection.writeAppData(req[0..n], &send_buf));
 
     // read the response: decrypt records, parse frames, look for :status 200 on a HEADERS frame.
-    var acc: [16384]u8 = undefined;
-    var acc_len: usize = 0;
+    var recv_accum: [16384]u8 = undefined;
+    var recv_len: usize = 0;
     var rounds: usize = 0;
     while (rounds < 64) : (rounds += 1) {
         var rec_buf: [17 * 1024]u8 = undefined;
         const rec_len = try readRecordInto(fd, &rec_buf);
         if (rec_buf[0] != 23) continue; // application_data only
 
-        var dec: [17 * 1024]u8 = undefined;
-        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &dec);
-        @memcpy(acc[acc_len..][0..plain.len], plain);
-        acc_len += plain.len;
+        var plain_buf: [17 * 1024]u8 = undefined;
+        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &plain_buf);
+        @memcpy(recv_accum[recv_len..][0..plain.len], plain);
+        recv_len += plain.len;
 
         var off: usize = 0;
-        while (off + Http2.FRAME_HEADER_LEN <= acc_len) {
-            const frame = Http2.parseFrameHeader(acc[off..][0..Http2.FRAME_HEADER_LEN]);
+        while (off + Http2.FRAME_HEADER_LEN <= recv_len) {
+            const frame = Http2.parseFrameHeader(recv_accum[off..][0..Http2.FRAME_HEADER_LEN]);
             const total = Http2.FRAME_HEADER_LEN + @as(usize, frame.length);
-            if (off + total > acc_len) break; // frame not fully arrived yet
+            if (off + total > recv_len) break; // frame not fully arrived yet
 
-            const fpayload = acc[off + Http2.FRAME_HEADER_LEN .. off + total];
+            const fpayload = recv_accum[off + Http2.FRAME_HEADER_LEN .. off + total];
             if (frame.frame_type == Http2.FRAME_TYPE_HEADERS) {
-                var hdec = Http2.HpackDecoder.init();
+                var hpack_decoder = Http2.HpackDecoder.init();
                 var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
                 var scratch: [4096]u8 = undefined;
-                const cnt = try hdec.decode(fpayload, &hdrs, &scratch);
-                for (hdrs[0..cnt]) |h| {
+                const header_count = try hpack_decoder.decode(fpayload, &hdrs, &scratch);
+                for (hdrs[0..header_count]) |h| {
                     if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return;
                 }
             }
             off += total;
         }
-        if (off > 0 and off < acc_len) {
-            std.mem.copyForwards(u8, acc[0 .. acc_len - off], acc[off..acc_len]);
-            acc_len -= off;
-        } else if (off >= acc_len) {
-            acc_len = 0;
+        if (off > 0 and off < recv_len) {
+            std.mem.copyForwards(u8, recv_accum[0 .. recv_len - off], recv_accum[off..recv_len]);
+            recv_len -= off;
+        } else if (off >= recv_len) {
+            recv_len = 0;
         }
     }
 
@@ -178,8 +178,8 @@ const CERT_ANCHOR_PATH = "examples/certs/ecdsa_p256_cert.pem";
 
 fn verifyServerTrust(io: std.Io, finished: *const Tls.Client.FinishResult) !void {
     var pem_buf: [8192]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
-    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, CERT_ANCHOR_PATH, fba.allocator(), .limited(8192));
+    var pem_fixed_buf = std.heap.FixedBufferAllocator.init(&pem_buf);
+    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, CERT_ANCHOR_PATH, pem_fixed_buf.allocator(), .limited(8192));
 
     var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
     const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);

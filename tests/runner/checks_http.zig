@@ -297,8 +297,8 @@ pub fn runWs(io: std.Io, server_path: []const u8, port: u16, ws_route: []const u
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "ws://127.0.0.1:{d}{s}", .{ port, ws_route });
 
-    var wsc = zix.Http.WsClient.init(.{ .io = io, .connect_timeout_ms = 3000, .response_timeout_ms = common.RESPONSE_TIMEOUT_MS, .read_timeout_ms = common.RESPONSE_TIMEOUT_MS });
-    var conn = try wsc.connect(url);
+    var ws_client = zix.Http.WsClient.init(.{ .io = io, .connect_timeout_ms = 3000, .response_timeout_ms = common.RESPONSE_TIMEOUT_MS, .read_timeout_ms = common.RESPONSE_TIMEOUT_MS });
+    var conn = try ws_client.connect(url);
     defer conn.deinit();
 
     try conn.send(.text, "hello");
@@ -326,21 +326,21 @@ pub fn runHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
     @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
     n += Http2.PREFACE.len;
 
-    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
-    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var frame_head: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
 
-    var hbuf: [256]u8 = undefined;
-    var enc = Http2.HpackEncoder.init(&hbuf);
-    try enc.writeHeader(":method", "GET");
-    try enc.writeHeader(":path", "/");
-    try enc.writeHeader(":scheme", "http");
-    try enc.writeHeader(":authority", "localhost");
-    const hblock = enc.encoded();
-    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var header_buf: [256]u8 = undefined;
+    var hpack_encoder = Http2.HpackEncoder.init(&header_buf);
+    try hpack_encoder.writeHeader(":method", "GET");
+    try hpack_encoder.writeHeader(":path", "/");
+    try hpack_encoder.writeHeader(":scheme", "http");
+    try hpack_encoder.writeHeader(":authority", "localhost");
+    const hblock = hpack_encoder.encoded();
+    Http2.encodeFrameHeader(&frame_head, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
     @memcpy(req[n..][0..hblock.len], hblock);
     n += hblock.len;
 

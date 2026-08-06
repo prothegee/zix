@@ -91,8 +91,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 fn setRecvTimeout(fd: std.posix.fd_t) void {
     // std.posix carries the per-target layout and option number. The Linux ones fed a foreign
     // kernel a struct of the wrong shape under an option number that means something else there.
-    var tv = std.posix.timeval{ .sec = RECV_TIMEOUT_S, .usec = 0 };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    var recv_timeout = std.posix.timeval{ .sec = RECV_TIMEOUT_S, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&recv_timeout)) catch {};
 }
 
 fn sendLargePost(fd: std.posix.fd_t) !void {
@@ -163,10 +163,10 @@ const Reader = struct {
 fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
     var written: usize = 0;
     while (written < data.len) {
-        const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
-        switch (std.posix.errno(rc)) {
+        const write_result = std.posix.system.write(fd, data[written..].ptr, data.len - written);
+        switch (std.posix.errno(write_result)) {
             .SUCCESS => {
-                const n: usize = @intCast(rc);
+                const n: usize = @intCast(write_result);
                 if (n == 0) return error.BrokenPipe;
                 written += n;
             },
@@ -177,10 +177,10 @@ fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
 }
 
 fn parseContentLength(head: []const u8) ?usize {
-    var it = std.mem.splitSequence(u8, head, "\r\n");
-    _ = it.next();
+    var line_iter = std.mem.splitSequence(u8, head, "\r\n");
+    _ = line_iter.next();
 
-    while (it.next()) |line| {
+    while (line_iter.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const name = std.mem.trim(u8, line[0..colon], " \t");
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {

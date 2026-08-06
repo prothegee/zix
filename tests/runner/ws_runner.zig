@@ -60,8 +60,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16, ws_route: []const u8) !vo
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "ws://127.0.0.1:{d}{s}", .{ port, ws_route });
 
-    var wsc = zix.Http.WsClient.init(.{ .io = io, .connect_timeout_ms = 3000, .response_timeout_ms = common.RESPONSE_TIMEOUT_MS, .read_timeout_ms = common.RESPONSE_TIMEOUT_MS });
-    var conn = try wsc.connect(url);
+    var ws_client = zix.Http.WsClient.init(.{ .io = io, .connect_timeout_ms = 3000, .response_timeout_ms = common.RESPONSE_TIMEOUT_MS, .read_timeout_ms = common.RESPONSE_TIMEOUT_MS });
+    var conn = try ws_client.connect(url);
     defer conn.deinit();
 
     try conn.send(.text, WS_PAYLOAD);

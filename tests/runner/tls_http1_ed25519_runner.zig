@@ -60,20 +60,20 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     const fd = stream.socket.handle;
 
     // TLS 1.3 handshake via the native zix.Tls client (offers ecdsa + ed25519 sig schemes).
-    var rnd: [64]u8 = undefined;
-    io.random(&rnd);
+    var random_bytes: [64]u8 = undefined;
+    io.random(&random_bytes);
     var ch_buf: [600]u8 = undefined;
-    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].* }, &ch_buf);
+    const started = try Tls.Client.start(.{ .client_random = random_bytes[0..32].*, .ephemeral_secret = random_bytes[32..64].* }, &ch_buf);
     var state = started.state;
 
     try writeRecord(fd, 22, started.client_hello);
 
     var flight_buf: [8192]u8 = undefined;
-    var flen: usize = 0;
-    for (0..3) |_| flen += try readRecordInto(fd, flight_buf[flen..]);
+    var flight_len: usize = 0;
+    for (0..3) |_| flight_len += try readRecordInto(fd, flight_buf[flight_len..]);
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
 
     // trust the Ed25519 server cert: chain to the fixture anchor + hostname (RFC 5280 / 6125).
     try verifyServerTrust(io, &finished);
@@ -86,24 +86,24 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     try writeAll(fd, finished.connection.writeAppData(req, &send_buf));
 
     // read response records, decrypt, accumulate plaintext until the body arrives or the peer closes.
-    var acc: [8192]u8 = undefined;
-    var acc_len: usize = 0;
+    var recv_accum: [8192]u8 = undefined;
+    var recv_len: usize = 0;
     var rounds: usize = 0;
     while (rounds < 32) : (rounds += 1) {
         var rec_buf: [17 * 1024]u8 = undefined;
         const rec_len = readRecordInto(fd, &rec_buf) catch break;
         if (rec_buf[0] != 23) continue; // application_data only
 
-        var dec: [17 * 1024]u8 = undefined;
-        const plain = finished.connection.readAppData(rec_buf[0..rec_len], &dec) catch break; // close_notify ends it
-        if (acc_len + plain.len > acc.len) break;
-        @memcpy(acc[acc_len..][0..plain.len], plain);
-        acc_len += plain.len;
+        var plain_buf: [17 * 1024]u8 = undefined;
+        const plain = finished.connection.readAppData(rec_buf[0..rec_len], &plain_buf) catch break; // close_notify ends it
+        if (recv_len + plain.len > recv_accum.len) break;
+        @memcpy(recv_accum[recv_len..][0..plain.len], plain);
+        recv_len += plain.len;
 
-        if (std.mem.indexOf(u8, acc[0..acc_len], EXPECTED_BODY) != null) break;
+        if (std.mem.indexOf(u8, recv_accum[0..recv_len], EXPECTED_BODY) != null) break;
     }
 
-    const response = acc[0..acc_len];
+    const response = recv_accum[0..recv_len];
     if (std.mem.indexOf(u8, response, " 200 ") == null) return error.UnexpectedStatus;
     if (std.mem.indexOf(u8, response, EXPECTED_BODY) == null) return error.UnexpectedBody;
     if (std.mem.indexOf(u8, response, "Strict-Transport-Security") == null) return error.MissingHsts;
@@ -113,8 +113,8 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 
 fn verifyServerTrust(io: std.Io, finished: *const Tls.Client.FinishResult) !void {
     var pem_buf: [8192]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
-    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, CA_PATH, fba.allocator(), .limited(8192));
+    var pem_fixed_buf = std.heap.FixedBufferAllocator.init(&pem_buf);
+    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, CA_PATH, pem_fixed_buf.allocator(), .limited(8192));
 
     var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
     const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);

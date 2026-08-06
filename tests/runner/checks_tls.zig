@@ -100,19 +100,19 @@ pub fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
     defer stream.close(io);
     const fd = stream.socket.handle;
 
-    var rnd: [64]u8 = undefined;
-    io.random(&rnd);
+    var random_bytes: [64]u8 = undefined;
+    io.random(&random_bytes);
     var ch_buf: [600]u8 = undefined;
-    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].*, .alpn = &.{.H2} }, &ch_buf);
+    const started = try Tls.Client.start(.{ .client_random = random_bytes[0..32].*, .ephemeral_secret = random_bytes[32..64].*, .alpn = &.{.H2} }, &ch_buf);
     var state = started.state;
     try wire.tlsWriteRecord(fd, 22, started.client_hello);
 
     var flight_buf: [8192]u8 = undefined;
-    var flen: usize = 0;
-    for (0..3) |_| flen += try wire.tlsReadRecord(fd, flight_buf[flen..]);
+    var flight_len: usize = 0;
+    for (0..3) |_| flight_len += try wire.tlsReadRecord(fd, flight_buf[flight_len..]);
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
     if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
     try wire.tlsWriteAll(fd, finished.client_finished);
 
@@ -120,21 +120,21 @@ pub fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
     var n: usize = 0;
     @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
     n += Http2.PREFACE.len;
-    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
-    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var frame_head: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
 
-    var hbuf: [256]u8 = undefined;
-    var enc = Http2.HpackEncoder.init(&hbuf);
-    try enc.writeHeader(":method", "GET");
-    try enc.writeHeader(":path", "/");
-    try enc.writeHeader(":scheme", "https");
-    try enc.writeHeader(":authority", "localhost");
-    const hblock = enc.encoded();
-    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var header_buf: [256]u8 = undefined;
+    var hpack_encoder = Http2.HpackEncoder.init(&header_buf);
+    try hpack_encoder.writeHeader(":method", "GET");
+    try hpack_encoder.writeHeader(":path", "/");
+    try hpack_encoder.writeHeader(":scheme", "https");
+    try hpack_encoder.writeHeader(":authority", "localhost");
+    const hblock = hpack_encoder.encoded();
+    Http2.encodeFrameHeader(&frame_head, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS | Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
     @memcpy(req[n..][0..hblock.len], hblock);
     n += hblock.len;
 
@@ -148,8 +148,8 @@ pub fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
         const rec_len = try wire.tlsReadRecord(fd, &rec_buf);
         if (rec_buf[0] != 23) continue;
 
-        var dec: [17 * 1024]u8 = undefined;
-        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &dec);
+        var plain_buf: [17 * 1024]u8 = undefined;
+        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &plain_buf);
         if (try scanner.push(plain)) return;
     }
 
@@ -171,19 +171,19 @@ pub fn runTlsGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
     defer stream.close(io);
     const fd = stream.socket.handle;
 
-    var rnd: [64]u8 = undefined;
-    io.random(&rnd);
+    var random_bytes: [64]u8 = undefined;
+    io.random(&random_bytes);
     var ch_buf: [600]u8 = undefined;
-    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].*, .alpn = &.{.H2} }, &ch_buf);
+    const started = try Tls.Client.start(.{ .client_random = random_bytes[0..32].*, .ephemeral_secret = random_bytes[32..64].*, .alpn = &.{.H2} }, &ch_buf);
     var state = started.state;
     try wire.tlsWriteRecord(fd, 22, started.client_hello);
 
     var flight_buf: [8192]u8 = undefined;
-    var flen: usize = 0;
-    for (0..3) |_| flen += try wire.tlsReadRecord(fd, flight_buf[flen..]);
+    var flight_len: usize = 0;
+    for (0..3) |_| flight_len += try wire.tlsReadRecord(fd, flight_buf[flight_len..]);
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
     if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
     try wire.tlsWriteAll(fd, finished.client_finished);
 
@@ -192,23 +192,23 @@ pub fn runTlsGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
     var n: usize = 0;
     @memcpy(req[0..Http2.PREFACE.len], Http2.PREFACE);
     n += Http2.PREFACE.len;
-    var fh: [Http2.FRAME_HEADER_LEN]u8 = undefined;
-    Http2.encodeFrameHeader(&fh, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var frame_head: [Http2.FRAME_HEADER_LEN]u8 = undefined;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = 0, .frame_type = Http2.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
 
-    var hbuf: [256]u8 = undefined;
-    var enc = Http2.HpackEncoder.init(&hbuf);
-    try enc.writeHeader(":method", "POST");
-    try enc.writeHeader(":path", "/helloworld.Greeter/SayHello");
-    try enc.writeHeader(":scheme", "https");
-    try enc.writeHeader(":authority", "localhost");
-    try enc.writeHeader("content-type", "application/grpc+proto");
-    try enc.writeHeader("te", "trailers");
-    const hblock = enc.encoded();
-    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS, .stream_id = 1 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    var header_buf: [256]u8 = undefined;
+    var hpack_encoder = Http2.HpackEncoder.init(&header_buf);
+    try hpack_encoder.writeHeader(":method", "POST");
+    try hpack_encoder.writeHeader(":path", "/helloworld.Greeter/SayHello");
+    try hpack_encoder.writeHeader(":scheme", "https");
+    try hpack_encoder.writeHeader(":authority", "localhost");
+    try hpack_encoder.writeHeader("content-type", "application/grpc+proto");
+    try hpack_encoder.writeHeader("te", "trailers");
+    const hblock = hpack_encoder.encoded();
+    Http2.encodeFrameHeader(&frame_head, .{ .length = @intCast(hblock.len), .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_END_HEADERS, .stream_id = 1 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
     @memcpy(req[n..][0..hblock.len], hblock);
     n += hblock.len;
 
@@ -217,9 +217,9 @@ pub fn runTlsGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
     msg[0] = 0;
     std.mem.writeInt(u32, msg[1..5], payload.len, .big);
     @memcpy(msg[5..], payload);
-    Http2.encodeFrameHeader(&fh, .{ .length = @intCast(msg.len), .frame_type = Http2.FRAME_TYPE_DATA, .flags = Http2.FLAG_END_STREAM, .stream_id = 1 });
-    @memcpy(req[n..][0..fh.len], &fh);
-    n += fh.len;
+    Http2.encodeFrameHeader(&frame_head, .{ .length = @intCast(msg.len), .frame_type = Http2.FRAME_TYPE_DATA, .flags = Http2.FLAG_END_STREAM, .stream_id = 1 });
+    @memcpy(req[n..][0..frame_head.len], &frame_head);
+    n += frame_head.len;
     @memcpy(req[n..][0..msg.len], &msg);
     n += msg.len;
 
@@ -233,8 +233,8 @@ pub fn runTlsGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
         const rec_len = try wire.tlsReadRecord(fd, &rec_buf);
         if (rec_buf[0] != 23) continue;
 
-        var dec: [17 * 1024]u8 = undefined;
-        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &dec);
+        var plain_buf: [17 * 1024]u8 = undefined;
+        const plain = try finished.connection.readAppData(rec_buf[0..rec_len], &plain_buf);
         if (try scanner.push(plain)) return;
     }
 
@@ -255,24 +255,24 @@ pub fn runTlsHttp1Ed25519(io: std.Io, server_path: []const u8, port: u16) !void 
     defer stream.close(io);
     const fd = stream.socket.handle;
 
-    var rnd: [64]u8 = undefined;
-    io.random(&rnd);
+    var random_bytes: [64]u8 = undefined;
+    io.random(&random_bytes);
     var ch_buf: [600]u8 = undefined;
-    const started = try Tls.Client.start(.{ .client_random = rnd[0..32].*, .ephemeral_secret = rnd[32..64].* }, &ch_buf);
+    const started = try Tls.Client.start(.{ .client_random = random_bytes[0..32].*, .ephemeral_secret = random_bytes[32..64].* }, &ch_buf);
     var state = started.state;
     try wire.tlsWriteRecord(fd, 22, started.client_hello);
 
     var flight_buf: [8192]u8 = undefined;
-    var flen: usize = 0;
-    for (0..3) |_| flen += try wire.tlsReadRecord(fd, flight_buf[flen..]);
+    var flight_len: usize = 0;
+    for (0..3) |_| flight_len += try wire.tlsReadRecord(fd, flight_buf[flight_len..]);
 
     var fin_buf: [256]u8 = undefined;
-    var finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
+    var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
 
     // trust the Ed25519 server cert (chain + hostname) against the fixture anchor.
     var pem_buf: [8192]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
-    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, "examples/certs/ed25519_cert.pem", fba.allocator(), .limited(8192));
+    var pem_fixed_buf = std.heap.FixedBufferAllocator.init(&pem_buf);
+    const cert_pem = try std.Io.Dir.cwd().readFileAlloc(io, "examples/certs/ed25519_cert.pem", pem_fixed_buf.allocator(), .limited(8192));
     var der_buf: [Tls.Client.max_server_cert_der]u8 = undefined;
     const anchor_der = try Tls.pemToDer(&der_buf, cert_pem);
     try finished.verifyServerCert(anchor_der, "localhost", common.realtimeSeconds(io));
@@ -283,24 +283,24 @@ pub fn runTlsHttp1Ed25519(io: std.Io, server_path: []const u8, port: u16) !void 
     var send_buf: [512]u8 = undefined;
     try wire.tlsWriteAll(fd, finished.connection.writeAppData(req, &send_buf));
 
-    var acc: [8192]u8 = undefined;
-    var acc_len: usize = 0;
+    var recv_accum: [8192]u8 = undefined;
+    var recv_len: usize = 0;
     var rounds: usize = 0;
     while (rounds < 32) : (rounds += 1) {
         var rec_buf: [17 * 1024]u8 = undefined;
         const rec_len = wire.tlsReadRecord(fd, &rec_buf) catch break;
         if (rec_buf[0] != 23) continue;
 
-        var dec: [17 * 1024]u8 = undefined;
-        const plain = finished.connection.readAppData(rec_buf[0..rec_len], &dec) catch break;
-        if (acc_len + plain.len > acc.len) break;
-        @memcpy(acc[acc_len..][0..plain.len], plain);
-        acc_len += plain.len;
+        var plain_buf: [17 * 1024]u8 = undefined;
+        const plain = finished.connection.readAppData(rec_buf[0..rec_len], &plain_buf) catch break;
+        if (recv_len + plain.len > recv_accum.len) break;
+        @memcpy(recv_accum[recv_len..][0..plain.len], plain);
+        recv_len += plain.len;
 
-        if (std.mem.indexOf(u8, acc[0..acc_len], "hello over tls 1.3 (ed25519)") != null) break;
+        if (std.mem.indexOf(u8, recv_accum[0..recv_len], "hello over tls 1.3 (ed25519)") != null) break;
     }
 
-    const response = acc[0..acc_len];
+    const response = recv_accum[0..recv_len];
     if (std.mem.indexOf(u8, response, " 200 ") == null) return error.UnexpectedStatus;
     if (std.mem.indexOf(u8, response, "hello over tls 1.3 (ed25519)") == null) return error.UnexpectedBody;
     if (std.mem.indexOf(u8, response, "Strict-Transport-Security") == null) return error.MissingHsts;

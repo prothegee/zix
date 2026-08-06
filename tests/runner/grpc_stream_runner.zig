@@ -62,11 +62,11 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var buf1: [32]u8 = undefined;
     var buf2: [32]u8 = undefined;
 
-    const r1 = try client.recvResponse(sid, &buf1);
-    if (r1 != .data or !std.mem.eql(u8, r1.data, "aaa")) return error.UnexpectedEcho1;
+    const first_reply = try client.recvResponse(sid, &buf1);
+    if (first_reply != .data or !std.mem.eql(u8, first_reply.data, "aaa")) return error.UnexpectedEcho1;
 
-    const r2 = try client.recvResponse(sid, &buf2);
-    if (r2 != .data or !std.mem.eql(u8, r2.data, "bbb")) return error.UnexpectedEcho2;
+    const second_reply = try client.recvResponse(sid, &buf2);
+    if (second_reply != .data or !std.mem.eql(u8, second_reply.data, "bbb")) return error.UnexpectedEcho2;
 
     const fin = try client.recvResponse(sid, &buf1);
     if (fin != .status or fin.status != zix.Grpc.Status.OK) return error.NoOkStatus;

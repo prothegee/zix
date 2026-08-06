@@ -74,8 +74,8 @@ pub fn tlsWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
 
 /// Look up a response header value by case-insensitive name, or null when absent.
 pub fn headerValue(head: []const u8, name: []const u8) ?[]const u8 {
-    var it = std.mem.tokenizeSequence(u8, head, "\r\n");
-    while (it.next()) |line| {
+    var line_iter = std.mem.tokenizeSequence(u8, head, "\r\n");
+    while (line_iter.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) {
             return std.mem.trim(u8, line[colon + 1 ..], " ");
@@ -111,33 +111,33 @@ pub fn parseContentLength(head: []const u8) ?usize {
 /// return error.NoStatus200;
 /// ```
 pub const H2Scanner = struct {
-    acc: [16384]u8 = undefined,
-    acc_len: usize = 0,
+    recv_accum: [16384]u8 = undefined,
+    recv_len: usize = 0,
 
     /// Append a plaintext chunk, parse complete frames, and report whether :status 200 was seen.
     /// Consumed frames are compacted out so the buffer only holds the unparsed tail.
     pub fn push(self: *H2Scanner, plain: []const u8) !bool {
-        @memcpy(self.acc[self.acc_len..][0..plain.len], plain);
-        self.acc_len += plain.len;
+        @memcpy(self.recv_accum[self.recv_len..][0..plain.len], plain);
+        self.recv_len += plain.len;
 
         var off: usize = 0;
-        while (off + Http2.FRAME_HEADER_LEN <= self.acc_len) {
-            const frame = Http2.parseFrameHeader(self.acc[off..][0..Http2.FRAME_HEADER_LEN]);
+        while (off + Http2.FRAME_HEADER_LEN <= self.recv_len) {
+            const frame = Http2.parseFrameHeader(self.recv_accum[off..][0..Http2.FRAME_HEADER_LEN]);
             const total = Http2.FRAME_HEADER_LEN + @as(usize, frame.length);
-            if (off + total > self.acc_len) break;
+            if (off + total > self.recv_len) break;
 
-            const payload = self.acc[off + Http2.FRAME_HEADER_LEN .. off + total];
+            const payload = self.recv_accum[off + Http2.FRAME_HEADER_LEN .. off + total];
             if (frame.frame_type == Http2.FRAME_TYPE_HEADERS) {
                 if (try headersHaveStatus200(payload)) return true;
             }
             off += total;
         }
 
-        if (off >= self.acc_len) {
-            self.acc_len = 0;
+        if (off >= self.recv_len) {
+            self.recv_len = 0;
         } else if (off > 0) {
-            std.mem.copyForwards(u8, self.acc[0 .. self.acc_len - off], self.acc[off..self.acc_len]);
-            self.acc_len -= off;
+            std.mem.copyForwards(u8, self.recv_accum[0 .. self.recv_len - off], self.recv_accum[off..self.recv_len]);
+            self.recv_len -= off;
         }
 
         return false;
@@ -146,12 +146,12 @@ pub const H2Scanner = struct {
 
 /// Decode an HPACK header block and report whether it carries :status 200.
 fn headersHaveStatus200(payload: []const u8) !bool {
-    var hdec = Http2.HpackDecoder.init();
+    var hpack_decoder = Http2.HpackDecoder.init();
     var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
     var scratch: [4096]u8 = undefined;
-    const cnt = try hdec.decode(payload, &hdrs, &scratch);
+    const header_count = try hpack_decoder.decode(payload, &hdrs, &scratch);
 
-    for (hdrs[0..cnt]) |h| {
+    for (hdrs[0..header_count]) |h| {
         if (std.mem.eql(u8, h.name, ":status") and std.mem.eql(u8, h.value, "200")) return true;
     }
 

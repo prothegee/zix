@@ -170,15 +170,15 @@ fn statusOf(resp: []const u8) !u16 {
 }
 
 fn headOf(resp: []const u8) []const u8 {
-    const sep = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return resp;
+    const head_end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return resp;
 
-    return resp[0..sep];
+    return resp[0..head_end];
 }
 
 fn bodyOf(resp: []const u8) []const u8 {
-    const sep = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return &.{};
+    const head_end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return &.{};
 
-    return resp[sep + 4 ..];
+    return resp[head_end + 4 ..];
 }
 
 /// Spawn a query example and walk every case against it.
