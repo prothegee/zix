@@ -16,6 +16,8 @@
 #     one per load-gen hardware thread (the arena ratio), unless --load-threads.
 #   - Load generators run in Docker (LOADGEN_DOCKER=true default: a laptop rarely
 #     has an ngtcp2-enabled h2load native). Pre-set LOADGEN_DOCKER=false to override.
+#   - Load-gen `timeout 45` bounds gain a KILL escalation through a PATH shim
+#     (a TERM-trapping docker client otherwise hangs a run forever).
 #
 # Quiesce is an EXACT system_tune equivalent, nothing more, so the local run
 # matches the arena run knob for knob (including the cold first run after the
@@ -301,11 +303,13 @@ SAMPLER_PID=""
 PROBE_RESULT=""
 MEM_LOG=""
 SMAPS_FILE=""
+TIMEOUT_SHIM_DIR=""
 cleanup() {
     [ -n "$PINNER_PID" ] && kill "$PINNER_PID" 2>/dev/null || true
     [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null || true
 
     rm -f "$BENCH_PATCHED" "$FW_PATCHED" "$PROFILES_PATCHED"
+    [ -n "$TIMEOUT_SHIM_DIR" ] && rm -rf "$TIMEOUT_SHIM_DIR" || true
 
     if [ "$SOURCE" = "local" ]; then
         rm -f "$LOCAL_DOCKERFILE" "$LOCAL_BUILDSH"
@@ -762,6 +766,28 @@ export H3THREADS="$THREADS"
 export LOADGEN_DOCKER="${LOADGEN_DOCKER:-true}"
 export GCANNON_MODE="${GCANNON_MODE:-docker}"
 
+# The arena's load-generator wrappers bound every run with a bare `timeout 45`,
+# TERM only. In docker mode that child is a podman client, and an attached
+# client traps TERM to tear its container down: a wedged teardown then never
+# exits, `timeout` waits on it forever, and the bench hangs silently inside a
+# captured $() (observed on a gateway cell whose proxy had crashed mid-cell).
+# The bench child resolves `timeout` through this shim instead, which adds a
+# KILL escalation: TERM at the wrapper's own bound, 15s of teardown grace
+# (podman stops containers with a 10s grace), then KILL. Arena scripts stay
+# byte-identical, every `timeout N` call site picks the shim up via PATH.
+TIMEOUT_REAL="$(command -v timeout || true)"
+BENCH_PATH="$PATH"
+if [ -n "$TIMEOUT_REAL" ]; then
+    TIMEOUT_SHIM_DIR="$(mktemp -d)"
+    cat > "$TIMEOUT_SHIM_DIR/timeout" <<EOF
+#!/usr/bin/env bash
+exec "$TIMEOUT_REAL" --kill-after=15 "\$@"
+EOF
+    chmod +x "$TIMEOUT_SHIM_DIR/timeout"
+
+    BENCH_PATH="$TIMEOUT_SHIM_DIR:$PATH"
+fi
+
 # Write self-describing header to result file.
 {
     echo "$START_BANNER"
@@ -790,7 +816,7 @@ RUN_ARGS=("$FRAMEWORK")
 
 echo "[isol] running full bench, result -> $RESULT_TXT" >&2
 bench_rc=0
-"$BENCH_PATCHED" "${RUN_ARGS[@]}" 2>&1 | tee -a "$RESULT_TXT" || bench_rc=$?
+PATH="$BENCH_PATH" "$BENCH_PATCHED" "${RUN_ARGS[@]}" 2>&1 | tee -a "$RESULT_TXT" || bench_rc=$?
 [ "$bench_rc" -eq 0 ] || echo "[isol] note: bench exited $bench_rc, continuing to summary and restore" >&2
 
 echo "[isol] settling ${SETTLE}s before restore" >&2
