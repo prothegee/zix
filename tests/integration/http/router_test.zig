@@ -25,14 +25,14 @@ fn handlerB(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Cont
 test "zix integration: dispatch, exact match routes to handler" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/about", .handler = handlerA },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     last_handler = "";
     try router.dispatch(&req, &res, &ctx);
@@ -42,14 +42,14 @@ test "zix integration: dispatch, exact match routes to handler" {
 test "zix integration: dispatch, param populates path_params" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerA, .kind = .PARAM },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /users/bob HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /users/bob HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     try router.dispatch(&req, &res, &ctx);
     try std.testing.expectEqual(@as(usize, 1), req.path_params.len);
@@ -61,14 +61,14 @@ test "zix integration: dispatch, param populates path_params" {
 test "zix integration: dispatch, two path params both populated" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/orgs/:org/repos/:repo", .handler = handlerA, .kind = .PARAM },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /orgs/zix/repos/core HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /orgs/zix/repos/core HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     try router.dispatch(&req, &res, &ctx);
     try std.testing.expectEqual(@as(usize, 2), req.path_params.len);
@@ -79,14 +79,14 @@ test "zix integration: dispatch, two path params both populated" {
 test "zix integration: dispatch, prefix routes to handler" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/static", .handler = handlerA, .kind = .PREFIX },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /static/css/app.css HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /static/css/app.css HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     last_handler = "";
     try router.dispatch(&req, &res, &ctx);

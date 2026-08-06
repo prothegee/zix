@@ -33,7 +33,7 @@ fn spawnServer(ctx: *ServerCtx, io: std.Io, port: u16) !std.Thread {
 }
 
 fn sendAndRecv(
-    wr: anytype,
+    writer: anytype,
     rd_interface: *std.Io.Reader,
     recv_buf: []u8,
     recv_len: *usize,
@@ -47,13 +47,13 @@ fn sendAndRecv(
 ) !usize {
     const n = try zix.Fix.buildMessage(out_buf, sender, target, seq.*, msgtype, extra);
     seq.* += 1;
-    try wr.interface.writeAll(out_buf[0..n]);
-    try wr.interface.flush();
+    try writer.interface.writeAll(out_buf[0..n]);
+    try writer.interface.flush();
     return recvMsg(rd_interface, recv_buf, recv_len, reply_fields);
 }
 
 fn recvMsg(
-    rd: *std.Io.Reader,
+    reader: *std.Io.Reader,
     recv_buf: []u8,
     recv_len: *usize,
     out_fields: []zix.Fix.Field,
@@ -61,17 +61,17 @@ fn recvMsg(
     while (true) {
         if (zix.Fix.findMessageEnd(recv_buf[0..recv_len.*])) |end| {
             const raw = recv_buf[0..end];
-            const nf = try zix.Fix.parseFields(raw, out_fields);
+            const field_count = try zix.Fix.parseFields(raw, out_fields);
             const remaining = recv_len.* - end;
             if (remaining > 0) {
                 std.mem.copyForwards(u8, recv_buf[0..remaining], recv_buf[end..recv_len.*]);
             }
             recv_len.* = remaining;
-            return nf;
+            return field_count;
         }
         if (recv_len.* >= recv_buf.len) return error.MessageTooLarge;
-        const b = try rd.takeByte();
-        recv_buf[recv_len.*] = b;
+        const byte = try reader.takeByte();
+        recv_buf[recv_len.*] = byte;
         recv_len.* += 1;
     }
 }
@@ -124,14 +124,14 @@ test "zix integration: Logon handshake and echo round-trip succeed" {
     var ctx: ServerCtx = undefined;
     const thread = try spawnServer(&ctx, io, TEST_PORT);
 
-    const sa = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT);
-    const stream = try sa.connect(io, .{ .mode = .stream });
+    const server_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT);
+    const stream = try server_addr.connect(io, .{ .mode = .stream });
     defer stream.close(io);
 
-    var rd_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var wr_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var write_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     var recv_buf: [zix.Fix.MAX_MSG_SIZE * 2]u8 = undefined;
     var recv_len: usize = 0;
@@ -140,8 +140,8 @@ test "zix integration: Logon handshake and echo round-trip succeed" {
     var seq: u32 = 1;
 
     const logon_nf = try sendAndRecv(
-        &wr,
-        &rd.interface,
+        &writer,
+        &reader.interface,
         &recv_buf,
         &recv_len,
         &out_buf,
@@ -155,8 +155,8 @@ test "zix integration: Logon handshake and echo round-trip succeed" {
     try std.testing.expectEqualStrings("A", zix.Fix.getField(fields[0..logon_nf], .MsgType).?);
 
     const echo_nf = try sendAndRecv(
-        &wr,
-        &rd.interface,
+        &writer,
+        &reader.interface,
         &recv_buf,
         &recv_len,
         &out_buf,
@@ -172,8 +172,8 @@ test "zix integration: Logon handshake and echo round-trip succeed" {
     try std.testing.expectEqualStrings("AAPL", zix.Fix.getField(fields[0..echo_nf], .Symbol).?);
 
     const logout_nf = try sendAndRecv(
-        &wr,
-        &rd.interface,
+        &writer,
+        &reader.interface,
         &recv_buf,
         &recv_len,
         &out_buf,
@@ -200,14 +200,14 @@ test "zix integration: multiple sequential messages are all echoed" {
     var ctx: ServerCtx = undefined;
     const thread = try spawnServer(&ctx, io, TEST_PORT + 1);
 
-    const sa = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 1);
-    const stream = try sa.connect(io, .{ .mode = .stream });
+    const server_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 1);
+    const stream = try server_addr.connect(io, .{ .mode = .stream });
     defer stream.close(io);
 
-    var rd_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var wr_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var write_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     var recv_buf: [zix.Fix.MAX_MSG_SIZE * 2]u8 = undefined;
     var recv_len: usize = 0;
@@ -216,8 +216,8 @@ test "zix integration: multiple sequential messages are all echoed" {
     var seq: u32 = 1;
 
     _ = try sendAndRecv(
-        &wr,
-        &rd.interface,
+        &writer,
+        &reader.interface,
         &recv_buf,
         &recv_len,
         &out_buf,
@@ -231,9 +231,9 @@ test "zix integration: multiple sequential messages are all echoed" {
 
     const order_ids = [_][]const u8{ "ORD001", "ORD002", "ORD003" };
     for (order_ids) |oid| {
-        const nf = try sendAndRecv(
-            &wr,
-            &rd.interface,
+        const field_count = try sendAndRecv(
+            &writer,
+            &reader.interface,
             &recv_buf,
             &recv_len,
             &out_buf,
@@ -244,13 +244,13 @@ test "zix integration: multiple sequential messages are all echoed" {
             &.{.{ .tag = .ClOrdID, .value = oid }},
             &fields,
         );
-        try std.testing.expectEqualStrings("D", zix.Fix.getField(fields[0..nf], .MsgType).?);
-        try std.testing.expectEqualStrings(oid, zix.Fix.getField(fields[0..nf], .ClOrdID).?);
+        try std.testing.expectEqualStrings("D", zix.Fix.getField(fields[0..field_count], .MsgType).?);
+        try std.testing.expectEqualStrings(oid, zix.Fix.getField(fields[0..field_count], .ClOrdID).?);
     }
 
     _ = try sendAndRecv(
-        &wr,
-        &rd.interface,
+        &writer,
+        &reader.interface,
         &recv_buf,
         &recv_len,
         &out_buf,

@@ -36,14 +36,14 @@ test "zix integration: Packet round-trip BIG endian preserves all values" {
 }
 
 test "zix integration: FeedbackResult, packet variant stores full Packet" {
-    const FB = zix.Udp.FeedbackResult(Packet);
+    const Feedback = zix.Udp.FeedbackResult(Packet);
     const pkt = Packet{
         .id = "client-9101\x00\x00\x00\x00\x00".*,
         .packet_type = 7,
         .register = 99,
         .position = .{ 0.1, 0.2, 0.3 },
     };
-    const fb: FB = .{ .packet = pkt };
-    try std.testing.expect(std.meta.activeTag(fb) == .packet);
-    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&pkt), std.mem.asBytes(&fb.packet));
+    const feedback: Feedback = .{ .packet = pkt };
+    try std.testing.expect(std.meta.activeTag(feedback) == .packet);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&pkt), std.mem.asBytes(&feedback.packet));
 }

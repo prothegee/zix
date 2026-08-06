@@ -39,8 +39,8 @@ test "zix integration: body(), chunked single chunk decoded correctly" {
             "5\r\nhello\r\n0\r\n\r\n",
         arena.allocator(),
     );
-    const b = try req.body();
-    try std.testing.expectEqualStrings("hello", b);
+    const body = try req.body();
+    try std.testing.expectEqualStrings("hello", body);
 }
 
 test "zix integration: body(), chunked multiple chunks assembled" {
@@ -51,8 +51,8 @@ test "zix integration: body(), chunked multiple chunks assembled" {
             "3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n",
         arena.allocator(),
     );
-    const b = try req.body();
-    try std.testing.expectEqualStrings("foobarr", b);
+    const body = try req.body();
+    try std.testing.expectEqualStrings("foobarr", body);
 }
 
 test "zix integration: body(), chunked empty body returns empty string" {
@@ -63,8 +63,8 @@ test "zix integration: body(), chunked empty body returns empty string" {
             "0\r\n\r\n",
         arena.allocator(),
     );
-    const b = try req.body();
-    try std.testing.expectEqualStrings("", b);
+    const body = try req.body();
+    try std.testing.expectEqualStrings("", body);
 }
 
 test "zix integration: body() returns body_cache without touching reader" {
@@ -74,9 +74,9 @@ test "zix integration: body() returns body_cache without touching reader" {
         std.testing.allocator,
     );
     req.body_cache = "{\"name\":\"Alice\",\"age\":30}";
-    const b = try req.body();
-    try std.testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30}", b);
+    const body = try req.body();
+    try std.testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30}", body);
     // second call returns same pointer, no re-read
-    const b2 = try req.body();
-    try std.testing.expect(b.ptr == b2.ptr);
+    const body_again = try req.body();
+    try std.testing.expect(body.ptr == body_again.ptr);
 }

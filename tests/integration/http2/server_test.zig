@@ -61,8 +61,8 @@ fn spawnServer(
 
 fn clientConnect(io: std.Io, port: u16) !std.posix.fd_t {
     const addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", port);
-    const s = try addr.connect(io, .{ .mode = .stream });
-    return s.socket.handle;
+    const stream = try addr.connect(io, .{ .mode = .stream });
+    return stream.socket.handle;
 }
 
 fn sendPreface(fd: std.posix.fd_t) !void {
@@ -77,13 +77,13 @@ fn sendRequest(
     path: []const u8,
     body: ?[]const u8,
 ) !void {
-    var hbuf: [256]u8 = undefined;
-    var enc = zix.Http2.HpackEncoder.init(&hbuf);
-    try enc.writeHeader(":method", method);
-    try enc.writeHeader(":path", path);
-    try enc.writeHeader(":scheme", "http");
-    try enc.writeHeader(":authority", "localhost");
-    const hblock = enc.encoded();
+    var header_buf: [256]u8 = undefined;
+    var hpack_encoder = zix.Http2.HpackEncoder.init(&header_buf);
+    try hpack_encoder.writeHeader(":method", method);
+    try hpack_encoder.writeHeader(":path", path);
+    try hpack_encoder.writeHeader(":scheme", "http");
+    try hpack_encoder.writeHeader(":authority", "localhost");
+    const hblock = hpack_encoder.encoded();
 
     const end_stream: u8 = if (body == null)
         zix.Http2.FLAG_END_STREAM | zix.Http2.FLAG_END_HEADERS
@@ -98,52 +98,52 @@ fn sendRequest(
     });
     try zix.Http2.writeAllFD(fd, hblock);
 
-    if (body) |b| {
+    if (body) |payload| {
         try zix.Http2.writeFrameHeaderFD(fd, .{
-            .length = @intCast(b.len),
+            .length = @intCast(payload.len),
             .frame_type = zix.Http2.FRAME_TYPE_DATA,
             .flags = zix.Http2.FLAG_END_STREAM,
             .stream_id = sid,
         });
-        try zix.Http2.writeAllFD(fd, b);
+        try zix.Http2.writeAllFD(fd, payload);
     }
 }
 
 fn recvResponse(fd: std.posix.fd_t, sid: u31, buf: []u8) ![]const u8 {
     var body_len: usize = 0;
     var payload_buf: [zix.Http2.MAX_PAYLOAD + 256]u8 = undefined;
-    var hdec = zix.Http2.HpackDecoder.init();
+    var hpack_decoder = zix.Http2.HpackDecoder.init();
     var hdrs: [32]zix.Http2.Header = undefined;
     var scratch: [2048]u8 = undefined;
 
     while (true) {
-        const fh = try zix.Http2.readFrameHeader(fd);
-        const payload = payload_buf[0..fh.length];
-        if (fh.length > 0) try zix.Http2.recvExact(fd, payload);
+        const frame = try zix.Http2.readFrameHeader(fd);
+        const payload = payload_buf[0..frame.length];
+        if (frame.length > 0) try zix.Http2.recvExact(fd, payload);
 
-        switch (fh.frame_type) {
+        switch (frame.frame_type) {
             zix.Http2.FRAME_TYPE_SETTINGS => {
-                if ((fh.flags & zix.Http2.FLAG_ACK) == 0) try zix.Http2.sendSettingsAckFD(fd);
+                if ((frame.flags & zix.Http2.FLAG_ACK) == 0) try zix.Http2.sendSettingsAckFD(fd);
             },
             zix.Http2.FRAME_TYPE_WINDOW_UPDATE => {},
             zix.Http2.FRAME_TYPE_PING => {
-                if ((fh.flags & zix.Http2.FLAG_ACK) == 0) {
-                    var p8: [8]u8 = undefined;
-                    @memcpy(&p8, payload[0..8]);
-                    try zix.Http2.sendPingAckFD(fd, p8);
+                if ((frame.flags & zix.Http2.FLAG_ACK) == 0) {
+                    var ping_payload: [8]u8 = undefined;
+                    @memcpy(&ping_payload, payload[0..8]);
+                    try zix.Http2.sendPingAckFD(fd, ping_payload);
                 }
             },
             zix.Http2.FRAME_TYPE_HEADERS => {
-                if (fh.stream_id != sid) continue;
-                _ = try hdec.decode(payload, &hdrs, &scratch);
-                if ((fh.flags & zix.Http2.FLAG_END_STREAM) != 0) return buf[0..body_len];
+                if (frame.stream_id != sid) continue;
+                _ = try hpack_decoder.decode(payload, &hdrs, &scratch);
+                if ((frame.flags & zix.Http2.FLAG_END_STREAM) != 0) return buf[0..body_len];
             },
             zix.Http2.FRAME_TYPE_DATA => {
-                if (fh.stream_id != sid) continue;
+                if (frame.stream_id != sid) continue;
                 const to_copy = @min(payload.len, buf.len - body_len);
                 @memcpy(buf[body_len..][0..to_copy], payload[0..to_copy]);
                 body_len += to_copy;
-                if ((fh.flags & zix.Http2.FLAG_END_STREAM) != 0) return buf[0..body_len];
+                if ((frame.flags & zix.Http2.FLAG_END_STREAM) != 0) return buf[0..body_len];
             },
             zix.Http2.FRAME_TYPE_GOAWAY => return error.ServerGoaway,
             zix.Http2.FRAME_TYPE_RST_STREAM => return error.StreamReset,
@@ -177,8 +177,8 @@ test "zix integration: Http2Server.run port zero returns PortNotConfigured" {
 }
 
 test "zix integration: Http2 HandlerFn type is a function pointer" {
-    const h: zix.Http2.HandlerFn = helloHandler;
-    _ = h;
+    const handler: zix.Http2.HandlerFn = helloHandler;
+    _ = handler;
 }
 
 test "zix integration: Http2 GET / returns Hello World over h2c direct" {
@@ -188,11 +188,11 @@ test "zix integration: Http2 GET / returns Hello World over h2c direct" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Http2.Route{
+    const Runner = makeRunner(&[_]zix.Http2.Route{
         .{ .path = "/", .handler = helloHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT, R.run);
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT, Runner.run);
 
     const fd = try clientConnect(io, TEST_PORT);
     defer zix.utils.fd_io.close(fd);
@@ -206,7 +206,7 @@ test "zix integration: Http2 GET / returns Hello World over h2c direct" {
     try std.testing.expectEqualStrings("Hello, World!", body);
 
     try zix.Http2.sendGoawayFD(fd, 1, zix.Http2.ERR_NO_ERROR);
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
@@ -218,11 +218,11 @@ test "zix integration: Http2 POST /echo returns request body" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Http2.Route{
+    const Runner = makeRunner(&[_]zix.Http2.Route{
         .{ .path = "/echo", .handler = echoHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 1, R.run);
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT + 1, Runner.run);
 
     const fd = try clientConnect(io, TEST_PORT + 1);
     defer zix.utils.fd_io.close(fd);
@@ -236,7 +236,7 @@ test "zix integration: Http2 POST /echo returns request body" {
     try std.testing.expectEqualStrings("ping from client", body);
 
     try zix.Http2.sendGoawayFD(fd, 1, zix.Http2.ERR_NO_ERROR);
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
@@ -248,11 +248,11 @@ test "zix integration: Http2 two sequential streams on same connection" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Http2.Route{
+    const Runner = makeRunner(&[_]zix.Http2.Route{
         .{ .path = "/", .handler = helloHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 2, R.run);
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT + 2, Runner.run);
 
     const fd = try clientConnect(io, TEST_PORT + 2);
     defer zix.utils.fd_io.close(fd);
@@ -261,16 +261,16 @@ test "zix integration: Http2 two sequential streams on same connection" {
 
     try sendRequest(fd, 1, "GET", "/", null);
     var buf1: [1024]u8 = undefined;
-    const b1 = try recvResponse(fd, 1, &buf1);
-    try std.testing.expectEqualStrings("Hello, World!", b1);
+    const first_body = try recvResponse(fd, 1, &buf1);
+    try std.testing.expectEqualStrings("Hello, World!", first_body);
 
     try sendRequest(fd, 3, "GET", "/", null);
     var buf2: [1024]u8 = undefined;
-    const b2 = try recvResponse(fd, 3, &buf2);
-    try std.testing.expectEqualStrings("Hello, World!", b2);
+    const second_body = try recvResponse(fd, 3, &buf2);
+    try std.testing.expectEqualStrings("Hello, World!", second_body);
 
     try zix.Http2.sendGoawayFD(fd, 3, zix.Http2.ERR_NO_ERROR);
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
@@ -282,11 +282,11 @@ test "zix integration: Http2 h2c upgrade GET / returns Hello World" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const R = makeRunner(&[_]zix.Http2.Route{
+    const Runner = makeRunner(&[_]zix.Http2.Route{
         .{ .path = "/", .handler = helloHandler },
     });
     var ctx: ServerCtx = undefined;
-    const t = try spawnServer(&ctx, io, TEST_PORT + 3, R.run);
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT + 3, Runner.run);
 
     const fd = try clientConnect(io, TEST_PORT + 3);
     defer zix.utils.fd_io.close(fd);
@@ -311,7 +311,7 @@ test "zix integration: Http2 h2c upgrade GET / returns Hello World" {
     try std.testing.expectEqualStrings("Hello, World!", body);
 
     try zix.Http2.sendGoawayFD(fd, 1, zix.Http2.ERR_NO_ERROR);
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }

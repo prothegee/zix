@@ -60,20 +60,20 @@ fn ensureDirAll(path: []const u8) void {
 
 fn readLogFile(save_path: []const u8, date: *const [10]u8, save_file: []const u8, out: []u8) usize {
     var path_buf: [512]u8 = undefined;
-    const fp = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}-000000.log", .{
+    const log_path = std.fmt.bufPrint(&path_buf, "{s}/{s}/{s}-000000.log", .{
         save_path, date, save_file,
     }) catch return 0;
 
     const fd = std.posix.openat(
         @as(std.posix.fd_t, std.posix.AT.FDCWD),
-        fp,
+        log_path,
         .{ .ACCMODE = .RDONLY },
         0,
     ) catch return 0;
     defer zix.utils.fd_io.close(fd);
 
-    const rc = std.posix.system.read(fd, out.ptr, out.len);
-    const n: usize = if (std.posix.errno(rc) == .SUCCESS) @intCast(rc) else 0;
+    const read_result = std.posix.system.read(fd, out.ptr, out.len);
+    const n: usize = if (std.posix.errno(read_result) == .SUCCESS) @intCast(read_result) else 0;
     return n;
 }
 

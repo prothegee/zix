@@ -80,15 +80,15 @@ fn sendGet(fd: std.posix.fd_t, sid: u31, path: []const u8, accept_encoding: ?[]c
 }
 
 fn sendGetRange(fd: std.posix.fd_t, sid: u31, path: []const u8, accept_encoding: ?[]const u8, range: ?[]const u8) !void {
-    var hbuf: [256]u8 = undefined;
-    var enc = zix.Http2.HpackEncoder.init(&hbuf);
-    try enc.writeHeader(":method", "GET");
-    try enc.writeHeader(":path", path);
-    try enc.writeHeader(":scheme", "http");
-    try enc.writeHeader(":authority", "localhost");
-    if (accept_encoding) |value| try enc.writeHeader("accept-encoding", value);
-    if (range) |value| try enc.writeHeader("range", value);
-    const hblock = enc.encoded();
+    var header_buf: [256]u8 = undefined;
+    var hpack_encoder = zix.Http2.HpackEncoder.init(&header_buf);
+    try hpack_encoder.writeHeader(":method", "GET");
+    try hpack_encoder.writeHeader(":path", path);
+    try hpack_encoder.writeHeader(":scheme", "http");
+    try hpack_encoder.writeHeader(":authority", "localhost");
+    if (accept_encoding) |value| try hpack_encoder.writeHeader("accept-encoding", value);
+    if (range) |value| try hpack_encoder.writeHeader("range", value);
+    const hblock = hpack_encoder.encoded();
 
     try zix.Http2.writeFrameHeaderFD(fd, .{
         .length = @intCast(hblock.len),
@@ -114,24 +114,24 @@ fn recvReply(fd: std.posix.fd_t, sid: u31, buf: []u8, encoding_buf: []u8) !Reply
     var range_buf: [64]u8 = undefined;
     var range_len: usize = 0;
     var payload_buf: [zix.Http2.MAX_PAYLOAD + 256]u8 = undefined;
-    var hdec = zix.Http2.HpackDecoder.init();
+    var hpack_decoder = zix.Http2.HpackDecoder.init();
     var hdrs: [32]zix.Http2.Header = undefined;
     var scratch: [2048]u8 = undefined;
 
     while (true) {
-        const fh = try zix.Http2.readFrameHeader(fd);
-        const payload = payload_buf[0..fh.length];
-        if (fh.length > 0) try zix.Http2.recvExact(fd, payload);
+        const frame = try zix.Http2.readFrameHeader(fd);
+        const payload = payload_buf[0..frame.length];
+        if (frame.length > 0) try zix.Http2.recvExact(fd, payload);
 
-        switch (fh.frame_type) {
+        switch (frame.frame_type) {
             zix.Http2.FRAME_TYPE_SETTINGS => {
-                if ((fh.flags & zix.Http2.FLAG_ACK) == 0) try zix.Http2.sendSettingsAckFD(fd);
+                if ((frame.flags & zix.Http2.FLAG_ACK) == 0) try zix.Http2.sendSettingsAckFD(fd);
             },
             zix.Http2.FRAME_TYPE_WINDOW_UPDATE => {},
             zix.Http2.FRAME_TYPE_HEADERS => {
-                if (fh.stream_id != sid) continue;
+                if (frame.stream_id != sid) continue;
 
-                const count = try hdec.decode(payload, &hdrs, &scratch);
+                const count = try hpack_decoder.decode(payload, &hdrs, &scratch);
                 for (hdrs[0..count]) |header| {
                     if (std.mem.eql(u8, header.name, ":status")) status = std.fmt.parseInt(u16, header.value, 10) catch 0;
                     if (std.mem.eql(u8, header.name, "content-encoding") and header.value.len <= encoding_buf.len) {
@@ -144,18 +144,18 @@ fn recvReply(fd: std.posix.fd_t, sid: u31, buf: []u8, encoding_buf: []u8) !Reply
                     }
                 }
 
-                if ((fh.flags & zix.Http2.FLAG_END_STREAM) != 0) {
+                if ((frame.flags & zix.Http2.FLAG_END_STREAM) != 0) {
                     return .{ .status = status, .body = buf[0..body_len], .content_encoding = encoding_buf[0..encoding_len], .content_range = replyRange(range_buf[0..range_len]) };
                 }
             },
             zix.Http2.FRAME_TYPE_DATA => {
-                if (fh.stream_id != sid) continue;
+                if (frame.stream_id != sid) continue;
 
                 const take = @min(payload.len, buf.len - body_len);
                 @memcpy(buf[body_len..][0..take], payload[0..take]);
                 body_len += take;
 
-                if ((fh.flags & zix.Http2.FLAG_END_STREAM) != 0) {
+                if ((frame.flags & zix.Http2.FLAG_END_STREAM) != 0) {
                     return .{ .status = status, .body = buf[0..body_len], .content_encoding = encoding_buf[0..encoding_len], .content_range = replyRange(range_buf[0..range_len]) };
                 }
             },

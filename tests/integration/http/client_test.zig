@@ -45,8 +45,8 @@ test "zix integration: ClientResponse.iterateHeaders, count all headers" {
     defer resp.deinit();
 
     var count: usize = 0;
-    var it = resp.iterateHeaders();
-    while (it.next()) |_| count += 1;
+    var header_iter = resp.iterateHeaders();
+    while (header_iter.next()) |_| count += 1;
     try std.testing.expectEqual(@as(usize, 3), count);
 }
 
