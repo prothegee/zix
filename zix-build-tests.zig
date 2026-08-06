@@ -62,23 +62,12 @@ pub fn addSteps(
     const report_name_step = testRunStep(b, report_name_tests, foreign_target, "tests/runner/report_name.zig");
     report_name_step.dependOn(isolate_step);
 
-    // zixer is its own executable root (src/zixer), not reachable from the zix
-    // module, so its unit tests get their own module with the zix import.
-    const zixer_mod = b.createModule(.{
-        .root_source_file = b.path("src/zixer/zixer.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    zixer_mod.addImport("zix", zix);
-    const zixer_tests = b.addTest(.{ .root_module = zixer_mod });
-    const zixer_step = testRunStep(b, zixer_tests, foreign_target, "src/zixer/zixer.zig");
-    zixer_step.dependOn(report_name_step);
-
+    // zixer is its own executable root (src/zixer) with its own build files, so
+    // its unit tests are `zig build zixer-unit-test`, not part of this step.
     const test_step = b.step("unit-test", "Run unit tests");
     test_step.dependOn(zix_tests_step);
     test_step.dependOn(isolate_step);
     test_step.dependOn(report_name_step);
-    test_step.dependOn(zixer_step);
 
     // --------------------------------------------------------- //
 
@@ -277,7 +266,7 @@ pub fn addSteps(
     const all_test_step = b.step("test-all", "Run unit, integration, behaviour, and edge tests");
     all_test_step.dependOn(zix_tests_step);
     all_test_step.dependOn(isolate_step);
-    all_test_step.dependOn(zixer_step);
+    all_test_step.dependOn(report_name_step);
     all_test_step.dependOn(integration_test_step);
     all_test_step.dependOn(behaviour_test_step);
     all_test_step.dependOn(edge_test_step);
