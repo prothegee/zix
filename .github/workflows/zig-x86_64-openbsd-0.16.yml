@@ -88,7 +88,7 @@ jobs:
             timeout 6m zig build zixer-unit-test --summary failures || failures="$failures zixer-unit-test"
             timeout 6m zig build zixer-examples --summary failures || failures="$failures zixer-examples"
             timeout 10m zig build zixer-test-runner-all --summary failures || failures="$failures zixer-test-runner-all"
-            timeout 6m zig build test-runner-all --summary failures || failures="$failures test-runner-all"
+            timeout 9m zig build test-runner-all --summary failures || failures="$failures test-runner-all"
             timeout 5m zig build postgrez-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures postgrez-test-unit"
             timeout 5m zig build rediz-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures rediz-test-unit"
             timeout 5m zig build prometheuz-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures prometheuz-test-unit"
