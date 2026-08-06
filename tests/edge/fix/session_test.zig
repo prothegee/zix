@@ -19,15 +19,15 @@ fn runSegmentedResponseServer(ctx: *ServerCtx, io: std.Io) void {
     };
     defer stream.close(io);
 
-    var rd_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var wr_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var write_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
     var recv_buf: [zix.Fix.MAX_MSG_SIZE * 2]u8 = undefined;
     var recv_len: usize = 0;
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
 
-    _ = recvMsg(&rd.interface, &recv_buf, &recv_len, &fields) catch return;
+    _ = recvMsg(&reader.interface, &recv_buf, &recv_len, &fields) catch return;
 
     var out_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
     const n = zix.Fix.buildMessage(&out_buf, "SERVER", "CLIENT", 1, zix.Fix.MsgType.Logon, &.{
@@ -36,10 +36,10 @@ fn runSegmentedResponseServer(ctx: *ServerCtx, io: std.Io) void {
     }) catch return;
 
     const half = n / 2;
-    wr.interface.writeAll(out_buf[0..half]) catch return;
-    wr.interface.flush() catch return;
-    wr.interface.writeAll(out_buf[half..n]) catch return;
-    wr.interface.flush() catch return;
+    writer.interface.writeAll(out_buf[0..half]) catch return;
+    writer.interface.flush() catch return;
+    writer.interface.writeAll(out_buf[half..n]) catch return;
+    writer.interface.flush() catch return;
 }
 
 fn runServer(ctx: *ServerCtx, io: std.Io) void {
@@ -63,7 +63,7 @@ fn setup(io: std.Io, ctx: *ServerCtx, port: u16) !std.Thread {
 }
 
 fn recvMsg(
-    rd: *std.Io.Reader,
+    reader: *std.Io.Reader,
     recv_buf: []u8,
     recv_len: *usize,
     out_fields: []zix.Fix.Field,
@@ -71,17 +71,17 @@ fn recvMsg(
     while (true) {
         if (zix.Fix.findMessageEnd(recv_buf[0..recv_len.*])) |end| {
             const raw = recv_buf[0..end];
-            const nf = try zix.Fix.parseFields(raw, out_fields);
+            const field_count = try zix.Fix.parseFields(raw, out_fields);
             const remaining = recv_len.* - end;
             if (remaining > 0) {
                 std.mem.copyForwards(u8, recv_buf[0..remaining], recv_buf[end..recv_len.*]);
             }
             recv_len.* = remaining;
-            return nf;
+            return field_count;
         }
         if (recv_len.* >= recv_buf.len) return error.MessageTooLarge;
-        const b = try rd.takeByte();
-        recv_buf[recv_len.*] = b;
+        const byte = try reader.takeByte();
+        recv_buf[recv_len.*] = byte;
         recv_len.* += 1;
     }
 }
@@ -118,8 +118,8 @@ test "zix edge: parseFields handles maximum number of fields without panic" {
     var pos: usize = 0;
     var i: u16 = 0;
     while (i < zix.Fix.MAX_FIELDS - 1) : (i += 1) {
-        const s = std.fmt.bufPrint(msg_buf[pos..], "{d}=v\x01", .{1000 + i}) catch break;
-        pos += s.len;
+        const written = std.fmt.bufPrint(msg_buf[pos..], "{d}=v\x01", .{1000 + i}) catch break;
+        pos += written.len;
     }
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
     const n = try zix.Fix.parseFields(msg_buf[0..pos], &fields);
@@ -142,8 +142,8 @@ test "zix edge: buildMessage with zero extra fields produces valid message" {
     try std.testing.expect(n > 0);
     try std.testing.expect(zix.Fix.verifyChecksum(out[0..n]));
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
-    const nf = try zix.Fix.parseFields(out[0..n], &fields);
-    try std.testing.expectEqualStrings("0", zix.Fix.getField(fields[0..nf], .MsgType).?);
+    const field_count = try zix.Fix.parseFields(out[0..n], &fields);
+    try std.testing.expectEqualStrings("0", zix.Fix.getField(fields[0..field_count], .MsgType).?);
 }
 
 // --------------------------------------------------------- //
@@ -156,16 +156,16 @@ test "zix edge: message arriving in two TCP segments is reassembled correctly" {
     const io = threaded.io();
 
     var ctx: ServerCtx = undefined;
-    const t = try setup(io, &ctx, TEST_PORT);
+    const server_thread = try setup(io, &ctx, TEST_PORT);
 
-    const sa = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT);
-    const stream = try sa.connect(io, .{ .mode = .stream });
+    const server_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT);
+    const stream = try server_addr.connect(io, .{ .mode = .stream });
     defer stream.close(io);
 
-    var rd_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var wr_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var write_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
     var recv_buf: [zix.Fix.MAX_MSG_SIZE * 2]u8 = undefined;
     var recv_len: usize = 0;
     var out_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
@@ -175,20 +175,20 @@ test "zix edge: message arriving in two TCP segments is reassembled correctly" {
         .{ .tag = .EncryptMethod, .value = "0" }, .{ .tag = .HeartBtInt, .value = "30" },
     });
     const half = logon_n / 2;
-    try wr.interface.writeAll(out_buf[0..half]);
-    try wr.interface.flush();
-    try wr.interface.writeAll(out_buf[half..logon_n]);
-    try wr.interface.flush();
+    try writer.interface.writeAll(out_buf[0..half]);
+    try writer.interface.flush();
+    try writer.interface.writeAll(out_buf[half..logon_n]);
+    try writer.interface.flush();
 
-    const nf = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
-    try std.testing.expectEqualStrings("A", zix.Fix.getField(fields[0..nf], .MsgType).?);
+    const field_count = try recvMsg(&reader.interface, &recv_buf, &recv_len, &fields);
+    try std.testing.expectEqualStrings("A", zix.Fix.getField(fields[0..field_count], .MsgType).?);
 
     const logout_n = try zix.Fix.buildMessage(&out_buf, "CLIENT", "SERVER", 2, "5", &.{});
-    try wr.interface.writeAll(out_buf[0..logout_n]);
-    try wr.interface.flush();
-    _ = try recvMsg(&rd.interface, &recv_buf, &recv_len, &fields);
+    try writer.interface.writeAll(out_buf[0..logout_n]);
+    try writer.interface.flush();
+    _ = try recvMsg(&reader.interface, &recv_buf, &recv_len, &fields);
 
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
@@ -224,8 +224,8 @@ test "zix edge: FixClient.recvMessage reassembles server response split across t
 
     const raw = try client.recvMessage(io);
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
-    const nf = try zix.Fix.parseFields(raw, &fields);
-    try std.testing.expectEqualStrings(zix.Fix.MsgType.Logon, zix.Fix.getField(fields[0..nf], .MsgType).?);
+    const field_count = try zix.Fix.parseFields(raw, &fields);
+    try std.testing.expectEqualStrings(zix.Fix.MsgType.Logon, zix.Fix.getField(fields[0..field_count], .MsgType).?);
 
     thread.join();
     ctx.listener.deinit(io);
@@ -239,16 +239,16 @@ test "zix edge: bad checksum causes server to close without server-side error pr
     const io = threaded.io();
 
     var ctx: ServerCtx = undefined;
-    const t = try setup(io, &ctx, TEST_PORT + 1);
+    const server_thread = try setup(io, &ctx, TEST_PORT + 1);
 
-    const sa = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 1);
-    const stream = try sa.connect(io, .{ .mode = .stream });
+    const server_addr = try std.Io.net.IpAddress.resolve(io, "127.0.0.1", TEST_PORT + 1);
+    const stream = try server_addr.connect(io, .{ .mode = .stream });
     defer stream.close(io);
 
-    var rd_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var wr_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
-    var rd = stream.reader(io, &rd_buf);
-    var wr = stream.writer(io, &wr_buf);
+    var read_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var write_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
 
     var out_buf: [zix.Fix.MAX_MSG_SIZE]u8 = undefined;
     const n = try zix.Fix.buildMessage(&out_buf, "CLIENT", "SERVER", 1, "A", &.{
@@ -256,12 +256,12 @@ test "zix edge: bad checksum causes server to close without server-side error pr
     });
     out_buf[n / 2] ^= 0xFF;
 
-    try wr.interface.writeAll(out_buf[0..n]);
-    try wr.interface.flush();
+    try writer.interface.writeAll(out_buf[0..n]);
+    try writer.interface.flush();
 
-    _ = rd.interface.takeByte() catch {};
+    _ = reader.interface.takeByte() catch {};
 
-    t.join();
+    server_thread.join();
     ctx.listener.deinit(io);
     try std.testing.expect(ctx.err == null);
 }
