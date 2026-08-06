@@ -73,311 +73,311 @@ const zix_ipc_sock = "tmp/zix_ipc.sock";
 const checks = [_]Check{
     // Basic per-engine checks: one unified example each, on the dispatch model its target picks.
     .{ .label = "http", .example = "http_basic", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp(io, paths[0], 9000);
         }
-    }.f },
+    }.call },
     .{ .label = "http1", .example = "http1_basic", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp1(io, paths[0], 9015);
         }
-    }.f },
+    }.call },
     .{ .label = "grpc", .example = "grpc_server", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpc(io, paths[0], 9032);
         }
-    }.f },
+    }.call },
     .{ .label = "tcp", .example = "tcp_server", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runTcp(io, paths[0], 9043);
         }
-    }.f },
+    }.call },
     .{ .label = "fix", .example = "fix_server", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runFix(io, paths[0], 9048);
         }
-    }.f },
+    }.call },
     .{ .label = "http2", .example = "http2_basic", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp2(io, paths[0], 9065);
         }
-    }.f },
+    }.call },
     .{ .label = "udp", .example = "udp_server", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runUdp(io, paths[0]);
         }
-    }.f },
+    }.call },
     .{ .label = "udp-raw", .example = "udp_server_raw", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runUdpRaw(io, paths[0]);
         }
-    }.f },
+    }.call },
     .{ .label = "uds", .example = "uds_server", .resource = zix_sock, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runUds(io, paths[0]);
         }
-    }.f },
+    }.call },
 
     // HTTP feature checks.
     .{ .label = "http-json", .example = "http_json", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9005, "/status", "", "server");
         }
-    }.f },
+    }.call },
     .{ .label = "http-middleware", .example = "http_middleware", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9006, "/public", "http://127.0.0.1", "public");
         }
-    }.f },
+    }.call },
     .{ .label = "http-params", .example = "http_params", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9007, "/echo?foo=bar", "", "foo");
         }
-    }.f },
+    }.call },
     .{ .label = "http-paths", .example = "http_paths", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9008, "/path", "", "");
         }
-    }.f },
+    }.call },
     .{ .label = "http-query", .example = "http_query", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_query.runHttpQuery(io, paths[0], 9080);
         }
-    }.f },
+    }.call },
     .{ .label = "http-timeout-resp", .example = "http_timeout_resp", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9010, "/ping", "", "pong");
         }
-    }.f },
+    }.call },
     .{ .label = "http-xtra-headers", .example = "http_xtra_headers", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpHeader(io, paths[0], 9011, "/info", "X-Server", "zix");
         }
-    }.f },
+    }.call },
     .{ .label = "http-manual-concurrent", .example = "http_manual_concurrent", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9014, "/", "", "hello");
         }
-    }.f },
+    }.call },
     .{ .label = "http-static", .example = "http_static", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpStatic(io, paths[0], 9009, "http_text_file.txt", "this is http text file example.", null);
         }
-    }.f },
+    }.call },
     .{ .label = "http-sse", .example = "http_sse", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runSse(io, paths[0], 9012);
         }
-    }.f },
+    }.call },
     .{ .label = "http-websocket", .example = "http_websocket", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runWs(io, paths[0], 9013, "/ws/lobby");
         }
-    }.f },
+    }.call },
     .{ .label = "http-compression", .example = "http_compression", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpCompression(io, paths[0], 9059);
         }
-    }.f },
+    }.call },
 
     // HTTP1 feature checks.
     .{ .label = "http1-json", .example = "http1_json", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9020, "/status", "", "server");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-middleware", .example = "http1_middleware", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9021, "/public", "http://127.0.0.1", "public");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-params", .example = "http1_params", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9022, "/echo?foo=bar", "", "foo");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-paths", .example = "http1_paths", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9023, "/path", "", "");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-query", .example = "http1_query", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_query.runHttpQuery(io, paths[0], 9079);
         }
-    }.f },
+    }.call },
     .{ .label = "http1-timeout-resp", .example = "http1_timeout_resp", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9025, "/ping", "", "pong");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-xtra-headers", .example = "http1_xtra_headers", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpHeader(io, paths[0], 9026, "/info", "X-Server", "zix");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-manual-concurrent", .example = "http1_manual_concurrent", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9030, "/", "", "hello");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-static", .example = "http1_static", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpStatic(io, paths[0], 9024, "http1_text_file.txt", "this is http1 text file example.", "/upload-multipart");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-sse", .example = "http1_sse", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runSse(io, paths[0], 9027);
         }
-    }.f },
+    }.call },
     .{ .label = "http1-websocket", .example = "http1_websocket", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runWs(io, paths[0], 9028, "/ws/lobby");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-cache", .example = "http1_cache", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpGet(io, paths[0], 9031, "/cache?kb=1", "", "ok");
         }
-    }.f },
+    }.call },
     .{ .label = "http1-compression", .example = "http1_compression", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttpCompression(io, paths[0], 9058);
         }
-    }.f },
+    }.call },
 
     // gRPC feature checks.
     .{ .label = "grpc-location", .example = "grpc_location_server", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpcLocation(io, paths[0], 9038);
         }
-    }.f },
+    }.call },
     .{ .label = "grpc-multi", .example = "grpc_multi_server", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpcMulti(io, paths[0]);
         }
-    }.f },
+    }.call },
     .{ .label = "grpc-timeout", .example = "grpc_timeout", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runGrpcTimeout(io, paths[0]);
         }
-    }.f },
+    }.call },
 
     // FIX trading check.
     .{ .label = "fix-trading", .example = "fix_server_trading", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_rpc.runFixTrading(io, paths[0]);
         }
-    }.f },
+    }.call },
 
     // UDS HTTP check (two server binaries: uds_server + uds_http).
     .{ .label = "uds-http", .example = "uds_http", .arity = 2, .resource = zix_sock, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runUdsHttp(io, paths[0], paths[1]);
         }
-    }.f },
+    }.call },
 
     // Channel self-terminating checks.
     .{ .label = "channel-basic", .example = "channel_basic", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runChannelSelfterm(io, paths[0]);
         }
-    }.f },
+    }.call },
     .{ .label = "channel-pipeline", .example = "channel_pipeline", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runChannelSelfterm(io, paths[0]);
         }
-    }.f },
+    }.call },
     .{ .label = "channel-worker-pool", .example = "channel_worker_pool", .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runChannelSelfterm(io, paths[0]);
         }
-    }.f },
+    }.call },
 
     // Channel IPC check (two server binaries: ipc_a + ipc_b).
     .{ .label = "channel-ipc", .example = "channel_ipc_a", .arity = 2, .resource = zix_ipc_sock, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_misc.runChannelIpc(io, paths[0], paths[1]);
         }
-    }.f },
+    }.call },
 
     // TLS checks (native clients, no curl): https/1.1, ed25519 variant, h2, gRPC over h2.
     .{ .label = "tls-http1", .example = "tls_http1_basic", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTls(io, paths[0], 9060);
         }
-    }.f },
+    }.call },
     .{ .label = "tls-http1-ed25519", .example = "tls_http1_ed25519", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsHttp1Ed25519(io, paths[0], 9062);
         }
-    }.f },
+    }.call },
     .{ .label = "tls-http2", .example = "tls_http2_basic", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsHttp2(io, paths[0], 9061);
         }
-    }.f },
+    }.call },
     .{ .label = "tls-grpc", .example = "tls_grpc_basic", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsGrpc(io, paths[0], 9070);
         }
-    }.f },
+    }.call },
 
     // HTTP/3 check (QUIC over TLS 1.3, native hand-rolled client, no external tool).
     .{ .label = "http3-basic", .example = "http3_basic", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_http.runHttp3(io, paths[0], 9063);
         }
-    }.f },
+    }.call },
 
     // SSE over TLS (ADR-054): https streaming on the arena and http1 engines, native TLS client.
     .{ .label = "tls-http-sse", .example = "tls_http_sse", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsSse(io, paths[0], 9072);
         }
-    }.f },
+    }.call },
     .{ .label = "tls-http1-sse", .example = "tls_http1_sse", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsSse(io, paths[0], 9073);
         }
-    }.f },
+    }.call },
 
     // WebSocket over TLS (ADR-055): wss echo on the http1 and arena engines, native TLS client.
     .{ .label = "tls-http1-ws", .example = "tls_http1_ws", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsWs(io, paths[0], 9074);
         }
-    }.f },
+    }.call },
     .{ .label = "tls-http-ws", .example = "tls_http_ws", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsWs(io, paths[0], 9075);
         }
-    }.f },
+    }.call },
 
     // https/1.1 over TLS 1.3 on the arena engine (zix.Http). Appended last so the argv order of the
     // existing checks stays stable. Same native TLS GET as tls-http1, different engine.
     .{ .label = "tls-http", .example = "tls_http_basic", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTls(io, paths[0], 9071);
         }
-    }.f },
+    }.call },
 
     // Dual listener (config.tls_port, ADR-060): appended last so the argv order of the existing
     // checks stays stable. One server answers cleartext AND https from the same worker fleet.
     .{ .label = "tls-http1-dual", .example = "tls_http1_dual", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_tls.runTlsHttp1Dual(io, paths[0], 9076, 9077);
         }
-    }.f },
+    }.call },
 
     // WebRTC data channel: ICE, DTLS, SCTP, and DCEP in one session between two zix processes.
     // Appended last so the argv order of the existing checks stays stable.
     .{ .label = "webrtc-datachannel", .example = "webrtc_datachannel_echo", .heavy = true, .run = &struct {
-        fn f(io: std.Io, paths: []const []const u8) anyerror!void {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_webrtc.runWebrtc(io, paths[0], 9083);
         }
-    }.f },
+    }.call },
 };
 
 /// Total argv server paths the checks table consumes (sum of every row's arity).
@@ -535,14 +535,14 @@ const WAVE_MAX = 16;
 /// (a flaky "ServerStartTimeout"). Conservative on purpose: a small box can only bring up a few of
 /// these heavyweight servers at a time, a large box scales out. The per-check retry (see runCheck) is
 /// the safety net for the occasional starved server, so this need not be tuned all the way to zero.
-fn waveWidth(cpu: usize) usize {
-    return std.math.clamp(cpu / 4, 2, WAVE_MAX);
+fn waveWidth(cpu_count: usize) usize {
+    return std.math.clamp(cpu_count / 4, 2, WAVE_MAX);
 }
 
 /// Live cap on concurrent CPU-heavy TLS / QUIC checks (crypto handshakes plus a worker pool), tighter
 /// than waveWidth. On a small box this serializes them so each gets the cores it needs to hand shake.
-fn maxHeavy(cpu: usize) usize {
-    return std.math.clamp(cpu / 12, 1, 3);
+fn maxHeavy(cpu_count: usize) usize {
+    return std.math.clamp(cpu_count / 12, 1, 3);
 }
 
 // --------------------------------------------------------- //
@@ -555,15 +555,15 @@ fn maxHeavy(cpu: usize) usize {
 /// Output streams in stable table order: a wave is a contiguous block of checks, waves run in index
 /// order, and within a wave the slots are awaited and reported in index order. report() runs only
 /// here on the main thread (never on the concurrent check threads), so the prints never interleave.
-fn runWaves(io: std.Io, self_exe: []const u8, all_paths: []const []const u8, tally: *Tally, cpu: usize, timeout_ms: u32) void {
-    const wave_width = waveWidth(cpu);
-    const max_heavy = maxHeavy(cpu);
-    const Fut = std.Io.Future(isolate.Result);
+fn runWaves(io: std.Io, self_exe: []const u8, all_paths: []const []const u8, tally: *Tally, cpu_count: usize, timeout_ms: u32) void {
+    const wave_width = waveWidth(cpu_count);
+    const max_heavy = maxHeavy(cpu_count);
+    const CheckFuture = std.Io.Future(isolate.Result);
 
     var check_idx: usize = 0;
     var path_cursor: usize = 0;
     while (check_idx < checks.len) {
-        var futs: [WAVE_MAX]Fut = undefined;
+        var futures: [WAVE_MAX]CheckFuture = undefined;
         var slot_check: [WAVE_MAX]usize = undefined;
         var slot_res: [WAVE_MAX]?[]const u8 = undefined;
         // One report buffer per slot: the child writes its line here while the wave is in flight, and
@@ -573,31 +573,31 @@ fn runWaves(io: std.Io, self_exe: []const u8, all_paths: []const []const u8, tal
         var heavy_count: usize = 0;
 
         while (check_idx < checks.len and count < wave_width) {
-            const c = checks[check_idx];
-            if (common.skipDispatchOffPlatform(c.label)) {
+            const check = checks[check_idx];
+            if (common.skipDispatchOffPlatform(check.label)) {
                 tally.total += 1;
-                path_cursor += c.arity;
+                path_cursor += check.arity;
                 check_idx += 1;
                 continue;
             }
-            if (c.resource) |res| {
+            if (check.resource) |res| {
                 if (resourceBusy(slot_res[0..count], res)) break;
             }
-            if (c.heavy and heavy_count == max_heavy) break;
+            if (check.heavy and heavy_count == max_heavy) break;
 
-            const paths = all_paths[path_cursor..][0..c.arity];
-            futs[count] = io.async(runIsolatedCheck, .{ io, self_exe, c.label, paths, timeout_ms, slot_report[count][0..] });
+            const paths = all_paths[path_cursor..][0..check.arity];
+            futures[count] = io.async(runIsolatedCheck, .{ io, self_exe, check.label, paths, timeout_ms, slot_report[count][0..] });
             slot_check[count] = check_idx;
-            slot_res[count] = c.resource;
+            slot_res[count] = check.resource;
 
-            if (c.heavy) heavy_count += 1;
-            path_cursor += c.arity;
+            if (check.heavy) heavy_count += 1;
+            path_cursor += check.arity;
             count += 1;
             check_idx += 1;
         }
 
-        for (0..count) |s| {
-            const result = futs[s].await(io);
+        for (0..count) |slot| {
+            const result = futures[slot].await(io);
             forwardResult(io, result, tally);
         }
     }
@@ -619,20 +619,20 @@ pub fn main(process: std.process.Init) void {
     // Collect server paths in argv order, one slot per declared check path.
     var all_paths: [total_paths][]const u8 = undefined;
     all_paths[0] = first;
-    var fill: usize = 1;
-    while (fill < total_paths) : (fill += 1) {
-        all_paths[fill] = arg_iter.next() orelse exitMissing(labelForPath(fill));
+    var path_idx: usize = 1;
+    while (path_idx < total_paths) : (path_idx += 1) {
+        all_paths[path_idx] = arg_iter.next() orelse exitMissing(labelForPath(path_idx));
     }
 
     // Run all checks concurrently in bounded waves (width scaled to the host), streaming each wave's
     // results in table order as it completes. The per-check kill bound is the native default unless
     // the environment widens it (the qemu CI legs do).
-    const cpu = std.Thread.getCpuCount() catch 4;
+    const cpu_count = std.Thread.getCpuCount() catch 4;
     const check_timeout_ms = isolate.checkTimeoutMs(process.environ_map.get(isolate.CHECK_TIMEOUT_ENV));
 
     var tally: Tally = .{};
 
-    runWaves(io, self_exe, &all_paths, &tally, cpu, check_timeout_ms);
+    runWaves(io, self_exe, &all_paths, &tally, cpu_count, check_timeout_ms);
 
     if (tally.failed > 0) {
         std.debug.print("{d}/{d} protocol(s) failed\n", .{ tally.failed, tally.total });
