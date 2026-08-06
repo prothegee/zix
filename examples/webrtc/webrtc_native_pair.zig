@@ -1,8 +1,12 @@
 // Usage:
 // zig build example-webrtc_datachannel_echo
 // zig build example-webrtc_native_pair
-// ./zig-out/bin/webrtc_datachannel_echo &
-// ./zig-out/bin/webrtc_native_pair
+// ./zig-out/bin/zix-example-webrtc_datachannel_echo-<arch>-<os> &
+// ./zig-out/bin/zix-example-webrtc_native_pair-<arch>-<os>
+//
+// Both ports can be overridden, which is how the same dialer runs the session through a
+// gateway instead of straight at the answering peer:
+// ./zig-out/bin/zix-example-webrtc_native_pair-<arch>-<os> --peer-port 9123 --bind-port 9084
 //
 // The dialing half of a native WebRTC pair: no browser, no SDP, and no signalling server. It runs
 // the whole session against webrtc_datachannel_echo over a real loopback socket, in the order the
@@ -18,6 +22,7 @@
 // check you can run by hand.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zix = @import("zix");
 
 const socket_poll = zix.utils.socket_poll;
@@ -26,6 +31,9 @@ const secure_random = zix.utils.secure_random;
 // --------------------------------------------------------- //
 
 const PEER_IP: []const u8 = "127.0.0.1";
+// Defaults aim straight at webrtc_datachannel_echo. --peer-port and
+// --bind-port override them, which is how the same dialer drives the session
+// through a gateway (see examples/proxies/sites/rtc_media.cfg).
 const PEER_PORT: u16 = 9083;
 const BIND_PORT: u16 = 9084;
 
@@ -87,13 +95,41 @@ fn drawOptions() zix.Webrtc.DialerOptions {
     };
 }
 
+/// Args iterator that also works on Windows: std's Iterator.init is
+/// POSIX-only in Zig 0.16, Windows needs the allocating variant.
+fn argsIterator(args: std.process.Args) std.process.Args.Iterator {
+    if (comptime builtin.os.tag == .windows) {
+        return std.process.Args.Iterator.initAllocator(args, std.heap.smp_allocator) catch {
+            std.process.exit(2);
+        };
+    }
+
+    return std.process.Args.Iterator.init(args);
+}
+
+/// Value of one --flag port argument, or fallback when it is absent or unusable.
+fn portFromArgs(args: std.process.Args, flag: []const u8, fallback: u16) u16 {
+    var iter = argsIterator(args);
+    _ = iter.next();
+
+    while (iter.next()) |arg| {
+        if (!std.mem.eql(u8, arg, flag)) continue;
+
+        const value = iter.next() orelse break;
+
+        return std.fmt.parseInt(u16, value, 10) catch break;
+    }
+
+    return fallback;
+}
+
 /// Run one whole session and check the message came back unchanged.
-fn dial(io: std.Io, allocator: std.mem.Allocator) !void {
-    const local = try std.Io.net.IpAddress.parse("0.0.0.0", BIND_PORT);
+fn dial(io: std.Io, allocator: std.mem.Allocator, peer_port: u16, bind_port: u16) !void {
+    const local = try std.Io.net.IpAddress.parse("0.0.0.0", bind_port);
     const socket = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
 
-    const peer = try std.Io.net.IpAddress.parse(PEER_IP, PEER_PORT);
+    const peer = try std.Io.net.IpAddress.parse(PEER_IP, peer_port);
     const start = std.Io.Clock.Timestamp.now(io, .awake);
 
     var dialer = try zix.Webrtc.Dialer.init(allocator, drawOptions(), 0);
@@ -144,7 +180,10 @@ fn dial(io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 pub fn main(process: std.process.Init) !void {
-    try dial(process.io, std.heap.smp_allocator);
+    const peer_port = portFromArgs(process.minimal.args, "--peer-port", PEER_PORT);
+    const bind_port = portFromArgs(process.minimal.args, "--bind-port", BIND_PORT);
 
-    std.log.info("native pair: the message came back on the data channel", .{});
+    try dial(process.io, std.heap.smp_allocator, peer_port, bind_port);
+
+    std.log.info("native pair: the message came back on the data channel from {s}:{d}", .{ PEER_IP, peer_port });
 }
