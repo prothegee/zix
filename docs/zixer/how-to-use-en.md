@@ -1,0 +1,329 @@
+# How to use zixer
+
+zixer is a proxy gateway you run as a program. You put your service behind it by writing one config file, not by changing your service. This page walks from an empty machine to a running site, then gives one recipe per shape.
+
+Every key mentioned here is described in full in `config-en.md`.
+
+<br>
+
+## Build
+
+zixer builds from the zix repository:
+
+```bash
+zig build zixer
+```
+
+The binary lands in `zig-out/bin/zixer-<triplet>`, i.e. `zixer-x86_64-linux`. Copy it anywhere on your path. The rest of this page writes it as `zixer`.
+
+```bash
+$ zixer version
+zixer 0.5.0-rc3 (zig 0.16.0, x86_64-linux)
+```
+
+zixer has no version of its own: it ships with the engines and reports the package version, so the line above names exactly which build is running.
+
+<br>
+
+## Five minutes to a proxied service
+
+Say you already run something on `127.0.0.1:3000`.
+
+```bash
+zixer init
+```
+
+That creates the root dir, which is `$HOME/.zixer` unless you say otherwise:
+
+```
+~/.zixer
+|
+|___/sites
+|   |___example.cfg.sample
+|
+|___/logs
+|
+|___main.cfg
+```
+
+Write one site file:
+
+```bash
+cat > ~/.zixer/sites/api.cfg <<'CFG'
+engine: http1
+ip: 0.0.0.0
+port: 8080
+upstreams: 127.0.0.1:3000
+CFG
+```
+
+Check it before starting anything. This reads the same parser the daemon reads:
+
+```bash
+$ zixer status
+# /home/you/.zixer/main.cfg
+main.cfg:
+status: ok
+...
+
+# /home/you/.zixer/sites/api.cfg
+api.cfg:
+status: ok
+engine: http1
+ip: 0.0.0.0
+port: 8080
+tls: false
+upstreams: 127.0.0.1:3000
+```
+
+Start it. The daemon is spawned for you the first time:
+
+```bash
+$ zixer start api.cfg
+api.cfg started on 0.0.0.0:8080
+
+$ curl -s http://127.0.0.1:8080/
+```
+
+Stop one site, or everything:
+
+```bash
+zixer stop api.cfg
+zixer daemon stop
+```
+
+<br>
+
+## Choosing where the root dir lives
+
+Three ways, first hit wins:
+
+```bash
+zixer --dir /srv/zixer status        # explicit, per command
+export ZIXER_DIR=/srv/zixer          # for a shell or a service unit
+# neither: $HOME/.zixer
+```
+
+Whichever you pick, use the same one for every command, including the one that spawns the daemon. A bare `zixer` reports which root it would use and whether it is initialized.
+
+Keep the path short. The daemon holds a unix socket at `<root>/control.sock`, and that whole string must fit the platform limit (108 bytes on Linux). A path too deep is refused with `control socket path is too long for this platform`.
+
+<br>
+
+## The commands
+
+| you want to | run |
+| :- | :- |
+| create the root dir | `zixer init` |
+| check every config | `zixer status` |
+| check one config | `zixer status api` (the `.cfg` is optional) |
+| see what sites exist | `zixer list` |
+| serve a site | `zixer start api.cfg` |
+| stop serving it | `zixer stop api.cfg` |
+| apply an edit to a site file | `zixer restart api.cfg` |
+| stop everything | `zixer daemon stop` |
+| run the daemon in the foreground | `zixer daemon` |
+
+`status` exits 1 when anything is wrong, so it works as a gate in a deploy script:
+
+```bash
+zixer --dir /srv/zixer status || exit 1
+zixer --dir /srv/zixer restart api.cfg
+```
+
+<br>
+
+## Applying a config change
+
+| you changed | to apply |
+| :- | :- |
+| one site file | `zixer restart <site.cfg>`, which re-reads that file from disk |
+| `main.cfg` | `zixer daemon stop`, then start your sites again |
+| a certificate on disk | `zixer restart <site.cfg>` |
+
+A running site never picks up an edit by itself. That is deliberate: a config edit becomes live when you say so, and `status` lets you check it first.
+
+<br>
+
+## Recipes
+
+### Static site
+
+No backend at all. zixer is the origin:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+public_dir: /var/www/site
+```
+
+A directory request maps to `index.html`. If a `.br` or `.gz` sibling sits next to a file, it is served to a client that accepts that coding, with `Vary: Accept-Encoding` on the response.
+
+### Single page app
+
+Any path that is not a real file answers the app shell, so client-side routing works on a refresh:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+public_dir: /var/www/app/dist
+spa_fallback: index.html
+```
+
+### Static assets beside a backend
+
+Only `/assets/...` comes off disk, everything else is proxied:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+upstreams: 127.0.0.1:3000
+public_dir: /var/www/app/dist
+public_prefix: /assets
+```
+
+The prefix is required as soon as a site has both planes and a fallback, otherwise a genuine 404 from the backend would disappear into the app shell.
+
+Note that the request path is joined onto `public_dir` as it arrives, so `public_prefix: /assets` needs a real `assets/` directory inside `public_dir`.
+
+### Several backends
+
+Requests rotate over the list. A backend that refuses a connection is skipped for a few seconds and then tried again:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+upstreams: 127.0.0.1:3000, 127.0.0.1:3001, 127.0.0.1:3002
+```
+
+Upstream hosts must be ip literals. `localhost:3000` passes the config check and then fails on every request.
+
+### TLS at the edge
+
+The backend stays cleartext, so nothing behind zixer needs a certificate:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+```
+
+The certificate decides which names the site answers. A request for a host the certificate does not cover is answered `421`, which is the correct answer for a misdirected request rather than a silent wrong-site response.
+
+### Renewal with certbot
+
+Add the challenge path to the site and let certbot write into the webroot:
+
+```
+acme_webroot: /var/www/acme
+```
+
+```bash
+certbot certonly --webroot -w /var/www/acme -d example.com \
+  --deploy-hook 'zixer --dir /srv/zixer restart example.cfg'
+```
+
+A TLS site on a port other than 80 also binds port 80 for the challenge, so the process needs that privilege. If another program already owns port 80, use `acme_proxy: 127.0.0.1:9080` instead and let that program answer the challenge.
+
+### HTTP/2
+
+```
+engine: http2
+ip: 0.0.0.0
+port: 8443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+```
+
+Clients speak h2, the backend keeps speaking HTTP/1.1. A websocket over extended CONNECT is bridged to an ordinary websocket backend.
+
+### gRPC
+
+```
+engine: grpc
+ip: 0.0.0.0
+port: 50051
+upstreams: 127.0.0.1:9109
+```
+
+Both legs are h2 so trailers, and therefore the grpc status, survive the hop. A grpc site cannot serve static files.
+
+### HTTP/3
+
+```
+engine: http3
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+```
+
+TLS is not optional here, it is part of QUIC. The port is UDP, so open it in the firewall as UDP.
+
+### Datagram forward
+
+A blind relay, one flow per client, which is what a media path in front of a WebRTC engine needs:
+
+```
+engine: udp
+ip: 0.0.0.0
+port: 3478
+upstreams: 127.0.0.1:9083
+```
+
+Nothing is parsed and nothing is rewritten. Each client gets its own socket toward the backend, so the backend sees one distinct peer per client.
+
+<br>
+
+## Running it as a service
+
+The daemon runs in the foreground with `zixer daemon`, which is what a service manager wants. Start your sites after it is up:
+
+```bash
+ZIXER_DIR=/srv/zixer zixer daemon
+```
+
+There is no log output yet. `logs_dir` must exist because `status` checks it, and nothing writes into it.
+
+<br>
+
+## Troubleshooting
+
+| what you see | what it means | what to do |
+| :- | :- | :- |
+| `zixer is not initialized` | no `main.cfg` under the root | `zixer init`, or point `--dir` at the right root |
+| `daemon did not answer after spawn` | the daemon could not start | run `zixer daemon` in the foreground and read the message |
+| `control socket path is too long for this platform` | the root dir path is too deep | move the root somewhere shorter |
+| `api.cfg has config errors` | the site did not validate | `zixer status api`, fix each listed key |
+| `port 8080 is already used by other.cfg` | another started site owns it | change the port, or stop the other site |
+| `bind failed (AddressInUse)` | something outside zixer owns the port | find it with `ss -ltnp` |
+| `bind failed (BadUpstreamAddress)` | a udp site upstream is not an ip literal | write the address, not a name |
+| `502 all upstreams failed` | every backend refused or failed | check the backend, and that the upstream address is an ip literal |
+| `503 no upstream available` | every backend is in its cooldown window | check the backends, retry after a few seconds |
+| `421 misdirected request` | the Host is not covered by `tls_cert` | use a name the certificate covers, or issue one that covers it |
+| `404 not found` on a static path | the file is not under `public_dir` | check the path, and remember that `public_prefix` is not stripped before the join |
+| the acme challenge 404s | the token is not under the webroot | it must be at `<acme_webroot>/.well-known/acme-challenge/<token>` |
+| an edit did nothing | the site is running the old file | `zixer restart <site.cfg>` |
+
+<br>
+
+## Where to look next
+
+| question | page |
+| :- | :- |
+| what does this key do exactly | `config-en.md` |
+| how is the gateway put together | `hld-en.md` |
+| what happens on the wire | `lld-en.md` |
+| can I see a working example of each shape | `examples/proxies/README-en.md` in the repository |
