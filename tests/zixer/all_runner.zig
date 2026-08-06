@@ -4,14 +4,23 @@
 //! binary first, then one upstream binary path per row of the UPSTREAM table
 //! below, in that exact order.
 //!
-//! One row is one demo: the runner starts that demo's upstream processes, asks
-//! the daemon to bind its site, drives a real client through the edge, then
-//! stops the site and kills the upstreams. Rows run one at a time, so a
-//! failure names one demo and leaves nothing bound behind it.
+//! One row is one demo: it starts its own daemon on its own throwaway root,
+//! starts that demo's upstream processes, asks the daemon to bind its site,
+//! drives a real client through the edge, then stops the site and tears
+//! everything down again.
 //!
-//! The daemon runs on a throwaway root under tmp/, copied from
-//! examples/proxies (see root_setup.zig), so a run never disturbs a daemon a
-//! developer already has on that directory.
+//! Each row runs in a child copy of this binary, bounded in time (see
+//! row_isolate.zig). Without that bound a single park costs the whole table:
+//! the client blocks in a read that never returns, the step hits its CI wall
+//! minutes later, and not one row after it is ever reported. With it, a park is
+//! one FAIL line and the run carries on. A failed row also prints what its
+//! daemon and upstreams wrote to stderr, which is the only account left of a
+//! child the parent had to kill.
+//!
+//! Roots are throwaway copies of examples/proxies under tmp/ (see
+//! root_setup.zig), one per row, so a run never disturbs a daemon a developer
+//! already has on that directory and a killed row cannot hand its orphan to the
+//! next one.
 //!
 //! Run one row by label:
 //!     zig build zixer-test-runner-all
@@ -28,8 +37,10 @@ const std = @import("std");
 
 const common = @import("runner_common");
 
+const child_stderr = @import("child_stderr.zig");
 const gateway = @import("gateway.zig");
 const root_setup = @import("root_setup.zig");
+const row_isolate = @import("row_isolate.zig");
 const upstreams = @import("upstreams.zig");
 
 const checks_http1 = @import("checks_http1.zig");
@@ -56,6 +67,10 @@ const UPSTREAM = struct {
 
     const COUNT: usize = 11;
 };
+
+comptime {
+    std.debug.assert(UPSTREAM.COUNT <= row_isolate.MAX_UPSTREAM_PATHS);
+}
 
 /// Edge ports, one per site config under examples/proxies/sites.
 const EDGE = struct {
@@ -233,27 +248,31 @@ const checks = [_]Check{
     },
 };
 
-/// Flag that narrows the run to one row.
-const ONLY_FLAG: []const u8 = "--only";
-
 // --------------------------------------------------------- //
 
-/// Everything argv carried: the optional label filter, the gateway binary, and
-/// the upstream binary paths in table order.
+/// Everything argv carried: this binary, the optional label filter, the gateway
+/// binary, and the upstream binary paths in table order.
 const Args = struct {
+    self_exe: []const u8 = "",
     only: ?[]const u8 = null,
     zixer_path: []const u8 = "",
     paths: [UPSTREAM.COUNT][]const u8 = @splat(""),
     path_count: usize = 0,
 };
 
-/// Split argv into the filter, the gateway path, and the upstream paths.
+/// Split argv into this binary, the filter, the gateway path, and the upstream
+/// paths.
+///
+/// Note:
+/// - argv[0] is kept rather than skipped: it is how a row respawns itself as a
+///   child. zig build invokes the runner by its emitted path, which is what
+///   std.process.spawn needs.
 fn parseArgs(iter: *std.process.Args.Iterator) !Args {
     var args = Args{};
-    _ = iter.next();
+    args.self_exe = iter.next() orelse return error.MissingRunnerPath;
 
     while (iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, ONLY_FLAG)) {
+        if (std.mem.eql(u8, arg, row_isolate.ONLY_FLAG)) {
             args.only = iter.next() orelse return error.MissingOnlyValue;
             continue;
         }
@@ -275,16 +294,138 @@ fn parseArgs(iter: *std.process.Args.Iterator) !Args {
     return args;
 }
 
-/// Run one row: upstreams up, site bound, client driven, everything torn down
-/// again whatever the outcome.
+/// The row one label names, or null when no row carries it.
+fn findCheck(label: []const u8) ?Check {
+    for (checks) |check| {
+        if (std.mem.eql(u8, label, check.label)) return check;
+    }
+
+    return null;
+}
+
+/// Run one row against a live daemon: upstreams up, site bound, client driven,
+/// everything torn down again whatever the outcome.
 fn runCheck(io: std.Io, check: Check, live: *const gateway.Gateway, paths: []const []const u8) !void {
-    var group = try upstreams.start(io, paths, check.needs);
+    var group = try upstreams.start(io, live.root, paths, check.needs);
     defer group.kill(io);
 
     try live.startSite(io, check.site);
     defer live.stopSite(io, check.site) catch {};
 
     try check.run(io);
+}
+
+// --------------------------------------------------------- //
+// child mode: one row, one report line, one exit code
+
+/// Build this row's own root and daemon, run it, and print its one line.
+///
+/// Note:
+/// - The root is left behind on purpose. The parent reads the daemon and
+///   upstream stderr files out of it before removing it, and a row run by hand
+///   leaves them there to read.
+///
+/// Return:
+/// - row_isolate.Exit.PASSED or row_isolate.Exit.FAILED, the child's exit code
+fn runOwnedRow(io: std.Io, args: Args, check: Check) u8 {
+    var root_buf: [root_setup.MAX_ROOT]u8 = undefined;
+    const root = root_setup.rootPath(check.label, &root_buf) catch {
+        std.debug.print("FAIL zixer-{s} ({s}): label too long for a root path\n", .{ check.label, check.site });
+        return row_isolate.Exit.FAILED;
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    root_setup.create(io, arena.allocator(), root) catch |err| {
+        std.debug.print("FAIL zixer-{s} ({s}): root {s}\n", .{ check.label, check.site, @errorName(err) });
+        return row_isolate.Exit.FAILED;
+    };
+
+    var live = gateway.start(io, args.zixer_path, root) catch |err| {
+        std.debug.print("FAIL zixer-{s} ({s}): daemon {s}\n", .{ check.label, check.site, @errorName(err) });
+        return row_isolate.Exit.FAILED;
+    };
+    defer live.shutdown(io);
+
+    runCheck(io, check, &live, args.paths[0..args.path_count]) catch |err| {
+        std.debug.print("FAIL zixer-{s} ({s}): {s}\n", .{ check.label, check.site, @errorName(err) });
+        return row_isolate.Exit.FAILED;
+    };
+
+    std.debug.print("PASS zixer-{s} ({s})\n", .{ check.label, check.site });
+
+    return row_isolate.Exit.PASSED;
+}
+
+/// Run the row one label names and exit with its verdict.
+fn runOnly(io: std.Io, args: Args, label: []const u8) noreturn {
+    const check = findCheck(label) orelse {
+        std.debug.print("zixer runner: no check matched --only {s}\n", .{label});
+        std.process.exit(2);
+    };
+
+    std.process.exit(runOwnedRow(io, args, check));
+}
+
+// --------------------------------------------------------- //
+// parent mode: the whole table, one bounded child per row
+
+/// Print whatever a failed row's children wrote to stderr. A child the parent
+/// killed printed no report of its own, so this is the only account of it.
+fn reportChildLogs(io: std.Io, check: Check, root: []const u8) void {
+    var tail_buf: [child_stderr.TAIL_MAX]u8 = undefined;
+
+    const daemon_tail = child_stderr.tail(io, root, child_stderr.DAEMON_NAME, &tail_buf);
+    if (daemon_tail.len != 0) std.debug.print("  daemon stderr:\n{s}\n", .{daemon_tail});
+
+    for (check.needs, 0..) |_, slot| {
+        var name_buf: [child_stderr.MAX_NAME]u8 = undefined;
+        const name = child_stderr.upstreamName(slot, &name_buf) catch continue;
+
+        const upstream_tail = child_stderr.tail(io, root, name, &tail_buf);
+        if (upstream_tail.len == 0) continue;
+
+        std.debug.print("  {s}:\n{s}\n", .{ name, upstream_tail });
+    }
+}
+
+/// Run one row as a bounded child, forward its report, and clean up its root.
+fn runRowIsolated(io: std.Io, args: Args, check: Check, timeout_ms: u32) bool {
+    var report_buf: [row_isolate.REPORT_MAX]u8 = undefined;
+    const result = row_isolate.runRow(
+        io,
+        args.self_exe,
+        check.label,
+        args.zixer_path,
+        args.paths[0..args.path_count],
+        timeout_ms,
+        &report_buf,
+    );
+
+    row_isolate.forward(io, result.report);
+
+    var root_buf: [root_setup.MAX_ROOT]u8 = undefined;
+    const root = root_setup.rootPath(check.label, &root_buf) catch return result.verdict == .PASSED;
+
+    if (result.verdict != .PASSED) reportChildLogs(io, check, root);
+
+    root_setup.destroy(io, root);
+
+    return result.verdict == .PASSED;
+}
+
+/// Run the whole table, one bounded child per row, and report the tally.
+fn runTable(io: std.Io, args: Args, timeout_ms: u32) u8 {
+    var failed: usize = 0;
+
+    for (checks) |check| {
+        if (!runRowIsolated(io, args, check, timeout_ms)) failed += 1;
+    }
+
+    std.debug.print("zixer runner: {d} of {d} demos passed\n", .{ checks.len - failed, checks.len });
+
+    return if (failed == 0) 0 else 1;
 }
 
 // --------------------------------------------------------- //
@@ -300,39 +441,11 @@ pub fn main(process: std.process.Init) !void {
         std.process.exit(2);
     };
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-    defer arena.deinit();
+    if (args.only) |label| runOnly(io, args, label);
 
-    try root_setup.create(io, arena.allocator());
-    defer root_setup.destroy(io);
+    // The per-row kill bound is the native default unless the environment
+    // widens it, which the qemu CI legs do.
+    const timeout_ms = row_isolate.rowTimeoutMs(process.environ_map.get(row_isolate.ROW_TIMEOUT_ENV));
 
-    var live = try gateway.start(io, args.zixer_path);
-    defer live.shutdown(io);
-
-    var ran: usize = 0;
-    var failed: usize = 0;
-
-    for (checks) |check| {
-        if (args.only) |only| {
-            if (!std.mem.eql(u8, only, check.label)) continue;
-        }
-
-        ran += 1;
-        runCheck(io, check, &live, args.paths[0..args.path_count]) catch |err| {
-            failed += 1;
-            std.debug.print("FAIL zixer-{s} ({s}): {s}\n", .{ check.label, check.site, @errorName(err) });
-            continue;
-        };
-
-        std.debug.print("PASS zixer-{s} ({s})\n", .{ check.label, check.site });
-    }
-
-    if (ran == 0) {
-        std.debug.print("zixer runner: no check matched --only\n", .{});
-        std.process.exit(2);
-    }
-
-    std.debug.print("zixer runner: {d} of {d} demos passed\n", .{ ran - failed, ran });
-
-    if (failed != 0) std.process.exit(1);
+    std.process.exit(runTable(io, args, timeout_ms));
 }
