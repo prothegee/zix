@@ -329,8 +329,8 @@ test "zix udp: raw udp epoll and uring run shapes compile (monomorphize without 
     // whole call chain at comptime: runUring -> workerLoopUring, runEpoll -> workerLoopEpoll, so a compile
     // error in either generic body surfaces here rather than only when an example instantiates it.
     const noop = struct {
-        fn h(_: []const u8, _: *const std.Io.net.IpAddress, _: *core.Sink) void {}
-    }.h;
+        fn handle(_: []const u8, _: *const std.Io.net.IpAddress, _: *core.Sink) void {}
+    }.handle;
 
     if (false) {
         runUring(noop, undefined) catch {};

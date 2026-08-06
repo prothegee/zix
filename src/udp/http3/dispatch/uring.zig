@@ -587,8 +587,8 @@ test "zix http3: http3 run shapes compile (monomorphize without running)" {
     // whole call chain at comptime, so a compile error in any generic body (including the parameterized
     // workerLoop that runSingle drives) surfaces here rather than only when an example runs it.
     const noop = struct {
-        fn h(_: *const core.Request, _: *core.Response) void {}
-    }.h;
+        fn handle(_: *const core.Request, _: *core.Response) void {}
+    }.handle;
 
     if (false) {
         runUring(noop, undefined) catch {};
