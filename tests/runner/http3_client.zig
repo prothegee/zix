@@ -21,7 +21,7 @@ const keyschedule = h3.keyschedule;
 const qpack = h3.qpack;
 const packet = h3.packet;
 const varint = h3.varint;
-const ks = h3.tls_key_schedule;
+const tls_key_schedule = h3.tls_key_schedule;
 const X25519 = std.crypto.dh.X25519;
 
 const BIND_PORT: u16 = 9195;
@@ -36,12 +36,12 @@ const Writer = struct {
     buf: []u8,
     pos: usize = 0,
 
-    fn u8v(self: *Writer, value: u8) void {
+    fn writeU8(self: *Writer, value: u8) void {
         self.buf[self.pos] = value;
         self.pos += 1;
     }
 
-    fn u16v(self: *Writer, value: u16) void {
+    fn writeU16(self: *Writer, value: u16) void {
         std.mem.writeInt(u16, self.buf[self.pos..][0..2], value, .big);
         self.pos += 2;
     }
@@ -53,85 +53,121 @@ const Writer = struct {
 
     /// Reserve a u16 length slot, returning its offset for a later patch.
     fn placeU16(self: *Writer) usize {
-        const at = self.pos;
+        const slot = self.pos;
         self.pos += 2;
 
-        return at;
+        return slot;
     }
 
     /// Back-patch a u16 length slot with the bytes written since it was reserved.
-    fn patchU16(self: *Writer, at: usize) void {
-        std.mem.writeInt(u16, self.buf[at..][0..2], @intCast(self.pos - at - 2), .big);
+    fn patchU16(self: *Writer, slot: usize) void {
+        std.mem.writeInt(u16, self.buf[slot..][0..2], @intCast(self.pos - slot - 2), .big);
     }
 
     /// Reserve a u24 length slot (the TLS handshake message length), returning its offset.
     fn placeU24(self: *Writer) usize {
-        const at = self.pos;
+        const slot = self.pos;
         self.pos += 3;
 
-        return at;
+        return slot;
     }
 
     /// Back-patch a u24 length slot with the bytes written since it was reserved.
-    fn patchU24(self: *Writer, at: usize) void {
-        const len: u24 = @intCast(self.pos - at - 3);
-        self.buf[at] = @intCast(len >> 16);
-        self.buf[at + 1] = @intCast((len >> 8) & 0xff);
-        self.buf[at + 2] = @intCast(len & 0xff);
+    fn patchU24(self: *Writer, slot: usize) void {
+        const len: u24 = @intCast(self.pos - slot - 3);
+        self.buf[slot] = @intCast(len >> 16);
+        self.buf[slot + 1] = @intCast((len >> 8) & 0xff);
+        self.buf[slot + 2] = @intCast(len & 0xff);
     }
 };
 
 /// Serialize a minimal TLS 1.3 ClientHello (RFC 8446 4.1.2) offering AES_128_GCM_SHA256, X25519, and
-/// ECDSA-P256 signatures, with our X25519 key share. No quic_transport_parameters extension: this
-/// server ignores it.
-fn buildClientHello(buf: []u8, client_random: [32]u8, x25519_pub: [32]u8) []const u8 {
-    var w = Writer{ .buf = buf };
+/// ECDSA-P256 signatures, with our X25519 key share, ALPN h3, and the quic_transport_parameters
+/// extension RFC 9001 3 requires of every QUIC endpoint. The zix h3 engine serves a client that
+/// omits them, a server that honours the client's flow-control limits cannot: with no limits
+/// announced, it has no credit to send a response with.
+fn buildClientHello(buf: []u8, client_random: [32]u8, x25519_pub: [32]u8, scid: []const u8) []const u8 {
+    var writer = Writer{ .buf = buf };
 
-    w.u8v(0x01); // CLIENT_HELLO
-    const body = w.placeU24(); // handshake message length
+    writer.writeU8(0x01); // CLIENT_HELLO
+    const body = writer.placeU24(); // handshake message length
 
-    w.u16v(0x0303); // legacy_version TLS 1.2
-    w.bytes(&client_random);
-    w.u8v(0x00); // empty session_id
+    writer.writeU16(0x0303); // legacy_version TLS 1.2
+    writer.bytes(&client_random);
+    writer.writeU8(0x00); // empty session_id
 
-    w.u16v(0x0002); // cipher_suites length
-    w.u16v(0x1301); // TLS_AES_128_GCM_SHA256
+    writer.writeU16(0x0002); // cipher_suites length
+    writer.writeU16(0x1301); // TLS_AES_128_GCM_SHA256
 
-    w.u8v(0x01); // compression methods length
-    w.u8v(0x00); // null compression
+    writer.writeU8(0x01); // compression methods length
+    writer.writeU8(0x00); // null compression
 
-    const exts = w.placeU16();
+    const exts = writer.placeU16();
 
-    w.u16v(0x002b); // supported_versions
-    const sv = w.placeU16();
-    w.u8v(0x02); // list length
-    w.u16v(0x0304); // TLS 1.3
-    w.patchU16(sv);
+    writer.writeU16(0x002b); // supported_versions
+    const versions_ext = writer.placeU16();
+    writer.writeU8(0x02); // list length
+    writer.writeU16(0x0304); // TLS 1.3
+    writer.patchU16(versions_ext);
 
-    w.u16v(0x000a); // supported_groups
-    const sg = w.placeU16();
-    w.u16v(0x0002); // list length
-    w.u16v(0x001d); // X25519
-    w.patchU16(sg);
+    writer.writeU16(0x000a); // supported_groups
+    const groups_ext = writer.placeU16();
+    writer.writeU16(0x0002); // list length
+    writer.writeU16(0x001d); // X25519
+    writer.patchU16(groups_ext);
 
-    w.u16v(0x000d); // signature_algorithms
-    const sa = w.placeU16();
-    w.u16v(0x0002); // list length
-    w.u16v(0x0403); // ECDSA_SECP256R1_SHA256
-    w.patchU16(sa);
+    writer.writeU16(0x000d); // signature_algorithms
+    const sigalgs_ext = writer.placeU16();
+    writer.writeU16(0x0002); // list length
+    writer.writeU16(0x0403); // ECDSA_SECP256R1_SHA256
+    writer.patchU16(sigalgs_ext);
 
-    w.u16v(0x0033); // key_share
-    const kshare = w.placeU16();
-    w.u16v(0x0024); // client_shares length (2 + 2 + 32)
-    w.u16v(0x001d); // X25519
-    w.u16v(0x0020); // key_exchange length 32
-    w.bytes(&x25519_pub);
-    w.patchU16(kshare);
+    writer.writeU16(0x0033); // key_share
+    const kshare = writer.placeU16();
+    writer.writeU16(0x0024); // client_shares length (2 + 2 + 32)
+    writer.writeU16(0x001d); // X25519
+    writer.writeU16(0x0020); // key_exchange length 32
+    writer.bytes(&x25519_pub);
+    writer.patchU16(kshare);
 
-    w.patchU16(exts);
-    w.patchU24(body);
+    writer.writeU16(0x0010); // application_layer_protocol_negotiation
+    const alpn = writer.placeU16();
+    writer.writeU16(0x0003); // protocol list length
+    writer.writeU8(0x02); // protocol name length
+    writer.bytes("h3");
+    writer.patchU16(alpn);
 
-    return w.buf[0..w.pos];
+    writer.writeU16(0x0039); // quic_transport_parameters
+    const params = writer.placeU16();
+    var param_buf: [128]u8 = undefined;
+    var param_len: usize = 0;
+    param_len += varint.write(param_buf[param_len..], 0x0f); // initial_source_connection_id
+    param_len += varint.write(param_buf[param_len..], scid.len);
+    @memcpy(param_buf[param_len..][0..scid.len], scid);
+    param_len += scid.len;
+    putParam(&param_buf, &param_len, 0x04, 1 << 20); // initial_max_data
+    putParam(&param_buf, &param_len, 0x05, 1 << 18); // initial_max_stream_data_bidi_local
+    putParam(&param_buf, &param_len, 0x07, 1 << 18); // initial_max_stream_data_uni
+    putParam(&param_buf, &param_len, 0x08, 8); // initial_max_streams_bidi
+    putParam(&param_buf, &param_len, 0x09, 8); // initial_max_streams_uni
+    writer.bytes(param_buf[0..param_len]);
+    writer.patchU16(params);
+
+    writer.patchU16(exts);
+    writer.patchU24(body);
+
+    return writer.buf[0..writer.pos];
+}
+
+/// Append one varint-coded transport parameter (id, then its varint value).
+fn putParam(buf: []u8, len: *usize, id: u64, value: u64) void {
+    len.* += varint.write(buf[len.*..], id);
+
+    var value_buf: [8]u8 = undefined;
+    const value_len = varint.write(&value_buf, value);
+    len.* += varint.write(buf[len.*..], value_len);
+    @memcpy(buf[len.*..][0..value_len], value_buf[0..value_len]);
+    len.* += value_len;
 }
 
 /// Parse a ServerHello's X25519 key_share value (RFC 8446 4.1.3). The layout is fixed by
@@ -199,36 +235,50 @@ fn firstCryptoData(payload: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Walk a decrypted 1-RTT payload, find the STREAM frame on the request stream (client bidi, id&3==0),
-/// and return its HTTP/3 DATA-frame body. Skips the ACK / HANDSHAKE_DONE / control-stream frames the
-/// server leads with.
-fn responseBody(payload: []const u8, out: []u8) ?[]const u8 {
+/// Walk a decrypted 1-RTT payload and copy every STREAM frame belonging to `stream_id` into
+/// `assembly` at its own offset, growing the contiguous prefix in `covered`. The ACK /
+/// HANDSHAKE_DONE / control-stream frames the server leads with are skipped.
+///
+/// Note:
+/// - Assembling before parsing is what makes this a client rather than a guess: a server is free
+///   to split one HTTP/3 frame across packets, so a chunk taken on its own may start in the middle
+///   of a frame header. Chunks that would leave a gap are ignored, the server retransmits them.
+fn collectStream(payload: []const u8, stream_id: u64, assembly: []u8, covered: *usize) void {
     var pos: usize = 0;
     while (pos < payload.len) {
-        const ftype = varint.read(payload[pos..]) catch return null;
+        const ftype = varint.read(payload[pos..]) catch return;
         pos += ftype.len;
 
         switch (ftype.value) {
             0x00, 0x01, 0x1e => {}, // PADDING, PING, HANDSHAKE_DONE
             0x02, 0x03 => { // ACK
-                pos = skipAck(payload, pos, ftype.value == 0x03) orelse return null;
+                pos = skipAck(payload, pos, ftype.value == 0x03) orelse return;
             },
             0x08...0x0f => {
-                const parsed = parseStream(payload[pos - ftype.len ..]) orelse return null;
-                if (parsed.id & 0x03 == 0) {
-                    if (httpDataBody(parsed.data, out)) |body| return body;
-                }
+                const parsed = parseStream(payload[pos - ftype.len ..]) orelse return;
+                if (parsed.id == stream_id) absorb(parsed, assembly, covered);
 
                 pos = (pos - ftype.len) + parsed.consumed;
             },
-            else => return null,
+            else => return,
         }
     }
-
-    return null;
 }
 
-const ParsedStream = struct { id: u64, data: []const u8, consumed: usize };
+/// Copy one stream chunk into the assembly buffer at its offset. A chunk that starts past the
+/// contiguous prefix is dropped: it would leave a hole this simple assembler cannot track.
+fn absorb(parsed: ParsedStream, assembly: []u8, covered: *usize) void {
+    const start: usize = @intCast(parsed.offset);
+    if (start > covered.*) return;
+    if (start + parsed.data.len > assembly.len) return;
+
+    @memcpy(assembly[start..][0..parsed.data.len], parsed.data);
+
+    const end = start + parsed.data.len;
+    if (end > covered.*) covered.* = end;
+}
+
+const ParsedStream = struct { id: u64, offset: u64, data: []const u8, consumed: usize };
 
 /// Parse one STREAM frame (RFC 9000 19.8) at the start of `buf`.
 fn parseStream(buf: []const u8) ?ParsedStream {
@@ -238,8 +288,10 @@ fn parseStream(buf: []const u8) ?ParsedStream {
     const id = varint.read(buf[pos..]) catch return null;
     pos += id.len;
 
+    var offset_value: u64 = 0;
     if (frame_type & 0x04 != 0) {
         const offset = varint.read(buf[pos..]) catch return null;
+        offset_value = offset.value;
         pos += offset.len;
     }
 
@@ -250,7 +302,7 @@ fn parseStream(buf: []const u8) ?ParsedStream {
     } else buf.len - pos;
     if (pos + length > buf.len) return null;
 
-    return .{ .id = id.value, .data = buf[pos .. pos + length], .consumed = pos + length };
+    return .{ .id = id.value, .offset = offset_value, .data = buf[pos .. pos + length], .consumed = pos + length };
 }
 
 /// Walk the HTTP/3 frames of a request-stream payload and copy the first DATA frame's body into out.
@@ -284,14 +336,14 @@ fn skipAck(buf: []const u8, start: usize, ecn: bool) ?usize {
     var i: usize = 0;
     const fixed: usize = 4; // Largest, Delay, Range Count, First Range
     while (i < fixed) : (i += 1) {
-        const v = varint.read(buf[pos..]) catch return null;
-        pos += v.len;
+        const field = varint.read(buf[pos..]) catch return null;
+        pos += field.len;
     }
     if (ecn) {
-        var e: usize = 0;
-        while (e < 3) : (e += 1) {
-            const v = varint.read(buf[pos..]) catch return null;
-            pos += v.len;
+        var ecn_idx: usize = 0;
+        while (ecn_idx < 3) : (ecn_idx += 1) {
+            const field = varint.read(buf[pos..]) catch return null;
+            pos += field.len;
         }
     }
 
@@ -320,25 +372,25 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
     const initial_client = crypto.AesKeys.fromSecret(secrets.client);
     const initial_server = crypto.AesKeys.fromSecret(secrets.server);
 
-    var ch_buf: [512]u8 = undefined;
-    const client_hello = buildClientHello(&ch_buf, client_random, x25519_pub);
+    var hello_buf: [512]u8 = undefined;
+    const client_hello = buildClientHello(&hello_buf, client_random, x25519_pub, scid);
 
-    var transcript = ks.Transcript.init();
+    var transcript = tls_key_schedule.Transcript.init();
     transcript.update(client_hello);
 
     // Initial payload: a CRYPTO frame carrying the ClientHello, padded over the 1200-byte floor.
     var init_payload: [1500]u8 = undefined;
-    var pp: usize = 0;
-    init_payload[pp] = 0x06; // CRYPTO
-    pp += 1;
-    pp += varint.write(init_payload[pp..], 0); // offset
-    pp += varint.write(init_payload[pp..], client_hello.len);
-    @memcpy(init_payload[pp..][0..client_hello.len], client_hello);
-    pp += client_hello.len;
-    while (pp < INITIAL_MIN) : (pp += 1) init_payload[pp] = 0x00; // PADDING
+    var payload_len: usize = 0;
+    init_payload[payload_len] = 0x06; // CRYPTO
+    payload_len += 1;
+    payload_len += varint.write(init_payload[payload_len..], 0); // offset
+    payload_len += varint.write(init_payload[payload_len..], client_hello.len);
+    @memcpy(init_payload[payload_len..][0..client_hello.len], client_hello);
+    payload_len += client_hello.len;
+    while (payload_len < INITIAL_MIN) : (payload_len += 1) init_payload[payload_len] = 0x00; // PADDING
 
     var initial_pkt: [1600]u8 = undefined;
-    const initial = try protection.sealInitial(&initial_pkt, initial_client, dcid, scid, 0, init_payload[0..pp]);
+    const initial = try protection.sealInitial(&initial_pkt, initial_client, dcid, scid, 0, init_payload[0..payload_len]);
 
     // First send may hit an unbound server socket. A failure here is not fatal, the retransmit loop
     // below resends the Initial until the server answers or the budget is spent.
@@ -347,14 +399,14 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
     // Receive ServerHello (Initial) then the Handshake flight, deriving keys as each arrives.
     var hs_keys: keyschedule.HandshakeKeys = undefined;
     var result = Connected{ .app_keys = undefined, .server_scid = undefined, .server_scid_len = 0 };
-    var have_sh = false;
+    var have_server_hello = false;
     var have_app = false;
 
     var init_pn: u32 = 0;
     var sends: usize = 1;
     while (!have_app) {
-        var rbuf: [2048]u8 = undefined;
-        const msg = receiveWithin(io, sock, &rbuf, HANDSHAKE_TIMEOUT_MS) orelse {
+        var recv_buf: [2048]u8 = undefined;
+        const msg = receiveWithin(io, sock, &recv_buf, HANDSHAKE_TIMEOUT_MS) orelse {
             // No response yet. The server's UDP socket may not be bound (there is no accept to poll),
             // or a packet was lost under load. Retransmit the Initial with a fresh packet number, the
             // QUIC reliability the handshake depends on, until the budget is spent.
@@ -366,8 +418,8 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
             // server bound its UDP socket). That is transient, keep retransmitting until the budget
             // is spent rather than giving up on the first refusal.
             var rt_pkt: [1600]u8 = undefined;
-            const rt = protection.sealInitial(&rt_pkt, initial_client, dcid, scid, init_pn, init_payload[0..pp]) catch continue;
-            sock.send(io, server, rt) catch continue;
+            const retransmit = protection.sealInitial(&rt_pkt, initial_client, dcid, scid, init_pn, init_payload[0..payload_len]) catch continue;
+            sock.send(io, server, retransmit) catch continue;
             continue;
         };
         const data = msg.data;
@@ -375,22 +427,22 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
 
         const hdr = packet.parseLongHeader(data) catch continue;
 
-        if (hdr.packet_type == 0 and !have_sh) {
-            var obuf: [2048]u8 = undefined;
-            const opened = protection.openInitial(data, initial_server, &obuf) catch continue;
-            const sh = firstCryptoData(opened.payload) orelse continue;
+        if (hdr.packet_type == 0 and !have_server_hello) {
+            var open_buf: [2048]u8 = undefined;
+            const opened = protection.openInitial(data, initial_server, &open_buf) catch continue;
+            const server_hello = firstCryptoData(opened.payload) orelse continue;
 
-            transcript.update(sh);
-            const server_pub = serverKeyShare(sh) orelse return error.NoServerKeyShare;
+            transcript.update(server_hello);
+            const server_pub = serverKeyShare(server_hello) orelse return error.NoServerKeyShare;
             const shared = X25519.scalarmult(ephemeral, server_pub) catch return error.X25519;
             hs_keys = keyschedule.handshakeKeys(shared, transcript.current());
 
             @memcpy(result.server_scid[0..hdr.scid.len], hdr.scid);
             result.server_scid_len = hdr.scid.len;
-            have_sh = true;
-        } else if (hdr.packet_type == 2 and have_sh and !have_app) {
-            var obuf: [2048]u8 = undefined;
-            const opened = protection.openHandshake(data, hs_keys.server, &obuf) catch continue;
+            have_server_hello = true;
+        } else if (hdr.packet_type == 2 and have_server_hello and !have_app) {
+            var open_buf: [2048]u8 = undefined;
+            const opened = protection.openHandshake(data, hs_keys.server, &open_buf) catch continue;
             const flight = firstCryptoData(opened.payload) orelse continue;
 
             transcript.update(flight);
@@ -404,56 +456,74 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
     return result;
 }
 
-/// Seal a 1-RTT request packet: an HTTP/3 HEADERS frame (QPACK :method GET + :path literal) on
-/// `stream_id`, sealed under the client 1-RTT keys with `client_pn`. The returned slice points into
-/// `pkt_buf`, which the caller owns.
+/// Authority every request carries. It matches the fixture certificate, so a server that refuses a
+/// name it holds no certificate for still answers this client.
+const AUTHORITY: []const u8 = "localhost";
+
+/// Seal a 1-RTT request packet: an HTTP/3 HEADERS frame on `stream_id`, sealed under the client
+/// 1-RTT keys with `client_pn`. The returned slice points into `pkt_buf`, which the caller owns.
+///
+/// Note:
+/// - All four pseudo-headers RFC 9114 4.3.1 requires are sent. A server free to shape its own
+///   handler surface can serve less, a gateway rebuilding an http1 request cannot: without
+///   :scheme and :authority there is no absolute target and no Host to send upstream.
 fn buildRequest(app_keys: keyschedule.AppKeys, server_scid: []const u8, stream_id: u64, client_pn: u32, path: []const u8, pkt_buf: []u8) ![]const u8 {
     var fields: [256]u8 = undefined;
-    var fl: usize = 0;
+    var fields_len: usize = 0;
     fields[0] = 0x00; // Required Insert Count 0
     fields[1] = 0x00; // Base 0
-    fl = 2;
-    fl += qpack.encodeStaticIndexedFieldLine(fields[fl..], 17); // :method GET
-    fl += qpack.encodePrefixedInt(fields[fl..], 4, 0x50, 1); // :path literal, static name index 1
-    fl += qpack.encodePrefixedInt(fields[fl..], 7, 0x00, path.len); // value length, non-Huffman
-    @memcpy(fields[fl..][0..path.len], path);
-    fl += path.len;
+    fields_len = 2;
+    fields_len += qpack.encodeStaticIndexedFieldLine(fields[fields_len..], 17); // :method GET
+    fields_len += qpack.encodeStaticIndexedFieldLine(fields[fields_len..], 23); // :scheme https
+    fields_len += qpack.encodePrefixedInt(fields[fields_len..], 4, 0x50, 0); // :authority literal, static name index 0
+    fields_len += qpack.encodePrefixedInt(fields[fields_len..], 7, 0x00, AUTHORITY.len); // value length, non-Huffman
+    @memcpy(fields[fields_len..][0..AUTHORITY.len], AUTHORITY);
+    fields_len += AUTHORITY.len;
+    fields_len += qpack.encodePrefixedInt(fields[fields_len..], 4, 0x50, 1); // :path literal, static name index 1
+    fields_len += qpack.encodePrefixedInt(fields[fields_len..], 7, 0x00, path.len); // value length, non-Huffman
+    @memcpy(fields[fields_len..][0..path.len], path);
+    fields_len += path.len;
 
     var content: [512]u8 = undefined;
-    var cl: usize = 0;
+    var content_len: usize = 0;
     content[0] = 0x01; // HEADERS frame
-    cl = 1;
-    cl += varint.write(content[cl..], fl);
-    @memcpy(content[cl..][0..fl], fields[0..fl]);
-    cl += fl;
+    content_len = 1;
+    content_len += varint.write(content[content_len..], fields_len);
+    @memcpy(content[content_len..][0..fields_len], fields[0..fields_len]);
+    content_len += fields_len;
 
     var req_payload: [1024]u8 = undefined;
-    var rp: usize = 0;
+    var payload_pos: usize = 0;
     req_payload[0] = 0x0b; // STREAM | LEN | FIN
-    rp = 1;
-    rp += varint.write(req_payload[rp..], stream_id);
-    rp += varint.write(req_payload[rp..], cl); // data length
-    @memcpy(req_payload[rp..][0..cl], content[0..cl]);
-    rp += cl;
+    payload_pos = 1;
+    payload_pos += varint.write(req_payload[payload_pos..], stream_id);
+    payload_pos += varint.write(req_payload[payload_pos..], content_len); // data length
+    @memcpy(req_payload[payload_pos..][0..content_len], content[0..content_len]);
+    payload_pos += content_len;
 
-    return try protection.sealShort(pkt_buf, app_keys.client, server_scid, client_pn, req_payload[0..rp]);
+    return try protection.sealShort(pkt_buf, app_keys.client, server_scid, client_pn, req_payload[0..payload_pos]);
 }
 
-/// Receive and decrypt 1-RTT packets until one carries a request-stream body, returning it. Bare ACK /
-/// control packets the server may interleave are skipped.
-fn recvBody(io: std.Io, sock: anytype, app_keys: keyschedule.AppKeys, body_out: []u8) ![]const u8 {
+/// Receive and decrypt 1-RTT packets, assembling `stream_id` until its HTTP/3 frames carry a
+/// complete DATA body. Bare ACK / control packets the server interleaves are skipped.
+fn recvBody(io: std.Io, sock: anytype, app_keys: keyschedule.AppKeys, stream_id: u64, body_out: []u8) ![]const u8 {
+    var assembly: [ASSEMBLY_BYTES]u8 = undefined;
+    var covered: usize = 0;
+
     var attempts: usize = 0;
     while (attempts < 16) : (attempts += 1) {
-        var rbuf: [2048]u8 = undefined;
-        const msg = receiveWithin(io, sock, &rbuf, RECV_TIMEOUT_MS) orelse break;
+        var recv_buf: [2048]u8 = undefined;
+        const msg = receiveWithin(io, sock, &recv_buf, RECV_TIMEOUT_MS) orelse break;
         const data = msg.data;
         if (data.len == 0 or data[0] & 0x80 != 0) continue;
 
-        var obuf: [2048]u8 = undefined;
+        var open_buf: [2048]u8 = undefined;
         // This test client does a single short round trip, so the server's packet numbers stay well
         // under the truncation boundary: no prior-largest reconstruction is needed (null).
-        const opened = protection.openShort(data, app_keys.server, CID_LEN, null, &obuf) catch continue;
-        if (responseBody(opened.payload, body_out)) |body| return body;
+        const opened = protection.openShort(data, app_keys.server, CID_LEN, null, &open_buf) catch continue;
+        collectStream(opened.payload, stream_id, &assembly, &covered);
+
+        if (httpDataBody(assembly[0..covered], body_out)) |body| return body;
     }
 
     return error.NoResponse;
@@ -490,7 +560,7 @@ pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const 
     const request_packet = try buildRequest(conn.app_keys, conn.scid(), 0, 0, path, &req_pkt);
     try sock.send(io, &server, request_packet);
 
-    return recvBody(io, sock, conn.app_keys, body_out);
+    return recvBody(io, sock, conn.app_keys, 0, body_out);
 }
 
 /// Do TWO HTTP/3 GET round trips on ONE connection, on client bidi streams 0 then 4, returning both
@@ -523,11 +593,14 @@ pub fn fetchTwo(io: std.Io, server_ip: []const u8, server_port: u16, path0: []co
     const req1 = try buildRequest(conn.app_keys, conn.scid(), 4, 1, path1, &req1_pkt);
     try sock.send(io, &server, req1);
 
-    const body0 = try recvBody(io, sock, conn.app_keys, body0_out);
-    const body1 = try recvBody(io, sock, conn.app_keys, body1_out);
+    const body0 = try recvBody(io, sock, conn.app_keys, 0, body0_out);
+    const body1 = try recvBody(io, sock, conn.app_keys, 4, body1_out);
 
     return .{ body0, body1 };
 }
+
+/// Largest response one stream may assemble before the client gives up on it.
+const ASSEMBLY_BYTES: usize = 64 * 1024;
 
 /// Per-response wait for a 1-RTT packet.
 const RECV_TIMEOUT_MS: u32 = 3000;
