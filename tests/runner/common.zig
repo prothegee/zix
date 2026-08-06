@@ -267,7 +267,13 @@ pub fn waitForUdsSocket(io: std.Io, path: []const u8, timeout_ms: u64) !void {
 }
 
 /// Spawn an executable as a background child process.
-/// stdout, stdin, and stderr are suppressed.
+/// stdin and stdout are discarded. stderr is piped only where something reads it.
+///
+/// Note:
+/// - captureFallbackNote is the only reader, and it scrapes the io_uring fallback line, which no
+///   kernel but Linux can emit. Everywhere else the pipe would be a buffer nobody drains, and a
+///   server that fills it blocks in write with nothing to unblock it. Discarding is what keeps a
+///   chatty server off that cliff.
 ///
 /// Param:
 /// io - std.Io
@@ -281,7 +287,7 @@ pub fn spawnServer(io: std.Io, server_path: []const u8) !std.process.Child {
         .argv = &.{server_path},
         .stdin = .ignore,
         .stdout = .ignore,
-        .stderr = .pipe,
+        .stderr = if (comptime builtin.os.tag == .linux) .pipe else .ignore,
     });
 }
 
