@@ -76,7 +76,10 @@ jobs:
             # end to end over real sockets inside this VM, so both get 6 minutes where a driver
             # suite gets the 5 the native legs give it.
             timeout 6m zig build examples --summary failures || failures="$failures examples"
-            timeout 6m zig build zixer --summary failures || failures="$failures examples"
+            timeout 6m zig build zixer --summary failures || failures="$failures zixer"
+            timeout 6m zig build zixer-unit-test --summary failures || failures="$failures zixer-unit-test"
+            timeout 6m zig build zixer-examples --summary failures || failures="$failures zixer-examples"
+            timeout 10m zig build zixer-test-runner-all --summary failures || failures="$failures zixer-test-runner-all"
             timeout 6m zig build test-runner-all --summary failures || failures="$failures test-runner-all"
             timeout 5m zig build postgrez-test-unit --summary failures || failures="$failures postgrez-test-unit"
             timeout 5m zig build rediz-test-unit --summary failures || failures="$failures rediz-test-unit"
