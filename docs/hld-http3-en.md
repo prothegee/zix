@@ -41,7 +41,7 @@ flowchart TD
     C --> D["parse client bidi STREAM frames\n(id & 0x03 == 0)"]
     D --> E["QPACK-decode HEADERS\n-> :method, :path"]
     E --> F["Huffman-decode :path if flagged\n-> path_scratch"]
-    F --> G["Router.dispatch(req, res)\nor bare handler"]
+    F --> G["Router.dispatch(req, res, ctx)\nor bare handler"]
     G --> H["handler fills res.status / res.body"]
     H --> I{"body fits one packet?"}
     I -->|yes| J["coalesce ACK + HANDSHAKE_DONE +\nSETTINGS + MAX_STREAMS + MAX_DATA +\nresponse into one sealed 1-RTT packet"]
@@ -88,9 +88,11 @@ Access via `const zix = @import("zix");`
 | Symbol | Type | Description |
 | :- | :- | :- |
 | `zix.Http3.Server` | struct | `Server.init(handler, config)` returns the server, the handler baked in at comptime |
-| `zix.Http3.HandlerFn` | fn type | `fn(req: *const Request, res: *Response) void` |
-| `zix.Http3.Request` | struct | Decoded request: `method`, `path`, `authority`, `body` |
-| `zix.Http3.Response` | struct | Handler-filled response: `status`, `body`, `content_type` |
+| `zix.Http3.HandlerFn` | fn type | `*const fn(*const Request, *Response, *Context) anyerror!void` |
+| `zix.Http3.Request` | struct | Decoded request: `method`, `path`, `authority`, `body`, `accept_encoding` |
+| `zix.Http3.Response` | struct | Handler-filled response: `status`, `body`, `content_type`, `content_encoding`, `sent` |
+| `zix.Http3.Context` | struct | Per-request context: `stream_id` (the raw escape hatch, QUIC has no per-request fd), `io`, a stack-arena allocator, and the optional handler deadline |
+| `zix.Http3.ContentEncoding` | enum | `identity` / `gzip` / `br`, the coding the handler selected for `res.body` |
 | `zix.Http3.ServerConfig` | struct | Server configuration (`Http3ServerConfig`) |
 | `zix.Http3.DispatchModel` | enum(u8) | Shared with the TCP engines (ADR-050) |
 | `zix.Http3.Router(routes)` | generic fn | Comptime route table, mirrors `zix.Http1` / `zix.Http2` |
@@ -218,23 +220,43 @@ Range (RFC 7233) is not served on this engine: a static response is always the w
 
 ```zig
 pub const Request = struct {
-    method:    []const u8,
-    path:      []const u8,
-    authority: []const u8 = "",
-    body:      []const u8 = "",
+    method:          []const u8,
+    path:            []const u8,
+    authority:       []const u8 = "",
+    body:            []const u8 = "",
+    accept_encoding: []const u8 = "",
 };
 
 pub const Response = struct {
-    status:       u16        = 200,
-    body:         []const u8 = "",
-    content_type: []const u8 = "text/plain",
+    status:           u16             = 200,
+    body:             []const u8      = "",
+    content_type:     []const u8      = "text/plain",
+    content_encoding: ContentEncoding = .identity,
+    sent:             bool            = false,
 
     pub fn setStatus(self: *Response, status: u16) void { self.status = status; }
-    pub fn send(self: *Response, body: []const u8) void { self.body = body; }
+    pub fn send(self: *Response, body: []const u8) void { self.body = body; self.sent = true; }
+    pub fn setContentEncoding(self: *Response, enc: ContentEncoding) void { self.content_encoding = enc; }
 };
 ```
 
-The request slices point into the engine's per-connection decode buffer and are valid only for the duration of the handler call. On the current serve path only `method` and `path` are populated from the wire (`authority` and `body` keep their defaults). The response body is copied into the send path after the handler returns, so it may point at handler-owned or static memory (see the example's threadlocal scratch and process-lifetime `big_body`). `content_type` is part of the handler API but the v1 response path only QPACK-encodes `:status` on the wire.
+The request slices point into the engine's per-connection decode buffer and are valid only for the duration of the handler call. On the current serve path `method`, `path`, and `accept_encoding` are populated from the wire (`authority` and `body` keep their defaults). The response body is copied into the send path after the handler returns, so it may point at handler-owned or static memory (see the example's threadlocal scratch and process-lifetime `big_body`). `content_type` is part of the handler API but the v1 response path QPACK-encodes only `:status` and, when the handler set one, `content-encoding`.
+
+### Handler error policy
+
+The handler returns `anyerror!void`. `core.invokeHandler` completes a handler error as one auto-500, but only when the handler wrote nothing yet (`Response.sent`), so an intentionally sent response is never overwritten:
+
+| Condition | What the engine does |
+| :- | :- |
+| error returned and `!res.sent` | Sets `res.status = 500` and clears `res.body`, then the normal send path carries it |
+| error returned after `res.send(...)` | Nothing, the response the handler built is sent as it stands |
+
+The completion here is a struct fill, not a socket write, which is what separates this engine from the other three:
+
+- The auto-500 body is empty. `zix.Http`, `zix.Http1`, and `zix.Http2` write a `text/plain` body reading `Internal Server Error`, this engine sends the status alone.
+- There is no failed-send case. `res.send` only fills the struct and returns `void`, so a handler cannot fail to send the way `try res.send(...)` can on a TCP engine, and every error that reaches `invokeHandler` is decided purely by `res.sent`.
+
+One other `500` comes from the engine itself rather than from a handler error: a body too large for one packet needs a send-stream slot, and when the connection has none free the request is answered `500` with an empty body (packed like a small response). There are 64 slots per connection (`max_send_streams`, fixed, not a config field), so a client that keeps many large responses in flight can see it.
 
 ---
 
