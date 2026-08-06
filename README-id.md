@@ -83,6 +83,7 @@
     - [WebRTC](./README-id.md#webrtc)
     - [Logger](./README-id.md#logger)
 - [Driver](./README-id.md#driver)
+- [zixer](./README-id.md#zixer)
 
 <br>
 
@@ -2318,6 +2319,52 @@ Driver database dan metrics, ditulis murni dengan Zig di atas standard library s
 | [`prometheuz`](docs/driver/prometheuz/README-id.md) | Prometheus: scrape, remote write, query PromQL instant dan range |
 
 Setiap README yang ditaut mencakup instalasi, mulai cepat, kedua gaya init, dan menunjuk ke dokumen hld, lld, dan config miliknya.
+
+<br>
+
+## zixer
+
+`zixer` adalah proxy gateway yang dikirim bersama para engine. Ia program yang kamu jalankan, bukan library yang kamu link: tiap perilaku datang dari file config teks biasa, jadi sebuah service bisa ditaruh di belakangnya tanpa satu baris kode. Satu daemon memegang semua site, dan satu site adalah satu file yang menyebut engine, port, dan ke mana trafiknya pergi.
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+```
+
+```bash
+zig build zixer            # membangun zig-out/bin/zixer-<arch>-<os>
+zixer init                 # membuat kerangka root dir: main.cfg, sites/, logs/
+zixer status               # memvalidasi tiap config, keluar 1 bila ada fault
+zixer start example.cfg    # men-spawn daemon bila belum ada yang berjalan
+zixer restart example.cfg  # membaca ulang satu file site, yang dipanggil deploy hook certbot
+zixer daemon stop          # melepas tiap site lalu keluar
+```
+
+Key `engine` memilih edge, dan tiap engine kecuali `udp` melakukan re-origination pada request alih-alih meneruskannya byte per byte:
+
+| Engine | Sisi client | Leg upstream |
+| :- | :- | :- |
+| http1 | HTTP/1.1, TLS opsional, upgrade websocket, SSE, file static | HTTP/1.1, keep-alive |
+| http2 | h2 dengan sniff prior knowledge, websocket rfc 8441 | HTTP/1.1 per stream |
+| grpc | h2 saja | h2, supaya trailer selamat melewati hop |
+| http3 | QUIC dan HTTP/3, TLS selalu | HTTP/1.1 |
+| udp | datagram mentah, satu flow per client | datagram mentah |
+
+| Dokumen | Keterangan |
+| :- | :- |
+| [`docs/zixer/how-to-use-id.md`](docs/zixer/how-to-use-id.md) | zixer: build, site pertama, satu resep per bentuk, renewal certbot, penelusuran masalah |
+| [`docs/zixer/config-id.md`](docs/zixer/config-id.md) | Rujukan config zixer: tiap key main.cfg dan site, default, aturan lintas field, teks fault |
+| [`docs/zixer/hld-id.md`](docs/zixer/hld-id.md) | zixer: process model, komponen, siklus hidup site, engine, concurrency model, TLS dan ACME |
+| [`docs/zixer/lld-id.md`](docs/zixer/lld-id.md) | zixer: grammar config, wire control, aturan registry, internal per edge, batas tetap |
+
+Demo yang bisa dijalankan untuk tiap bentuk ada di [`examples/proxies/`](examples/proxies/README-id.md), masing-masing satu upstream plus satu config site, dan `zig build zixer-test-runner-all` menjalankan ke-13-nya lewat root sementara.
+
+**Kapan digunakan:** taruh di depan service yang sudah kamu jalankan saat kamu ingin terminasi TLS, file static, upstream round-robin, atau perubahan protocol di edge, dan kamu ingin itu dijelaskan di sebuah file alih-alih ditulis sebagai kode. Pakai engine-nya langsung bila perilakunya memang milik program kamu sendiri.
 
 <br>
 
