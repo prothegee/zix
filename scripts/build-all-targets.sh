@@ -13,7 +13,13 @@ parse_target_filter "${1:-zig}" "${2:-}"
 
 # --------------------------------------------------------- #
 
-matrix "zix" . test-all examples zixer test-runner-all
+matrix "zix" . test-all examples test-runner-all
+
+# --------------------------------------------------------- #
+# zixer keeps its own build files and its own steps, so its unit tests, demo
+# upstreams, and example runner are separate legs from zix's.
+
+matrix "zixer" . zixer zixer-unit-test zixer-examples zixer-test-runner-all
 
 # --------------------------------------------------------- #
 # Drivers are standalone packages with their own build.zig. On a foreign
