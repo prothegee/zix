@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
 
     const zon_options = b.addOptions();
     zon_options.addOption([]const u8, "user_agent", zon.user_agent);
+    zon_options.addOption([]const u8, "version", zon.version);
     zix.addOptions("zon_options", zon_options);
 
     // --------------------------------------------------------- //
@@ -121,8 +122,10 @@ pub fn build(b: *std.Build) void {
 
     // --------------------------------------------------------- //
 
-    // zixer executable (src/zixer ships with the package, so no gate needed).
-    @import("zix-build-zixer.zig").addSteps(b, target, optimize, zix);
+    // zixer keeps its own build files (zixer-build*.zig): the executable ships
+    // with the package, its demo upstreams and runner are gated on the same
+    // directories zix gates on.
+    @import("zixer-build.zig").addSteps(b, target, optimize, zix, have_examples, have_tests);
 
     // --------------------------------------------------------- //
 
