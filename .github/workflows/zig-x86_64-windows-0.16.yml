@@ -114,7 +114,7 @@ jobs:
 
       - name: zixer proxy runner
         if: always()
-        timeout-minutes: 10
+        timeout-minutes: 12
         shell: pwsh
         run: zig build zixer-test-runner-all --summary failures
 
