@@ -59,4 +59,22 @@ pub fn addSteps(
 
     const test_step = b.step("zixer-unit-test", "Run the zixer unit tests");
     test_step.dependOn(testRunStep(b, zixer_tests, foreign_target, "src/zixer/zixer.zig"));
+
+    // The proxy runner's own helpers carry their tests in file. They import std
+    // only, not zix, so each gets its own module rather than riding on the
+    // zixer one.
+    inline for (.{
+        "tests/zixer/child_stderr.zig",
+        "tests/zixer/root_setup.zig",
+        "tests/zixer/row_isolate.zig",
+    }) |src| {
+        const helper_mod = b.createModule(.{
+            .root_source_file = b.path(src),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        const helper_tests = b.addTest(.{ .root_module = helper_mod });
+        test_step.dependOn(testRunStep(b, helper_tests, foreign_target, src));
+    }
 }
