@@ -16,10 +16,10 @@ const Http2 = zix.Http2;
 const fd_io = zix.utils.fd_io;
 const socket_poll = zix.utils.socket_poll;
 
-/// Ceiling for one raw TLS record read. A check's server answers in well under a second, so this
+/// Ceiling for one raw descriptor read. A check's server answers in well under a second, so this
 /// only fires when it accepted the connection and then went silent. Without it the read has no end,
 /// and an infinite park is not an error the runner's retry layer can see.
-const TLS_READ_TIMEOUT_MS: u32 = 5000;
+const RAW_READ_TIMEOUT_MS: u32 = 5000;
 
 // --------------------------------------------------------- //
 
@@ -56,13 +56,38 @@ pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
     var filled: usize = 0;
 
     while (filled < buf.len) {
-        if (!socket_poll.readableWithin(fd, TLS_READ_TIMEOUT_MS)) return error.ReadTimeout;
+        if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ReadTimeout;
 
         const got = try fd_io.readOnce(fd, buf[filled..]);
         if (got == 0) return error.ConnectionClosed;
 
         filled += got;
     }
+}
+
+/// Read whatever has arrived on fd, once, bounded.
+///
+/// Note:
+/// - For a scan that cannot say in advance how many bytes it needs, i.e. the h2 frame scan below,
+///   which reads once and pushes what arrives. fd_io.readOnce is the same call without a bound.
+/// - A server can hold a connection open without ever sending what the scan is looking for: an h2
+///   edge that answers a status the scan does not accept then goes back to waiting for the next
+///   client frame, and neither side ever speaks again. That is a park, not a close, so the round
+///   counter above never advances and the check never fails on its own.
+/// - Raw descriptor, no reader buffer above it, so the readiness gate is safe to place directly in
+///   front of the read.
+///
+/// Param:
+/// fd - std.posix.fd_t (a connected, blocking descriptor)
+/// buf - []u8 (receives whatever arrived)
+///
+/// Return:
+/// - usize bytes read, 0 when the peer closed
+/// - error.ReadTimeout when nothing arrived inside the bound
+pub fn readOnceBounded(fd: std.posix.fd_t, buf: []u8) !usize {
+    if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ReadTimeout;
+
+    return fd_io.readOnce(fd, buf);
 }
 
 /// Write all bytes to fd, looping over short writes and retrying on EINTR.
