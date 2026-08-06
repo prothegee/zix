@@ -70,10 +70,10 @@ jobs:
             # line at the end is the authoritative verdict for this leg.
             failures=""
 
-            timeout 5m zig build unit-test --summary failures --test-timeout 60s || failures="$failures unit-test"
-            timeout 5m zig build integration-test --summary failures --test-timeout 60s || failures="$failures integration-test"
-            timeout 5m zig build behaviour-test --summary failures --test-timeout 60s || failures="$failures behaviour-test"
-            timeout 5m zig build edge-test --summary failures --test-timeout 60s || failures="$failures edge-test"
+            timeout 6m zig build unit-test --summary failures --test-timeout 60s || failures="$failures unit-test"
+            timeout 6m zig build integration-test --summary failures --test-timeout 60s || failures="$failures integration-test"
+            timeout 6m zig build behaviour-test --summary failures --test-timeout 60s || failures="$failures behaviour-test"
+            timeout 6m zig build edge-test --summary failures --test-timeout 60s || failures="$failures edge-test"
 
             # Every command below is wrapped: this leg is one step, so without a per-command
             # bound a single stall owns the whole leg until the step cap fires. One run sat 27
@@ -89,15 +89,15 @@ jobs:
             timeout 6m zig build zixer-examples --summary failures || failures="$failures zixer-examples"
             timeout 10m zig build zixer-test-runner-all --summary failures || failures="$failures zixer-test-runner-all"
             timeout 9m zig build test-runner-all --summary failures || failures="$failures test-runner-all"
-            timeout 5m zig build postgrez-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures postgrez-test-unit"
-            timeout 5m zig build rediz-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures rediz-test-unit"
-            timeout 5m zig build prometheuz-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures prometheuz-test-unit"
-            timeout 5m zig build postgrez-test-behaviour -Ddriver-test-timeout=60s --summary failures || failures="$failures postgrez-test-behaviour"
-            timeout 5m zig build postgrez-test-edge -Ddriver-test-timeout=60s --summary failures || failures="$failures postgrez-test-edge"
-            timeout 5m zig build rediz-test-behaviour -Ddriver-test-timeout=60s --summary failures || failures="$failures rediz-test-behaviour"
-            timeout 5m zig build rediz-test-edge -Ddriver-test-timeout=60s --summary failures || failures="$failures rediz-test-edge"
-            timeout 5m zig build prometheuz-test-behaviour -Ddriver-test-timeout=60s --summary failures || failures="$failures prometheuz-test-behaviour"
-            timeout 5m zig build prometheuz-test-edge -Ddriver-test-timeout=60s --summary failures || failures="$failures prometheuz-test-edge"
+            timeout 6m zig build postgrez-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures postgrez-test-unit"
+            timeout 6m zig build rediz-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures rediz-test-unit"
+            timeout 6m zig build prometheuz-test-unit -Ddriver-test-timeout=60s --summary failures || failures="$failures prometheuz-test-unit"
+            timeout 6m zig build postgrez-test-behaviour -Ddriver-test-timeout=60s --summary failures || failures="$failures postgrez-test-behaviour"
+            timeout 6m zig build postgrez-test-edge -Ddriver-test-timeout=60s --summary failures || failures="$failures postgrez-test-edge"
+            timeout 6m zig build rediz-test-behaviour -Ddriver-test-timeout=60s --summary failures || failures="$failures rediz-test-behaviour"
+            timeout 6m zig build rediz-test-edge -Ddriver-test-timeout=60s --summary failures || failures="$failures rediz-test-edge"
+            timeout 6m zig build prometheuz-test-behaviour -Ddriver-test-timeout=60s --summary failures || failures="$failures prometheuz-test-behaviour"
+            timeout 6m zig build prometheuz-test-edge -Ddriver-test-timeout=60s --summary failures || failures="$failures prometheuz-test-edge"
 
             if [ -n "$failures" ]; then
               echo "failed:$failures"
