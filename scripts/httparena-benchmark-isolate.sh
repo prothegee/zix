@@ -646,6 +646,84 @@ fi
 API4_CPUS="$(server_pairs_head 2)"
 API16_CPUS="$(server_pairs_head 8)"
 
+# The multi-container profiles (gateway-64, gateway-h3, production-stack) keep
+# their cpusets inside their own compose files, which the profiles.sh patch
+# below never reaches. Derive the same arena proportions from the local pairs
+# and export them, so a compose file written as ${GATEWAY_PROXY_CPUS:-...}
+# asks for cores that exist here instead of the arena's numbering (a compose
+# file that still carries a bare literal fails at container start off the
+# arena, with "write to cpuset.cpus: Numerical result out of range").
+#   gateway-64, gateway-h3   arena proxy 20 : server 12 of the 32-pair half
+#   production-stack         arena edge 15 : cache 1 : authsvc 4 : server 12
+
+# `count` SMT pairs of the server half, starting at pair `start`.
+server_pairs_slice() {
+    local start=$1
+    local count=$2
+
+    (IFS=,; echo "${SERVER_PAIRS[*]:start:count}")
+}
+
+# An arena share of 32 pairs, rounded to the nearest whole local pair.
+scaled_pair_count() {
+    local arena_share=$1
+    local count=$(( (${#SERVER_PAIRS[@]} * arena_share + 16) / 32 ))
+
+    [ "$count" -lt 1 ] && count=1
+
+    echo "$count"
+}
+
+STACK_PAIR_COUNT=${#SERVER_PAIRS[@]}
+
+gateway_server_pairs="$(scaled_pair_count 12)"
+if [ "$gateway_server_pairs" -ge "$STACK_PAIR_COUNT" ] && [ "$STACK_PAIR_COUNT" -gt 1 ]; then
+    gateway_server_pairs=$(( STACK_PAIR_COUNT - 1 ))
+fi
+gateway_proxy_pairs=$(( STACK_PAIR_COUNT - gateway_server_pairs ))
+
+if [ "$gateway_proxy_pairs" -lt 1 ]; then
+    gateway_proxy_pairs=$STACK_PAIR_COUNT
+    gateway_server_pairs=$STACK_PAIR_COUNT
+    echo "[isol] one core on the server half: proxy and server share it (a busy-poll server reads 0 rps there)" >&2
+fi
+
+export GATEWAY_PROXY_CPUS="${GATEWAY_PROXY_CPUS:-$(server_pairs_slice 0 "$gateway_proxy_pairs")}"
+export GATEWAY_SERVER_CPUS="${GATEWAY_SERVER_CPUS:-$(server_pairs_slice $(( STACK_PAIR_COUNT - gateway_server_pairs )) "$gateway_server_pairs")}"
+
+# production-stack splits the same half four ways. Trim the two large shares
+# first so the sidecars always land somewhere, then hand the spare pairs to
+# cache and authsvc. On the arena the result is the stock literal set.
+stack_edge_pairs="$(scaled_pair_count 15)"
+stack_server_pairs="$(scaled_pair_count 12)"
+
+while [ $(( stack_edge_pairs + stack_server_pairs )) -ge "$STACK_PAIR_COUNT" ] &&
+      [ $(( stack_edge_pairs + stack_server_pairs )) -gt 2 ]; do
+    if [ "$stack_edge_pairs" -ge "$stack_server_pairs" ]; then
+        stack_edge_pairs=$(( stack_edge_pairs - 1 ))
+    else
+        stack_server_pairs=$(( stack_server_pairs - 1 ))
+    fi
+done
+
+stack_spare_pairs=$(( STACK_PAIR_COUNT - stack_edge_pairs - stack_server_pairs ))
+
+if [ "$stack_spare_pairs" -ge 2 ]; then
+    stack_cache_cpus="$(server_pairs_slice "$stack_edge_pairs" 1)"
+    stack_authsvc_cpus="$(server_pairs_slice $(( stack_edge_pairs + 1 )) $(( stack_spare_pairs - 1 )))"
+elif [ "$stack_spare_pairs" -eq 1 ]; then
+    stack_cache_cpus="$(server_pairs_slice "$stack_edge_pairs" 1)"
+    stack_authsvc_cpus="$stack_cache_cpus"
+else
+    stack_cache_cpus="$(server_pairs_slice $(( stack_edge_pairs - 1 )) 1)"
+    stack_authsvc_cpus="$stack_cache_cpus"
+fi
+
+export STACK_EDGE_CPUS="${STACK_EDGE_CPUS:-$(server_pairs_slice 0 "$stack_edge_pairs")}"
+export STACK_CACHE_CPUS="${STACK_CACHE_CPUS:-$stack_cache_cpus}"
+export STACK_AUTHSVC_CPUS="${STACK_AUTHSVC_CPUS:-$stack_authsvc_cpus}"
+export STACK_SERVER_CPUS="${STACK_SERVER_CPUS:-$(server_pairs_slice $(( STACK_PAIR_COUNT - stack_server_pairs )) "$stack_server_pairs")}"
+
 # Scale the profiles to this machine: the stock server cpuset (the arena's
 # 0-31,64-95 whole-core half) becomes the local SMT-aware half, the crud
 # profile's redis-carved variant (1-31,65-95) becomes the half minus the
@@ -696,6 +774,8 @@ export GCANNON_MODE="${GCANNON_MODE:-docker}"
     echo "# source:       $SOURCE"
     echo "# server_cpus:  $SERVER_CPUS"
     echo "# loadgen_cpus: $LOADGEN_CPUS"
+    echo "# gateway_cpus: proxy=$GATEWAY_PROXY_CPUS server=$GATEWAY_SERVER_CPUS"
+    echo "# stack_cpus:   edge=$STACK_EDGE_CPUS cache=$STACK_CACHE_CPUS authsvc=$STACK_AUTHSVC_CPUS server=$STACK_SERVER_CPUS"
     echo "# threads:      $THREADS"
     echo "# quiesce:      $DO_QUIESCE (system_tune equivalent: governor/sysctls/lo-mtu-1500/docker-restart/drop-caches)"
     echo "# freq_pin:     ${FREQ_HZ:-(none, arena parity)}"
