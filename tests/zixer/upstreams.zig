@@ -8,6 +8,8 @@ const std = @import("std");
 
 const common = @import("runner_common");
 
+const child_stderr = @import("child_stderr.zig");
+
 /// How many upstream processes one demo row may need. round_robin needs two.
 pub const MAX_PER_CHECK: usize = 2;
 
@@ -45,30 +47,44 @@ pub const Group = struct {
 
 /// Start every upstream one demo row needs and wait until each is answering.
 ///
+/// Note:
+/// - Each upstream's stderr goes to a file in the row's root, never a pipe.
+///   Nothing here drains a pipe, so an upstream that panics would fill one and
+///   then park alive still holding its port. The file also survives a row the
+///   parent had to kill, so its report can quote what the upstream said.
+/// - A file also means common.waitForTcpPort finds no stderr pipe to scrape,
+///   so it captures no io_uring fallback note. These demo upstreams all run the
+///   ASYNC model, which never emits one.
+///
 /// Param:
 /// io - std.Io
+/// root - []const u8 (the row's runner root, from root_setup.rootPath)
 /// paths - []const []const u8 (upstream binary paths, in argv order)
 /// specs - []const Spec (what this row needs)
 ///
 /// Return:
 /// - Group holding the live children
 /// - error.ServerStartTimeout when a tcp upstream never accepts
-pub fn start(io: std.Io, paths: []const []const u8, specs: []const Spec) !Group {
+pub fn start(io: std.Io, root: []const u8, paths: []const []const u8, specs: []const Spec) !Group {
     var group = Group{};
     errdefer group.kill(io);
 
     var needs_bind_wait = false;
 
-    for (specs) |spec| {
+    for (specs, 0..) |spec, slot| {
         var argv_buf: [4][]const u8 = undefined;
         argv_buf[0] = paths[spec.binary];
         for (spec.args, 0..) |arg, index| argv_buf[index + 1] = arg;
+
+        var name_buf: [child_stderr.MAX_NAME]u8 = undefined;
+        const err_file = try child_stderr.create(io, root, try child_stderr.upstreamName(slot, &name_buf));
+        defer err_file.close(io);
 
         group.children[group.len] = try std.process.spawn(io, .{
             .argv = argv_buf[0 .. 1 + spec.args.len],
             .stdin = .ignore,
             .stdout = .ignore,
-            .stderr = .pipe,
+            .stderr = .{ .file = err_file },
         });
         group.len += 1;
 
