@@ -192,7 +192,7 @@ pub const Daemon = struct {
             }
         }
 
-        const backlog = cfg.kernel_backlog orelse self.cfg.kernel_backlog;
+        const backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog);
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, backlog) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
             error.TlsCertFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_cert file", .{name}),
@@ -255,6 +255,12 @@ pub const Daemon = struct {
         writer.interface.flush() catch return;
     }
 };
+
+/// The listen backlog one site binds with: its own kernel_backlog when the
+/// site file set one, the main.cfg value otherwise.
+fn resolveBacklog(site_backlog: ?u31, main_backlog: u31) u31 {
+    return site_backlog orelse main_backlog;
+}
 
 /// Reply for a name the daemon must not resolve, null when the name is fine.
 fn rejectName(name: []const u8, reply_buf: []u8) ?[]const u8 {
@@ -458,6 +464,41 @@ test "zix zixer: daemon handleLine, two sites on one port collide at start" {
         "error: two.cfg port 39865 is already used by one.cfg",
         daemon.handleLine("start two.cfg", &reply_buf),
     );
+}
+
+test "zix zixer: daemon backlog, a site override wins over the main.cfg value" {
+    // main.cfg carries the default, a site file may raise or lower it for
+    // its own listener. The bound value is visible on the wire as the
+    // listen queue length.
+    try std.testing.expectEqual(@as(u31, 1024), resolveBacklog(null, 1024));
+    try std.testing.expectEqual(@as(u31, 7), resolveBacklog(7, 1024));
+    try std.testing.expectEqual(@as(u31, 4096), resolveBacklog(4096, 128));
+}
+
+test "zix zixer: daemon backlog, a started site binds with the resolved value" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_backlog/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_backlog") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    try writeSiteFile(io, arena.allocator(), test_root, "inherited.cfg", "engine: http1\nip: 127.0.0.1\nport: 39867\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "own.cfg", "engine: http1\nip: 127.0.0.1\nport: 39868\nupstreams: 127.0.0.1:3000\nkernel_backlog: 7\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start inherited.cfg", &reply_buf), "ok: "));
+    try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start own.cfg", &reply_buf), "ok: "));
+
+    // Both bind: a backlog far below the main.cfg default is still a valid
+    // listener, it only shortens the pending-connection queue.
+    try std.testing.expectEqual(@as(usize, 2), daemon.sites.items.len);
+    try std.testing.expectEqual(@as(u31, 1024), daemon.cfg.kernel_backlog);
 }
 
 test "zix zixer: daemon handleLine, shutdown reports the unbind count and sets the flag" {
