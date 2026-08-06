@@ -156,6 +156,15 @@ __*Update:*__
 
 <br>
 
+- Identifier di test suite diganti nama: setiap nama satu sampai empat karakter yang maknanya harus ditebak sekarang menyebut isinya:
+    - `tests/runner/all_runner.zig` mendeklarasikan ke-55 trampoline check-nya sebagai `fn f`, nama yang tidak membawa apa pun. Sekarang `fn call`, bentuk yang sudah dipakai `tests/zixer/all_runner.zig`. Variabel lokal scheduler mengikuti: `c` jadi `check`, `Fut` / `futs` jadi `CheckFuture` / `futures`, `fill` jadi `path_idx`, dan `cpu` jadi `cpu_count` karena isinya jumlah, bukan sebuah core.
+    - Tiap test block HTTP/3 menyimpan helper hex privat bernama `fn h`. Sekarang `fn hexBytes` di semua 15 berkas dan 167 titik panggil. Stub handler di dalam test block (`fn h`, `fn f`) jadi `fn handle`, dan factory handler `const H` di `src/tcp/http2/router.zig` jadi `Handlers`.
+    - Sekitar 48 berkas di bawah `tests/` memuat variabel lokal yang harus dilacak balik ke baris deklarasinya: `t` jadi `server_thread`, `sa` jadi `server_addr`, `al` jadi `allocator`, `rd` / `wr` jadi `reader` / `writer`, `fh` jadi `frame`, `hbuf` jadi `header_buf`, `hdec` / `enc` jadi `hpack_decoder` / `hpack_encoder`, `flen` jadi `flight_len`, `rnd` jadi `random_bytes`, `fba` jadi `pem_fixed_buf`. Test client HTTP/3 mendapat sapuan terdalam, termasuk `w` jadi `writer`, `u8v` / `u16v` jadi `writeU8` / `writeU16`, serta `pp` / `fl` / `cl` / `rp` jadi `payload_len` / `fields_len` / `content_len` / `payload_pos`.
+    - Singkatan domain yang terbatas dan sudah umum tetap pada panjang naturalnya dan tidak disentuh: `io`, `ctx`, `buf`, `fd`, `len`, `pos`, `conn`, `req`, `res`, `gpa`, `cfg`, dan istilah QUIC `sid`, `scid`, `dcid`.
+    - Hanya penamaan, tidak ada perubahan perilaku. Diverifikasi dengan test suite penuh, seluruh 55 protokol runner, dan 13 demo proxy zixer.
+
+<br>
+
 ## 0.5.x-rc2 (2026-07-27)
 
 __*Update:*__
