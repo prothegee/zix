@@ -10,6 +10,7 @@ const cmd_restart = @import("cmd_restart.zig");
 const cmd_start = @import("cmd_start.zig");
 const cmd_status = @import("cmd_status.zig");
 const cmd_stop = @import("cmd_stop.zig");
+const cmd_version = @import("cmd_version.zig");
 const root_dir = @import("root_dir.zig");
 
 const HELP =
@@ -27,6 +28,7 @@ const HELP =
     \\    restart <site.cfg>  re-read one site cfg and rebind it
     \\    daemon              run the daemon in the foreground
     \\    daemon stop         stop the daemon and every started site
+    \\    version             show the version, which follows the zix package
     \\    help                show this help
     \\
     \\root dir resolution order:
@@ -170,6 +172,8 @@ pub fn main(process: std.process.Init) !void {
             code = try cmd_restart.run(io, arena, out, root, cli.filters, cli.exe_path);
         } else if (std.mem.eql(u8, command, "daemon")) {
             code = try cmd_daemon.run(io, std.heap.smp_allocator, arena, out, root, cli.filters);
+        } else if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
+            code = try cmd_version.run(out);
         } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
             try out.writeAll(HELP);
         } else {
@@ -207,6 +211,7 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("cmd_start.zig"));
     std.testing.refAllDecls(@import("cmd_stop.zig"));
     std.testing.refAllDecls(@import("cmd_restart.zig"));
+    std.testing.refAllDecls(@import("cmd_version.zig"));
     std.testing.refAllDecls(@import("upstream_pool.zig"));
     std.testing.refAllDecls(@import("upstream_conn.zig"));
     std.testing.refAllDecls(@import("proxy_headers.zig"));
@@ -277,7 +282,21 @@ test "zix zixer: cli help, every command is documented" {
     try std.testing.expect(std.mem.indexOf(u8, HELP, "stop <site.cfg>") != null);
     try std.testing.expect(std.mem.indexOf(u8, HELP, "restart <site.cfg>") != null);
     try std.testing.expect(std.mem.indexOf(u8, HELP, "daemon stop") != null);
+    try std.testing.expect(std.mem.indexOf(u8, HELP, "version") != null);
     try std.testing.expect(std.mem.indexOf(u8, HELP, "ZIXER_DIR") != null);
+}
+
+test "zix zixer: cli args, every version spelling lands as the command" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for ([_][]const u8{ "version", "--version", "-v" }) |spelling| {
+        var args = FakeArgs{ .items = &.{ "zixer", spelling } };
+        const cli = try parseArgs(arena.allocator(), &args);
+
+        try std.testing.expectEqualStrings(spelling, cli.command.?);
+        try std.testing.expectEqual(@as(usize, 0), cli.filters.len);
+    }
 }
 
 test "zix zixer: cli args, argv0 lands in exe_path" {
