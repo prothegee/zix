@@ -11,7 +11,6 @@ const zix = @import("zix");
 const wire = @import("runner_wire");
 
 const Http2 = zix.Http2;
-const fd_io = zix.utils.fd_io;
 
 /// Reads before the h2 check gives up waiting for the status.
 const MAX_ROUNDS: usize = 64;
@@ -24,6 +23,13 @@ const GREET_NAME: []const u8 = "runner";
 
 /// http2 edge: prior-knowledge h2c preface, SETTINGS, then GET / on stream 1.
 /// The scanner answers as soon as a HEADERS block carries :status 200.
+///
+/// Note:
+/// - Every read is bounded. An edge that answers a status this scan does not
+///   accept, a 502 from a failed upstream leg for instance, then goes back to
+///   waiting for the next client frame: neither side speaks again, the round
+///   counter never advances, and an unbounded read here would park the whole
+///   table on it.
 pub fn runHttp2(io: std.Io, port: u16) !void {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
     var stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
@@ -67,7 +73,7 @@ pub fn runHttp2(io: std.Io, port: u16) !void {
     var rounds: usize = 0;
     while (rounds < MAX_ROUNDS) : (rounds += 1) {
         var chunk: [READ_BUF]u8 = undefined;
-        const got = try fd_io.readOnce(fd, &chunk);
+        const got = try wire.readOnceBounded(fd, &chunk);
         if (got == 0) return error.ConnectionClosed;
 
         if (try scanner.push(chunk[0..got])) return;
