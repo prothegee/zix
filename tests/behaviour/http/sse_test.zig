@@ -7,8 +7,8 @@ const zix = @import("zix");
 // --------------------------------------------------------- //
 
 test "zix behaviour: ContentType.TEXT_EVENT_STREAM, asString returns text/event-stream" {
-    const ct: zix.Http.ContentType = .TEXT_EVENT_STREAM;
-    try std.testing.expectEqualStrings("text/event-stream", ct.asString());
+    const content_type: zix.Http.ContentType = .TEXT_EVENT_STREAM;
+    try std.testing.expectEqualStrings("text/event-stream", content_type.asString());
 }
 
 test "zix behaviour: Response.streaming, defaults to false" {

@@ -9,36 +9,36 @@ const zix = @import("zix");
 test "zix behaviour: Channel, closed field defaults to false after init" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var ch = try zix.Channel(u32).init(arena.allocator(), 4);
-    defer ch.deinit();
+    var channel = try zix.Channel(u32).init(arena.allocator(), 4);
+    defer channel.deinit();
 
-    try std.testing.expect(!ch.closed);
+    try std.testing.expect(!channel.closed);
 }
 
 test "zix behaviour: Channel, head starts at zero" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var ch = try zix.Channel(u32).init(arena.allocator(), 4);
-    defer ch.deinit();
+    var channel = try zix.Channel(u32).init(arena.allocator(), 4);
+    defer channel.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), ch.head);
+    try std.testing.expectEqual(@as(usize, 0), channel.head);
 }
 
 test "zix behaviour: Channel, ring tail formula is (head + count) % buf.len" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var ch = try zix.Channel(u32).init(arena.allocator(), 4);
-    defer ch.deinit();
+    var channel = try zix.Channel(u32).init(arena.allocator(), 4);
+    defer channel.deinit();
 
     // Manually set state to simulate 3 items in a 4-slot ring
-    ch.buf[0] = 10;
-    ch.buf[1] = 20;
-    ch.buf[2] = 30;
-    ch.count = 3;
+    channel.buf[0] = 10;
+    channel.buf[1] = 20;
+    channel.buf[2] = 30;
+    channel.count = 3;
 
-    const tail = (ch.head + ch.count) % ch.buf.len;
+    const tail = (channel.head + channel.count) % channel.buf.len;
     try std.testing.expectEqual(@as(usize, 3), tail);
-    try std.testing.expectEqual(@as(u32, 10), ch.buf[ch.head]);
+    try std.testing.expectEqual(@as(u32, 10), channel.buf[channel.head]);
 }
 
 test "zix behaviour: Channel, send increments count" {
@@ -46,11 +46,11 @@ test "zix behaviour: Channel, send increments count" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     const io = threaded.io();
-    var ch = try zix.Channel(u32).init(arena.allocator(), 4);
-    defer ch.deinit();
+    var channel = try zix.Channel(u32).init(arena.allocator(), 4);
+    defer channel.deinit();
 
-    try ch.send(io, 99);
-    try std.testing.expectEqual(@as(usize, 1), ch.count);
+    try channel.send(io, 99);
+    try std.testing.expectEqual(@as(usize, 1), channel.count);
 }
 
 test "zix behaviour: Channel, recv decrements count" {
@@ -58,12 +58,12 @@ test "zix behaviour: Channel, recv decrements count" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     const io = threaded.io();
-    var ch = try zix.Channel(u32).init(arena.allocator(), 4);
-    defer ch.deinit();
+    var channel = try zix.Channel(u32).init(arena.allocator(), 4);
+    defer channel.deinit();
 
-    try ch.send(io, 7);
-    _ = try ch.recv(io);
-    try std.testing.expectEqual(@as(usize, 0), ch.count);
+    try channel.send(io, 7);
+    _ = try channel.recv(io);
+    try std.testing.expectEqual(@as(usize, 0), channel.count);
 }
 
 test "zix behaviour: Channel, close sets closed field to true" {
@@ -71,10 +71,10 @@ test "zix behaviour: Channel, close sets closed field to true" {
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     const io = threaded.io();
-    var ch = try zix.Channel(u32).init(arena.allocator(), 4);
-    defer ch.deinit();
+    var channel = try zix.Channel(u32).init(arena.allocator(), 4);
+    defer channel.deinit();
 
-    try std.testing.expect(!ch.closed);
-    ch.close(io);
-    try std.testing.expect(ch.closed);
+    try std.testing.expect(!channel.closed);
+    channel.close(io);
+    try std.testing.expect(channel.closed);
 }

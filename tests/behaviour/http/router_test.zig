@@ -26,15 +26,15 @@ fn handlerB(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Cont
 test "zix behaviour: dispatch, exact beats param regardless of registration order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerB, .kind = .PARAM },
         .{ .path = "/users/alice", .handler = handlerA },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /users/alice HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /users/alice HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     last_handler = "";
     try router.dispatch(&req, &res, &ctx);
@@ -44,15 +44,15 @@ test "zix behaviour: dispatch, exact beats param regardless of registration orde
 test "zix behaviour: dispatch, param beats prefix regardless of registration order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerB, .kind = .PREFIX },
         .{ .path = "/api/:resource", .handler = handlerA, .kind = .PARAM },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /api/users HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /api/users HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     last_handler = "";
     try router.dispatch(&req, &res, &ctx);
@@ -62,15 +62,15 @@ test "zix behaviour: dispatch, param beats prefix regardless of registration ord
 test "zix behaviour: dispatch, prefix: longest match wins" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerB, .kind = .PREFIX },
         .{ .path = "/api/users", .handler = handlerA, .kind = .PREFIX },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /api/users/alice HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /api/users/alice HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     last_handler = "";
     try router.dispatch(&req, &res, &ctx);
@@ -80,14 +80,14 @@ test "zix behaviour: dispatch, prefix: longest match wins" {
 test "zix behaviour: dispatch, prefix matches its own path exactly" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/api", .handler = handlerA, .kind = .PREFIX },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     last_handler = "";
     try router.dispatch(&req, &res, &ctx);
@@ -97,14 +97,14 @@ test "zix behaviour: dispatch, prefix matches its own path exactly" {
 test "zix behaviour: dispatch, query string transparent to path matching (param)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/users/:id", .handler = handlerA, .kind = .PARAM },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /users/bob?role=admin HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /users/bob?role=admin HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     try router.dispatch(&req, &res, &ctx);
     try std.testing.expectEqualStrings("bob", req.path_params[0].value);
@@ -113,14 +113,14 @@ test "zix behaviour: dispatch, query string transparent to path matching (param)
 test "zix behaviour: dispatch, query string transparent to path matching (exact)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const al = arena.allocator();
+    const allocator = arena.allocator();
     const router = zix.Http.Router(&[_]zix.Http.Route{
         .{ .path = "/about", .handler = handlerA },
     });
 
-    var req = try zix.Http.Request.fromRaw("GET /about?ref=menu HTTP/1.1\r\nHost: localhost\r\n\r\n", al);
-    var res = zix.Http.Response.init(undefined, false, undefined, al, 32);
-    var ctx = zix.Http.Context{ .io = undefined, .allocator = al };
+    var req = try zix.Http.Request.fromRaw("GET /about?ref=menu HTTP/1.1\r\nHost: localhost\r\n\r\n", allocator);
+    var res = zix.Http.Response.init(undefined, false, undefined, allocator, 32);
+    var ctx = zix.Http.Context{ .io = undefined, .allocator = allocator };
 
     try router.dispatch(&req, &res, &ctx);
 }
