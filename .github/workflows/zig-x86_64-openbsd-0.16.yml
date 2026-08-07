@@ -62,7 +62,9 @@ jobs:
             # while its neighbors finish in milliseconds, and the fixed bounds tuned for
             # native speed then kill healthy work. Every bound in this leg is widened to
             # 60s instead: the runner's per-check kill (this env), the suite --test-timeout
-            # flags below, and the driver -Ddriver-test-timeout option.
+            # flags below, and the -Ddriver-test-timeout option the drivers and jzon share.
+            # jzon runs nested, so --test-timeout never reaches it and the option is what
+            # carries its bound.
             export ZIX_CHECK_TIMEOUT_MS=60000
 
             # The whole leg is one ssh script, so a failed suite must not stop
@@ -74,7 +76,8 @@ jobs:
             timeout 6m zig build integration-test --summary failures --test-timeout 240s || failures="$failures integration-test"
             timeout 6m zig build behaviour-test --summary failures --test-timeout 240s || failures="$failures behaviour-test"
             timeout 6m zig build edge-test --summary failures --test-timeout 240s || failures="$failures edge-test"
-            timeout 6m zig build jzon-test-all --summary failures --test-timeout 240s || failures="$failures jzon-test-all"
+            timeout 6m zig build jzon-test-all -Ddriver-test-timeout=240s --summary failures || failures="$failures jzon-test-all"
+            timeout 6m zig build jzon-examples --summary failures || failures="$failures jzon-examples"
 
             # Every command below is wrapped: this leg is one step, so without a per-command
             # bound a single stall owns the whole leg until the step cap fires. One run sat 27
