@@ -145,8 +145,8 @@ Driver documentation (each README fans out to its own hld, lld, and config docs)
 Zix dispatch model for IOCP and KQUEUE not supported.
 
 __*Platform Development Status:*__ <br>
-<img src="https://img.shields.io/badge/x86__64-Linux-green">
-<img src="https://img.shields.io/badge/aarch64-Linux-green">
+<img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
+<img src="https://img.shields.io/badge/aarch64-Linux-brightgreen">
 <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
 <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
 <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">

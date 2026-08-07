@@ -59,8 +59,8 @@
     <code><i>Yellow: Cross-Compiled (Open for contributors/maintainers)</i></code>
 </p>
 <div align="center">
-    <img src="https://img.shields.io/badge/x86__64-Linux-green">
-    <img src="https://img.shields.io/badge/aarch64-Linux-green">
+    <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
+    <img src="https://img.shields.io/badge/aarch64-Linux-brightgreen">
     <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
     <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
     <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">

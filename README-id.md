@@ -145,8 +145,8 @@ Dokumentasi driver (setiap README menyebar ke dokumen hld, lld, dan config milik
 Zix dispatch model untuk IOCP dan KQUEUE tidak didukung.
 
 __*Platform Development Status:*__ <br>
-<img src="https://img.shields.io/badge/x86__64-Linux-green">
-<img src="https://img.shields.io/badge/aarch64-Linux-green">
+<img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
+<img src="https://img.shields.io/badge/aarch64-Linux-brightgreen">
 <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
 <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
 <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
