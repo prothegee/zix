@@ -195,6 +195,7 @@ pub const Daemon = struct {
         const backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog);
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, backlog) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
+            error.ChallengePortInUse => return print(reply_buf, "error: {s} challenge port {d} is already in use", .{ name, site_runtime.ACME_HTTP_PORT }),
             error.TlsCertFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_cert file", .{name}),
             error.TlsKeyFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_key file", .{name}),
             else => {
