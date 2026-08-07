@@ -185,7 +185,9 @@ pub const EdgeState = struct {
             .port = port,
         };
 
-        if (state.idle) |*cache| try state.reaper.start(io, cache);
+        // One cache: a quic edge owns a single socket, so it has no workers
+        // to divide the idle bound between.
+        if (state.idle) |*cache| try state.reaper.start(io, cache[0..1]);
         errdefer state.reaper.stop();
 
         state.thread = try std.Thread.spawn(.{}, receiveLoop, .{state});
