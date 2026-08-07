@@ -22,11 +22,11 @@ matrix "zix" . test-all examples test-runner-all
 matrix "zixer" . zixer zixer-unit-test zixer-examples zixer-test-runner-all
 
 # --------------------------------------------------------- #
-# jzon keeps its own build files and its own steps for the tiered suites under
-# tests/jzon. Its src/ tests ride the zix test-all leg above with the rest of
-# the library, so only the tiered step is a leg of its own.
+# jzon is a standalone package with its own build.zig, so it is a leg of its
+# own like the drivers below. It needs no server and no container, so every
+# tier runs on every target.
 
-matrix "jzon" . jzon-test-all
+matrix "jzon" src/jzon test-unit test-behaviour test-edge examples
 
 # --------------------------------------------------------- #
 # Drivers are standalone packages with their own build.zig. On a foreign
