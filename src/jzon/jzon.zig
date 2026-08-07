@@ -12,6 +12,7 @@
 
 pub const sink = @import("sink.zig");
 pub const cursor = @import("cursor.zig");
+pub const cursor_vector = @import("cursor_vector.zig");
 pub const escape = @import("escape.zig");
 pub const escape_vector = @import("escape_vector.zig");
 pub const integer = @import("integer.zig");
@@ -30,11 +31,23 @@ pub const deserialize_options = @import("deserialize/options.zig");
 /// Which of a target's fields a document filled in.
 pub const fields = @import("deserialize/fields.zig");
 
+/// How many bytes a read scan classifies at once.
+pub const scan = @import("deserialize/scan.zig");
+
+/// Step over a whole value without building anything out of it.
+pub const skip = @import("deserialize/skip.zig");
+
+/// The value of one string token, borrowed or copied.
+pub const string_value = @import("deserialize/string_value.zig");
+
 /// Read a value the way std does, which parses every shape std parses.
 pub const std_parser = @import("deserialize/std_parser.zig");
 
 /// Read a value through std's tokens and dispatch generated from the type.
 pub const scanner_parser = @import("deserialize/scanner_parser.zig");
+
+/// Read a value through jzon's own cursor and code generated from the type.
+pub const generated_parser = @import("deserialize/generated_parser.zig");
 
 /// A write cursor over a caller-owned buffer.
 pub const Sink = sink.Sink;
