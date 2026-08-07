@@ -107,7 +107,9 @@ flowchart LR
 | `daemon_spawn.zig` | auto-spawn when the socket is silent |
 | `site_runtime.zig` | what one started site owns: the listener, the acme companion |
 | `port_probe.zig` | whether a listener outside this daemon already owns a port |
-| `site_serve.zig` | the accept loop for one tcp site |
+| `site_serve.zig` | what one serving tcp site owns: its workers, pools, and idle caches |
+| `site_worker.zig` | one accept loop with its own listener and upstream leg |
+| `worker_count.zig` | how many accept loops a site runs |
 | `http1_proxy.zig`, `http1_head.zig` | the http1 edge and its message parsing |
 | `http2_edge.zig` and siblings | the h2 edge, frames, translation, the rfc 8441 websocket bridge |
 | `grpc_edge.zig` and siblings | the grpc edge, h2 on both legs |
@@ -175,26 +177,32 @@ zixer is thread-per-listener at the accept level and task-per-connection below i
 
 ```mermaid
 flowchart TB
-    subgraph site [one tcp site]
-        accept[accept thread]
-        t1[conn task]
-        t2[conn task]
-        tn[conn task]
-    end
-    pool[upstream pool + idle cache]
+    client[clients] --> kernel[one port, one listener per worker]
 
-    accept --> t1
-    accept --> t2
-    accept --> tn
-    t1 --> pool
-    t2 --> pool
-    tn --> pool
+    subgraph site [one tcp site]
+        subgraph w1 [worker 1]
+            a1[accept loop]
+            p1[pool + idle cache]
+        end
+        subgraph wn [worker n]
+            an[accept loop]
+            pn[pool + idle cache]
+        end
+    end
+
+    kernel --> a1
+    kernel --> an
+    a1 --> t1[conn task] --> p1
+    a1 --> t2[conn task] --> p1
+    an --> tn[conn task] --> pn
 ```
 
-- Each started tcp site owns one accept thread. Each accepted connection becomes a concurrent task in that site's group, so a slow client never blocks the accept loop.
-- A udp site is different: one up pump thread receives on the site socket, and each client flow gets its own ephemeral socket plus its own down pump, so an upstream sees one distinct peer per client. That is what ICE and DTLS state need.
-- The upstream pool and the idle connection cache are shared per site and guarded by a short spinlock. Nothing else is shared between connections.
-- `stop` and `daemon stop` set a flag and wake the loops, so teardown is bounded rather than abrupt.
+- Each started tcp site runs `workers` accept loops, one thread each, and each holds its own listener on the site's port. The kernel decides which listener takes an arriving connection, so accepting is not one thread's job. `workers: 1` is the default and gives the single loop zixer had before.
+- Each accepted connection becomes a concurrent task in that worker's group, so a slow client never blocks its accept loop.
+- A udp site is different: one up pump thread receives on the site socket, and each client flow gets its own ephemeral socket plus its own down pump, so an upstream sees one distinct peer per client. That is what ICE and DTLS state need. An http3 site is the same shape, one socket, so neither spends `workers`.
+- The upstream pool and the idle connection cache belong to one worker, not to the site, and a short spinlock guards each because connection tasks run concurrently within a worker. Nothing is shared between workers except the TLS context, which is read-only after the site starts.
+- The site's idle bound is divided between the workers, so a backend never loses more of its capacity because the edge runs more loops.
+- `stop` and `daemon stop` set one flag and wake the loops until every worker has left, so teardown is bounded rather than abrupt.
 
 <br>
 
@@ -265,4 +273,4 @@ Being explicit about the gaps is part of the design:
 - No health checks, only failure learned from live traffic.
 - No hot reload of `main.cfg`, and no reload of every site at once.
 - No per-path routing, header rewriting, rate limiting, or caching.
-- `workers`, `dispatch`, and `max_recv_buf` are validated and reported, and nothing reads them. See `config-en.md`.
+- `dispatch` and `max_recv_buf` are validated and reported, and nothing reads them. See `config-en.md`.

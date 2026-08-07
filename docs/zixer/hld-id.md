@@ -107,7 +107,9 @@ flowchart LR
 | `daemon_spawn.zig` | auto-spawn saat socket diam |
 | `site_runtime.zig` | apa yang dimiliki satu site yang start: listener, companion acme |
 | `port_probe.zig` | apakah listener di luar daemon ini sudah memiliki sebuah port |
-| `site_serve.zig` | accept loop untuk satu site tcp |
+| `site_serve.zig` | apa yang dimiliki satu site tcp yang melayani: worker, pool, dan idle cache-nya |
+| `site_worker.zig` | satu accept loop dengan listener dan leg upstream sendiri |
+| `worker_count.zig` | berapa accept loop yang dijalankan sebuah site |
 | `http1_proxy.zig`, `http1_head.zig` | edge http1 dan parsing pesannya |
 | `http2_edge.zig` dan kerabatnya | edge h2, frame, translasi, bridge websocket rfc 8441 |
 | `grpc_edge.zig` dan kerabatnya | edge grpc, h2 di kedua leg |
@@ -175,26 +177,32 @@ zixer adalah thread-per-listener di level accept dan task-per-connection di bawa
 
 ```mermaid
 flowchart TB
-    subgraph site [satu site tcp]
-        accept[accept thread]
-        t1[conn task]
-        t2[conn task]
-        tn[conn task]
-    end
-    pool[upstream pool + idle cache]
+    client[client] --> kernel[satu port, satu listener per worker]
 
-    accept --> t1
-    accept --> t2
-    accept --> tn
-    t1 --> pool
-    t2 --> pool
-    tn --> pool
+    subgraph site [satu site tcp]
+        subgraph w1 [worker 1]
+            a1[accept loop]
+            p1[pool + idle cache]
+        end
+        subgraph wn [worker n]
+            an[accept loop]
+            pn[pool + idle cache]
+        end
+    end
+
+    kernel --> a1
+    kernel --> an
+    a1 --> t1[conn task] --> p1
+    a1 --> t2[conn task] --> p1
+    an --> tn[conn task] --> pn
 ```
 
-- Tiap site tcp yang start memiliki satu accept thread. Tiap koneksi yang diterima menjadi task bersamaan di group site itu, jadi client lambat tidak pernah memblokir accept loop.
-- Site udp berbeda: satu up pump thread menerima di socket site, dan tiap flow client mendapat socket ephemeral sendiri plus down pump sendiri, jadi upstream melihat satu peer berbeda per client. Itulah yang dibutuhkan state ICE dan DTLS.
-- Upstream pool dan idle connection cache dibagi per site dan dijaga spinlock pendek. Tidak ada hal lain yang dibagi antar koneksi.
-- `stop` dan `daemon stop` menyetel flag lalu membangunkan loop, jadi pembongkaran berbatas, bukan mendadak.
+- Tiap site tcp yang start menjalankan `workers` accept loop, satu thread masing-masing, dan tiap loop memegang listener-nya sendiri di port site itu. Kernel yang memutuskan listener mana yang mengambil koneksi yang datang, jadi menerima koneksi bukan pekerjaan satu thread saja. `workers: 1` adalah default dan memberi satu loop seperti zixer sebelumnya.
+- Tiap koneksi yang diterima menjadi task bersamaan di group worker itu, jadi client lambat tidak pernah memblokir accept loop-nya.
+- Site udp berbeda: satu up pump thread menerima di socket site, dan tiap flow client mendapat socket ephemeral sendiri plus down pump sendiri, jadi upstream melihat satu peer berbeda per client. Itulah yang dibutuhkan state ICE dan DTLS. Site http3 bentuknya sama, satu socket, jadi keduanya tidak memakai `workers`.
+- Upstream pool dan idle connection cache milik satu worker, bukan milik site, dan spinlock pendek menjaga masing-masing karena task koneksi berjalan bersamaan di dalam satu worker. Tidak ada yang dibagi antar worker kecuali context TLS, yang read-only setelah site start.
+- Batas idle milik site dibagi di antara worker-nya, jadi backend tidak pernah kehilangan kapasitas lebih banyak karena edge menjalankan lebih banyak loop.
+- `stop` dan `daemon stop` menyetel satu flag lalu membangunkan loop sampai tiap worker keluar, jadi pembongkaran berbatas, bukan mendadak.
 
 <br>
 
@@ -265,4 +273,4 @@ Menyebut celahnya secara eksplisit adalah bagian dari desain:
 - Belum ada health check, hanya kegagalan yang dipelajari dari trafik nyata.
 - Belum ada hot reload `main.cfg`, dan belum ada reload semua site sekaligus.
 - Belum ada routing per path, rewrite header, rate limit, atau caching.
-- `workers`, `dispatch`, dan `max_recv_buf` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.
+- `dispatch` dan `max_recv_buf` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.
