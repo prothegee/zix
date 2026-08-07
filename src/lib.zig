@@ -190,6 +190,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tls/connection.zig"));
     std.testing.refAllDecls(@import("tls/pem.zig"));
     std.testing.refAllDecls(@import("tls/rsa.zig"));
+    std.testing.refAllDecls(@import("tls/std_rsa_verify.zig"));
     std.testing.refAllDecls(@import("tls/montgomery.zig"));
     std.testing.refAllDecls(@import("tls/context.zig"));
     std.testing.refAllDecls(@import("tcp/tls/h2_terminator.zig"));
