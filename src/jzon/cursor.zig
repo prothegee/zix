@@ -16,6 +16,34 @@ const std = @import("std");
 ///   there cannot start what was asked for.
 pub const Error = error{ Truncated, Unexpected };
 
+/// The insignificant whitespace RFC 8259 2 allows between tokens: space,
+/// horizontal tab, line feed, carriage return.
+///
+/// Note:
+/// - Nothing else counts. A control byte outside this set is a token's problem,
+///   not a skip's, so it is left where it is.
+pub const WHITESPACE = [_]u8{ ' ', '\t', '\n', '\r' };
+
+/// Whether one byte is insignificant whitespace.
+///
+/// Note:
+/// - This is the whole rule, and every scan over a document asks it. A scan that
+///   classifies a whole vector lane at a time builds its comparisons from the
+///   same list, so the two widths never drift apart.
+///
+/// Param:
+/// byte - u8 (the byte to classify)
+///
+/// Return:
+/// - bool (true when the byte may be stepped over between tokens)
+pub inline fn isSpace(byte: u8) bool {
+    inline for (WHITESPACE) |allowed| {
+        if (byte == allowed) return true;
+    }
+
+    return false;
+}
+
 /// A located JSON string token: the bytes between the quotes, plus whether any
 /// of them are part of an escape sequence.
 ///
@@ -130,20 +158,10 @@ pub const Cursor = struct {
         self.pos += text.len;
     }
 
-    /// Step over the insignificant whitespace RFC 8259 2 allows between tokens:
-    /// space, horizontal tab, line feed, carriage return.
-    ///
-    /// Note:
-    /// - Nothing else counts as whitespace. A control byte outside that set is
-    ///   left where it is, so the token that follows reports it instead of the
-    ///   skip swallowing it.
+    /// Step over the insignificant whitespace between tokens, one byte at a
+    /// time. `isSpace` holds the set.
     pub fn skipSpace(self: *Cursor) void {
-        while (self.pos < self.src.len) : (self.pos += 1) {
-            switch (self.src[self.pos]) {
-                ' ', '\t', '\n', '\r' => {},
-                else => return,
-            }
-        }
+        while (self.pos < self.src.len and isSpace(self.src[self.pos])) : (self.pos += 1) {}
     }
 
     /// Read a string token, both quotes included, and return the bytes between
@@ -272,6 +290,19 @@ test "zix jzon: cursor peek and take agree on the same byte" {
     try std.testing.expectEqual(@as(u8, 'b'), try cursor.take());
     try std.testing.expectError(error.Truncated, cursor.peek());
     try std.testing.expectError(error.Truncated, cursor.take());
+}
+
+test "zix jzon: cursor isSpace answers for exactly the bytes skipSpace steps over" {
+    for (0..256) |value| {
+        const byte: u8 = @intCast(value);
+
+        var cursor: Cursor = .init(&[_]u8{byte});
+        cursor.skipSpace();
+
+        try std.testing.expectEqual(isSpace(byte), cursor.atEnd());
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), WHITESPACE.len);
 }
 
 test "zix jzon: cursor accept leaves a byte that does not match" {
