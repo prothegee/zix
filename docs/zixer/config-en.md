@@ -69,9 +69,9 @@ Anything the grammar cannot read is a fault, never a silent skip:
 | logs_dir | `<root>/logs` | where log output will be written | the directory must exist, nothing writes into it yet | a missing directory faults and `status` exits 1 |
 | sites_dir | `<root>/sites` | where site `.cfg` files are read from | every `list`, `status`, `start`, and `restart` | a missing directory faults, and no site is found |
 | kernel_backlog | `1024` | default listen queue length for tcp site listeners | http1, http2, and grpc sites without their own value, plus the acme companion listener | `0` faults, the kernel still caps the value at `net.core.somaxconn` |
-| max_recv_buf | `1472` | intended receive buffer size | reported only, see below | below `1` it faults |
+| max_recv_buf | `8192` | bytes one per-connection stream buffer gets, see below | http1, http2, grpc, and TLS sites, as the default a site file may override | outside `1024` to `262144` it faults and stays at the default |
 
-Only `workers`, `logs_dir`, `sites_dir`, and `kernel_backlog` change what the daemon does. A blank `main.cfg` is valid: every key falls back to the defaults above.
+Only `dispatch` is validated without being applied. A blank `main.cfg` is valid: every key falls back to the defaults above.
 
 ### What workers does
 
@@ -91,14 +91,38 @@ than many requests on a few. Measured on this project's demo static site,
 12 loops against 1: no change at 8 connections, 8 percent at 1024, and 61
 percent at 4096.
 
+### What max_recv_buf does
+
+Every accepted connection allocates its stream buffers when it starts and
+releases them when it ends. `max_recv_buf` is the size of one such buffer,
+and how many a connection holds depends on what the site does:
+
+| site shape | buffers per connection | at the `8192` default |
+| :- | :- | :- |
+| static only, `public_dir` and no `upstreams` | 2, the client read and write | 16 KiB |
+| proxied, any engine | 4, the client pair and the upstream pair | 32 KiB |
+| grpc | 2 for the client, plus 2 per upstream h2 connection actually opened | 32 KiB with one upstream |
+
+The size does not limit anything: a site on the smallest value still parses a
+full request head, still serves a file of any length, and still forwards a
+body of any length. It only decides how much moves per read and per write, so
+a smaller value costs more syscalls per large transfer and a larger one costs
+resident memory on every open connection.
+
+- A site file may name its own `max_recv_buf`, which overrides this one for that site.
+- The range is `1024` to `262144` bytes on both, and a value outside it faults rather than being clamped silently.
+- This is not the whole per-connection cost. A proxied http1 connection also holds three head buffers of 16 KiB each, which are protocol limits rather than a tuning choice, and a TLS connection adds about 58 KiB for the record and plaintext buffers of its session.
+
+Measured on this project's demo static site, resident memory per held
+connection: 62.7 KiB at `1024`, 64.7 KiB at `2048`, 76.7 KiB at `8192`, and
+124.7 KiB at `32768`. The proxied site is 112.7, 116.8, 140.8, and 236.8 KiB
+at the same four values.
+
 ### Keys that are validated but not applied yet
 
-`dispatch` and `max_recv_buf` are parsed, range-checked, and printed by `zixer status`, and nothing in the serving path reads them. Setting them does not change how the daemon runs:
+`dispatch` is parsed, range-checked, and printed by `zixer status`, and nothing in the serving path reads it. `dispatch: async`, `dispatch: epoll`, and `dispatch: uring` all serve through the same edge loops, where each accept loop dispatches every connection as a concurrent task.
 
-- `dispatch: async`, `dispatch: epoll`, and `dispatch: uring` all serve through the same edge loops. Each accept loop dispatches every connection as a concurrent task.
-- `max_recv_buf: 1` still serves a 1 MiB static file byte for byte and still forwards a 60,000 byte datagram intact, because every edge sizes its own buffers.
-
-Treat both as reserved. They are kept because the validation is the part an operator needs first (a config that will be honored later must still be refused now when it is wrong), but do not size a machine around them.
+Treat it as reserved. It is kept because the validation is the part an operator needs first (a config that will be honored later must still be refused now when it is wrong), but do not size a machine around it.
 
 <br>
 
@@ -121,7 +145,7 @@ One file, one site. `engine` and `port` are required, everything else has a defa
 | public_prefix | none | path prefix bound to `public_dir`, i.e. `/assets` | with `public_dir` | must start with `/`, needs `public_dir` |
 | spa_fallback | none | file served when no static file matches, i.e. `index.html` | with `public_dir` | needs `public_dir`, and needs `public_prefix` when the site also has upstreams |
 | kernel_backlog | main.cfg value | listen queue length for this site | http1, http2, grpc, refused on udp, accepted but unused on http3 | `0` faults |
-| max_recv_buf | main.cfg value | intended receive buffer size | reported only, same as in main.cfg | below `1` faults |
+| max_recv_buf | main.cfg value | bytes one per-connection stream buffer gets | http1, http2, grpc, and TLS sites | outside `1024` to `262144` it faults and the site falls back to the main.cfg value |
 | upstream_timeout_ms | `30000` | how long the edge waits on a silent upstream before answering 504 | http1, http2, http3, refused on grpc and udp | needs `upstreams`, `0` waits forever, above 4294967295 faults |
 
 `ip` and `port` together decide the listening socket. `0.0.0.0` binds every interface, `127.0.0.1` binds loopback only, `::` binds every IPv6 interface.
@@ -186,7 +210,7 @@ Set `upstream_timeout_ms: 0` on a site whose backend legitimately thinks for lon
 | upstreams | yes | yes | yes | yes | yes, required |
 | public_dir, public_prefix, spa_fallback | yes | yes | refused | yes | refused |
 | kernel_backlog | yes | yes | yes | accepted, no effect | refused |
-| max_recv_buf | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
+| max_recv_buf | sizes the stream buffers | sizes the stream buffers | sizes the stream buffers | accepted, no effect | accepted, no effect |
 | upstream_timeout_ms | yes | yes | refused | yes | refused |
 
 "Refused" means the key faults with a fix hint and the site does not start. "Accepted, no effect" means the file validates clean and nothing reads the value.
@@ -234,7 +258,7 @@ workers: 1
 dispatch: async
 logs_dir: /srv/zixer/logs
 sites_dir: /srv/zixer/sites
-max_recv_buf: 1472
+max_recv_buf: 8192
 kernel_backlog: 1024
 
 # /srv/zixer/sites/api.cfg

@@ -69,9 +69,9 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 | logs_dir | `<root>/logs` | tempat output log akan ditulis | direktorinya harus ada, belum ada yang menulis ke sana | direktori yang hilang menjadi fault dan `status` keluar dengan kode 1 |
 | sites_dir | `<root>/sites` | tempat file `.cfg` site dibaca | tiap `list`, `status`, `start`, dan `restart` | direktori yang hilang menjadi fault, dan tidak ada site yang ditemukan |
 | kernel_backlog | `1024` | panjang listen queue default untuk listener site tcp | site http1, http2, dan grpc yang tidak punya nilai sendiri, plus listener companion acme | `0` fault, kernel tetap membatasi nilainya di `net.core.somaxconn` |
-| max_recv_buf | `1472` | ukuran receive buffer yang dimaksudkan | hanya dilaporkan, lihat di bawah | di bawah `1` ia fault |
+| max_recv_buf | `8192` | jumlah byte untuk satu stream buffer per koneksi, lihat di bawah | site http1, http2, grpc, dan TLS, sebagai default yang boleh ditimpa file site | di luar `1024` sampai `262144` ia fault dan tetap di default |
 
-Hanya `workers`, `logs_dir`, `sites_dir`, dan `kernel_backlog` yang mengubah apa yang dilakukan daemon. `main.cfg` kosong tetap valid: tiap key jatuh ke default di atas.
+Hanya `dispatch` yang divalidasi tanpa dipakai. `main.cfg` kosong tetap valid: tiap key jatuh ke default di atas.
 
 ### Apa yang dilakukan workers
 
@@ -92,12 +92,38 @@ koneksi, bukan banyak request di beberapa koneksi. Diukur pada site static demo
 project ini, 12 loop dibanding 1: tidak ada perubahan di 8 koneksi, 8 persen di
 1024, dan 61 persen di 4096.
 
+### Apa yang dilakukan max_recv_buf
+
+Tiap koneksi yang diterima mengalokasikan stream buffer-nya saat mulai dan
+melepasnya saat selesai. `max_recv_buf` adalah ukuran satu buffer tersebut,
+dan berapa banyak yang dipegang satu koneksi tergantung apa yang dilakukan
+site itu:
+
+| bentuk site | buffer per koneksi | pada default `8192` |
+| :- | :- | :- |
+| static saja, `public_dir` tanpa `upstreams` | 2, baca dan tulis sisi client | 16 KiB |
+| proxy, engine apa pun | 4, pasangan client dan pasangan upstream | 32 KiB |
+| grpc | 2 untuk client, plus 2 per koneksi h2 upstream yang benar-benar dibuka | 32 KiB dengan satu upstream |
+
+Ukurannya tidak membatasi apa pun: site dengan nilai terkecil tetap mem-parse
+head request penuh, tetap menyajikan file sepanjang apa pun, dan tetap
+meneruskan body sepanjang apa pun. Ia hanya menentukan berapa banyak byte yang
+berpindah per baca dan per tulis, jadi nilai lebih kecil berarti lebih banyak
+syscall untuk transfer besar, dan nilai lebih besar berarti lebih banyak
+resident memory di tiap koneksi yang terbuka.
+
+- File site boleh menyebut `max_recv_buf` sendiri, dan nilainya menimpa yang ini untuk site tersebut.
+- Rentangnya `1024` sampai `262144` byte di keduanya, dan nilai di luar itu fault, bukan diam-diam di-clamp.
+- Ini bukan seluruh biaya per koneksi. Koneksi http1 yang di-proxy juga memegang tiga head buffer masing-masing 16 KiB, yang merupakan batas protokol bukan pilihan tuning, dan koneksi TLS menambah sekitar 58 KiB untuk record dan plaintext buffer milik session-nya.
+
+Diukur pada site static demo project ini, resident memory per koneksi yang
+ditahan: 62,7 KiB di `1024`, 64,7 KiB di `2048`, 76,7 KiB di `8192`, dan
+124,7 KiB di `32768`. Site yang di-proxy adalah 112,7, 116,8, 140,8, dan
+236,8 KiB pada empat nilai yang sama.
+
 ### Key yang divalidasi tapi belum dipakai
 
-`dispatch` dan `max_recv_buf` di-parse, dicek rentangnya, dan dicetak oleh `zixer status`, dan tidak ada satu pun jalur serving yang membacanya. Menyetelnya tidak mengubah cara daemon berjalan:
-
-- `dispatch: async`, `dispatch: epoll`, dan `dispatch: uring` semuanya melayani lewat edge loop yang sama. Tiap accept loop menjalankan tiap koneksi sebagai task bersamaan.
-- `max_recv_buf: 1` tetap menyajikan file static 1 MiB byte per byte dan tetap meneruskan datagram 60.000 byte utuh, karena tiap edge menentukan ukuran buffer-nya sendiri.
+`dispatch` di-parse, dicek rentangnya, dan dicetak oleh `zixer status`, dan tidak ada satu pun jalur serving yang membacanya. `dispatch: async`, `dispatch: epoll`, dan `dispatch: uring` semuanya melayani lewat edge loop yang sama, dan tiap accept loop menjalankan tiap koneksi sebagai task bersamaan.
 
 Anggap keduanya reserved. Keduanya dipertahankan karena validasi adalah bagian yang pertama dibutuhkan operator (config yang nanti akan dipakai tetap harus ditolak sekarang bila salah), tapi jangan menghitung kapasitas mesin berdasarkan keduanya.
 
@@ -122,7 +148,7 @@ Satu file, satu site. `engine` dan `port` wajib, sisanya punya default atau opsi
 | public_prefix | tidak ada | prefix path yang diikat ke `public_dir`, mis. `/assets` | dengan `public_dir` | harus diawali `/`, butuh `public_dir` |
 | spa_fallback | tidak ada | file yang disajikan saat tidak ada file static yang cocok, mis. `index.html` | dengan `public_dir` | butuh `public_dir`, dan butuh `public_prefix` saat site juga punya upstreams |
 | kernel_backlog | nilai main.cfg | panjang listen queue untuk site ini | http1, http2, grpc, ditolak di udp, diterima tapi tidak dipakai di http3 | `0` fault |
-| max_recv_buf | nilai main.cfg | ukuran receive buffer yang dimaksudkan | hanya dilaporkan, sama seperti di main.cfg | di bawah `1` fault |
+| max_recv_buf | nilai main.cfg | jumlah byte untuk satu stream buffer per koneksi | site http1, http2, grpc, dan TLS | di luar `1024` sampai `262144` ia fault dan site jatuh ke nilai main.cfg |
 | upstream_timeout_ms | `30000` | berapa lama edge menunggu upstream yang diam sebelum menjawab 504 | http1, http2, http3, ditolak di grpc dan udp | butuh `upstreams`, `0` menunggu selamanya, di atas 4294967295 fault |
 
 `ip` dan `port` bersama menentukan socket yang mendengarkan. `0.0.0.0` bind ke semua interface, `127.0.0.1` bind loopback saja, `::` bind ke semua interface IPv6.
@@ -187,7 +213,7 @@ Set `upstream_timeout_ms: 0` pada site yang backend-nya memang berpikir lebih la
 | upstreams | ya | ya | ya | ya | ya, wajib |
 | public_dir, public_prefix, spa_fallback | ya | ya | ditolak | ya | ditolak |
 | kernel_backlog | ya | ya | ya | diterima, tanpa efek | ditolak |
-| max_recv_buf | diterima, tanpa efek | diterima, tanpa efek | diterima, tanpa efek | diterima, tanpa efek | diterima, tanpa efek |
+| max_recv_buf | menentukan ukuran stream buffer | menentukan ukuran stream buffer | menentukan ukuran stream buffer | diterima, tanpa efek | diterima, tanpa efek |
 | upstream_timeout_ms | ya | ya | ditolak | ya | ditolak |
 
 "Ditolak" berarti key-nya fault dengan fix hint dan site tidak start. "Diterima, tanpa efek" berarti file lolos validasi dan tidak ada yang membaca nilainya.
@@ -235,7 +261,7 @@ workers: 1
 dispatch: async
 logs_dir: /srv/zixer/logs
 sites_dir: /srv/zixer/sites
-max_recv_buf: 1472
+max_recv_buf: 8192
 kernel_backlog: 1024
 
 # /srv/zixer/sites/api.cfg
