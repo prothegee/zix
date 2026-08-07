@@ -243,7 +243,8 @@ An O(1) round-robin over the upstreams currently up:
 - Marking down is a swap-remove, marking up is an append.
 - A connect failure marks the upstream down. Re-admission happens at pick time after a 3000 ms cooldown, and the sweep is gated to at most once per 200 ms so its cost never lands on every pick.
 - A re-admitted upstream that is still dead is marked down again by the next failure. There is no probe thread.
-- Idle keep-alive connections are cached per upstream slot, up to 4 each. Overflow is closed instead of grown.
+- Idle keep-alive connections are cached per upstream slot, up to 4 each, and up to 32 across the whole site. Overflow is closed instead of grown.
+- A cached connection also ages out after 5000 ms. Expiry runs when one is taken, and a sweep thread per site runs it every 2500 ms so a site with no traffic still hands its connections back. An idle pooled connection is capacity taken from the backend.
 
 A short spinlock guards the pool and the cache, because connection tasks run concurrently within a site.
 
@@ -262,7 +263,9 @@ None of these are configurable today.
 | request head | 16 KiB | http1 edge |
 | headers per message | 64 | http1 edge |
 | static path | 512 bytes | `public_dir` plus the request path |
-| idle upstream connections | 4 per upstream | per site |
+| idle upstream connections | 4 per upstream, 32 in total | per site |
+| idle upstream connection age | 5000 ms | per site idle cache |
+| idle sweep interval | 2500 ms | per site reaper thread |
 | upstream cooldown | 3000 ms | per site pool |
 | concurrent QUIC connections | 64 | per http3 site |
 | udp flows | 64 | per udp site |

@@ -243,7 +243,8 @@ Round-robin O(1) atas upstream yang sedang up:
 - Menandai down adalah swap-remove, menandai up adalah append.
 - Kegagalan connect menandai upstream down. Penerimaan kembali terjadi saat pemilihan setelah cooldown 3000 ms, dan sapuannya dibatasi paling sering sekali per 200 ms supaya biayanya tidak pernah jatuh di tiap pemilihan.
 - Upstream yang diterima kembali tapi masih mati ditandai down lagi oleh kegagalan berikutnya. Tidak ada thread probe.
-- Koneksi keep-alive idle di-cache per slot upstream, sampai 4 per slot. Kelebihannya ditutup alih-alih ditumbuhkan.
+- Koneksi keep-alive idle di-cache per slot upstream, sampai 4 per slot, dan sampai 32 untuk seluruh site. Kelebihannya ditutup alih-alih ditumbuhkan.
+- Koneksi yang di-cache juga kedaluwarsa setelah 5000 ms. Pengecekan umur berjalan saat sebuah koneksi diambil, dan satu thread sweep per site menjalankannya tiap 2500 ms supaya site tanpa trafik pun tetap mengembalikan koneksinya. Koneksi idle di pool adalah kapasitas yang diambil dari backend.
 
 Spinlock pendek menjaga pool dan cache, karena task koneksi berjalan bersamaan di dalam satu site.
 
@@ -262,7 +263,9 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | head request | 16 KiB | edge http1 |
 | header per pesan | 64 | edge http1 |
 | path static | 512 byte | `public_dir` plus path request |
-| koneksi upstream idle | 4 per upstream | per site |
+| koneksi upstream idle | 4 per upstream, 32 total | per site |
+| umur koneksi upstream idle | 5000 ms | cache idle per site |
+| interval sweep idle | 2500 ms | thread reaper per site |
 | cooldown upstream | 3000 ms | pool per site |
 | koneksi QUIC bersamaan | 64 | per site http3 |
 | flow udp | 64 | per site udp |
