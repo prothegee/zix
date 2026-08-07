@@ -9,7 +9,7 @@ const MAIN_CFG_TEMPLATE =
     \\# zixer main configuration
     \\# numeric values accept integer math, i.e. 16 * 1024
     \\
-    \\workers: 1                      # 0 = all available threads
+    \\workers: 1                      # accept loops per tcp site, 0 = all available threads
     \\dispatch: async                 # async | epoll | uring
     \\logs_dir: {s}/logs
     \\sites_dir: {s}/sites
