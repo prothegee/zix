@@ -4,6 +4,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const conn_buffer = @import("conn_buffer.zig");
 const http1_head = @import("http1_head.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const http2_frames = @import("http2_frames.zig");
@@ -16,9 +17,6 @@ const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
 const Http2 = zix.Http2;
-
-/// Stream buffer size for the socket legs (matches the h1 edge).
-const STREAM_BUF_SIZE: usize = 8 * 1024;
 
 /// Streams the edge holds while one is being served, advertised as
 /// SETTINGS_MAX_CONCURRENT_STREAMS. Overflow answers REFUSED_STREAM, the
@@ -86,6 +84,9 @@ const Conn = struct {
     client_w: *std.Io.Writer,
     client_addr: std.Io.net.IpAddress,
     client_stream: ?std.Io.net.Stream,
+    /// The upstream leg's buffers. One stream is served at a time, so the
+    /// whole connection shares one pair.
+    buffers: conn_buffer.Set,
     decoder: Http2.HpackDecoder,
     write_lock: std.atomic.Value(bool) = .init(false),
     saw_settings: bool = false,
@@ -124,10 +125,11 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
     const io = proxy.io;
     defer client_stream.close(io);
 
-    var read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var client_reader = client_stream.reader(io, &read_buf);
-    var client_writer = client_stream.writer(io, &write_buf);
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
+    defer buffers.deinit(proxy.allocator);
+
+    var client_reader = client_stream.reader(io, buffers.client_read);
+    var client_writer = client_stream.writer(io, buffers.client_write);
 
     if (prefersH2(&client_reader.interface)) {
         serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream);
@@ -159,6 +161,9 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
     }) catch return;
     client_w.flush() catch return;
 
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = false, .upstream = proxy.pool != null }) catch return;
+    defer buffers.deinit(proxy.allocator);
+
     var conn = Conn{
         .proxy = proxy,
         .io = proxy.io,
@@ -166,6 +171,7 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
         .client_w = client_w,
         .client_addr = client_addr,
         .client_stream = client_stream,
+        .buffers = buffers,
         .decoder = Http2.HpackDecoder.init(),
     };
 
@@ -601,10 +607,8 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
         };
         const gate = upstreamGate(conn, conn_up);
 
-        var up_read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-        var up_write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-        var up_reader = conn_up.stream.reader(io, &up_read_buf);
-        var up_writer = conn_up.stream.writer(io, &up_write_buf);
+        var up_reader = conn_up.stream.reader(io, conn.buffers.upstream_read);
+        var up_writer = conn_up.stream.writer(io, conn.buffers.upstream_write);
 
         up_writer.interface.writeAll(upstream_head) catch {
             conn_up.stream.close(io);
@@ -1060,10 +1064,8 @@ fn serveConnect(conn: *Conn) Outcome {
             continue;
         };
 
-        var up_read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-        var up_write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-        var up_reader = conn_up.stream.reader(io, &up_read_buf);
-        var up_writer = conn_up.stream.writer(io, &up_write_buf);
+        var up_reader = conn_up.stream.reader(io, conn.buffers.upstream_read);
+        var up_writer = conn_up.stream.writer(io, conn.buffers.upstream_write);
 
         const sent = blk: {
             up_writer.interface.writeAll(upstream_head) catch break :blk false;
@@ -1259,6 +1261,10 @@ fn nowMs(io: std.Io) i64 {
 // --------------------------------------------------------- //
 
 const testing = std.testing;
+
+/// Socket leg size the rigs below bind with. The serving path takes its
+/// size from the site instead, see conn_buffer.
+const STREAM_BUF_SIZE: usize = 8 * 1024;
 const site_cfg = @import("site_cfg.zig");
 
 fn edgeStream(handle: std.posix.fd_t) std.Io.net.Stream {
