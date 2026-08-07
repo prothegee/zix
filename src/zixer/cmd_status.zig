@@ -133,6 +133,7 @@ pub fn renderSite(out: *std.Io.Writer, path: []const u8, name: []const u8, cfg: 
     if (cfg.spa_fallback) |spa_fallback| try out.print("spa_fallback: {s}\n", .{spa_fallback});
     if (cfg.kernel_backlog) |kernel_backlog| try out.print("kernel_backlog: {d}\n", .{kernel_backlog});
     if (cfg.max_recv_buf) |max_recv_buf| try out.print("max_recv_buf: {d}\n", .{max_recv_buf});
+    if (cfg.upstream_timeout_ms) |upstream_timeout_ms| try out.print("upstream_timeout_ms: {d}\n", .{upstream_timeout_ms});
 
     try renderFaults(out, faults);
     try out.writeAll("\n");
@@ -433,4 +434,35 @@ test "zix zixer: cmd status, render faults are indented under errors" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "status: error\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "errors:\n    workers: workers exceed") != null);
+}
+
+test "zix zixer: cmd status, a configured upstream read bound is reported back" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_status_timeout_test/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_status_timeout_test") catch {};
+
+    var init_buf: [2048]u8 = undefined;
+    var init_report = std.Io.Writer.fixed(&init_buf);
+    _ = try cmd_init.run(io, arena.allocator(), &init_report, .{ .path = test_root, .source = .ARG });
+
+    try writeSiteFile(io, arena.allocator(), test_root, "bounded.cfg", "engine: http1\nport: 8081\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 2 * 1000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "unbounded.cfg", "engine: http1\nport: 8082\nupstreams: 127.0.0.1:3000\n");
+
+    var report_buf: [8192]u8 = undefined;
+    var report = std.Io.Writer.fixed(&report_buf);
+    const code = try run(io, arena.allocator(), &report, .{ .path = test_root, .source = .ARG }, &.{});
+
+    try std.testing.expectEqual(@as(u8, 0), code);
+    try std.testing.expect(std.mem.indexOf(u8, report.buffered(), "upstream_timeout_ms: 2000") != null);
+
+    // A site that never set the key prints no line for it, the same as
+    // every other optional key.
+    const unbounded_at = std.mem.indexOf(u8, report.buffered(), "unbounded.cfg:").?;
+    try std.testing.expect(std.mem.indexOf(u8, report.buffered()[unbounded_at..], "upstream_timeout_ms") == null);
 }
