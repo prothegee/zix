@@ -7,6 +7,15 @@ const tcp_nodelay = @import("tcp_nodelay.zig");
 /// Idle connections kept per upstream slot. More than this closes on release.
 pub const IDLE_CAP: usize = 4;
 
+/// Idle connections kept across every slot of one site. A site with many
+/// upstreams would otherwise park IDLE_CAP against each of them at once.
+pub const TOTAL_IDLE_CAP: usize = 32;
+
+/// How long a parked connection may sit unused before it is closed. An idle
+/// pooled connection is capacity taken from the backend, so zixer gives it
+/// back rather than holding it for a request that may never come.
+pub const IDLE_TTL_MS: i64 = 5_000;
+
 /// One live connection to an upstream, tagged with its pool slot.
 pub const UpstreamConn = struct {
     stream: std.Io.net.Stream,
@@ -53,12 +62,25 @@ pub fn connect(io: std.Io, host: []const u8, port: u16, slot_index: u32) !Upstre
 /// Note:
 /// - Guarded by the same short spinlock idiom as the pool: acquire and
 ///   release run from concurrent edge connection tasks.
+/// - Three bounds apply together: IDLE_CAP per slot, TOTAL_IDLE_CAP across
+///   the site, and IDLE_TTL_MS of age. The two counts stop a burst from
+///   parking a backend's capacity, the age stops a quiet site from holding
+///   it forever.
+/// - Closing a socket is a syscall, so every path collects what it will
+///   close, releases the lock, and closes after.
 pub const IdleCache = struct {
     stacks: []Stack,
+    total_len: usize = 0,
     lock_flag: std.atomic.Value(bool) = .init(false),
 
+    /// One parked connection and when it was parked.
+    const Parked = struct {
+        stream: std.Io.net.Stream,
+        parked_at_ms: i64,
+    };
+
     const Stack = struct {
-        conns: [IDLE_CAP]std.Io.net.Stream,
+        conns: [IDLE_CAP]Parked,
         len: usize = 0,
     };
 
@@ -73,40 +95,115 @@ pub const IdleCache = struct {
     /// Close every idle conn and free the stacks.
     pub fn deinit(cache: *IdleCache, allocator: std.mem.Allocator, io: std.Io) void {
         for (cache.stacks) |*stack| {
-            for (stack.conns[0..stack.len]) |stream| stream.close(io);
+            for (stack.conns[0..stack.len]) |parked| parked.stream.close(io);
         }
 
         allocator.free(cache.stacks);
     }
 
     /// Pop an idle conn for slot_index, null when none is cached.
-    pub fn acquire(cache: *IdleCache, slot_index: u32) ?UpstreamConn {
+    ///
+    /// Note:
+    /// - The stack is last-in-first-out, so the freshest conn comes back
+    ///   first. Anything popped past its age is closed instead of handed
+    ///   out, which keeps a stale socket out of a live exchange.
+    ///
+    /// Param:
+    /// io - std.Io
+    /// slot_index - u32
+    /// now_ms - i64 (same clock release stamps with)
+    ///
+    /// Return:
+    /// - ?UpstreamConn with reused = true
+    pub fn acquire(cache: *IdleCache, io: std.Io, slot_index: u32, now_ms: i64) ?UpstreamConn {
+        var expired: [IDLE_CAP]std.Io.net.Stream = undefined;
+        var expired_len: usize = 0;
+        var taken: ?std.Io.net.Stream = null;
+
         cache.lockAcquire();
-        defer cache.lockRelease();
-
         const stack = &cache.stacks[slot_index];
-        if (stack.len == 0) return null;
+        while (stack.len > 0) {
+            stack.len -= 1;
+            cache.total_len -= 1;
 
-        stack.len -= 1;
+            const parked = stack.conns[stack.len];
+            if (now_ms - parked.parked_at_ms >= IDLE_TTL_MS) {
+                expired[expired_len] = parked.stream;
+                expired_len += 1;
+                continue;
+            }
 
-        return .{ .stream = stack.conns[stack.len], .slot_index = slot_index, .reused = true };
+            taken = parked.stream;
+            break;
+        }
+        cache.lockRelease();
+
+        for (expired[0..expired_len]) |stream| stream.close(io);
+
+        const stream = taken orelse return null;
+
+        return .{ .stream = stream, .slot_index = slot_index, .reused = true };
     }
 
-    /// Park a still-usable conn for reuse. A full stack closes it instead.
-    pub fn release(cache: *IdleCache, io: std.Io, conn: UpstreamConn) void {
+    /// Park a still-usable conn for reuse. A full stack, a full site, or a
+    /// conn the caller kept past its age closes it instead.
+    ///
+    /// Param:
+    /// io - std.Io
+    /// conn - UpstreamConn (the caller gives ownership up either way)
+    /// now_ms - i64 (stamped on the entry, drives the age bound)
+    pub fn release(cache: *IdleCache, io: std.Io, conn: UpstreamConn, now_ms: i64) void {
         cache.lockAcquire();
 
         const stack = &cache.stacks[conn.slot_index];
-        if (stack.len == IDLE_CAP) {
+        if (stack.len == IDLE_CAP or cache.total_len == TOTAL_IDLE_CAP) {
             cache.lockRelease();
             conn.stream.close(io);
 
             return;
         }
 
-        stack.conns[stack.len] = conn.stream;
+        stack.conns[stack.len] = .{ .stream = conn.stream, .parked_at_ms = now_ms };
         stack.len += 1;
+        cache.total_len += 1;
         cache.lockRelease();
+    }
+
+    /// Close every parked conn that has sat longer than IDLE_TTL_MS.
+    ///
+    /// Note:
+    /// - This is what a quiet site needs. Expiry on acquire only fires when
+    ///   a request arrives, and the site holding connections it is not using
+    ///   is exactly the case with no requests.
+    ///
+    /// Return:
+    /// - usize (how many conns this sweep closed)
+    pub fn sweepExpired(cache: *IdleCache, io: std.Io, now_ms: i64) usize {
+        var expired: [TOTAL_IDLE_CAP]std.Io.net.Stream = undefined;
+        var expired_len: usize = 0;
+
+        cache.lockAcquire();
+        for (cache.stacks) |*stack| {
+            var kept: usize = 0;
+            for (stack.conns[0..stack.len]) |parked| {
+                if (now_ms - parked.parked_at_ms >= IDLE_TTL_MS and expired_len < expired.len) {
+                    expired[expired_len] = parked.stream;
+                    expired_len += 1;
+                    continue;
+                }
+
+                stack.conns[kept] = parked;
+                kept += 1;
+            }
+
+            cache.total_len -= stack.len - kept;
+            stack.len = kept;
+        }
+        cache.lockRelease();
+
+        for (expired[0..expired_len]) |stream| stream.close(io);
+
+        return expired_len;
     }
 
     /// Idle conns currently parked for one slot.
@@ -115,6 +212,14 @@ pub const IdleCache = struct {
         defer cache.lockRelease();
 
         return cache.stacks[slot_index].len;
+    }
+
+    /// Idle conns currently parked across every slot of this site.
+    pub fn totalIdle(cache: *IdleCache) usize {
+        cache.lockAcquire();
+        defer cache.lockRelease();
+
+        return cache.total_len;
     }
 
     fn lockAcquire(cache: *IdleCache) void {
@@ -191,19 +296,21 @@ test "zix zixer: upstream conn, idle cache round trips a conn per slot" {
     var cache = try IdleCache.init(std.testing.allocator, 2);
     defer cache.deinit(std.testing.allocator, io);
 
-    try std.testing.expectEqual(@as(?UpstreamConn, null), cache.acquire(0));
+    try std.testing.expectEqual(@as(?UpstreamConn, null), cache.acquire(io, 0, 0));
 
-    cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = 0, .reused = false });
+    cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = 0, .reused = false }, 0);
     try std.testing.expectEqual(@as(usize, 1), cache.idleCount(0));
     try std.testing.expectEqual(@as(usize, 0), cache.idleCount(1));
+    try std.testing.expectEqual(@as(usize, 1), cache.totalIdle());
 
-    const back = cache.acquire(0).?;
+    const back = cache.acquire(io, 0, 1).?;
     try std.testing.expect(back.reused);
     try std.testing.expectEqual(fds[0], back.stream.socket.handle);
     try std.testing.expectEqual(@as(usize, 0), cache.idleCount(0));
+    try std.testing.expectEqual(@as(usize, 0), cache.totalIdle());
 
     // fds[0] goes back in so deinit closes it.
-    cache.release(io, back);
+    cache.release(io, back, 1);
 }
 
 test "zix zixer: upstream conn, idle cache closes overflow instead of growing" {
@@ -219,16 +326,126 @@ test "zix zixer: upstream conn, idle cache closes overflow instead of growing" {
     var pairs: [IDLE_CAP + 1][2]std.posix.fd_t = undefined;
     for (&pairs) |*fds| {
         try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, fds));
-        cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = 0, .reused = false });
+        cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = 0, .reused = false }, 0);
     }
     defer for (&pairs) |*fds| {
         _ = std.os.linux.close(fds[1]);
     };
 
     try std.testing.expectEqual(@as(usize, IDLE_CAP), cache.idleCount(0));
+    try std.testing.expectEqual(@as(usize, IDLE_CAP), cache.totalIdle());
 
     // The overflow conn was closed on release: its peer reads EOF.
     var probe: [1]u8 = undefined;
     const got = std.os.linux.read(pairs[IDLE_CAP][1], &probe, 1);
     try std.testing.expectEqual(@as(usize, 0), got);
+}
+
+test "zix zixer: upstream conn, idle cache refuses to park past the site total" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        // non-linux region: the fixture parks raw socketpair descriptors,
+        // which only linux hands out here. Nothing is bound.
+        std.log.info("idle cache total bound test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Enough slots that the per-slot cap alone would allow far more than the
+    // site total: the total is what has to stop it.
+    const slot_count = TOTAL_IDLE_CAP / IDLE_CAP + 2;
+    var cache = try IdleCache.init(std.testing.allocator, slot_count);
+    defer cache.deinit(std.testing.allocator, io);
+
+    var pairs: [(TOTAL_IDLE_CAP / IDLE_CAP + 2) * IDLE_CAP][2]std.posix.fd_t = undefined;
+    defer for (&pairs) |*fds| {
+        _ = std.os.linux.close(fds[1]);
+    };
+
+    for (&pairs, 0..) |*fds, i| {
+        try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, fds));
+        cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = @intCast(i / IDLE_CAP), .reused = false }, 0);
+    }
+
+    try std.testing.expectEqual(TOTAL_IDLE_CAP, cache.totalIdle());
+
+    // The first conn past the site total was closed, so its peer reads EOF.
+    var probe: [1]u8 = undefined;
+    const got = std.os.linux.read(pairs[TOTAL_IDLE_CAP][1], &probe, 1);
+    try std.testing.expectEqual(@as(usize, 0), got);
+}
+
+test "zix zixer: upstream conn, an aged conn is closed instead of handed out" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        // non-linux region: the fixture parks raw socketpair descriptors,
+        // which only linux hands out here. Nothing is bound.
+        std.log.info("idle cache age bound test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[1]);
+
+    var cache = try IdleCache.init(std.testing.allocator, 1);
+    defer cache.deinit(std.testing.allocator, io);
+
+    cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = 0, .reused = false }, 1000);
+
+    // Inside the age it comes back, past it the caller is told there is
+    // nothing cached and the socket is gone.
+    try std.testing.expectEqual(@as(?UpstreamConn, null), cache.acquire(io, 0, 1000 + IDLE_TTL_MS));
+    try std.testing.expectEqual(@as(usize, 0), cache.totalIdle());
+
+    var probe: [1]u8 = undefined;
+    const got = std.os.linux.read(fds[1], &probe, 1);
+    try std.testing.expectEqual(@as(usize, 0), got);
+}
+
+test "zix zixer: upstream conn, sweep closes the aged and keeps the fresh" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        // non-linux region: the fixture parks raw socketpair descriptors,
+        // which only linux hands out here. Nothing is bound.
+        std.log.info("idle cache sweep test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var aged: [2]std.posix.fd_t = undefined;
+    var fresh: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &aged));
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fresh));
+    defer _ = std.os.linux.close(aged[1]);
+    defer _ = std.os.linux.close(fresh[1]);
+
+    var cache = try IdleCache.init(std.testing.allocator, 2);
+    defer cache.deinit(std.testing.allocator, io);
+
+    cache.release(io, .{ .stream = fakeStream(aged[0]), .slot_index = 0, .reused = false }, 0);
+    cache.release(io, .{ .stream = fakeStream(fresh[0]), .slot_index = 1, .reused = false }, IDLE_TTL_MS);
+
+    try std.testing.expectEqual(@as(usize, 1), cache.sweepExpired(io, IDLE_TTL_MS));
+    try std.testing.expectEqual(@as(usize, 0), cache.idleCount(0));
+    try std.testing.expectEqual(@as(usize, 1), cache.idleCount(1));
+    try std.testing.expectEqual(@as(usize, 1), cache.totalIdle());
+
+    // The aged peer sees EOF, the fresh one is still open.
+    var probe: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.read(aged[1], &probe, 1));
+
+    const fresh_conn = cache.acquire(io, 1, IDLE_TTL_MS).?;
+    try std.testing.expectEqual(fresh[0], fresh_conn.stream.socket.handle);
+    cache.release(io, fresh_conn, IDLE_TTL_MS);
 }
