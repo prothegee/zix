@@ -18,6 +18,8 @@ const example_names = [_][]const u8{
     "deserialize",
     "strings",
     "unknown_keys",
+    "bench_serialize",
+    "bench_deserialize",
 };
 
 /// The behaviour tier: what each piece does when it is handed what it wants.
