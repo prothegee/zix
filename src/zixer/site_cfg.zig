@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const cfg_scanner = @import("cfg_scanner.zig");
+const conn_buffer = @import("conn_buffer.zig");
 const fault = @import("fault.zig");
 
 pub const Engine = enum {
@@ -171,12 +172,17 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
             },
             .max_recv_buf => {
                 const value = try fault.evalNumber(faults, entry) orelse continue;
-                if (value < 1) {
-                    try faults.add(entry.key, "must be at least 1", .{});
+                const bytes = std.math.cast(usize, value) orelse {
+                    try faults.add(entry.key, "must be {d}-{d} bytes", .{ conn_buffer.MIN_BYTES, conn_buffer.MAX_BYTES });
+                    continue;
+                };
+
+                if (!conn_buffer.inRange(bytes)) {
+                    try faults.add(entry.key, "must be {d}-{d} bytes", .{ conn_buffer.MIN_BYTES, conn_buffer.MAX_BYTES });
                     continue;
                 }
 
-                cfg.max_recv_buf = @intCast(value);
+                cfg.max_recv_buf = bytes;
             },
             .upstream_timeout_ms => {
                 const value = try fault.evalNumber(faults, entry) orelse continue;
@@ -361,6 +367,27 @@ test "zix zixer: site cfg, full proxied site parses clean" {
     try testing.expectEqual(@as(u16, 3001), cfg.upstreams[1].port);
     try testing.expectEqualStrings("/assets", cfg.public_prefix.?);
     try testing.expectEqual(@as(usize, 16384), cfg.max_recv_buf.?);
+}
+
+test "zix zixer: site cfg, a max recv buf outside the range faults and stays unset" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: http1\n" ++
+        "port: 8080\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "max_recv_buf: 512\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("max_recv_buf", faults.slice()[0].key);
+
+    // Unset, so the site falls back to the main.cfg value rather than to a
+    // number the file asked for and did not get.
+    try testing.expectEqual(@as(?usize, null), cfg.max_recv_buf);
 }
 
 test "zix zixer: site cfg, static-only http3 site parses clean" {
