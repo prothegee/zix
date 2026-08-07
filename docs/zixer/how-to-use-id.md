@@ -320,6 +320,7 @@ Belum ada output log. `logs_dir` harus ada karena `status` memeriksanya, dan tid
 | `bind failed (BadUpstreamAddress)` | upstream site udp bukan literal ip | tulis alamatnya, bukan nama |
 | `502 all upstreams failed` | tiap backend menolak atau gagal | periksa backend, dan pastikan alamat upstream adalah literal ip |
 | `503 no upstream available` | tiap backend sedang di jendela cooldown-nya | periksa backend, coba lagi beberapa detik kemudian |
+| `504 upstream timeout` | backend menerima koneksi lalu diam selama `upstream_timeout_ms` | periksa backend, naikkan nilainya, atau set `upstream_timeout_ms: 0` kalau memang berpikir selama itu |
 | `421 misdirected request` | Host tidak dicakup `tls_cert` | pakai nama yang dicakup certificate, atau terbitkan certificate yang mencakupnya |
 | `404 not found` di path static | file-nya tidak ada di bawah `public_dir` | periksa path-nya, dan ingat `public_prefix` tidak dipotong sebelum digabungkan |
 | challenge acme menjawab 404 | token tidak ada di bawah webroot | ia harus ada di `<acme_webroot>/.well-known/acme-challenge/<token>` |

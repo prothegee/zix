@@ -320,6 +320,7 @@ There is no log output yet. `logs_dir` must exist because `status` checks it, an
 | `bind failed (BadUpstreamAddress)` | a udp site upstream is not an ip literal | write the address, not a name |
 | `502 all upstreams failed` | every backend refused or failed | check the backend, and that the upstream address is an ip literal |
 | `503 no upstream available` | every backend is in its cooldown window | check the backends, retry after a few seconds |
+| `504 upstream timeout` | the backend accepted the connection and then said nothing for `upstream_timeout_ms` | check the backend, raise the value, or set `upstream_timeout_ms: 0` if it really thinks that long |
 | `421 misdirected request` | the Host is not covered by `tls_cert` | use a name the certificate covers, or issue one that covers it |
 | `404 not found` on a static path | the file is not under `public_dir` | check the path, and remember that `public_prefix` is not stripped before the join |
 | the acme challenge 404s | the token is not under the webroot | it must be at `<acme_webroot>/.well-known/acme-challenge/<token>` |
