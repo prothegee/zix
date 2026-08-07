@@ -110,8 +110,13 @@ pub fn addSteps(
         "tests/jzon/behaviour/escape_vector_test.zig",
         "tests/jzon/behaviour/integer_test.zig",
         "tests/jzon/behaviour/float_test.zig",
+        "tests/jzon/behaviour/reflect_test.zig",
+        "tests/jzon/behaviour/fields_test.zig",
         "tests/jzon/behaviour/std_emitter_test.zig",
         "tests/jzon/behaviour/generated_emitter_test.zig",
+        "tests/jzon/behaviour/std_parser_test.zig",
+        "tests/jzon/behaviour/scanner_parser_test.zig",
+        "tests/jzon/behaviour/round_trip_test.zig",
     };
     const last_behaviour = addSuites(b, target, optimize, zix, foreign_target, behaviour_step, &behaviour_suites, null);
 
@@ -126,8 +131,12 @@ pub fn addSteps(
         "tests/jzon/edge/escape_vector_test.zig",
         "tests/jzon/edge/integer_test.zig",
         "tests/jzon/edge/float_test.zig",
+        "tests/jzon/edge/reflect_test.zig",
+        "tests/jzon/edge/fields_test.zig",
         "tests/jzon/edge/std_emitter_test.zig",
         "tests/jzon/edge/generated_emitter_test.zig",
+        "tests/jzon/edge/std_parser_test.zig",
+        "tests/jzon/edge/scanner_parser_test.zig",
     };
     _ = addSuites(b, target, optimize, zix, foreign_target, edge_step, &edge_suites, last_behaviour);
 
