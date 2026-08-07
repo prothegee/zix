@@ -194,6 +194,7 @@ __*Maintained Platforms:*__
 - "Nice to have" dan "mungkin kita perlu ini" bersifat tersier.
 - Selalu perbaiki dari sisi kita terlebih dahulu daripada dari sisi fitur Zig.
 - Jika bias/ambigu, coba diskusikan. Minimal libatkan 1-2 entitas lain.
+- Jangan gunakan abstraksi yang bergantung pada mesin atau tujuan tertentu, hindarilah jika memang harus.
 - Fast path raw-syscall Linux x86_64/aarch64 itu guarded, perubahan di situ bisa merusak implementasi.
 - Kamu dan timmu (Junior/Mid/Senior) menggunakan bahasa selain Inggris, kamu bisa berkontribusi dalam bahasa tersebut.
 
