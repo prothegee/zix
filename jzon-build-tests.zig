@@ -106,16 +106,21 @@ pub fn addSteps(
     const behaviour_suites = [_][]const u8{
         "tests/jzon/behaviour/sink_test.zig",
         "tests/jzon/behaviour/cursor_test.zig",
+        "tests/jzon/behaviour/cursor_vector_test.zig",
         "tests/jzon/behaviour/escape_test.zig",
         "tests/jzon/behaviour/escape_vector_test.zig",
         "tests/jzon/behaviour/integer_test.zig",
         "tests/jzon/behaviour/float_test.zig",
         "tests/jzon/behaviour/reflect_test.zig",
         "tests/jzon/behaviour/fields_test.zig",
+        "tests/jzon/behaviour/scan_test.zig",
+        "tests/jzon/behaviour/skip_test.zig",
+        "tests/jzon/behaviour/string_value_test.zig",
         "tests/jzon/behaviour/std_emitter_test.zig",
         "tests/jzon/behaviour/generated_emitter_test.zig",
         "tests/jzon/behaviour/std_parser_test.zig",
         "tests/jzon/behaviour/scanner_parser_test.zig",
+        "tests/jzon/behaviour/generated_parser_test.zig",
         "tests/jzon/behaviour/round_trip_test.zig",
     };
     const last_behaviour = addSuites(b, target, optimize, zix, foreign_target, behaviour_step, &behaviour_suites, null);
@@ -127,16 +132,21 @@ pub fn addSteps(
     const edge_suites = [_][]const u8{
         "tests/jzon/edge/sink_test.zig",
         "tests/jzon/edge/cursor_test.zig",
+        "tests/jzon/edge/cursor_vector_test.zig",
         "tests/jzon/edge/escape_test.zig",
         "tests/jzon/edge/escape_vector_test.zig",
         "tests/jzon/edge/integer_test.zig",
         "tests/jzon/edge/float_test.zig",
         "tests/jzon/edge/reflect_test.zig",
         "tests/jzon/edge/fields_test.zig",
+        "tests/jzon/edge/scan_test.zig",
+        "tests/jzon/edge/skip_test.zig",
+        "tests/jzon/edge/string_value_test.zig",
         "tests/jzon/edge/std_emitter_test.zig",
         "tests/jzon/edge/generated_emitter_test.zig",
         "tests/jzon/edge/std_parser_test.zig",
         "tests/jzon/edge/scanner_parser_test.zig",
+        "tests/jzon/edge/generated_parser_test.zig",
     };
     _ = addSuites(b, target, optimize, zix, foreign_target, edge_step, &edge_suites, last_behaviour);
 
