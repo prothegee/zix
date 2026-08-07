@@ -16,7 +16,7 @@ const MAIN_CFG_TEMPLATE =
     \\
     \\# per-listener defaults, site files may override
     \\kernel_backlog: 1024
-    \\max_recv_buf: 1472
+    \\max_recv_buf: 8192              # per-connection stream buffer, one leg
     \\
 ;
 
