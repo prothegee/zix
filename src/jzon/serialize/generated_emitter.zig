@@ -22,6 +22,7 @@ const escape = @import("../escape.zig");
 const escape_vector = @import("../escape_vector.zig");
 const float = @import("../float.zig");
 const integer = @import("../integer.zig");
+const reflect = @import("../reflect.zig");
 const Sink = @import("../sink.zig").Sink;
 
 /// How rendering can fail. Nothing is allocated, so a full buffer is all of it.
@@ -88,7 +89,7 @@ pub fn emit(sink: *Sink, value: anytype, comptime shape: Shape) Error!void {
         },
 
         .@"enum" => {
-            if (!isExhaustive(Value)) @compileError(
+            if (!reflect.isExhaustive(Value)) @compileError(
                 "jzon emitter: " ++ @typeName(Value) ++
                     " is non-exhaustive, so a value it carries may have no tag name",
             );
@@ -181,19 +182,6 @@ fn fieldKey(comptime name: []const u8, comptime first: bool) []const u8 {
 
         return &final;
     }
-}
-
-/// Whether every value of an enum type has a tag name.
-///
-/// Note:
-/// - Zig 0.16 carries `is_exhaustive`, 0.17 carries `mode`. Asking which field
-///   exists keeps one call site working on both.
-inline fn isExhaustive(comptime T: type) bool {
-    const info = @typeInfo(T).@"enum";
-
-    if (@hasField(@TypeOf(info), "is_exhaustive")) return info.is_exhaustive;
-
-    return info.mode == .exhaustive;
 }
 
 // --------------------------------------------------------- //
