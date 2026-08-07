@@ -4,21 +4,20 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const conn_buffer = @import("conn_buffer.zig");
 const http2_frames = @import("http2_frames.zig");
 const upstream_conn = @import("upstream_conn.zig");
 
 const Http2 = zix.Http2;
 
-/// Stream buffer size for both directions of the upstream socket.
-pub const STREAM_BUF_SIZE: usize = 8 * 1024;
-
 /// One h2 connection toward an upstream, multiplexing the client streams
 /// routed to it.
 ///
 /// Note:
-/// - The struct binds reader and writer interfaces to its own buffers, so
+/// - The struct binds reader and writer interfaces to buffers it owns, so
 ///   it must stay at one address after openInto (the edge session owns it
-///   in a fixed array).
+///   in a fixed array). The buffers themselves are one allocation, sized
+///   by the site, and only a connection that actually opened holds any.
 /// - Writes come from the up pump (HEADERS, DATA) and the down pump
 ///   (grants, acks) concurrently, every write helper serializes through
 ///   write_lock and flushes.
@@ -27,8 +26,7 @@ pub const STREAM_BUF_SIZE: usize = 8 * 1024;
 pub const UpConn = struct {
     stream: std.Io.net.Stream,
     slot_index: u32,
-    read_buf: [STREAM_BUF_SIZE]u8 = undefined,
-    write_buf: [STREAM_BUF_SIZE]u8 = undefined,
+    buffers: conn_buffer.Set = .empty,
     reader: std.Io.net.Stream.Reader = undefined,
     writer: std.Io.net.Stream.Writer = undefined,
     write_lock: std.atomic.Value(bool) = .init(false),
@@ -45,21 +43,33 @@ pub const UpConn = struct {
 ///
 /// Param:
 /// up_conn - *UpConn (initialized in place, address must be final)
+/// allocator - std.mem.Allocator (owns this leg's buffers until close)
+/// stream_buf_bytes - usize (one direction's size, resolved by the site)
 ///
 /// Return:
 /// - void, up_conn is ready for stream traffic
-/// - error.BadUpstreamAddress or any connect / write error
-pub fn openInto(up_conn: *UpConn, io: std.Io, host: []const u8, port: u16, slot_index: u32) !void {
+/// - error.OutOfMemory, error.BadUpstreamAddress, or any connect / write error
+pub fn openInto(up_conn: *UpConn, io: std.Io, allocator: std.mem.Allocator, stream_buf_bytes: usize, host: []const u8, port: u16, slot_index: u32) !void {
+    const buffers = try conn_buffer.Set.init(allocator, stream_buf_bytes, .{ .client = false, .upstream = true });
+    errdefer buffers.deinit(allocator);
+
     const conn = try upstream_conn.connect(io, host, port, slot_index);
     errdefer conn.stream.close(io);
 
-    up_conn.* = .{ .stream = conn.stream, .slot_index = slot_index };
-    up_conn.reader = up_conn.stream.reader(io, &up_conn.read_buf);
-    up_conn.writer = up_conn.stream.writer(io, &up_conn.write_buf);
+    up_conn.* = .{ .stream = conn.stream, .slot_index = slot_index, .buffers = buffers };
+    up_conn.reader = up_conn.stream.reader(io, up_conn.buffers.upstream_read);
+    up_conn.writer = up_conn.stream.writer(io, up_conn.buffers.upstream_write);
 
     try up_conn.writer.interface.writeAll(Http2.PREFACE);
     try http2_frames.writeSettings(&up_conn.writer.interface, &.{});
     try up_conn.writer.interface.flush();
+}
+
+/// Close the socket and release the buffers openInto took.
+pub fn close(up_conn: *UpConn, io: std.Io, allocator: std.mem.Allocator) void {
+    up_conn.stream.close(io);
+    up_conn.buffers.deinit(allocator);
+    up_conn.buffers = .empty;
 }
 
 /// Next client-side stream id on this connection (odd, increasing). The
@@ -168,8 +178,8 @@ test "zix zixer: grpc upstream, open runs the client preface on the wire" {
     defer server.deinit(io);
 
     var up_conn = UpConn{ .stream = undefined, .slot_index = 3 };
-    try openInto(&up_conn, io, "127.0.0.1", 39840, 3);
-    defer up_conn.stream.close(io);
+    try openInto(&up_conn, io, testing.allocator, conn_buffer.DEFAULT_BYTES, "127.0.0.1", 39840, 3);
+    defer close(&up_conn, io, testing.allocator);
 
     const accepted = try server.accept(io);
     defer accepted.close(io);
