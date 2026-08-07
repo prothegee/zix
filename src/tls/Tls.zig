@@ -61,6 +61,14 @@ pub const verifyChain = @import("cert_verify.zig").verifyChain;
 /// PEM to DER decode (a single block), for loading a cert / trust anchor from a .pem file.
 pub const pemToDer = @import("pem.zig").pemToDer;
 
+/// Check an RSA signature with std's verifier, the way a peer would (RFC 8017 8.1.2 and 8.2.2).
+/// Independent of zix's own RSA code, and spelled the same on both supported Zig versions.
+pub const verifyRsaPss = @import("std_rsa_verify.zig").verifyPss;
+pub const verifyRsaPkcs1v15 = @import("std_rsa_verify.zig").verifyPkcs1v15;
+/// False on a Zig whose own PSS verifier is broken, see std_rsa_verify.zig. Temporary, zig 0.17
+/// only. zix signs and verifies PSS itself, so nothing it ships is affected.
+pub const std_pss_verify_usable = @import("std_rsa_verify.zig").PSS_USABLE;
+
 pub const Alpn = extensions.Alpn;
 pub const Alert = alert.Alert;
 pub const fatal_record_len = alert.fatal_record_len;
