@@ -73,7 +73,7 @@ Key dicocokkan berdasarkan nama terhadap sebuah enum, jadi key tak dikenal menja
 | dispatch | salah satu dari `async`, `epoll`, `uring`, dan di luar Linux hanya `async` |
 | logs_dir, sites_dir | diambil apa adanya, di-default ke `<root>/logs` dan `<root>/sites` bila tidak ada |
 | kernel_backlog | muat di `u31`, minimal 1 |
-| max_recv_buf | minimal 1 |
+| max_recv_buf | muat di `usize`, antara 1024 dan 262144 byte |
 
 `zixer status` menambahkan pemeriksaan keberadaan kedua direktori setelah parse.
 
@@ -195,6 +195,42 @@ tersangkut di dalam sebuah koneksi, bukan di accept.
 
 <br>
 
+## Buffer koneksi
+
+Tiap koneksi yang diterima mengalokasikan satu blok lalu membaginya menjadi
+leg yang dibutuhkan, dan melepasnya saat koneksi selesai. `conn_buffer.zig`
+memiliki ukurannya, dan `max_recv_buf` (nilai site, kalau tidak ada nilai
+main.cfg) adalah ukuran satu leg.
+
+| bentuk site | leg yang diminta | blok |
+| :- | :- | :- |
+| static saja | baca client, tulis client | 2 leg |
+| http1 yang di-proxy | pasangan client, plus pasangan upstream | 4 leg |
+| TLS | pasangan client membawa ciphertext, sisi plaintext memakai buffer milik session | 2 leg, plus 2 lagi ketika request loop mencapai pool |
+| http2 atau grpc di atas reader dan writer yang sudah diserahkan | pasangan upstream saja | 2 leg |
+| grpc | pasangan client, plus satu pasang per koneksi h2 upstream yang benar-benar dibuka | 2 leg, plus 2 per upstream yang terbuka |
+
+Heap, bukan stack, karena dua hal. Array stack diukur saat compile, jadi
+sebuah site tidak akan bisa menurunkannya. Dan array yang kebesaran tidak
+gratis: Zig menulisi local yang `undefined`, jadi mencadangkan 64 KiB untuk
+memakai 2 KiB tetap membayar 64 KiB resident memory. Terukur, dua local 64 KiB
+menggantikan dua local 8 KiB memindahkan koneksi yang ditahan dari 48,6 ke
+172,6 KiB.
+
+Alokasi yang gagal menjawab `503` lewat buffer stack kecil lalu menutup,
+bukan membuang socket tanpa status.
+
+Yang tetap di stack, karena ia batas protokol dan bukan pilihan tuning: head
+buffer request, head upstream hasil rebuild, head response (16 KiB
+masing-masing), serta record dan plaintext buffer milik TLS session.
+
+Body pump tidak memegang copy array sama sekali. `pumpExact` dan
+`pumpUntilClose` sama-sama memindahkan byte langsung dari reader ke writer,
+dan hasil nol berarti reader menaruhnya di buffer sendiri, jadi pass
+berikutnya yang menguras, bukan pump menganggapnya koneksi tertutup.
+
+<br>
+
 ## Edge http1
 
 ```mermaid
@@ -310,7 +346,7 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | baris control | 512 byte | request dan reply control socket |
 | nama site | 128 byte | control socket |
 | path control socket | 108 byte di Linux | seluruh string `<root>/control.sock` |
-| head request | 16 KiB | edge http1 |
+| head request | 16 KiB | edge http1, dan head upstream hasil rebuild serta head response berukuran sama |
 | header per pesan | 64 | edge http1 |
 | path static | 512 byte | `public_dir` plus path request |
 | koneksi upstream idle | 4 per upstream, 32 total, dibagi di antara worker | per site |
@@ -322,6 +358,9 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | datagram udp | 65535 byte | per site udp |
 | kegagalan accept berturut-turut sebelum loop menyerah | 100 | control loop dan tiap accept loop worker |
 | percobaan wake saat shutdown | 200 per worker, satu per milidetik | per site, sampai tiap accept keluar |
+| rentang stream buffer | 1024 sampai 262144 byte | nilai yang boleh dipakai `max_recv_buf` |
+| byte yang boleh dipindah satu panggilan body pump | 16 KiB | edge http1, pump-nya mengulang melewatinya |
+| alternative signal stack | mati | seluruh executable, `std_options` di `zixer.zig` |
 
 <br>
 
@@ -333,6 +372,6 @@ Tiap modul membawa test-nya sendiri berdampingan dengan kodenya, dijalankan deng
 | :- | :- |
 | test scanner dan math | grammar, comment, list, dan tiap aturan aritmetika |
 | test skema | tiap default, tiap teks fault, dan tiap aturan lintas field |
-| test daemon dan runtime | bahwa nilai hasil parse benar-benar sampai ke bind, mis. backlog yang di-resolve sebuah site dan jumlah worker yang dipakai site saat start |
+| test daemon dan runtime | bahwa nilai hasil parse benar-benar sampai ke bind, mis. backlog yang di-resolve sebuah site, jumlah worker yang dipakai site saat start, dan ukuran buffer yang dialokasikan koneksinya |
 
 Matriks demo di bawah `examples/proxies` adalah lapisan ujung ke ujung: `zig build zixer-test-runner-all` menyalakan tiap upstream, mem-bind site demo itu di root sementara, menjalankan client native lewat edge, dan melaporkan satu baris per demo.

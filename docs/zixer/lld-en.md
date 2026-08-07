@@ -73,7 +73,7 @@ Keys are matched by name against an enum, so an unknown key is a typo report rat
 | dispatch | one of `async`, `epoll`, `uring`, and off Linux only `async` |
 | logs_dir, sites_dir | taken as written, defaulted to `<root>/logs` and `<root>/sites` when absent |
 | kernel_backlog | fits `u31`, at least 1 |
-| max_recv_buf | at least 1 |
+| max_recv_buf | fits `usize`, between 1024 and 262144 bytes |
 
 `zixer status` adds an existence check on both directories after the parse.
 
@@ -193,6 +193,41 @@ accept.
 
 <br>
 
+## Connection buffers
+
+Every accepted connection allocates one block and slices it into the legs it
+needs, then frees it when the connection ends. `conn_buffer.zig` owns the
+sizes, and `max_recv_buf` (the site value, else the main.cfg one) is the size
+of one leg.
+
+| the site's shape | legs asked for | block |
+| :- | :- | :- |
+| static only | client read, client write | 2 legs |
+| proxied http1 | the client pair, plus the upstream pair | 4 legs |
+| TLS | the client pair carries ciphertext, the plaintext side is the session's own buffers | 2 legs, plus 2 more when the request loop reaches a pool |
+| http2 or grpc over a handed-over reader and writer | the upstream pair alone | 2 legs |
+| grpc | the client pair, plus a pair per upstream h2 connection that actually opens | 2 legs, plus 2 per open upstream |
+
+Heap and not the stack, for two reasons. A stack array is sized at compile
+time, so a site could not lower it. And an oversized one is not free: Zig
+writes over an `undefined` local, so reserving 64 KiB to use 2 KiB costs the
+whole 64 KiB in resident memory. Measured, two 64 KiB locals in place of two
+8 KiB ones moved a held connection from 48.6 to 172.6 KiB.
+
+An allocation that fails answers `503` off a small stack buffer and closes,
+rather than dropping the socket with no status.
+
+What stays on the stack, because it is a protocol limit rather than a tuning
+choice: the request head buffer, the rebuilt upstream head, the response head
+(16 KiB each), and the TLS session's record and plaintext buffers.
+
+The body pumps hold no copy array at all. `pumpExact` and `pumpUntilClose`
+both move bytes straight from the reader to the writer, and a zero return
+means the reader buffered instead of writing, so the next pass drains it
+rather than the pump treating it as a closed connection.
+
+<br>
+
 ## The http1 edge
 
 ```mermaid
@@ -307,7 +342,7 @@ None of these are configurable today.
 | control line | 512 bytes | control socket request and reply |
 | site name | 128 bytes | control socket |
 | control socket path | 108 bytes on Linux | the whole `<root>/control.sock` string |
-| request head | 16 KiB | http1 edge |
+| request head | 16 KiB | http1 edge, and the rebuilt upstream head and response head are the same size |
 | headers per message | 64 | http1 edge |
 | static path | 512 bytes | `public_dir` plus the request path |
 | idle upstream connections | 4 per upstream, 32 in total, divided between the workers | per site |
@@ -319,6 +354,9 @@ None of these are configurable today.
 | udp datagram | 65535 bytes | per udp site |
 | consecutive accept failures before a loop gives up | 100 | control loop and each worker accept loop |
 | shutdown wake attempts | 200 per worker, one per millisecond | per site, until every accept has left |
+| stream buffer range | 1024 to 262144 bytes | what `max_recv_buf` may be set to |
+| bytes one body pump call may move | 16 KiB | http1 edge, the pump loops past it |
+| alternative signal stack | off | the whole executable, `std_options` in `zixer.zig` |
 
 <br>
 
@@ -330,6 +368,6 @@ Every module carries its own tests beside the code, run with `zig build zixer-un
 | :- | :- |
 | scanner and math tests | the grammar, comments, lists, and every arithmetic rule |
 | schema tests | every default, every fault text, and every cross-field rule |
-| daemon and runtime tests | that a parsed value reaches the bind, i.e. the backlog a site resolves and the worker count a site starts with |
+| daemon and runtime tests | that a parsed value reaches the bind, i.e. the backlog a site resolves, the worker count a site starts with, and the buffer size its connections allocate |
 
 The demo matrix under `examples/proxies` is the end-to-end layer: `zig build zixer-test-runner-all` starts each upstream, binds that demo's site in a throwaway root, drives a native client through the edge, and reports one line per demo.
