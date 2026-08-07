@@ -67,7 +67,8 @@ jobs:
             timeout 5m zig build integration-test --summary failures --test-timeout 30s || failures="$failures integration-test"
             timeout 5m zig build behaviour-test --summary failures --test-timeout 30s || failures="$failures behaviour-test"
             timeout 5m zig build edge-test --summary failures --test-timeout 30s || failures="$failures edge-test"
-            timeout 5m zig build jzon-test-all --summary failures --test-timeout 30s || failures="$failures jzon-test-all"
+            timeout 5m zig build jzon-test-all -Ddriver-test-timeout=30s --summary failures || failures="$failures jzon-test-all"
+            timeout 5m zig build jzon-examples --summary failures || failures="$failures jzon-examples"
 
             # Every command below is wrapped: this leg is one step, so without a per-command
             # bound a single stall owns the whole leg until the step cap fires. One run sat 27
