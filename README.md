@@ -56,7 +56,7 @@
 <p align="center">
     <code><i>Green: Maintained</i></code>
     <br>
-    <code><i>Yellow: Cross-Compiled (Open for contributors/maintainers)</i></code>
+    <code><i>Yellow: Cross-Compiled (looking for contributors/maintainers)</i></code>
 </p>
 <div align="center">
     <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
@@ -74,7 +74,7 @@
     <b><i>Zig Build Main Branch Status:</i></b>
 </h4>
 <p align="center">
-    <code><i>These built are not checking native container.</i></code>
+    <code><i>These built are not checking native docker/podman container</i></code>
 </p>
 <div align="center">
     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=zig-x86_64-Linux-0.16">
