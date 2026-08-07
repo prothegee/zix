@@ -52,6 +52,11 @@ pub const Driver = struct {
 
 // --------------------------------------------------------- //
 
+/// zix json serialize and deserialize
+pub const jzon = @import("jzon/jzon.zig");
+
+// --------------------------------------------------------- //
+
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
@@ -421,4 +426,11 @@ test "zix: unit test" {
 
     // # zix.Channel
     std.testing.refAllDecls(@import("channel/channel.zig"));
+
+    // # zix.jzon
+    std.testing.refAllDecls(@import("jzon/sink.zig"));
+    std.testing.refAllDecls(@import("jzon/cursor.zig"));
+    std.testing.refAllDecls(@import("jzon/escape.zig"));
+    std.testing.refAllDecls(@import("jzon/integer.zig"));
+    std.testing.refAllDecls(@import("jzon/jzon.zig"));
 }
