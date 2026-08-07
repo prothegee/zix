@@ -22,6 +22,13 @@ matrix "zix" . test-all examples
 matrix "zixer" . zixer zixer-unit-test zixer-examples
 
 # --------------------------------------------------------- #
+# jzon keeps its own build files and its own steps for the tiered suites under
+# tests/jzon. Its src/ tests ride the zix test-all leg above with the rest of
+# the library, so only the tiered step is a leg of its own.
+
+matrix "jzon" . jzon-test-all
+
+# --------------------------------------------------------- #
 # Drivers are standalone packages with their own build.zig. On a foreign
 # target the tests compile and skip execution, on the native
 # target the container-based steps (test-integration) own their
