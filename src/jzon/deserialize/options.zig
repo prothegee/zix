@@ -7,6 +7,28 @@
 
 const std = @import("std");
 
+/// Which read path a parse runs.
+///
+/// Note:
+/// - The default is the std-backed one, so `.{}` parses every shape std parses.
+///   A generated strategy is opt-in, and asking for one on a shape it has no
+///   JSON form for is a compile error naming the type.
+/// - Read by the entry point that picks a path. The path under it is handed what
+///   it needs and never sees which strategy named it.
+pub const Strategy = enum {
+    /// `std.json` reflection, which parses anything std parses.
+    STD,
+    /// Tokens from `std.json.Scanner`, with the field dispatch generated from
+    /// the type. std still decides what a valid document is.
+    SCANNER,
+    /// Generated from the type, over jzon's own read cursor, scanning one byte
+    /// at a time.
+    GENERATED,
+    /// As GENERATED, scanning one vector lane at a time. It pays on documents
+    /// that arrive laid out with whitespace or carry long strings.
+    GENERATED_VECTOR,
+};
+
 /// Where a parsed string's bytes live.
 pub const Strings = enum {
     /// Every string is copied into the allocator, so the value outlives the
@@ -29,6 +51,7 @@ pub const Unknown = enum {
 
 /// The options a parse runs with.
 pub const Options = struct {
+    strategy: Strategy = .STD,
     strings: Strings = .COPY,
     unknown: Unknown = .REJECT,
 };
@@ -58,9 +81,10 @@ pub const Error = error{
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix jzon: deserialize options default to the safe pair" {
+test "zix jzon: deserialize options default to the capable path and the safe pair" {
     const options: Options = .{};
 
+    try std.testing.expectEqual(Strategy.STD, options.strategy);
     try std.testing.expectEqual(Strings.COPY, options.strings);
     try std.testing.expectEqual(Unknown.REJECT, options.unknown);
 }
