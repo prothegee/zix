@@ -93,8 +93,9 @@ Tiap config site membawa perintah run dan drive-nya sendiri di header, jadi
 | `public_prefix` | mixed |
 | `kernel_backlog` | main.cfg, diwarisi tiap site di sini |
 
-`acme_webroot` dan `acme_proxy` tidak punya demo, karena challenge sungguhan butuh port 80
-dan sebuah certificate authority. Perilakunya dijelaskan di
+`acme_webroot`, `acme_proxy`, dan `upstream_timeout_ms` tidak punya demo: challenge sungguhan
+butuh port 80 dan sebuah certificate authority, dan read deadline baru terlihat pada backend
+yang sengaja stall. Perilakunya dijelaskan di
 [`docs/zixer/config-id.md`](../../docs/zixer/config-id.md).
 
 <br>

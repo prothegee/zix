@@ -92,8 +92,9 @@ Every site config carries its own run and drive commands in its header, so
 | `public_prefix` | mixed |
 | `kernel_backlog` | main.cfg, inherited by every site here |
 
-`acme_webroot` and `acme_proxy` have no demo, because a real challenge needs port 80 and a
-certificate authority. Their behavior is described in
+`acme_webroot`, `acme_proxy`, and `upstream_timeout_ms` have no demo: a real challenge needs
+port 80 and a certificate authority, and a read deadline only shows itself against a backend
+that stalls on purpose. Their behavior is described in
 [`docs/zixer/config-en.md`](../../docs/zixer/config-en.md).
 
 <br>
