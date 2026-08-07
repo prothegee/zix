@@ -126,7 +126,8 @@ Daemon menyimpan satu array site yang sudah start. Tiap mutasi berjalan serial, 
 | `start` pada site yang sudah start ditolak | bind ulang diam-diam akan menyembunyikan perubahan config yang tidak pernah diterapkan |
 | `restart` pada site yang berhenti akan menyalakannya | hook renewal tidak boleh gagal hanya karena site kebetulan sedang mati |
 | port yang sudah dimiliki site lain yang start ditolak | site tcp bind dengan address reuse, jadi kernel akan berbagi port alih-alih melaporkan tabrakan |
-| port companion acme dihitung sebagai dimiliki | tabrakan yang sama berlaku untuk port 80 |
+| port yang dijawab listener di luar daemon ini ditolak | registry hanya melihat site di proses ini, probe connect yang menemukan pemilik di proses lain |
+| port companion acme dihitung sebagai dimiliki | tabrakan yang sama berlaku untuk port 80, baik dari registry maupun dari probe |
 | listen backlog adalah nilai site, kalau tidak nilai main.cfg | satu default, satu override per site |
 
 File config lebih besar dari 256 KiB ditolak alih-alih dimuat.
@@ -145,7 +146,11 @@ Satu site yang start memegang satu listener, dengan salah satu bentuk berikut:
 | udp dengan `upstreams` | forward per flow di atas socket datagram yang di-bind |
 | http3 atau udp tanpa keduanya | socket datagram telanjang |
 
-Listener tcp bind dengan address reuse, socket datagram bind ketat. Site TLS dengan key acme, di port selain 80, juga bind port 80. Bind itu tidak opsional: bila gagal, seluruh `start` gagal dengan pesan yang menyebut port challenge-nya.
+Listener tcp bind dengan address reuse, socket datagram bind ketat.
+
+Address reuse itulah alasan bind tcp didahului sebuah probe. Std memasangkan flag itu dengan `SO_REUSEPORT` di posix, dan `SO_REUSEADDR` di Windows sama permisifnya, jadi listener kedua ikut bergabung di port itu alih-alih gagal, lalu kernel membagi koneksi yang datang ke keduanya. Probe connect ke alamat yang akan didengarkan site, loopback sebagai ganti wildcard karena Windows menolak connect ke `0.0.0.0`. Listener yang hidup akan menjawab dan start ditolak dengan `AddressInUse`, sedangkan socket yang tertinggal di TIME_WAIT menolak connect itu, jadi restart tepat setelah trafik nyata tetap bisa bind ulang. Socket datagram tidak butuh probe: bind-nya ketat dan melaporkan tabrakannya sendiri.
+
+Site TLS dengan key acme, di port selain 80, juga bind port 80, dan port companion itu diprobe dengan cara yang sama. Bind itu tidak opsional: bila gagal, seluruh `start` gagal dengan pesan yang menyebut port challenge-nya.
 
 <br>
 
