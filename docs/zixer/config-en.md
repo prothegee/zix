@@ -64,24 +64,41 @@ Anything the grammar cannot read is a fault, never a silent skip:
 
 | key | default | controls | applies | if wrong |
 | :- | :- | :- | :- | :- |
-| workers | `1` | worker count, `0` means every available thread | reported only, see below | above the machine thread count it faults and stays at the default |
+| workers | `1` | accept loops each site runs, `0` means every available thread | http1, http2, and grpc sites that serve upstreams or a `public_dir` | above the thread count this process may use it faults and stays at the default |
 | dispatch | `async` | dispatch model: `async`, `epoll`, `uring` | reported only, see below | `epoll` and `uring` fault off Linux, any other word faults everywhere |
 | logs_dir | `<root>/logs` | where log output will be written | the directory must exist, nothing writes into it yet | a missing directory faults and `status` exits 1 |
 | sites_dir | `<root>/sites` | where site `.cfg` files are read from | every `list`, `status`, `start`, and `restart` | a missing directory faults, and no site is found |
 | kernel_backlog | `1024` | default listen queue length for tcp site listeners | http1, http2, and grpc sites without their own value, plus the acme companion listener | `0` faults, the kernel still caps the value at `net.core.somaxconn` |
 | max_recv_buf | `1472` | intended receive buffer size | reported only, see below | below `1` it faults |
 
-Only `logs_dir`, `sites_dir`, and `kernel_backlog` change what the daemon does. A blank `main.cfg` is valid: every key falls back to the defaults above.
+Only `workers`, `logs_dir`, `sites_dir`, and `kernel_backlog` change what the daemon does. A blank `main.cfg` is valid: every key falls back to the defaults above.
+
+### What workers does
+
+A started tcp site runs `workers` accept loops instead of one. Each loop holds
+its own listener on the site's port, and the kernel hands each of them a share
+of the arriving connections, so accepting stops being one thread's job.
+
+- `workers: 0` means every thread this process may run on. On Linux that is read from the process affinity mask, so a daemon pinned to a cpuset gets the cores it was given, not the ones the machine has. A container limited by a cpu quota rather than a cpuset should name a count instead.
+- Each loop also owns its own upstream pool and idle connection cache. The site's idle bound is divided between them, so a backend never loses more of its capacity because the edge runs more loops.
+- `zixer status` prints the resolved count beside the configured one whenever they differ, i.e. `workers: 0 (resolved to 12)`.
+- The count is read once, when the daemon starts. Editing `main.cfg` and restarting a single site does not change it, the daemon has to be restarted.
+- Windows keeps one loop whatever the count says. Two listeners cannot share a port there: the second bind takes the port over instead of joining it, so the extra loops would serve nothing.
+- Only the tcp proxy engines spend it. An http3 site and a udp site each own one socket whose per-connection state is keyed to that socket.
+
+More loops help when accepting is the wall, which is many connections rather
+than many requests on a few. Measured on this project's demo static site,
+12 loops against 1: no change at 8 connections, 8 percent at 1024, and 61
+percent at 4096.
 
 ### Keys that are validated but not applied yet
 
-`workers`, `dispatch`, and `max_recv_buf` are parsed, range-checked, and printed by `zixer status`, and nothing in the serving path reads them. Setting them does not change how the daemon runs:
+`dispatch` and `max_recv_buf` are parsed, range-checked, and printed by `zixer status`, and nothing in the serving path reads them. Setting them does not change how the daemon runs:
 
-- A daemon started with `workers: 1` and one with `workers: 12` hold the same thread count, before and after traffic.
-- `dispatch: async`, `dispatch: epoll`, and `dispatch: uring` all serve through the same edge loops. Each site owns one accept thread and dispatches each connection as a concurrent task.
+- `dispatch: async`, `dispatch: epoll`, and `dispatch: uring` all serve through the same edge loops. Each accept loop dispatches every connection as a concurrent task.
 - `max_recv_buf: 1` still serves a 1 MiB static file byte for byte and still forwards a 60,000 byte datagram intact, because every edge sizes its own buffers.
 
-Treat all three as reserved. They are kept because the validation is the part an operator needs first (a config that will be honored later must still be refused now when it is wrong), but do not size a machine around them.
+Treat both as reserved. They are kept because the validation is the part an operator needs first (a config that will be honored later must still be refused now when it is wrong), but do not size a machine around them.
 
 <br>
 

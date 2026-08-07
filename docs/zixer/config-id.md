@@ -64,24 +64,42 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 
 | key | default | controls | applies | if wrong |
 | :- | :- | :- | :- | :- |
-| workers | `1` | jumlah worker, `0` berarti semua thread yang tersedia | hanya dilaporkan, lihat di bawah | di atas jumlah thread mesin ia fault dan tetap di default |
+| workers | `1` | jumlah accept loop yang dijalankan tiap site, `0` berarti semua thread yang tersedia | site http1, http2, dan grpc yang melayani upstream atau `public_dir` | di atas jumlah thread yang boleh dipakai proses ini ia fault dan tetap di default |
 | dispatch | `async` | dispatch model: `async`, `epoll`, `uring` | hanya dilaporkan, lihat di bawah | `epoll` dan `uring` fault di luar Linux, kata lain fault di mana pun |
 | logs_dir | `<root>/logs` | tempat output log akan ditulis | direktorinya harus ada, belum ada yang menulis ke sana | direktori yang hilang menjadi fault dan `status` keluar dengan kode 1 |
 | sites_dir | `<root>/sites` | tempat file `.cfg` site dibaca | tiap `list`, `status`, `start`, dan `restart` | direktori yang hilang menjadi fault, dan tidak ada site yang ditemukan |
 | kernel_backlog | `1024` | panjang listen queue default untuk listener site tcp | site http1, http2, dan grpc yang tidak punya nilai sendiri, plus listener companion acme | `0` fault, kernel tetap membatasi nilainya di `net.core.somaxconn` |
 | max_recv_buf | `1472` | ukuran receive buffer yang dimaksudkan | hanya dilaporkan, lihat di bawah | di bawah `1` ia fault |
 
-Hanya `logs_dir`, `sites_dir`, dan `kernel_backlog` yang mengubah apa yang dilakukan daemon. `main.cfg` kosong tetap valid: tiap key jatuh ke default di atas.
+Hanya `workers`, `logs_dir`, `sites_dir`, dan `kernel_backlog` yang mengubah apa yang dilakukan daemon. `main.cfg` kosong tetap valid: tiap key jatuh ke default di atas.
+
+### Apa yang dilakukan workers
+
+Site tcp yang sudah start menjalankan `workers` accept loop, bukan satu. Tiap
+loop memegang listener-nya sendiri di port site itu, dan kernel memberi tiap
+listener sebagian dari koneksi yang datang, jadi menerima koneksi tidak lagi
+menjadi pekerjaan satu thread saja.
+
+- `workers: 0` berarti semua thread yang boleh dipakai proses ini. Di Linux nilainya dibaca dari affinity mask proses, jadi daemon yang di-pin ke sebuah cpuset mendapat core yang diberikan padanya, bukan core yang dimiliki mesin. Container yang dibatasi cpu quota, bukan cpuset, sebaiknya menyebut angkanya langsung.
+- Tiap loop juga memiliki upstream pool dan idle connection cache sendiri. Batas idle milik site dibagi di antara mereka, jadi backend tidak pernah kehilangan kapasitas lebih banyak hanya karena edge menjalankan lebih banyak loop.
+- `zixer status` mencetak nilai hasil resolusi di samping nilai config setiap kali keduanya berbeda, misalnya `workers: 0 (resolved to 12)`.
+- Nilainya dibaca sekali, saat daemon start. Mengubah `main.cfg` lalu restart satu site tidak mengubahnya, daemon-nya yang harus di-restart.
+- Windows tetap memakai satu loop berapa pun angkanya. Dua listener tidak bisa berbagi port di sana: bind kedua mengambil alih port itu, bukan bergabung, jadi loop tambahan tidak akan melayani apa pun.
+- Hanya engine proxy tcp yang memakainya. Site http3 dan site udp masing-masing memiliki satu socket yang state per koneksinya terikat ke socket itu.
+
+Loop tambahan membantu ketika menerima koneksi adalah dindingnya, yaitu banyak
+koneksi, bukan banyak request di beberapa koneksi. Diukur pada site static demo
+project ini, 12 loop dibanding 1: tidak ada perubahan di 8 koneksi, 8 persen di
+1024, dan 61 persen di 4096.
 
 ### Key yang divalidasi tapi belum dipakai
 
-`workers`, `dispatch`, dan `max_recv_buf` di-parse, dicek rentangnya, dan dicetak oleh `zixer status`, dan tidak ada satu pun jalur serving yang membacanya. Menyetelnya tidak mengubah cara daemon berjalan:
+`dispatch` dan `max_recv_buf` di-parse, dicek rentangnya, dan dicetak oleh `zixer status`, dan tidak ada satu pun jalur serving yang membacanya. Menyetelnya tidak mengubah cara daemon berjalan:
 
-- Daemon yang start dengan `workers: 1` dan yang dengan `workers: 12` memegang jumlah thread yang sama, sebelum maupun sesudah ada trafik.
-- `dispatch: async`, `dispatch: epoll`, dan `dispatch: uring` semuanya melayani lewat edge loop yang sama. Tiap site memiliki satu accept thread dan menjalankan tiap koneksi sebagai task bersamaan.
+- `dispatch: async`, `dispatch: epoll`, dan `dispatch: uring` semuanya melayani lewat edge loop yang sama. Tiap accept loop menjalankan tiap koneksi sebagai task bersamaan.
 - `max_recv_buf: 1` tetap menyajikan file static 1 MiB byte per byte dan tetap meneruskan datagram 60.000 byte utuh, karena tiap edge menentukan ukuran buffer-nya sendiri.
 
-Anggap ketiganya reserved. Ketiganya dipertahankan karena validasi adalah bagian yang pertama dibutuhkan operator (config yang nanti akan dipakai tetap harus ditolak sekarang bila salah), tapi jangan menghitung kapasitas mesin berdasarkan ketiganya.
+Anggap keduanya reserved. Keduanya dipertahankan karena validasi adalah bagian yang pertama dibutuhkan operator (config yang nanti akan dipakai tetap harus ditolak sekarang bila salah), tapi jangan menghitung kapasitas mesin berdasarkan keduanya.
 
 <br>
 
