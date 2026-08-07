@@ -13,6 +13,23 @@ const cmd_stop = @import("cmd_stop.zig");
 const cmd_version = @import("cmd_version.zig");
 const root_dir = @import("root_dir.zig");
 
+/// Std options this executable overrides.
+///
+/// Note:
+/// - signal_stack_size gives every thread its own alternative stack for a
+///   signal handler, so a stack overflow can still print a trace. The
+///   default is 256 KiB, and std zeroes the whole thread-local area at
+///   every thread start, so it is 256 KiB of resident memory per thread.
+///   The daemon runs one thread per served connection, which turns it
+///   into the largest per-connection cost zixer has, ahead of every
+///   buffer put together. Null drops the alternative stack: a connection
+///   thread runs a fixed, non-recursive frame chain well under a hundred
+///   kilobytes against a 16 MiB stack, so overflow is not the failure
+///   this edge is exposed to.
+pub const std_options: std.Options = .{
+    .signal_stack_size = null,
+};
+
 const HELP =
     \\zixer, proxy gateway on the zix engines
     \\
@@ -192,6 +209,13 @@ pub fn main(process: std.process.Init) !void {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+test "zix zixer: std options, the alternative signal stack is off" {
+    // Every connection is served on its own thread, and std zeroes the
+    // whole thread-local area at thread start, so a 256 KiB alternative
+    // signal stack would be 256 KiB of resident memory per connection.
+    try std.testing.expectEqual(@as(?u64, null), std_options.signal_stack_size);
+}
+
 test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("cfg_math.zig"));
     std.testing.refAllDecls(@import("cfg_scanner.zig"));
@@ -207,6 +231,8 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("port_probe.zig"));
     std.testing.refAllDecls(@import("tcp_nodelay.zig"));
     std.testing.refAllDecls(@import("worker_count.zig"));
+    std.testing.refAllDecls(@import("conn_buffer.zig"));
+    std.testing.refAllDecls(@import("bind_options.zig"));
     std.testing.refAllDecls(@import("site_runtime.zig"));
     std.testing.refAllDecls(@import("daemon.zig"));
     std.testing.refAllDecls(@import("daemon_spawn.zig"));
