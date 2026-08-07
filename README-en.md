@@ -82,6 +82,7 @@
     - [HTTP/3](./README-en.md#http3)
     - [WebRTC](./README-en.md#webrtc)
     - [Logger](./README-en.md#logger)
+    - [JSON (jzon)](./README-en.md#json-jzon)
 - [Drivers](./README-en.md#drivers)
 - [zixer](./README-en.md#zixer)
 
@@ -2296,6 +2297,83 @@ Levels: `.DEBUG`(0) `.INFO`(1) `.WARN`(2) `.ERROR`(3). The file backend uses a 6
 Wire a logger into any server by setting `logger: &logger` in its config. See [`docs/hld-logger-en.md`](docs/hld-logger-en.md) for full documentation.
 
 **When to use:** wire a `Logger` into any server in production for structured, rotating file logs with per-protocol event lines, and call `logger.system()` for your own lifecycle and error events. Console modes keep development output readable while files stay authoritative. It is safe to call from background OS threads, so one logger can serve the whole process.
+
+<br>
+
+### JSON (jzon)
+
+`zix.jzon` is JSON in both directions, written on the standard library. Two calls carry it: `serialize` turns a typed value into JSON text, `deserialize` turns JSON text back into a typed value. A render allocates nothing, it is handed a buffer and returns how many bytes it used. A parse allocates only what the result points at, out of the allocator handed in, so an arena reset frees a whole parse in one step.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+const Order = struct {
+    id: u64,
+    customer: []const u8,
+    tags: []const []const u8,
+};
+
+// serialize: no allocator, the buffer is the whole budget
+var buf: [256]u8 = undefined;
+const len = try zix.jzon.serialize(&buf, Order{
+    .id       = 7,
+    .customer = "Rekha Nair",
+    .tags     = &.{ "priority", "gift" },
+}, .{});
+// buf[0..len] is {"id":7,"customer":"Rekha Nair","tags":["priority","gift"]}
+
+// deserialize: everything the result points at comes from this allocator
+var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
+defer arena.deinit();
+
+const order = try zix.jzon.deserialize(Order, arena.allocator(), buf[0..len], .{});
+```
+
+Both calls take a comptime options struct naming which path runs. Every write path renders the same bytes and every read path reads back the same value, so a strategy is a cost decision and nothing else, changed at the call site with no other line moving. Because it is comptime, only the path named is compiled into the binary.
+
+**Write strategies (`zix.jzon.SerializeStrategy`):**
+
+| Strategy | What it runs |
+| :- | :- |
+| `.STD` | `std.json.Stringify`, which renders every shape std renders |
+| `.GENERATED_FMT` | generated from the type, integers through `std.fmt` |
+| `.GENERATED` | generated from the type, integer digits written straight into the buffer |
+| `.GENERATED_VECTOR` | as `.GENERATED`, with strings scanned one vector lane at a time |
+
+**Read strategies (`zix.jzon.DeserializeStrategy`):**
+
+| Strategy | What it runs |
+| :- | :- |
+| `.STD` | `std.json` reflection, which parses every shape std parses |
+| `.SCANNER` | tokens from `std.json.Scanner`, with the field dispatch generated from the type |
+| `.GENERATED` | generated from the type, over jzon's own read cursor, one byte at a time |
+| `.GENERATED_VECTOR` | as `.GENERATED`, one vector lane at a time |
+
+`.GENERATED_VECTOR` is not always the quickest. It pays on documents that arrive laid out with whitespace or carry long strings, and costs on minified traffic with short fields, which is why it stays a call-site choice rather than a default.
+
+**Read options (`zix.jzon.DeserializeOptions`):**
+
+| Field | Default | What it decides |
+| :- | :- | :- |
+| `strategy` | `.STD` | which read path runs |
+| `strings` | `.COPY` | `.COPY` copies every string into the allocator, `.BORROW` points a string with no escape at the document, which then has to outlive the value |
+| `unknown` | `.REJECT` | `.REJECT` fails on a key the type does not declare, `.SKIP` steps over the key and its whole value however deep it nests |
+
+**Errors:** a render reports `error.NoSpaceLeft` and nothing else. A parse reports one set whichever path ran: `UnknownField`, `MissingField`, `UnknownEnumValue`, `Truncated`, `Unexpected`, `BadNumber`, `BadEscape`, `OutOfMemory`.
+
+A field type a generated path has no JSON form for is a compile error naming the type, never a runtime failure, and `.STD` still takes that shape.
+
+**Examples:** four, none of them a server, so each runs and exits. jzon is a standalone package under `src/jzon` with its own `build.zig`, so build them from there with `zig build examples` (or `zig build jzon-examples` from the repo root).
+
+| Example | What it shows |
+| :- | :- |
+| [serialize](src/jzon/examples/serialize.zig) | a value into a fixed buffer, every write strategy, and what a buffer too small reports |
+| [deserialize](src/jzon/examples/deserialize.zig) | a request body into a typed value on an arena, every read strategy, reset between bodies |
+| [strings](src/jzon/examples/strings.zig) | `.COPY` against `.BORROW`, and what borrowing asks of the document's lifetime |
+| [unknown_keys](src/jzon/examples/unknown_keys.zig) | `.REJECT` against `.SKIP` on a document carrying more than the type declares |
+
+**When to use:** reach for `.{}` first, which is the std-backed path and takes every shape std takes. Move a hot handler to `.GENERATED` when the shape is a plain record and the parse or the render is on the request path, and add `.strings = .BORROW` when the value dies with the buffer it was read out of.
 
 <br>
 
