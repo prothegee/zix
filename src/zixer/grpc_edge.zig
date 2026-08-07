@@ -4,15 +4,13 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const conn_buffer = @import("conn_buffer.zig");
 const grpc_relay = @import("grpc_relay.zig");
 const grpc_upstream = @import("grpc_upstream.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const http2_frames = @import("http2_frames.zig");
 
 const Http2 = zix.Http2;
-
-/// Stream buffer size for the client socket legs (matches the h1 edge).
-const STREAM_BUF_SIZE: usize = 8 * 1024;
 
 /// Concurrent client streams one edge connection relays, advertised as
 /// SETTINGS_MAX_CONCURRENT_STREAMS. Overflow answers REFUSED_STREAM, the
@@ -102,10 +100,11 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
     const io = proxy.io;
     defer client_stream.close(io);
 
-    var read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var client_reader = client_stream.reader(io, &read_buf);
-    var client_writer = client_stream.writer(io, &write_buf);
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
+    defer buffers.deinit(proxy.allocator);
+
+    var client_reader = client_stream.reader(io, buffers.client_read);
+    var client_writer = client_stream.writer(io, buffers.client_write);
 
     serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream);
 }
@@ -154,7 +153,7 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
     session.pumps.cancel(session.io);
 
     for (session.up_used, 0..) |used, index| {
-        if (used) session.up_conns[index].stream.close(session.io);
+        if (used) grpc_upstream.close(&session.up_conns[index], session.io, session.proxy.allocator);
     }
 }
 
@@ -581,7 +580,7 @@ fn findOrOpenUpstream(session: *Session) ?usize {
         if (existing) |index| return index;
         const open_index = free_index orelse return anyOpenUpstream(session);
 
-        grpc_upstream.openInto(&session.up_conns[open_index], io, picked.host, picked.port, picked.index) catch {
+        grpc_upstream.openInto(&session.up_conns[open_index], io, session.proxy.allocator, session.proxy.stream_buf_bytes, picked.host, picked.port, picked.index) catch {
             pool.markDown(picked.index, nowMs(io));
             continue;
         };
@@ -592,7 +591,7 @@ fn findOrOpenUpstream(session: *Session) ?usize {
         unlockState(session);
 
         session.pumps.concurrent(io, downPumpTask, .{ session, open_index }) catch {
-            session.up_conns[open_index].stream.close(io);
+            grpc_upstream.close(&session.up_conns[open_index], io, session.proxy.allocator);
             lockState(session);
             session.up_conns[open_index].alive = false;
             unlockState(session);
