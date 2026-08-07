@@ -206,6 +206,7 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("control_client.zig"));
     std.testing.refAllDecls(@import("port_probe.zig"));
     std.testing.refAllDecls(@import("tcp_nodelay.zig"));
+    std.testing.refAllDecls(@import("worker_count.zig"));
     std.testing.refAllDecls(@import("site_runtime.zig"));
     std.testing.refAllDecls(@import("daemon.zig"));
     std.testing.refAllDecls(@import("daemon_spawn.zig"));
@@ -233,6 +234,7 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("tls_edge.zig"));
     std.testing.refAllDecls(@import("acme_challenge.zig"));
     std.testing.refAllDecls(@import("acme_listener.zig"));
+    std.testing.refAllDecls(@import("site_worker.zig"));
     std.testing.refAllDecls(@import("site_serve.zig"));
     std.testing.refAllDecls(@import("udp_flow_table.zig"));
     std.testing.refAllDecls(@import("udp_forward.zig"));
