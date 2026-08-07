@@ -36,6 +36,9 @@ pub const SiteCfg = struct {
     spa_fallback: ?[]const u8 = null,
     kernel_backlog: ?u31 = null,
     max_recv_buf: ?usize = null,
+    /// How long the edge waits on a silent upstream before it answers 504.
+    /// Null takes the built-in default, 0 turns the bound off.
+    upstream_timeout_ms: ?u32 = null,
 };
 
 /// Known site cfg keys. Field names mirror the cfg key strings exactly so
@@ -55,6 +58,7 @@ const Key = enum {
     spa_fallback,
     kernel_backlog,
     max_recv_buf,
+    upstream_timeout_ms,
 };
 
 /// Parse and validate one site cfg content.
@@ -174,6 +178,15 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
 
                 cfg.max_recv_buf = @intCast(value);
             },
+            .upstream_timeout_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const budget = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d}, 0 waits forever", .{std.math.maxInt(u32)});
+                    continue;
+                };
+
+                cfg.upstream_timeout_ms = budget;
+            },
         }
     }
 
@@ -216,6 +229,10 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         try faults.add("acme_proxy", "choose acme_webroot or acme_proxy, not both", .{});
     }
 
+    if (cfg.upstream_timeout_ms != null and cfg.upstreams.len == 0) {
+        try faults.add("upstream_timeout_ms", "needs upstreams", .{});
+    }
+
     const engine = cfg.engine orelse return;
 
     // A cleartext http1 site answers the challenge path on its own
@@ -234,11 +251,17 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         },
         .GRPC => {
             if (cfg.public_dir != null) try faults.add("public_dir", "not supported on grpc sites, remove it", .{});
+
+            // The grpc upstream leg is one h2 connection multiplexing every
+            // stream, so a per-request read bound needs its own mechanism
+            // and this key would be accepted and ignored.
+            if (cfg.upstream_timeout_ms != null) try faults.add("upstream_timeout_ms", "not supported on grpc sites, remove it", .{});
         },
         .UDP => {
             if (cfg.tls) try faults.add("tls", "udp forward is blind bytes, tls does not apply", .{});
             if (cfg.public_dir != null) try faults.add("public_dir", "not supported on udp sites, remove it", .{});
             if (cfg.kernel_backlog != null) try faults.add("kernel_backlog", "does not apply to udp sites, remove it", .{});
+            if (cfg.upstream_timeout_ms != null) try faults.add("upstream_timeout_ms", "does not apply to udp sites, remove it", .{});
             if (cfg.acme_webroot != null) try faults.add("acme_webroot", "does not apply to udp sites, remove it", .{});
             if (cfg.acme_proxy != null) try faults.add("acme_proxy", "does not apply to udp sites, remove it", .{});
         },
@@ -605,4 +628,51 @@ test "zix zixer: site cfg, cleartext non-http1 site rejects acme keys" {
     var h1_faults = fault.FaultList.init(arena.allocator());
     _ = try parse(arena.allocator(), "engine: http1\nport: 80\nupstreams: 127.0.0.1:3000\nacme_webroot: /var/www/acme\n", &h1_faults);
     try testing.expectEqual(@as(usize, 0), h1_faults.slice().len);
+}
+
+test "zix zixer: site cfg, upstream_timeout_ms parses and zero means no bound" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 5 * 1000\n", &faults);
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expectEqual(@as(u32, 5000), cfg.upstream_timeout_ms.?);
+
+    var off_faults = fault.FaultList.init(arena.allocator());
+    const off = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 0\n", &off_faults);
+    try testing.expectEqual(@as(usize, 0), off_faults.slice().len);
+    try testing.expectEqual(@as(u32, 0), off.upstream_timeout_ms.?);
+
+    // Left out entirely, the edge takes its built-in default.
+    var bare_faults = fault.FaultList.init(arena.allocator());
+    const bare = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
+    try testing.expectEqual(@as(usize, 0), bare_faults.slice().len);
+    try testing.expectEqual(@as(?u32, null), bare.upstream_timeout_ms);
+}
+
+test "zix zixer: site cfg, upstream_timeout_ms is refused where it cannot apply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var static_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\npublic_dir: /var/www/app\nupstream_timeout_ms: 1000\n", &static_faults);
+    try testing.expectEqual(@as(usize, 1), static_faults.slice().len);
+    try testing.expectEqualStrings("upstream_timeout_ms", static_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs upstreams", static_faults.slice()[0].hint);
+
+    var grpc_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: grpc\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 1000\n", &grpc_faults);
+    try testing.expectEqual(@as(usize, 1), grpc_faults.slice().len);
+    try testing.expectEqualStrings("upstream_timeout_ms", grpc_faults.slice()[0].key);
+
+    var udp_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: udp\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 1000\n", &udp_faults);
+    try testing.expectEqual(@as(usize, 1), udp_faults.slice().len);
+    try testing.expectEqualStrings("upstream_timeout_ms", udp_faults.slice()[0].key);
+
+    var negative_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 0 - 1\n", &negative_faults);
+    try testing.expectEqual(@as(usize, 1), negative_faults.slice().len);
+    try testing.expectEqualStrings("upstream_timeout_ms", negative_faults.slice()[0].key);
 }
