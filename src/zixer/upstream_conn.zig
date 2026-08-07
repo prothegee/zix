@@ -62,14 +62,20 @@ pub fn connect(io: std.Io, host: []const u8, port: u16, slot_index: u32) !Upstre
 /// Note:
 /// - Guarded by the same short spinlock idiom as the pool: acquire and
 ///   release run from concurrent edge connection tasks.
-/// - Three bounds apply together: IDLE_CAP per slot, TOTAL_IDLE_CAP across
-///   the site, and IDLE_TTL_MS of age. The two counts stop a burst from
+/// - Three bounds apply together: per_slot_cap per slot, total_cap across
+///   the cache, and IDLE_TTL_MS of age. The two counts stop a burst from
 ///   parking a backend's capacity, the age stops a quiet site from holding
 ///   it forever.
+/// - A site with several workers gives each worker its own cache through
+///   initShare, which divides the counts. The bound is a site bound, not a
+///   per-worker one: a backend must not lose more of its capacity just
+///   because the edge runs more accept loops.
 /// - Closing a socket is a syscall, so every path collects what it will
 ///   close, releases the lock, and closes after.
 pub const IdleCache = struct {
     stacks: []Stack,
+    per_slot_cap: usize = IDLE_CAP,
+    total_cap: usize = TOTAL_IDLE_CAP,
     total_len: usize = 0,
     lock_flag: std.atomic.Value(bool) = .init(false),
 
@@ -84,12 +90,35 @@ pub const IdleCache = struct {
         len: usize = 0,
     };
 
-    /// One stack per upstream slot.
+    /// One stack per upstream slot, holding the whole site's idle bound.
     pub fn init(allocator: std.mem.Allocator, slot_count: usize) !IdleCache {
+        return initShare(allocator, slot_count, 1);
+    }
+
+    /// One worker's share of the site's idle bound.
+    ///
+    /// Note:
+    /// - worker_count of these caches together park no more connections
+    ///   than a single init cache would, so adding workers never takes
+    ///   more of a backend's capacity.
+    /// - A share never falls below one connection: a worker that could
+    ///   park nothing would reconnect on every request.
+    ///
+    /// Param:
+    /// allocator - std.mem.Allocator (owns the stacks)
+    /// slot_count - usize (upstreams of this site)
+    /// worker_count - usize (accept loops sharing the site bound)
+    ///
+    /// Return:
+    /// - IdleCache with the divided bounds
+    pub fn initShare(allocator: std.mem.Allocator, slot_count: usize, worker_count: usize) !IdleCache {
         const stacks = try allocator.alloc(Stack, slot_count);
         for (stacks) |*stack| stack.len = 0;
 
-        return .{ .stacks = stacks };
+        const workers = @max(1, worker_count);
+        const total_cap = @max(1, TOTAL_IDLE_CAP / workers);
+
+        return .{ .stacks = stacks, .per_slot_cap = @min(IDLE_CAP, total_cap), .total_cap = total_cap };
     }
 
     /// Close every idle conn and free the stacks.
@@ -156,7 +185,7 @@ pub const IdleCache = struct {
         cache.lockAcquire();
 
         const stack = &cache.stacks[conn.slot_index];
-        if (stack.len == IDLE_CAP or cache.total_len == TOTAL_IDLE_CAP) {
+        if (stack.len == cache.per_slot_cap or cache.total_len == cache.total_cap) {
             cache.lockRelease();
             conn.stream.close(io);
 
@@ -448,4 +477,81 @@ test "zix zixer: upstream conn, sweep closes the aged and keeps the fresh" {
     const fresh_conn = cache.acquire(io, 1, IDLE_TTL_MS).?;
     try std.testing.expectEqual(fresh[0], fresh_conn.stream.socket.handle);
     cache.release(io, fresh_conn, IDLE_TTL_MS);
+}
+
+test "zix zixer: upstream conn, a worker share divides the site idle bound" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // One worker keeps the whole site bound, which is what init means.
+    var alone = try IdleCache.initShare(std.testing.allocator, 1, 1);
+    defer alone.deinit(std.testing.allocator, io);
+    try std.testing.expectEqual(TOTAL_IDLE_CAP, alone.total_cap);
+    try std.testing.expectEqual(IDLE_CAP, alone.per_slot_cap);
+
+    // Eight workers hold an eighth each, so the site total is unchanged.
+    var shared = try IdleCache.initShare(std.testing.allocator, 1, 8);
+    defer shared.deinit(std.testing.allocator, io);
+    try std.testing.expectEqual(TOTAL_IDLE_CAP / 8, shared.total_cap);
+    try std.testing.expectEqual(@as(usize, 8) * shared.total_cap, TOTAL_IDLE_CAP);
+
+    // The per-slot cap never sits above the total a worker may hold.
+    try std.testing.expect(shared.per_slot_cap <= shared.total_cap);
+}
+
+test "zix zixer: upstream conn, a worker share never falls below one conn" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // More workers than the site bound has room for: a worker that could
+    // park nothing would reconnect on every single request.
+    var tiny = try IdleCache.initShare(std.testing.allocator, 1, TOTAL_IDLE_CAP * 4);
+    defer tiny.deinit(std.testing.allocator, io);
+
+    try std.testing.expectEqual(@as(usize, 1), tiny.total_cap);
+    try std.testing.expectEqual(@as(usize, 1), tiny.per_slot_cap);
+
+    // A zero worker count is nonsense a caller should never pass, and it
+    // still has to give a usable cache rather than divide by zero.
+    var zero = try IdleCache.initShare(std.testing.allocator, 1, 0);
+    defer zero.deinit(std.testing.allocator, io);
+    try std.testing.expectEqual(TOTAL_IDLE_CAP, zero.total_cap);
+}
+
+test "zix zixer: upstream conn, a share cache stops parking at its own total" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        // non-linux region: the fixture parks raw socketpair descriptors,
+        // which only linux hands out here. Nothing is bound.
+        std.log.info("idle cache worker share bound test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Four workers, so this cache holds a quarter of the site bound.
+    const share = TOTAL_IDLE_CAP / 4;
+    var cache = try IdleCache.initShare(std.testing.allocator, share + 1, 4);
+    defer cache.deinit(std.testing.allocator, io);
+
+    var pairs: [TOTAL_IDLE_CAP / 4 + 1][2]std.posix.fd_t = undefined;
+    defer for (&pairs) |*fds| {
+        _ = std.os.linux.close(fds[1]);
+    };
+
+    // One conn per slot, so only the share bound can stop the last one.
+    for (&pairs, 0..) |*fds, i| {
+        try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, fds));
+        cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = @intCast(i), .reused = false }, 0);
+    }
+
+    try std.testing.expectEqual(share, cache.totalIdle());
+
+    // The one past the share was closed, so its peer reads EOF.
+    var probe: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.read(pairs[share][1], &probe, 1));
 }
