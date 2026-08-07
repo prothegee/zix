@@ -110,8 +110,12 @@ pub const State = struct {
 fn acceptLoop(state: *State) void {
     const io = state.io;
 
+    // No pool here, so a challenge connection buffers the client pair
+    // alone. The companion is not a load path, so it keeps the built-in
+    // size rather than the site's.
     const proxy = http1_proxy.Proxy{
         .io = io,
+        .allocator = state.allocator,
         .acme = .{ .webroot = state.webroot, .relay = state.relay },
         .redirect_https = state.https_port,
     };
