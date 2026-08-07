@@ -5,6 +5,7 @@ const std = @import("std");
 const acme_challenge = @import("acme_challenge.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const site_cfg = @import("site_cfg.zig");
+const tcp_nodelay = @import("tcp_nodelay.zig");
 
 /// Consecutive accept failures before the loop gives up.
 const MAX_ACCEPT_FAILURES: usize = 100;
@@ -130,6 +131,8 @@ fn acceptLoop(state: *State) void {
             stream.close(io);
             return;
         }
+
+        tcp_nodelay.apply(stream);
 
         const task = ConnTask{ .proxy = proxy, .stream = stream };
         state.conns.concurrent(io, serveTask, .{task}) catch serveTask(task);
