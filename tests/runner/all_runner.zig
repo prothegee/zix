@@ -30,6 +30,7 @@
 //   checks_tls.zig   https/1.1, h2, gRPC, SSE, WebSocket over TLS 1.3
 //   checks_rpc.zig   gRPC + FIX
 //   checks_misc.zig  TCP, UDP, UDS, Channel
+//   checks_jzon.zig  a JSON request body and a JSON response body through jzon
 //   checks_webrtc.zig  ICE + DTLS + SCTP + data channel, one whole session
 //   report_name.zig  what a check calls itself in its result line
 
@@ -43,6 +44,7 @@ const checks_tls = @import("checks_tls.zig");
 const checks_rpc = @import("checks_rpc.zig");
 const checks_misc = @import("checks_misc.zig");
 const checks_query = @import("checks_query.zig");
+const checks_jzon = @import("checks_jzon.zig");
 const checks_webrtc = @import("checks_webrtc.zig");
 
 // --------------------------------------------------------- //
@@ -377,6 +379,14 @@ const checks = [_]Check{
     .{ .label = "webrtc-datachannel", .example = "webrtc_datachannel_echo", .heavy = true, .run = &struct {
         fn call(io: std.Io, paths: []const []const u8) anyerror!void {
             return checks_webrtc.runWebrtc(io, paths[0], 9083);
+        }
+    }.call },
+
+    // jzon in both directions over http1: the case table, then a rendered record posted back as a
+    // request body. Appended last so the argv order of the existing checks stays stable.
+    .{ .label = "http1-jzon", .example = "http1_jzon", .run = &struct {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
+            return checks_jzon.runJzon(io, paths[0], 9033);
         }
     }.call },
 };
