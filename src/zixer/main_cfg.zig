@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const zix = @import("zix");
 
 const cfg_scanner = @import("cfg_scanner.zig");
+const conn_buffer = @import("conn_buffer.zig");
 const fault = @import("fault.zig");
 
 /// Dispatch enum is the zix one, so the daemon hands it straight to the engines.
@@ -17,7 +18,7 @@ pub const MainCfg = struct {
     logs_dir: []const u8 = "",
     sites_dir: []const u8 = "",
     kernel_backlog: u31 = 1024,
-    max_recv_buf: usize = 1472,
+    max_recv_buf: usize = conn_buffer.DEFAULT_BYTES,
 };
 
 /// Known main.cfg keys. Field names mirror the cfg key strings exactly so
@@ -126,12 +127,17 @@ pub fn parse(
             },
             .max_recv_buf => {
                 const value = try fault.evalNumber(faults, entry) orelse continue;
-                if (value < 1) {
-                    try faults.add(entry.key, "must be at least 1", .{});
+                const bytes = std.math.cast(usize, value) orelse {
+                    try faults.add(entry.key, "must be {d}-{d} bytes", .{ conn_buffer.MIN_BYTES, conn_buffer.MAX_BYTES });
+                    continue;
+                };
+
+                if (!conn_buffer.inRange(bytes)) {
+                    try faults.add(entry.key, "must be {d}-{d} bytes", .{ conn_buffer.MIN_BYTES, conn_buffer.MAX_BYTES });
                     continue;
                 }
 
-                cfg.max_recv_buf = @intCast(value);
+                cfg.max_recv_buf = bytes;
             },
         }
     }
@@ -174,7 +180,7 @@ test "zix zixer: main cfg, empty content keeps defaults with dirs from root" {
     try std.testing.expectEqual(@as(usize, 1), cfg.workers);
     try std.testing.expectEqual(Dispatch.ASYNC, cfg.dispatch);
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
-    try std.testing.expectEqual(@as(usize, 1472), cfg.max_recv_buf);
+    try std.testing.expectEqual(conn_buffer.DEFAULT_BYTES, cfg.max_recv_buf);
 
     const expected_logs = try std.fs.path.join(arena.allocator(), &.{ "/srv/zixer", "logs" });
     const expected_sites = try std.fs.path.join(arena.allocator(), &.{ "/srv/zixer", "sites" });
@@ -264,6 +270,55 @@ test "zix zixer: main cfg, bad dispatch and bad math fault with hints" {
     try std.testing.expectEqualStrings("no colon line", faults.slice()[2].key);
     try std.testing.expectEqual(Dispatch.ASYNC, cfg.dispatch);
     try std.testing.expectEqual(@as(u31, 1024), cfg.kernel_backlog);
+}
+
+test "zix zixer: main cfg, a max recv buf outside the range faults and keeps the default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const content = "max_recv_buf: 64\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try std.testing.expectEqualStrings("max_recv_buf", faults.slice()[0].key);
+    try std.testing.expect(std.mem.indexOf(u8, faults.slice()[0].hint, "bytes") != null);
+    try std.testing.expectEqual(conn_buffer.DEFAULT_BYTES, cfg.max_recv_buf);
+}
+
+test "zix zixer: main cfg, a max recv buf above the ceiling faults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var content_buf: [64]u8 = undefined;
+    const content = try std.fmt.bufPrint(&content_buf, "max_recv_buf: {d}\n", .{conn_buffer.MAX_BYTES + 1});
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try std.testing.expectEqual(conn_buffer.DEFAULT_BYTES, cfg.max_recv_buf);
+}
+
+test "zix zixer: main cfg, the range ends are both accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var low_buf: [64]u8 = undefined;
+    const low_content = try std.fmt.bufPrint(&low_buf, "max_recv_buf: {d}\n", .{conn_buffer.MIN_BYTES});
+    var low_faults = fault.FaultList.init(arena.allocator());
+    const low = try parse(arena.allocator(), low_content, "/srv/zixer", 8, &low_faults);
+
+    var high_buf: [64]u8 = undefined;
+    const high_content = try std.fmt.bufPrint(&high_buf, "max_recv_buf: {d}\n", .{conn_buffer.MAX_BYTES});
+    var high_faults = fault.FaultList.init(arena.allocator());
+    const high = try parse(arena.allocator(), high_content, "/srv/zixer", 8, &high_faults);
+
+    try std.testing.expectEqual(@as(usize, 0), low_faults.slice().len);
+    try std.testing.expectEqual(conn_buffer.MIN_BYTES, low.max_recv_buf);
+    try std.testing.expectEqual(@as(usize, 0), high_faults.slice().len);
+    try std.testing.expectEqual(conn_buffer.MAX_BYTES, high.max_recv_buf);
 }
 
 test "zix zixer: main cfg, dispatch names round trip" {
