@@ -430,6 +430,7 @@ test "zix: unit test" {
     // # zix.jzon
     std.testing.refAllDecls(@import("jzon/sink.zig"));
     std.testing.refAllDecls(@import("jzon/cursor.zig"));
+    std.testing.refAllDecls(@import("jzon/cursor_vector.zig"));
     std.testing.refAllDecls(@import("jzon/escape.zig"));
     std.testing.refAllDecls(@import("jzon/escape_vector.zig"));
     std.testing.refAllDecls(@import("jzon/integer.zig"));
@@ -439,7 +440,11 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("jzon/serialize/generated_emitter.zig"));
     std.testing.refAllDecls(@import("jzon/deserialize/options.zig"));
     std.testing.refAllDecls(@import("jzon/deserialize/fields.zig"));
+    std.testing.refAllDecls(@import("jzon/deserialize/scan.zig"));
+    std.testing.refAllDecls(@import("jzon/deserialize/skip.zig"));
+    std.testing.refAllDecls(@import("jzon/deserialize/string_value.zig"));
     std.testing.refAllDecls(@import("jzon/deserialize/std_parser.zig"));
     std.testing.refAllDecls(@import("jzon/deserialize/scanner_parser.zig"));
+    std.testing.refAllDecls(@import("jzon/deserialize/generated_parser.zig"));
     std.testing.refAllDecls(@import("jzon/jzon.zig"));
 }
