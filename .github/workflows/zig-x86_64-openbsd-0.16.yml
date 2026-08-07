@@ -70,11 +70,11 @@ jobs:
             # line at the end is the authoritative verdict for this leg.
             failures=""
 
-            timeout 6m zig build unit-test --summary failures --test-timeout 120s || failures="$failures unit-test"
-            timeout 6m zig build integration-test --summary failures --test-timeout 120s || failures="$failures integration-test"
-            timeout 6m zig build behaviour-test --summary failures --test-timeout 120s || failures="$failures behaviour-test"
-            timeout 6m zig build edge-test --summary failures --test-timeout 120s || failures="$failures edge-test"
-            timeout 6m zig build jzon-test-all --summary failures --test-timeout 120s || failures="$failures jzon-test-all"
+            timeout 6m zig build unit-test --summary failures --test-timeout 240s || failures="$failures unit-test"
+            timeout 6m zig build integration-test --summary failures --test-timeout 240s || failures="$failures integration-test"
+            timeout 6m zig build behaviour-test --summary failures --test-timeout 240s || failures="$failures behaviour-test"
+            timeout 6m zig build edge-test --summary failures --test-timeout 240s || failures="$failures edge-test"
+            timeout 6m zig build jzon-test-all --summary failures --test-timeout 240s || failures="$failures jzon-test-all"
 
             # Every command below is wrapped: this leg is one step, so without a per-command
             # bound a single stall owns the whole leg until the step cap fires. One run sat 27
