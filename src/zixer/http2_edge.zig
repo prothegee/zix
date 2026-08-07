@@ -712,7 +712,16 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
         conn_up.stream.close(io);
         return if (streamError(conn, active.id, Http2.ERR_INTERNAL_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
     };
-    if (writeBlock(conn, active.id, block, head_only) == .CLOSED) {
+    // A Content-Length body is a finished answer being read right now, so
+    // the head stays staged and the first DATA frame rides the same write.
+    // A chunked or close-delimited body may be a live stream whose first
+    // byte is seconds out, and that head cannot wait on it.
+    const stage_head = response.framing == .content_length;
+    const head_written = if (stage_head)
+        stageBlock(conn, active.id, block, false)
+    else
+        writeBlock(conn, active.id, block, head_only);
+    if (head_written == .CLOSED) {
         conn_up.stream.close(io);
         return .CONN_DEAD;
     }
@@ -739,6 +748,14 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
             },
         };
     }
+
+    // Nothing may stay staged past here. A relay that ended early still
+    // owes the client the head, and an already-drained buffer costs
+    // nothing to flush again.
+    conn.client_w.flush() catch {
+        conn_up.stream.close(io);
+        return .CONN_DEAD;
+    };
 
     const reusable = !relay_failed and !response.connection_close and response.framing != .until_close;
     if (reusable) conn.proxy.idle.?.release(io, conn_up, nowMs(io)) else conn_up.stream.close(io);
@@ -976,8 +993,14 @@ fn serveStaticFile(conn: *Conn, active: *ActiveStream, resolved: static_files.Re
         return if (streamError(conn, active.id, Http2.ERR_INTERNAL_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
     };
 
+    // Same staging as the proxied path: the file's first DATA frame
+    // leaves with the head.
     const head_only = is_head or resolved.size == 0;
-    if (writeBlock(conn, active.id, block, head_only) == .CLOSED) return .CONN_DEAD;
+    const head_written = if (head_only)
+        writeBlock(conn, active.id, block, true)
+    else
+        stageBlock(conn, active.id, block, false);
+    if (head_written == .CLOSED) return .CONN_DEAD;
     if (head_only) return .DONE;
 
     var chunk: [http2_frames.MAX_PAYLOAD]u8 = undefined;
@@ -994,7 +1017,13 @@ fn serveStaticFile(conn: *Conn, active: *ActiveStream, resolved: static_files.Re
         offset += got;
         sendData(conn, active, chunk[0..got], offset == resolved.size) catch |err| switch (err) {
             error.ClientDead => return .CONN_DEAD,
-            else => return .DONE,
+
+            // The stream ended under us, the staged head still leaves.
+            else => {
+                conn.client_w.flush() catch return .CONN_DEAD;
+
+                return .DONE;
+            },
         };
     }
     conn.client_w.flush() catch return .CONN_DEAD;
@@ -1160,6 +1189,25 @@ fn writeBlock(conn: *Conn, stream_id: u31, block: []const u8, end_stream: bool) 
     defer unlockWrite(conn);
     http2_frames.writeHeaderBlock(conn.client_w, stream_id, block, end_stream, effectiveMaxFrame(conn)) catch return .CLOSED;
     conn.client_w.flush() catch return .CLOSED;
+
+    return .OK;
+}
+
+/// Write one header block and leave it staged, under the shared write lock.
+///
+/// Note:
+/// - Only for a head whose body is already in hand or a local file read:
+///   the first DATA frame then leaves in the same write, so a small
+///   response costs one segment instead of two, and one TLS record
+///   instead of two. A body that may stall (chunked, close-delimited)
+///   uses writeBlock, its head cannot wait on a stream's first event.
+/// - The caller owes the flush. Every relay path ends in one, and
+///   relayResponse flushes again on the way out so an early end still
+///   delivers the head.
+fn stageBlock(conn: *Conn, stream_id: u31, block: []const u8, end_stream: bool) ProcessResult {
+    lockWrite(conn);
+    defer unlockWrite(conn);
+    http2_frames.writeHeaderBlock(conn.client_w, stream_id, block, end_stream, effectiveMaxFrame(conn)) catch return .CLOSED;
 
     return .OK;
 }
@@ -1510,6 +1558,91 @@ fn waitBackend(io: std.Io, fake: *FakeBackend) !void {
 
 fn openEdgePair(fds: *[2]std.posix.fd_t) !void {
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, fds));
+}
+
+/// Client-leg writer that records the wire as segments: one entry per
+/// drain or flush that moved bytes, which is one send on a real socket.
+/// A call that moved nothing is no send at all, so it records nothing.
+const SegmentProbe = struct {
+    writer: std.Io.Writer,
+    stage: [STREAM_BUF_SIZE]u8 = undefined,
+    wire: [16 * 1024]u8 = undefined,
+    wire_len: usize = 0,
+    segment_start: [32]usize = undefined,
+    segment_len: [32]usize = undefined,
+    segment_count: usize = 0,
+
+    const vtable = std.Io.Writer.VTable{ .drain = drain, .flush = flushSegment };
+
+    fn bind(probe: *SegmentProbe) void {
+        probe.writer = .{ .vtable = &vtable, .buffer = &probe.stage, .end = 0 };
+    }
+
+    fn segment(probe: *const SegmentProbe, index: usize) []const u8 {
+        return probe.wire[probe.segment_start[index]..][0..probe.segment_len[index]];
+    }
+
+    fn append(probe: *SegmentProbe, bytes: []const u8) void {
+        @memcpy(probe.wire[probe.wire_len..][0..bytes.len], bytes);
+        probe.wire_len += bytes.len;
+    }
+
+    fn closeSegment(probe: *SegmentProbe, start: usize) void {
+        if (probe.wire_len == start) return;
+
+        probe.segment_start[probe.segment_count] = start;
+        probe.segment_len[probe.segment_count] = probe.wire_len - start;
+        probe.segment_count += 1;
+    }
+
+    fn drain(interface: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const probe: *SegmentProbe = @alignCast(@fieldParentPtr("writer", interface));
+        const start = probe.wire_len;
+
+        probe.append(interface.buffer[0..interface.end]);
+        interface.end = 0;
+
+        var consumed: usize = 0;
+        for (data[0 .. data.len - 1]) |slice| {
+            probe.append(slice);
+            consumed += slice.len;
+        }
+        const last = data[data.len - 1];
+        for (0..splat) |_| {
+            probe.append(last);
+            consumed += last.len;
+        }
+
+        probe.closeSegment(start);
+
+        return consumed;
+    }
+
+    fn flushSegment(interface: *std.Io.Writer) std.Io.Writer.Error!void {
+        const probe: *SegmentProbe = @alignCast(@fieldParentPtr("writer", interface));
+        const start = probe.wire_len;
+
+        probe.append(interface.buffer[0..interface.end]);
+        interface.end = 0;
+
+        probe.closeSegment(start);
+    }
+};
+
+/// Build one h2 client leg: preface, SETTINGS, the ack, then one request.
+fn buildClientWire(buf: []u8, headers: []const Http2.Header) ![]const u8 {
+    var out = std.Io.Writer.fixed(buf);
+    try out.writeAll(Http2.PREFACE);
+    try http2_frames.writeSettings(&out, &.{});
+    try http2_frames.writeSettingsAck(&out);
+
+    var block_buf: [1024]u8 = undefined;
+    var encoder = Http2.HpackEncoder.init(&block_buf);
+    for (headers) |entry| try encoder.writeHeader(entry.name, entry.value);
+
+    try http2_frames.writeHeaderBlock(&out, 1, encoder.encoded(), true, http2_frames.MAX_PAYLOAD);
+
+    return out.buffered();
 }
 
 test "zix zixer: http2 edge, preface sniff serves h2 and falls back to h1" {
@@ -2245,4 +2378,235 @@ test "zix zixer: http2 edge, a silent upstream answers 504 with proxy status" {
     edge_thread.join();
     fake.release.store(true, .release);
     fake_thread.join();
+}
+
+test "zix zixer: http2 edge, the proxied head and body leave in one write" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = FakeBackend{ .io = io, .port = 18956, .request_quota = 1, .mode = .ECHO };
+    const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
+    try waitBackend(io, &fake);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18956 }};
+    var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(testing.allocator, 1);
+    defer idle.deinit(testing.allocator, io);
+    const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool, .idle = &idle };
+
+    const get_headers = [_]Http2.Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/one" },
+        .{ .name = ":authority", .value = "app.example" },
+    };
+    var wire_buf: [1024]u8 = undefined;
+    const wire = try buildClientWire(&wire_buf, &get_headers);
+
+    // The client leg is a fixed reader, so the edge serves the one request
+    // and then reads end of stream, and every byte it wrote is on record.
+    var client_r = std.Io.Reader.fixed(wire);
+    var probe: SegmentProbe = .{ .writer = undefined };
+    probe.bind();
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18956);
+    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+
+    fake_thread.join();
+
+    // Server SETTINGS, the SETTINGS ack, then the whole response. Four
+    // would mean the head went out on its own and the body chased it.
+    try testing.expectEqual(@as(usize, 3), probe.segment_count);
+
+    var response = std.Io.Reader.fixed(probe.segment(2));
+    var payload_buf: [http2_frames.MAX_PAYLOAD]u8 = undefined;
+
+    const head = try http2_frames.readFrame(&response, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_HEADERS), head.head.frame_type);
+    try testing.expectEqual(@as(u31, 1), head.head.stream_id);
+    try testing.expectEqual(Http2.FLAG_END_HEADERS, head.head.flags & Http2.FLAG_END_HEADERS);
+    try testing.expectEqual(@as(u8, 0), head.head.flags & Http2.FLAG_END_STREAM);
+
+    const data = try http2_frames.readFrame(&response, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_DATA), data.head.frame_type);
+    try testing.expectEqual(@as(u31, 1), data.head.stream_id);
+    try testing.expectEqual(Http2.FLAG_END_STREAM, data.head.flags & Http2.FLAG_END_STREAM);
+    try testing.expectEqualStrings("echo:", data.payload);
+
+    try testing.expectEqual(@as(usize, 0), response.bufferedLen());
+}
+
+test "zix zixer: http2 edge, the static head and body leave in one write" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.writeFile(testing.io, .{ .sub_path = "page.html", .data = "<h1>one write</h1>" }) catch @panic("fixture write failed");
+
+    var root_buf: [128]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    const proxy = http1_proxy.Proxy{ .io = io, .static = .{
+        .public_dir = root,
+        .public_prefix = null,
+        .spa_fallback = null,
+    } };
+
+    const get_headers = [_]Http2.Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/page.html" },
+        .{ .name = ":authority", .value = "site.test" },
+    };
+    var wire_buf: [1024]u8 = undefined;
+    const wire = try buildClientWire(&wire_buf, &get_headers);
+
+    var client_r = std.Io.Reader.fixed(wire);
+    var probe: SegmentProbe = .{ .writer = undefined };
+    probe.bind();
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18957);
+    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+
+    try testing.expectEqual(@as(usize, 3), probe.segment_count);
+
+    var response = std.Io.Reader.fixed(probe.segment(2));
+    var payload_buf: [http2_frames.MAX_PAYLOAD]u8 = undefined;
+
+    const head = try http2_frames.readFrame(&response, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_HEADERS), head.head.frame_type);
+    try testing.expectEqual(@as(u8, 0), head.head.flags & Http2.FLAG_END_STREAM);
+
+    const data = try http2_frames.readFrame(&response, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_DATA), data.head.frame_type);
+    try testing.expectEqual(Http2.FLAG_END_STREAM, data.head.flags & Http2.FLAG_END_STREAM);
+    try testing.expectEqualStrings("<h1>one write</h1>", data.payload);
+}
+
+test "zix zixer: http2 edge, a bodyless answer still leaves on its own" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // No pool and no static plane, so the edge answers 503 locally: a head
+    // with nothing behind it must not sit staged waiting for a body.
+    const proxy = http1_proxy.Proxy{ .io = io };
+
+    const get_headers = [_]Http2.Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/gone" },
+        .{ .name = ":authority", .value = "app.example" },
+    };
+    var wire_buf: [1024]u8 = undefined;
+    const wire = try buildClientWire(&wire_buf, &get_headers);
+
+    var client_r = std.Io.Reader.fixed(wire);
+    var probe: SegmentProbe = .{ .writer = undefined };
+    probe.bind();
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18958);
+    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+
+    try testing.expectEqual(@as(usize, 3), probe.segment_count);
+
+    var response = std.Io.Reader.fixed(probe.segment(2));
+    var payload_buf: [http2_frames.MAX_PAYLOAD]u8 = undefined;
+
+    const head = try http2_frames.readFrame(&response, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_HEADERS), head.head.frame_type);
+    try testing.expectEqual(Http2.FLAG_END_STREAM, head.head.flags & Http2.FLAG_END_STREAM);
+    try testing.expectEqual(@as(usize, 0), response.bufferedLen());
+}
+
+/// Upstream that answers a chunked head, holds, then sends one chunk. The
+/// hold is what a live stream looks like between events.
+const PausingBackend = struct {
+    io: std.Io,
+    port: u16,
+    pause_ms: u32,
+    ready: std.atomic.Value(bool) = .init(false),
+
+    fn serve(fake: *PausingBackend) void {
+        const io = fake.io;
+
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
+        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        defer server.deinit(io);
+        fake.ready.store(true, .release);
+
+        const stream = server.accept(io) catch return;
+        defer stream.close(io);
+
+        var read_buf: [4096]u8 = undefined;
+        var write_buf: [4096]u8 = undefined;
+        var reader = stream.reader(io, &read_buf);
+        var writer = stream.writer(io, &write_buf);
+
+        var head_buf: [4096]u8 = undefined;
+        _ = http1_head.readHead(&reader.interface, &head_buf) catch return;
+
+        writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n") catch return;
+        writer.interface.flush() catch return;
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(fake.pause_ms), .awake) catch {};
+
+        writer.interface.writeAll("5\r\nfirst\r\n0\r\n\r\n") catch return;
+        writer.interface.flush() catch return;
+    }
+};
+
+test "zix zixer: http2 edge, a streaming head leaves before its first chunk" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = PausingBackend{ .io = io, .port = 18959, .pause_ms = 150 };
+    const fake_thread = try std.Thread.spawn(.{}, PausingBackend.serve, .{&fake});
+    var tries: usize = 0;
+    while (tries < 100 and !fake.ready.load(.acquire)) : (tries += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+    try testing.expect(tries < 100);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18959 }};
+    var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(testing.allocator, 1);
+    defer idle.deinit(testing.allocator, io);
+    const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool, .idle = &idle };
+
+    const get_headers = [_]Http2.Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/events" },
+        .{ .name = ":authority", .value = "app.example" },
+    };
+    var wire_buf: [1024]u8 = undefined;
+    const wire = try buildClientWire(&wire_buf, &get_headers);
+
+    var client_r = std.Io.Reader.fixed(wire);
+    var probe: SegmentProbe = .{ .writer = undefined };
+    probe.bind();
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18959);
+    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+
+    fake_thread.join();
+
+    // The head must not have waited on the pause, so it is its own write
+    // and the chunk follows in the next one.
+    try testing.expect(probe.segment_count >= 4);
+
+    var head_segment = std.Io.Reader.fixed(probe.segment(2));
+    var payload_buf: [http2_frames.MAX_PAYLOAD]u8 = undefined;
+    const head = try http2_frames.readFrame(&head_segment, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_HEADERS), head.head.frame_type);
+    try testing.expectEqual(@as(u8, 0), head.head.flags & Http2.FLAG_END_STREAM);
+    try testing.expectEqual(@as(usize, 0), head_segment.bufferedLen());
+
+    var data_segment = std.Io.Reader.fixed(probe.segment(3));
+    const data = try http2_frames.readFrame(&data_segment, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_DATA), data.head.frame_type);
+    try testing.expectEqualStrings("first", data.payload);
 }
