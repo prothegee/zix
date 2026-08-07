@@ -2444,6 +2444,7 @@ The `engine` key picks the edge, and every engine except `udp` re-originates the
 
 | Document | Description |
 | :- | :- |
+| [`docs/zixer/README-en.md`](docs/zixer/README-en.md) | zixer: build, quickstart, root dir, commands, site keys, what each engine does at the edge |
 | [`docs/zixer/how-to-use-en.md`](docs/zixer/how-to-use-en.md) | zixer: build, first site, one recipe per shape, certbot renewal, troubleshooting |
 | [`docs/zixer/config-en.md`](docs/zixer/config-en.md) | zixer config reference: every main.cfg and site key, defaults, cross-field rules, fault texts |
 | [`docs/zixer/hld-en.md`](docs/zixer/hld-en.md) | zixer: process model, components, site lifecycle, engines, concurrency model, TLS and ACME |

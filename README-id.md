@@ -2453,6 +2453,7 @@ Key `engine` memilih edge, dan tiap engine kecuali `udp` melakukan re-originatio
 
 | Dokumen | Keterangan |
 | :- | :- |
+| [`docs/zixer/README-id.md`](docs/zixer/README-id.md) | zixer: build, mulai cepat, root dir, perintah, key site, apa yang dilakukan tiap engine di edge |
 | [`docs/zixer/how-to-use-id.md`](docs/zixer/how-to-use-id.md) | zixer: build, site pertama, satu resep per bentuk, renewal certbot, penelusuran masalah |
 | [`docs/zixer/config-id.md`](docs/zixer/config-id.md) | Rujukan config zixer: tiap key main.cfg dan site, default, aturan lintas field, teks fault |
 | [`docs/zixer/hld-id.md`](docs/zixer/hld-id.md) | zixer: process model, komponen, siklus hidup site, engine, concurrency model, TLS dan ACME |
