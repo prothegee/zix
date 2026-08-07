@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     # backstop for the whole leg. GitHub's own default is 6 hours, long enough for a
     # hung test to burn a day of runner minutes before anyone notices. A healthy leg
-    # lands inside this: five green runs measured 21m46s to 24m11s, and the step below
+    # lands inside this: green runs measured 21m46s to 25m30s, and the step below
     # leaves room for two parked suites on top of that, so anything past 36 is a hang.
     timeout-minutes: 36
     steps:
@@ -37,10 +37,12 @@ jobs:
       # The whole leg is one step, so a step-level cap is the only per-leg bound there is.
       # It sits under the job cap on purpose: killing the step still runs Post Checkout, so
       # the log is uploaded. A job-level kill loses the step body entirely.
-      # 30 over a 22 minute leg: one parked suite plus its retry costs 4 minutes, and the
-      # cap has to clear that or a park is reported as a kill with no verdict line.
+      # 33 over a leg measured at 21m46s to 25m30s: a parked suite plus its retry costs
+      # about 2m10s, and the cap has to clear two of those or a park is reported as a kill
+      # with no verdict line. 30 was too thin: the first green run to park landed 27m33s,
+      # leaving 2m27s, so a second park in the same leg would have been killed instead.
       - name: Test in OpenBSD
-        timeout-minutes: 30
+        timeout-minutes: 33
         uses: vmactions/openbsd-vm@v1
         with:
           release: "7.9"
@@ -121,8 +123,23 @@ jobs:
                 return 0
               fi
 
+              # the retry reports itself: --summary all so a retry that skipped its work
+              # still prints a step table, and its own elapsed seconds measured inside the
+              # VM. The host log timestamps cannot settle this: a suite's output arrives in
+              # one buffered burst, so the first green retry looked like it finished in 0.67s
+              # where the suite's own tests cost about 8s on this VM. A retry that is orders
+              # of magnitude too fast did not re-run anything, and the green it produced is
+              # not evidence of a passing suite.
               echo "== $name retry after timeout"
-              if timeout "$cap" zig build "$name" "$@" --summary failures; then
+              retry_start=$(date +%s)
+              if timeout "$cap" zig build "$name" "$@" --summary all; then
+                retry_status=0
+              else
+                retry_status=$?
+              fi
+              echo "== $name retry finished in $(( $(date +%s) - retry_start ))s, status $retry_status"
+
+              if [ "$retry_status" -eq 0 ]; then
                 return 0
               fi
 
