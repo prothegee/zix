@@ -73,6 +73,14 @@ jobs:
         timeout-minutes: 3
         run: zig build edge-test --summary failures --test-timeout 30s
 
+      # jzon keeps its own build files and steps (jzon-build*.zig). Its src/
+      # tests ride the unit-test step above with the rest of the library, so
+      # this drives the tiered suites under tests/jzon and nothing else.
+      - name: jzon tests
+        if: always()
+        timeout-minutes: 3
+        run: zig build jzon-test-all --summary failures --test-timeout 30s
+
       # examples is compile-plus-install only (no execution), so it gates the whole
       # example set against this target's toolchain. test-runner-all then drives every
       # zix protocol end to end: it spawns each example server as a child process and
