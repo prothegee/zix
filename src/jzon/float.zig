@@ -14,7 +14,8 @@
 //!   and an infinity as the bare word `inf`, which no JSON parser accepts. jzon
 //!   writes both the same way rather than disagree with the default path, so a
 //!   field that can hold either needs the caller to rule it out first.
-//! - Reading a float back belongs here too and arrives with the parser.
+//! - Reading one back lives here too, so both directions of the same number form
+//!   have one owner.
 
 const std = @import("std");
 
@@ -23,6 +24,10 @@ const Sink = @import("sink.zig").Sink;
 /// How writing a float can fail. Nothing is allocated, so a full buffer is all
 /// of it.
 pub const WriteError = @import("sink.zig").Error;
+
+/// How reading a float can fail. Text the JSON grammar does not allow reports
+/// the same way unreadable digits do: this is not a number a field can take.
+pub const ReadError = error{BadNumber};
 
 /// Write a float as JSON.
 ///
@@ -60,6 +65,80 @@ pub fn append(sink: *Sink, value: anytype) WriteError!void {
     try sink.commit(printed.len);
 
     try sink.byte('"');
+}
+
+/// Read a float out of a number token's bytes.
+///
+/// Note:
+/// - The RFC 8259 6 grammar is checked here rather than left to `std.fmt`, which
+///   also reads `inf`, `nan` and hex floats. A token handed over by a read cursor
+///   was bounded, not validated, so the check has to live on this side.
+/// - A value too large for T becomes an infinity rather than a failure, which is
+///   what std.json does with the same text.
+///
+/// Param:
+/// T - type (comptime, the float type to produce)
+/// text - []const u8 (the number token's bytes, as `Cursor.numberSpan` hands them back)
+///
+/// Return:
+/// - T (the value)
+/// - error.BadNumber when the text is not a JSON number
+pub fn parse(comptime T: type, text: []const u8) ReadError!T {
+    // Reject a non-float at compile time, so an integer cannot reach the float
+    // reading by accident.
+    _ = floatInfo(T);
+
+    if (!isNumber(text)) return error.BadNumber;
+
+    return std.fmt.parseFloat(T, text) catch error.BadNumber;
+}
+
+/// Whether `text` is a whole JSON number and nothing else (RFC 8259 6).
+///
+/// Note:
+/// - A leading zero is allowed only as the whole integer part, a fraction needs
+///   at least one digit after the point, and an exponent needs at least one
+///   digit after its optional sign.
+fn isNumber(text: []const u8) bool {
+    var pos: usize = 0;
+
+    if (pos < text.len and text[pos] == '-') pos += 1;
+
+    const whole = digitRun(text, pos);
+    if (whole == 0) return false;
+    if (text[pos] == '0' and whole > 1) return false;
+
+    pos += whole;
+
+    if (pos < text.len and text[pos] == '.') {
+        pos += 1;
+
+        const fraction = digitRun(text, pos);
+        if (fraction == 0) return false;
+
+        pos += fraction;
+    }
+
+    if (pos < text.len and (text[pos] == 'e' or text[pos] == 'E')) {
+        pos += 1;
+
+        if (pos < text.len and (text[pos] == '+' or text[pos] == '-')) pos += 1;
+
+        const exponent = digitRun(text, pos);
+        if (exponent == 0) return false;
+
+        pos += exponent;
+    }
+
+    return pos == text.len;
+}
+
+/// How many digits in a row start at `from`.
+fn digitRun(text: []const u8, from: usize) usize {
+    var pos = from;
+    while (pos < text.len and text[pos] >= '0' and text[pos] <= '9') : (pos += 1) {}
+
+    return pos - from;
 }
 
 /// The float facts of T, or a compile error naming the type that is not one.
@@ -159,4 +238,47 @@ test "zix jzon: float reports a buffer the digits do not fit in" {
 
     try std.testing.expectError(error.NoSpaceLeft, append(&sink, @as(f64, 12345.6789)));
     try std.testing.expectEqual(@as(usize, 0), sink.written());
+}
+
+test "zix jzon: float parse reads back what append wrote" {
+    const samples = [_]f64{ 0.0, 1.0, -1.0, 0.5, 0.1, 12345.6789, -0.000125, 1e21, 1e-300 };
+
+    for (samples) |sample| {
+        var buf: [512]u8 = undefined;
+        var sink: Sink = .init(&buf);
+        try append(&sink, sample);
+
+        try std.testing.expectEqual(sample, try parse(f64, sink.filled()));
+    }
+}
+
+test "zix jzon: float parse takes every part of the JSON number grammar" {
+    try std.testing.expectEqual(@as(f64, 0), try parse(f64, "0"));
+    try std.testing.expectEqual(@as(f64, -0.5), try parse(f64, "-0.5"));
+    try std.testing.expectEqual(@as(f64, 42), try parse(f64, "42"));
+    try std.testing.expectEqual(@as(f64, 1200), try parse(f64, "1.2e3"));
+    try std.testing.expectEqual(@as(f64, 1200), try parse(f64, "1.2E+3"));
+    try std.testing.expectEqual(@as(f64, 0.0012), try parse(f64, "1.2e-3"));
+}
+
+test "zix jzon: float parse rejects text the JSON grammar does not allow" {
+    try std.testing.expectError(error.BadNumber, parse(f64, ""));
+    try std.testing.expectError(error.BadNumber, parse(f64, "-"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "007"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "1."));
+    try std.testing.expectError(error.BadNumber, parse(f64, ".5"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "1e"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "1e+"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "+1"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "1 "));
+
+    // std.fmt reads all three of these, and none of them is JSON.
+    try std.testing.expectError(error.BadNumber, parse(f64, "inf"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "nan"));
+    try std.testing.expectError(error.BadNumber, parse(f64, "0x1p3"));
+}
+
+test "zix jzon: float parse widens past a type the way std.json does" {
+    try std.testing.expectEqual(std.math.inf(f32), try parse(f32, "1e300"));
+    try std.testing.expectEqual(@as(f16, 1.5), try parse(f16, "1.5"));
 }
