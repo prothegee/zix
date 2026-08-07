@@ -1,42 +1,46 @@
-//! zixer site serve loop: accept thread for one started proxy site
+//! zixer site serve state: the workers, pools, and caches one proxy site owns
 
 const std = @import("std");
 const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
 const http1_proxy = @import("http1_proxy.zig");
-const grpc_edge = @import("grpc_edge.zig");
-const http2_edge = @import("http2_edge.zig");
 const idle_reaper = @import("idle_reaper.zig");
 const site_cfg = @import("site_cfg.zig");
+const site_worker = @import("site_worker.zig");
 const static_files = @import("static_files.zig");
-const tcp_nodelay = @import("tcp_nodelay.zig");
 const tls_edge = @import("tls_edge.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
-/// Consecutive accept failures before the loop gives up.
-const MAX_ACCEPT_FAILURES: usize = 100;
+/// Wake attempts a shutdown makes per worker before it joins anyway, one
+/// per millisecond. Generous: the loop stops as soon as every worker has
+/// left, so the bound only matters if one is wedged inside a connection.
+const WAKE_ROUNDS_PER_WORKER: usize = 200;
 
-/// Everything one serving site owns. Heap-allocated so the accept thread and
-/// its connection tasks keep stable pointers while the daemon registry moves.
+/// Everything one serving site owns. Heap-allocated so the accept threads
+/// and their connection tasks keep stable pointers while the daemon
+/// registry moves.
 ///
 /// Note:
-/// - pool and idle exist only when the site has upstreams. A static-only
-///   site serves public_dir alone and leaves both null.
+/// - workers holds one accept loop per resolved worker, each with its own
+///   listener on the same port. pools and idles are parallel to it, one
+///   entry per worker, so a request never crosses a worker's spinlock.
+///   Both are empty on a static-only site, which serves public_dir alone.
 /// - tls_ctx exists only when the site terminates TLS: built from the cfg
 ///   cert / key paths at create, so a restart re-reads renewed cert files
-///   (the certbot deploy-hook path).
-/// - reaper runs only on a site that has an idle cache, and hands aged
-///   upstream connections back even while the site sits quiet.
+///   (the certbot deploy-hook path). Every worker reads the same one.
+/// - reaper runs only on a site that has idle caches, and hands aged
+///   upstream connections back even while the site sits quiet. One thread
+///   sweeps every worker's cache.
 pub const ServeState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     engine: site_cfg.Engine,
-    server: std.Io.net.Server,
-    pool: ?upstream_pool.Pool,
-    idle: ?upstream_conn.IdleCache,
+    workers: []site_worker.Worker,
+    pools: []upstream_pool.Pool,
+    idles: []upstream_conn.IdleCache,
     reaper: idle_reaper.Reaper = .{},
     upstream_timeout_ms: u32,
     public_dir: ?[]const u8,
@@ -46,47 +50,50 @@ pub const ServeState = struct {
     acme_webroot: ?[]const u8,
     acme_relay: ?site_cfg.Upstream,
     stop: std.atomic.Value(bool) = .init(false),
-    thread: ?std.Thread = null,
-    /// Live connection tasks. A concurrent group member releases its
-    /// resources when the task returns, shutdown cancels the stragglers
-    /// before the pool and strings are freed.
-    conns: std.Io.Group = .init,
     wake_ip: []const u8,
     port: u16,
 
-    /// Build the serve state and start its accept thread.
+    /// Build the serve state and start one accept thread per worker.
     ///
     /// Note:
     /// - server is moved in here: the caller hands the bound listener over
-    ///   and must not touch it again, shutdown() closes it.
+    ///   and must not touch it again, it becomes worker 0's. Any further
+    ///   worker binds its own listener on the same address, which needs no
+    ///   port probe: the site already owns the port at that point.
     /// - Every string taken from cfg is duped, the caller's arena may go.
     ///
     /// Param:
-    /// allocator - std.mem.Allocator (state, pool, and idle cache, long-lived)
+    /// allocator - std.mem.Allocator (state, workers, pools, caches, long-lived)
     /// io - std.Io (must outlive the state)
-    /// server - std.Io.net.Server (bound tcp listener for this site)
+    /// server - std.Io.net.Server (bound tcp listener, becomes worker 0's)
     /// cfg - *const site_cfg.SiteCfg (validated site config)
     /// port - u16
+    /// workers - usize (accept loops, already resolved from main.cfg)
+    /// kernel_backlog - u31 (listen queue length for the extra listeners)
     ///
     /// Return:
-    /// - *ServeState with the accept thread running
+    /// - *ServeState with every accept thread running
     pub fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
         server: std.Io.net.Server,
         cfg: *const site_cfg.SiteCfg,
         port: u16,
+        workers: usize,
+        kernel_backlog: u31,
     ) !*ServeState {
+        const worker_total = @max(1, workers);
+
         const state = try allocator.create(ServeState);
         errdefer allocator.destroy(state);
 
-        var pool: ?upstream_pool.Pool = null;
-        errdefer if (pool) |*inner| inner.deinit(allocator);
-        var idle: ?upstream_conn.IdleCache = null;
-        errdefer if (idle) |*inner| inner.deinit(allocator, io);
+        var pools: []upstream_pool.Pool = &.{};
+        errdefer freePools(allocator, pools);
+        var idles: []upstream_conn.IdleCache = &.{};
+        errdefer freeIdles(allocator, io, idles);
         if (cfg.upstreams.len > 0) {
-            pool = try upstream_pool.Pool.init(allocator, cfg.upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
-            idle = try upstream_conn.IdleCache.init(allocator, cfg.upstreams.len);
+            pools = try buildPools(allocator, cfg.upstreams, worker_total);
+            idles = try buildIdles(allocator, io, cfg.upstreams.len, worker_total);
         }
 
         const wake_ip = try allocator.dupe(u8, cfg.ip);
@@ -112,13 +119,16 @@ pub const ServeState = struct {
             tls_ctx = try tls_edge.buildContext(allocator, io, cfg.tls_cert.?, cfg.tls_key.?, tls_edge.alpnPrefs(engine));
         }
 
+        const workers_slice = try allocator.alloc(site_worker.Worker, worker_total);
+        errdefer allocator.free(workers_slice);
+
         state.* = .{
             .allocator = allocator,
             .io = io,
             .engine = engine,
-            .server = server,
-            .pool = pool,
-            .idle = idle,
+            .workers = workers_slice,
+            .pools = pools,
+            .idles = idles,
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
             .public_dir = public_dir,
             .public_prefix = public_prefix,
@@ -130,18 +140,38 @@ pub const ServeState = struct {
             .port = port,
         };
 
-        if (state.idle) |*cache| try state.reaper.start(io, cache);
+        // Worker 0 takes the listener the caller bound. Every other worker
+        // binds its own on the same address, which needs no port probe: the
+        // site already owns the port, and SO_REUSEPORT is the point here.
+        //
+        // The error path leaves worker 0's listener alone. Until create
+        // returns, that socket is still the caller's to close.
+        var bound: usize = 0;
+        errdefer for (state.workers[1..@max(1, bound)]) |*worker| worker.closeIdleListener();
+        while (bound < worker_total) : (bound += 1) {
+            const listener = if (bound == 0) server else try listenShared(io, cfg.ip, port, kernel_backlog);
+
+            state.workers[bound] = .{
+                .server = listener,
+                .proxy = buildProxy(state, bound),
+                .tls_ctx = if (state.tls_ctx) |*ctx| ctx else null,
+                .engine = engine,
+                .stop = &state.stop,
+            };
+        }
+
+        if (state.idles.len > 0) try state.reaper.start(io, state.idles);
         errdefer state.reaper.stop();
 
-        state.thread = try std.Thread.spawn(.{}, acceptLoop, .{state});
+        try startWorkers(state);
 
         return state;
     }
 
-    /// Stop the accept thread, close the listener, release everything.
+    /// Stop every accept thread, close every listener, release everything.
     ///
     /// Note:
-    /// - The wake connection is what unblocks the accept call portably:
+    /// - The wake connection is what unblocks an accept call portably:
     ///   closing a socket another thread is blocked on is not reliable
     ///   cross-platform, a loopback connect always is.
     /// - Connections already being served finish on their own tasks.
@@ -149,14 +179,16 @@ pub const ServeState = struct {
         const io = state.io;
 
         state.stop.store(true, .release);
-        wake(io, state.wake_ip, state.port);
-        if (state.thread) |thread| thread.join();
-        state.conns.cancel(io);
+        wakeWorkers(state);
+
+        for (state.workers) |*worker| worker.join();
+        for (state.workers) |*worker| worker.cancelConns();
+        for (state.workers) |*worker| worker.closeIdleListener();
         state.reaper.stop();
 
-        state.server.deinit(io);
-        if (state.idle) |*idle| idle.deinit(state.allocator, io);
-        if (state.pool) |*pool| pool.deinit(state.allocator);
+        state.allocator.free(state.workers);
+        freeIdles(state.allocator, io, state.idles);
+        freePools(state.allocator, state.pools);
         if (state.tls_ctx) |*ctx| ctx.deinit();
         state.allocator.free(state.wake_ip);
         freeOptional(state.allocator, state.public_dir);
@@ -181,11 +213,62 @@ fn freeOptional(allocator: std.mem.Allocator, value: ?[]const u8) void {
     if (value) |inner| allocator.free(inner);
 }
 
-fn acceptLoop(state: *ServeState) void {
-    const io = state.io;
+/// One upstream pool per worker, so the round-robin cursor and its short
+/// spinlock are never shared between accept loops.
+///
+/// Note:
+/// - Each copy learns on its own that an upstream is down, so a dead
+///   backend costs one failed connect per worker instead of one per site.
+///   The cooldown re-admit then works the same way in each copy.
+fn buildPools(allocator: std.mem.Allocator, upstreams: []const site_cfg.Upstream, worker_total: usize) ![]upstream_pool.Pool {
+    const pools = try allocator.alloc(upstream_pool.Pool, worker_total);
+    errdefer allocator.free(pools);
 
-    const pool: ?*upstream_pool.Pool = if (state.pool) |*inner| inner else null;
-    const idle: ?*upstream_conn.IdleCache = if (state.idle) |*inner| inner else null;
+    var built: usize = 0;
+    errdefer for (pools[0..built]) |*pool| pool.deinit(allocator);
+    while (built < worker_total) : (built += 1) {
+        pools[built] = try upstream_pool.Pool.init(allocator, upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    }
+
+    return pools;
+}
+
+/// One idle cache per worker, each holding its share of the site's bound.
+fn buildIdles(allocator: std.mem.Allocator, io: std.Io, slot_count: usize, worker_total: usize) ![]upstream_conn.IdleCache {
+    const idles = try allocator.alloc(upstream_conn.IdleCache, worker_total);
+    errdefer allocator.free(idles);
+
+    var built: usize = 0;
+    errdefer for (idles[0..built]) |*idle| idle.deinit(allocator, io);
+    while (built < worker_total) : (built += 1) {
+        idles[built] = try upstream_conn.IdleCache.initShare(allocator, slot_count, worker_total);
+    }
+
+    return idles;
+}
+
+fn freePools(allocator: std.mem.Allocator, pools: []upstream_pool.Pool) void {
+    for (pools) |*pool| pool.deinit(allocator);
+
+    allocator.free(pools);
+}
+
+fn freeIdles(allocator: std.mem.Allocator, io: std.Io, idles: []upstream_conn.IdleCache) void {
+    for (idles) |*idle| idle.deinit(allocator, io);
+
+    allocator.free(idles);
+}
+
+/// Bind one more listener on an address the site already owns.
+fn listenShared(io: std.Io, ip: []const u8, port: u16, kernel_backlog: u31) !std.Io.net.Server {
+    const addr = std.Io.net.IpAddress.parse(ip, port) catch return error.SiteCfgIncomplete;
+
+    return addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
+}
+
+/// The proxy one worker serves with: the site's planes, that worker's
+/// upstream leg.
+fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
     const static_site: ?static_files.StaticSite = if (state.public_dir) |dir| .{
         .public_dir = dir,
         .public_prefix = state.public_prefix,
@@ -195,69 +278,68 @@ fn acceptLoop(state: *ServeState) void {
         .{ .webroot = state.acme_webroot, .relay = state.acme_relay }
     else
         null;
-    const tls_ctx: ?*const zix.Tls.Context = if (state.tls_ctx) |*ctx| ctx else null;
-    const proxy = http1_proxy.Proxy{
-        .io = io,
-        .pool = pool,
-        .idle = idle,
+
+    return .{
+        .io = state.io,
+        .pool = if (state.pools.len > 0) &state.pools[index] else null,
+        .idle = if (state.idles.len > 0) &state.idles[index] else null,
         .static = static_site,
         .acme = acme,
-        .tls_cert_der = if (tls_ctx) |ctx| ctx.cert_der else null,
+        .tls_cert_der = if (state.tls_ctx) |ctx| ctx.cert_der else null,
         .upstream_timeout_ms = state.upstream_timeout_ms,
     };
+}
 
-    var accept_failures: usize = 0;
-    while (!state.stop.load(.acquire)) {
-        const stream = state.server.accept(io) catch {
-            if (state.stop.load(.acquire)) return;
+/// Spawn every accept thread, worker 0 last.
+///
+/// Note:
+/// - A spawn failure stops whatever already started, so the caller never
+///   sees a half-serving site.
+/// - Worker 0 serves the listener create was handed, and that socket is
+///   the caller's until create returns. Starting it last keeps it
+///   unstarted, and so unclosed, on any spawn failure.
+fn startWorkers(state: *ServeState) !void {
+    var started: usize = 1;
+    errdefer {
+        state.stop.store(true, .release);
+        wakeWorkers(state);
+        for (state.workers[1..started]) |*worker| worker.join();
+        for (state.workers[1..started]) |*worker| worker.cancelConns();
+    }
+    while (started < state.workers.len) : (started += 1) {
+        try state.workers[started].start();
+    }
 
-            accept_failures += 1;
-            if (accept_failures >= MAX_ACCEPT_FAILURES) return;
-            continue;
-        };
-        accept_failures = 0;
+    try state.workers[0].start();
+}
 
-        if (state.stop.load(.acquire)) {
-            stream.close(io);
-            return;
-        }
+/// Wake accepts until every worker has left its loop.
+///
+/// Note:
+/// - One wake is not one worker: with SO_REUSEPORT the kernel decides which
+///   listener takes the connection. A worker closes its listener on the way
+///   out, which takes it out of the group, so a retry reaches one that is
+///   still blocked.
+/// - The round bound only matters when a worker is wedged inside a
+///   connection rather than in accept. Joining then blocks either way, the
+///   bound just stops the wake loop from spinning on it.
+fn wakeWorkers(state: *ServeState) void {
+    const rounds = state.workers.len * WAKE_ROUNDS_PER_WORKER;
 
-        // Every engine on this listener writes a reply as more than one
-        // segment somewhere (h2 frames, grpc trailers, a tls record after a
-        // head), so Nagle costs a delayed-ack round trip per request.
-        tcp_nodelay.apply(stream);
+    for (0..rounds) |_| {
+        if (allLeft(state.workers)) return;
 
-        const task = ConnTask{ .proxy = proxy, .stream = stream, .tls_ctx = tls_ctx, .engine = state.engine };
-        state.conns.concurrent(io, serveTask, .{task}) catch serveTask(task);
+        wake(state.io, state.wake_ip, state.port);
+        std.Io.sleep(state.io, std.Io.Duration.fromMilliseconds(1), .awake) catch return;
     }
 }
 
-const ConnTask = struct {
-    proxy: http1_proxy.Proxy,
-    stream: std.Io.net.Stream,
-    tls_ctx: ?*const zix.Tls.Context,
-    engine: site_cfg.Engine,
-};
-
-fn serveTask(task: ConnTask) void {
-    if (task.tls_ctx) |ctx| {
-        tls_edge.serveConn(&task.proxy, ctx, task.stream, task.engine);
-        return;
+fn allLeft(workers: []const site_worker.Worker) bool {
+    for (workers) |*worker| {
+        if (worker.thread != null and !worker.hasLeft()) return false;
     }
 
-    // A cleartext http2 site sniffs the preface and falls back to the h1
-    // loop for anything else (rfc 9113 3.3 prior knowledge). A grpc site
-    // requires the preface outright, prior knowledge is the grpc norm.
-    if (task.engine == .HTTP2) {
-        http2_edge.serveConn(&task.proxy, task.stream);
-        return;
-    }
-    if (task.engine == .GRPC) {
-        grpc_edge.serveConn(&task.proxy, task.stream);
-        return;
-    }
-
-    http1_proxy.serveConn(&task.proxy, task.stream);
+    return true;
 }
 
 /// Connect-and-close against the site's own port so a blocked accept returns.
@@ -293,7 +375,7 @@ test "zix zixer: site serve, create binds a thread and shutdown frees the port" 
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39870);
     const server = try addr.listen(io, .{ .kernel_backlog = 64 });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39870);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39870, 1, 64);
     state.shutdown();
 
     // The port is free again: a fresh bind succeeds.
@@ -319,9 +401,9 @@ test "zix zixer: site serve, static-only site runs without a pool" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39881);
     const server = try addr.listen(io, .{ .kernel_backlog = 64 });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39881);
-    try std.testing.expect(state.pool == null);
-    try std.testing.expect(state.idle == null);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39881, 1, 64);
+    try std.testing.expect(state.pools.len == 0);
+    try std.testing.expect(state.idles.len == 0);
     try std.testing.expectEqualStrings("/var/www/static-test", state.public_dir.?);
     state.shutdown();
 
@@ -356,7 +438,7 @@ test "zix zixer: site serve, tls site create refuses a missing cert file" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39895);
     var server = try addr.listen(io, .{ .kernel_backlog = 8 });
 
-    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 39895));
+    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 39895, 1, 8));
     server.deinit(io);
 }
 
@@ -387,7 +469,7 @@ test "zix zixer: site serve, tls site terminates and serves the static plane" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39894);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39894);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39894, 1, 8);
     try std.testing.expect(state.tls_ctx != null);
 
     // manual TLS 1.3 client over the real socket: hello record, read the
@@ -481,7 +563,7 @@ test "zix zixer: site serve, the cfg read bound reaches the state and starts a r
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18953);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18953);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18953, 1, 8);
     try std.testing.expectEqual(@as(u32, 1234), state.upstream_timeout_ms);
     try std.testing.expect(state.reaper.thread != null);
     state.shutdown();
@@ -507,9 +589,171 @@ test "zix zixer: site serve, a site without upstreams takes the default and no r
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18955);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18955);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18955, 1, 8);
     try std.testing.expectEqual(upstream_deadline.DEFAULT_MS, state.upstream_timeout_ms);
     try std.testing.expect(state.reaper.thread == null);
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+/// One cleartext GET against a running site, the reply head and body.
+fn testGet(io: std.Io, port: u16, reply: []u8) ![]const u8 {
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+    const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer stream.close(io);
+
+    var write_buf: [512]u8 = undefined;
+    var writer = stream.writer(io, &write_buf);
+    try writer.interface.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    try writer.interface.flush();
+
+    var read_buf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+
+    var len: usize = 0;
+    while (len < reply.len) {
+        const got = reader.interface.readSliceShort(reply[len..]) catch break;
+        if (got == 0) break;
+        len += got;
+    }
+
+    return reply[0..len];
+}
+
+test "zix zixer: site serve, a four worker site answers on one shared port" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve worker test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.writeFile(std.testing.io, .{ .sub_path = "index.html", .data = "four-workers" }) catch @panic("fixture write failed");
+
+    var root_buf: [128]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18963,
+        .public_dir = root,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18963);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18963, 4, 8);
+    try std.testing.expectEqual(@as(usize, 4), state.workers.len);
+
+    // Four real sockets, not four views of one: the kernel can only spread
+    // accepts across listeners that are separately bound.
+    for (state.workers, 0..) |*worker, i| {
+        for (state.workers[i + 1 ..]) |*other| {
+            try std.testing.expect(worker.server.socket.handle != other.server.socket.handle);
+        }
+    }
+
+    // Four listeners on one port, and every one of them is a live accept
+    // loop: a request must be answered whichever the kernel hands it to.
+    for (0..12) |_| {
+        var reply_buf: [1024]u8 = undefined;
+        const reply = try testGet(io, 18963, &reply_buf);
+
+        try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 OK\r\n"));
+        try std.testing.expect(std.mem.endsWith(u8, reply, "four-workers"));
+    }
+
+    state.shutdown();
+
+    // Every worker released its listener, so a strict rebind succeeds.
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, every worker owns its own pool and idle cache" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve per-worker leg test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18965 }};
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18964,
+        .upstreams = &upstreams,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18964);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18964, 3, 8);
+    try std.testing.expectEqual(@as(usize, 3), state.workers.len);
+    try std.testing.expectEqual(@as(usize, 3), state.pools.len);
+    try std.testing.expectEqual(@as(usize, 3), state.idles.len);
+
+    // No worker shares an upstream leg with another, which is the point of
+    // the split: the round-robin cursor and both spinlocks stay local.
+    for (state.workers, 0..) |*worker, i| {
+        try std.testing.expectEqual(&state.pools[i], worker.proxy.pool.?);
+        try std.testing.expectEqual(&state.idles[i], worker.proxy.idle.?);
+    }
+
+    // Three workers hold a third of the site bound each, so the backend
+    // never loses more of its capacity than a single worker site takes.
+    var site_total: usize = 0;
+    for (state.idles) |idle| site_total += idle.total_cap;
+    try std.testing.expect(site_total <= upstream_conn.TOTAL_IDLE_CAP);
+
+    // One reaper thread covers all three caches.
+    try std.testing.expect(state.reaper.thread != null);
+    try std.testing.expectEqual(@as(usize, 3), state.reaper.caches.len);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, a zero worker count still runs one accept loop" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve zero worker test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18966,
+        .public_dir = "/var/www/static-test",
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18966);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    // main.cfg resolves 0 before it reaches here, so a 0 arriving at create
+    // is a caller mistake. A site with no accept loop would bind the port
+    // and answer nothing, which is worse than one loop.
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18966, 0, 8);
+    try std.testing.expectEqual(@as(usize, 1), state.workers.len);
     state.shutdown();
 
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
