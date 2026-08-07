@@ -4,6 +4,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
+const conn_buffer = @import("conn_buffer.zig");
 const http1_head = @import("http1_head.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const static_files = @import("static_files.zig");
@@ -12,11 +13,12 @@ const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 const ws_tunnel = @import("ws_tunnel.zig");
 
-/// Stream buffer size for each leg of the relay.
-const STREAM_BUF_SIZE: usize = 8 * 1024;
+/// Bytes one static-file read moves into the client writer at a time.
+const FILE_CHUNK: usize = 16 * 1024;
 
-/// Copy chunk size for the body pumps.
-const PUMP_CHUNK: usize = 16 * 1024;
+/// Ceiling on one reader-to-writer body move. The pump loops, so this only
+/// bounds how much a single call may carry, not the body length.
+const PUMP_LIMIT: usize = 16 * 1024;
 
 /// Interim (1xx) responses relayed per exchange before giving up.
 const MAX_INTERIM = 4;
@@ -28,6 +30,13 @@ const MAX_INTERIM = 4;
 /// gate.
 pub const Proxy = struct {
     io: std.Io,
+    /// Where one connection's stream buffers come from. A serving site
+    /// passes the daemon's allocator, which is the same one this default
+    /// names, so a directly built Proxy still serves.
+    allocator: std.mem.Allocator = std.heap.smp_allocator,
+    /// One leg's stream buffer size, already resolved by the site from its
+    /// own max_recv_buf and the main.cfg default.
+    stream_buf_bytes: usize = conn_buffer.DEFAULT_BYTES,
     pool: ?*upstream_pool.Pool = null,
     idle: ?*upstream_conn.IdleCache = null,
     static: ?static_files.StaticSite = null,
@@ -55,12 +64,34 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     const io = proxy.io;
     defer client_stream.close(io);
 
-    var read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var client_reader = client_stream.reader(io, &read_buf);
-    var client_writer = client_stream.writer(io, &write_buf);
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, legsFor(proxy)) catch {
+        writeRefusal(io, client_stream);
+        return;
+    };
+    defer buffers.deinit(proxy.allocator);
 
-    serveLoop(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream);
+    var client_reader = client_stream.reader(io, buffers.client_read);
+    var client_writer = client_stream.writer(io, buffers.client_write);
+
+    serveLoopBuffered(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, buffers);
+}
+
+/// Which legs this site's connections need buffers for. A static-only
+/// site never opens an upstream connection, so it pays for the client
+/// pair alone.
+fn legsFor(proxy: *const Proxy) conn_buffer.Legs {
+    return .{ .client = true, .upstream = proxy.pool != null };
+}
+
+/// Refuse a connection the edge could not buffer. Small enough to answer
+/// off the stack, which is the point: the box is out of memory, so saying
+/// so beats dropping the socket without a status.
+fn writeRefusal(io: std.Io, client_stream: std.Io.net.Stream) void {
+    var refusal_buf: [256]u8 = undefined;
+    var refusal_writer = client_stream.writer(io, &refusal_buf);
+
+    writeEdgeError(&refusal_writer.interface, 503, "edge out of buffers", "connection_limit_reached");
+    refusal_writer.interface.flush() catch {};
 }
 
 /// The edge request loop over reader / writer interfaces (plain stream or
@@ -78,7 +109,21 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
 /// - client_stream is the raw client socket behind the interfaces, the
 ///   tunnel needs it to unblock a waiting read. Null (socket-less rigs)
 ///   only softens tunnel teardown when the upstream ends first.
+/// - The caller already owns the client pair here, so this allocates the
+///   upstream pair alone, and nothing at all on a site with no pool.
 pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream) void {
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = false, .upstream = proxy.pool != null }) catch {
+        writeEdgeError(client_w, 503, "edge out of buffers", "connection_limit_reached");
+        client_w.flush() catch {};
+        return;
+    };
+    defer buffers.deinit(proxy.allocator);
+
+    serveLoopBuffered(proxy, client_r, client_w, client_addr, client_stream, buffers);
+}
+
+/// The request loop proper, over buffers the caller already allocated.
+fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, buffers: conn_buffer.Set) void {
     while (true) {
         var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
         const head_bytes = http1_head.readHead(client_r, &head_buf) catch |err| {
@@ -142,7 +187,7 @@ pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.I
             client_w.flush() catch return;
         }
 
-        const outcome = exchange(proxy, client_r, client_w, client_stream, &request, upstream_head, upgrade);
+        const outcome = exchange(proxy, client_r, client_w, client_stream, &request, upstream_head, upgrade, buffers);
 
         client_w.flush() catch return;
         if (outcome == .CLOSE) return;
@@ -274,7 +319,7 @@ fn sendResolved(io: std.Io, client_w: *std.Io.Writer, resolved: static_files.Res
     static_files.writeResolvedHead(client_w, &resolved, edge_close) catch return .CLOSE;
 
     if (!std.mem.eql(u8, request.method, "HEAD")) {
-        var chunk: [PUMP_CHUNK]u8 = undefined;
+        var chunk: [FILE_CHUNK]u8 = undefined;
         var offset: u64 = 0;
         while (offset < resolved.size) {
             const want: usize = @intCast(@min(resolved.size - offset, chunk.len));
@@ -330,6 +375,7 @@ fn exchange(
     request: *const http1_head.RequestHead,
     upstream_head: []const u8,
     upgrade: bool,
+    buffers: conn_buffer.Set,
 ) EdgeResult {
     const io = proxy.io;
     const no_body = request.framing == .none;
@@ -361,10 +407,8 @@ fn exchange(
         };
         const gate = upstream_deadline.Gate{ .stream = conn.stream, .budget_ms = proxy.upstream_timeout_ms };
 
-        var up_read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-        var up_write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-        var up_reader = conn.stream.reader(io, &up_read_buf);
-        var up_writer = conn.stream.writer(io, &up_write_buf);
+        var up_reader = conn.stream.reader(io, buffers.upstream_read);
+        var up_writer = conn.stream.writer(io, buffers.upstream_write);
 
         up_writer.interface.writeAll(upstream_head) catch {
             conn.stream.close(io);
@@ -610,19 +654,24 @@ fn nowMs(io: std.Io) i64 {
 ///   is the only place the request body flows.
 /// - The byte count is what ends the loop, so the gate never sits waiting
 ///   after the last byte of a finished body.
+/// - The bytes move through the reader's own buffer, the same way
+///   pumpUntilClose moves them. A copy array here would be one more
+///   per-connection buffer for no gain.
 fn pumpExact(src: *std.Io.Reader, dst: *std.Io.Writer, len: u64, gate: ?upstream_deadline.Gate) !void {
-    var chunk: [PUMP_CHUNK]u8 = undefined;
     var remaining = len;
     while (remaining > 0) {
         if (gate) |bound| {
             if (!bound.ready(src)) return error.UpstreamTimeout;
         }
 
-        const want: usize = @intCast(@min(remaining, chunk.len));
-        const got = src.readSliceShort(chunk[0..want]) catch return error.ConnectionClosed;
-        if (got == 0) return error.ConnectionClosed;
+        const want: usize = @intCast(@min(remaining, PUMP_LIMIT));
+        const got = src.stream(dst, .limited(want)) catch return error.ConnectionClosed;
 
-        try dst.writeAll(chunk[0..got]);
+        // Zero moved is not the end: the reader may have filled its own
+        // buffer this pass instead of writing, and the next pass drains
+        // it. A closed source raises instead, which is the catch above.
+        if (got == 0) continue;
+
         remaining -= got;
     }
 }
@@ -674,7 +723,7 @@ fn pumpUntilClose(src: *std.Io.Reader, dst: *std.Io.Writer) void {
     while (true) {
         // A zero return stored into the reader buffer instead of the
         // writer (interface readers may), the next pass drains it.
-        const got = src.stream(dst, .limited(PUMP_CHUNK)) catch return;
+        const got = src.stream(dst, .limited(PUMP_LIMIT)) catch return;
         if (got == 0) continue;
 
         dst.flush() catch return;
@@ -1964,4 +2013,65 @@ test "zix zixer: http1 proxy, a short budget does not disturb a healthy exchange
 
     try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 OK\r\n"));
     try std.testing.expect(std.mem.endsWith(u8, reply, "echo:ping"));
+}
+
+test "zix zixer: http1 proxy, a body larger than the buffers relays whole" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = FakeUpstream{ .io = io, .port = 18974, .request_quota = 1 };
+    const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
+    try waitReadyFlag(io, &fake.ready);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18974 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+
+    // The smallest buffer a site may configure, against a body many times
+    // its length: the pump has to loop, and nothing may be dropped.
+    const proxy = Proxy{ .io = io, .allocator = std.testing.allocator, .stream_buf_bytes = conn_buffer.MIN_BYTES, .pool = &pool, .idle = &idle };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    var write_buf: [1024]u8 = undefined;
+    var writer = client.writer(io, &write_buf);
+
+    const body_len: usize = 200;
+    try writer.interface.print("POST /echo HTTP/1.1\r\nHost: t\r\nConnection: close\r\nContent-Length: {d}\r\n\r\n", .{body_len});
+    var sent: usize = 0;
+    while (sent < body_len) : (sent += 1) try writer.interface.writeAll("x");
+    try writer.interface.flush();
+
+    var reply_buf: [2048]u8 = undefined;
+    const reply_len = readAllAvailable(io, client, &reply_buf);
+    const reply = reply_buf[0..reply_len];
+
+    edge_thread.join();
+    fake_thread.join();
+
+    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 OK\r\n"));
+
+    // The upstream echoes the body it received, so a short read anywhere
+    // in the chain shows up as a short echo here.
+    const echo_at = std.mem.indexOf(u8, reply, "echo:") orelse return error.NoEchoInReply;
+    try std.testing.expectEqual(body_len + 5, reply.len - echo_at);
+}
+
+test "zix zixer: http1 proxy, a static site allocates no upstream legs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const static_proxy = Proxy{ .io = testing.io, .allocator = arena.allocator(), .static = .{ .public_dir = "/x", .public_prefix = null, .spa_fallback = null } };
+    const proxied_proxy = Proxy{ .io = testing.io, .allocator = arena.allocator(), .pool = @ptrFromInt(@alignOf(upstream_pool.Pool)) };
+
+    try std.testing.expectEqual(@as(usize, 2), legsFor(&static_proxy).count());
+    try std.testing.expectEqual(@as(usize, 4), legsFor(&proxied_proxy).count());
 }
