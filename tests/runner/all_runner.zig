@@ -644,9 +644,9 @@ pub fn main(process: std.process.Init) void {
     runWaves(io, self_exe, &all_paths, &tally, cpu_count, check_timeout_ms);
 
     if (tally.failed > 0) {
-        std.debug.print("{d}/{d} protocol(s) failed\n", .{ tally.failed, tally.total });
+        std.debug.print("{d}/{d} example(s) failed\n", .{ tally.failed, tally.total });
         std.process.exit(1);
     }
 
-    std.debug.print("all {d} protocols passed\n", .{tally.total});
+    std.debug.print("zix: all {d} examples passed\n", .{tally.total});
 }

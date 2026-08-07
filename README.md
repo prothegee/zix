@@ -53,6 +53,11 @@
 <h4 align="center">
     <b><i>Platform Development Status:</i></b>
 </h4>
+<p align="center">
+    <code><i>Green: Maintained</i></code>
+    <br>
+    <code><i>Yellow: Cross-Compiled (Open for contributors/maintainers)</i></code>
+</p>
 <div align="center">
     <img src="https://img.shields.io/badge/x86__64-Linux-green">
     <img src="https://img.shields.io/badge/aarch64-Linux-green">
@@ -62,30 +67,25 @@
     <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
     <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 </div>
+
+<br>
+
+<h4 align="center">
+    <b><i>Zig Build Main Branch Status:</i></b>
+</h4>
 <p align="center">
-    <code><i>Green: Maintained</i></code>
-    <br>
-    <code><i>Yellow: Cross-Compiled (Looking for maintainer & contributor)</i></code>
+    <code><i>These built are not checking native container.</i></code>
 </p>
-
-<!-- <hr> -->
-
-<!-- <h4 align="center"> -->
-<!--     <b><i>Zig 0.16.x Build Status:</i></b> -->
-<!-- </h4> -->
-<!-- <div align="center"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=x86_64-Linux"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-linux-0.16.yml?label=aarch64-Linux"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-windows-0.16.yml?label=x86_64-Windows"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-macos-0.16.yml?label=aarch64-MacOS"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-freebsd-0.16.yml?label=x86_64-FreeBSD"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-netbsd-0.16.yml?label=x86_64-NetBSD"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-openbsd-0.16.yml?label=x86_64-OpenBSD"> -->
-<!-- </div> -->
-<!-- <p align="center"> -->
-<!--     <code><i>These built are not checking native container.</i></code> -->
-<!-- </p> -->
-<!-- https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?logo=Zig&label=x86_64-linux -->
+<div align="center">
+    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=zig-x86_64-Linux-0.16">
+    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-linux-0.16.yml?label=zig-aarch64-Linux-0.16">
+    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-windows-0.16.yml?label=zig-x86_64-Windows-0.16">
+    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-macos-0.16.yml?label=zig-aarch64-MacOS-0.16">
+    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-freebsd-0.16.yml?label=zig-x86_64-FreeBSD-0.16">
+    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-netbsd-0.16.yml?label=zig-x86_64-NetBSD-0.16">
+    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-openbsd-0.16.yml?label=zig-x86_64-OpenBSD-0.16">
+</div>
+<!-- https://shields.io/badges/git-hub-actions-workflow-status -->
 
 <hr>
 
