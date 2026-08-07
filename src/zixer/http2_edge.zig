@@ -12,6 +12,7 @@ const http2_ws_bridge = @import("http2_ws_bridge.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
+const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
 const Http2 = zix.Http2;
@@ -592,12 +593,13 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
             return if (localAnswer(conn, active.id, 503, "destination_unavailable") == .CLOSED) .CONN_DEAD else .DONE;
         };
 
-        const conn_up = idle.acquire(picked.index) orelse
+        const conn_up = idle.acquire(io, picked.index, nowMs(io)) orelse
             upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
             pool.markDown(picked.index, nowMs(io));
             failed_here = true;
             continue;
         };
+        const gate = upstreamGate(conn, conn_up);
 
         var up_read_buf: [STREAM_BUF_SIZE]u8 = undefined;
         var up_write_buf: [STREAM_BUF_SIZE]u8 = undefined;
@@ -647,10 +649,15 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
 
         var resp_head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
         const method: []const u8 = if (entry.is_head) "HEAD" else "GET";
-        const response = readUpstreamHead(conn, active, &up_reader.interface, &resp_head_buf, method) catch |err| {
+        const response = readUpstreamHead(conn, active, &up_reader.interface, &resp_head_buf, method, gate) catch |err| {
             conn_up.stream.close(io);
             switch (err) {
                 error.ClientDead => return .CONN_DEAD,
+
+                // A silent upstream is not a dead one: the request was
+                // already delivered, so it is neither replayed elsewhere
+                // nor is the slot taken out of rotation.
+                error.UpstreamTimeout => return if (localAnswer(conn, active.id, 504, "http_response_timeout") == .CLOSED) .CONN_DEAD else .DONE,
                 else => {},
             }
             if (!entry.needs_body) {
@@ -671,9 +678,11 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
 /// Read the upstream response head, relaying interim 1xx heads as h2
 /// informational HEADERS. A 101 was never asked for on a plain exchange
 /// and counts as an upstream failure.
-fn readUpstreamHead(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, head_buf: []u8, method: []const u8) !http1_head.ResponseHead {
+fn readUpstreamHead(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, head_buf: []u8, method: []const u8, gate: upstream_deadline.Gate) !http1_head.ResponseHead {
     var interim: usize = 0;
     while (interim <= MAX_INTERIM) : (interim += 1) {
+        if (!gate.ready(up_r)) return error.UpstreamTimeout;
+
         const bytes = http1_head.readHead(up_r, head_buf) catch return error.UpstreamDead;
         const response = http1_head.parseResponse(bytes, method) catch return error.UpstreamDead;
 
@@ -712,7 +721,7 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
     var relay_result: Outcome = .DONE;
     if (!head_only) {
         const relayed: RelayError!void = switch (response.framing) {
-            .content_length => |len| relayExact(conn, active, up_r, len),
+            .content_length => |len| relayExact(conn, active, up_r, len, upstreamGate(conn, conn_up)),
             .chunked => relayChunked(conn, active, up_r),
             .until_close => relayUntilClose(conn, active, up_r),
             .none => unreachable,
@@ -732,7 +741,7 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
     }
 
     const reusable = !relay_failed and !response.connection_close and response.framing != .until_close;
-    if (reusable) conn.proxy.idle.?.release(io, conn_up) else conn_up.stream.close(io);
+    if (reusable) conn.proxy.idle.?.release(io, conn_up, nowMs(io)) else conn_up.stream.close(io);
 
     return relay_result;
 }
@@ -833,10 +842,14 @@ fn sendData(conn: *Conn, active: *ActiveStream, bytes: []const u8, end_stream: b
 }
 
 /// Relay exactly len upstream bytes as DATA, END_STREAM on the last run.
-fn relayExact(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, len: u64) RelayError!void {
+fn relayExact(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, len: u64, gate: upstream_deadline.Gate) RelayError!void {
     var chunk: [http2_frames.MAX_PAYLOAD]u8 = undefined;
     var remaining = len;
     while (remaining > 0) {
+        // The head is already on the wire, so a stall here can only end the
+        // stream. The client sees a reset rather than a body that never ends.
+        if (!gate.ready(up_r)) return error.UpstreamDead;
+
         const want: usize = @intCast(@min(remaining, chunk.len));
         const got = up_r.readSliceShort(chunk[0..want]) catch return error.UpstreamDead;
         if (got == 0) return error.UpstreamDead;
@@ -1011,7 +1024,7 @@ fn serveConnect(conn: *Conn) Outcome {
             return if (localAnswer(conn, active.id, 503, "destination_unavailable") == .CLOSED) .CONN_DEAD else .DONE;
         };
 
-        const conn_up = idle.acquire(picked.index) orelse
+        const conn_up = idle.acquire(io, picked.index, nowMs(io)) orelse
             upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
             pool.markDown(picked.index, nowMs(io));
             failed_here = true;
@@ -1036,6 +1049,12 @@ fn serveConnect(conn: *Conn) Outcome {
         }
 
         var resp_head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
+        if (!upstreamGate(conn, conn_up).ready(&up_reader.interface)) {
+            conn_up.stream.close(io);
+
+            return if (localAnswer(conn, active.id, 504, "http_response_timeout") == .CLOSED) .CONN_DEAD else .DONE;
+        }
+
         const head_bytes = http1_head.readHead(&up_reader.interface, &resp_head_buf) catch {
             conn_up.stream.close(io);
             if (!conn_up.reused) pool.markDown(picked.index, nowMs(io));
@@ -1177,6 +1196,11 @@ fn lockWrite(conn: *Conn) void {
 
 fn unlockWrite(conn: *Conn) void {
     conn.write_lock.store(false, .release);
+}
+
+/// The read bound for one upstream leg of this site.
+fn upstreamGate(conn: *Conn, conn_up: upstream_conn.UpstreamConn) upstream_deadline.Gate {
+    return .{ .stream = conn_up.stream, .budget_ms = conn.proxy.upstream_timeout_ms };
 }
 
 fn nowMs(io: std.Io) i64 {
@@ -2146,4 +2170,79 @@ test "zix zixer: http2 edge, client goaway drains and closes the connection" {
 
     client.stream.close(io);
     edge_thread.join();
+}
+
+/// Test upstream that accepts and then says nothing, the stall an upstream
+/// read deadline exists for.
+const SilentBackend = struct {
+    io: std.Io,
+    port: u16,
+    ready: std.atomic.Value(bool) = .init(false),
+    release: std.atomic.Value(bool) = .init(false),
+
+    fn serve(fake: *SilentBackend) void {
+        const io = fake.io;
+
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
+        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        defer server.deinit(io);
+        fake.ready.store(true, .release);
+
+        const stream = server.accept(io) catch return;
+        defer stream.close(io);
+
+        while (!fake.release.load(.acquire)) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch break;
+        }
+    }
+};
+
+test "zix zixer: http2 edge, a silent upstream answers 504 with proxy status" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = SilentBackend{ .io = io, .port = 18950 };
+    const fake_thread = try std.Thread.spawn(.{}, SilentBackend.serve, .{&fake});
+    var tries: usize = 0;
+    while (tries < 100 and !fake.ready.load(.acquire)) : (tries += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+    try testing.expect(tries < 100);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18950 }};
+    var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(testing.allocator, 1);
+    defer idle.deinit(testing.allocator, io);
+    const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool, .idle = &idle, .upstream_timeout_ms = 200 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&fds);
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    var client = TestClient{ .io = io, .stream = edgeStream(fds[1]) };
+    try client.start();
+
+    const get_headers = [_]Http2.Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/stalled" },
+        .{ .name = ":authority", .value = "app.example" },
+    };
+    try client.sendHeaders(1, &get_headers, true);
+
+    const count = try client.readHead(1);
+    try testing.expectEqualStrings("504", client.headerValue(count, ":status").?);
+    try testing.expectEqualStrings("zixer; error=\"http_response_timeout\"", client.headerValue(count, "proxy-status").?);
+
+    // A slow backend is still a serving one, so the slot stays in rotation.
+    try testing.expectEqual(@as(usize, 1), pool.upCount());
+
+    client.stream.close(io);
+    edge_thread.join();
+    fake.release.store(true, .release);
+    fake_thread.join();
 }
