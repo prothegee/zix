@@ -56,7 +56,7 @@
 <p align="center">
     <code><i>Green: Maintained</i></code>
     <br>
-    <code><i>Yellow: Cross-Compiled (looking for contributors/maintainers)</i></code>
+    <code><i>Yellow: Cross-Compiled</i></code>
 </p>
 <div align="center">
     <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
