@@ -1,6 +1,7 @@
-//! Behaviour tests: zix.jzon.float, the JSON number form of a float.
+//! Behaviour tests: zix.jzon.float, the JSON number form of a float, both ways.
 //! Verifies the rendered form against std.json.Stringify, that a narrow float
-//! comes out as the f64 nearest it, and that the result parses back as a number.
+//! comes out as the f64 nearest it, that the result parses back as a number, and
+//! that jzon reads its own output back unchanged.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -92,6 +93,29 @@ test "zix behaviour: float writes after what the sink already holds" {
     try sink.byte('}');
 
     try std.testing.expectEqualStrings("{\"ratio\":2.5}", sink.filled());
+}
+
+test "zix behaviour: float reads back every sample it wrote" {
+    for (SAMPLES) |sample| {
+        var buf: [512]u8 = undefined;
+        var sink: Sink = .init(&buf);
+        try float.append(&sink, sample);
+
+        try std.testing.expectEqual(sample, try float.parse(f64, sink.filled()));
+    }
+}
+
+test "zix behaviour: float reads the same value std.json reads" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const numbers = [_][]const u8{ "0", "1", "-1.5", "0.1", "12345.6789", "1e10", "1.2e-3", "-0" };
+
+    for (numbers) |number| {
+        const theirs = try std.json.parseFromSliceLeaky(f64, arena.allocator(), number, .{});
+
+        try std.testing.expectEqual(theirs, try float.parse(f64, number));
+    }
 }
 
 test "zix behaviour: float output parses back through std.json as a number" {
