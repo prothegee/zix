@@ -4,6 +4,8 @@ const std = @import("std");
 const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
+const bind_options = @import("bind_options.zig");
+const conn_buffer = @import("conn_buffer.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const idle_reaper = @import("idle_reaper.zig");
 const site_cfg = @import("site_cfg.zig");
@@ -43,6 +45,10 @@ pub const ServeState = struct {
     idles: []upstream_conn.IdleCache,
     reaper: idle_reaper.Reaper = .{},
     upstream_timeout_ms: u32,
+    /// One leg's stream buffer size, already resolved from the site file
+    /// and the main.cfg default. Every connection this site accepts
+    /// allocates its buffers at this size.
+    stream_buf_bytes: usize,
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
@@ -68,8 +74,7 @@ pub const ServeState = struct {
     /// server - std.Io.net.Server (bound tcp listener, becomes worker 0's)
     /// cfg - *const site_cfg.SiteCfg (validated site config)
     /// port - u16
-    /// workers - usize (accept loops, already resolved from main.cfg)
-    /// kernel_backlog - u31 (listen queue length for the extra listeners)
+    /// options - bind_options.BindOptions (the main.cfg values, workers already resolved)
     ///
     /// Return:
     /// - *ServeState with every accept thread running
@@ -79,10 +84,10 @@ pub const ServeState = struct {
         server: std.Io.net.Server,
         cfg: *const site_cfg.SiteCfg,
         port: u16,
-        workers: usize,
-        kernel_backlog: u31,
+        options: bind_options.BindOptions,
     ) !*ServeState {
-        const worker_total = @max(1, workers);
+        const worker_total = @max(1, options.workers);
+        const kernel_backlog = options.kernel_backlog;
 
         const state = try allocator.create(ServeState);
         errdefer allocator.destroy(state);
@@ -130,6 +135,7 @@ pub const ServeState = struct {
             .pools = pools,
             .idles = idles,
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
+            .stream_buf_bytes = conn_buffer.resolve(cfg.max_recv_buf, options.max_recv_buf),
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
@@ -287,6 +293,8 @@ fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
         .acme = acme,
         .tls_cert_der = if (state.tls_ctx) |ctx| ctx.cert_der else null,
         .upstream_timeout_ms = state.upstream_timeout_ms,
+        .allocator = state.allocator,
+        .stream_buf_bytes = state.stream_buf_bytes,
     };
 }
 
@@ -375,7 +383,7 @@ test "zix zixer: site serve, create binds a thread and shutdown frees the port" 
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39870);
     const server = try addr.listen(io, .{ .kernel_backlog = 64 });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39870, 1, 64);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39870, .{ .kernel_backlog = 64 });
     state.shutdown();
 
     // The port is free again: a fresh bind succeeds.
@@ -401,7 +409,7 @@ test "zix zixer: site serve, static-only site runs without a pool" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39881);
     const server = try addr.listen(io, .{ .kernel_backlog = 64 });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39881, 1, 64);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39881, .{ .kernel_backlog = 64 });
     try std.testing.expect(state.pools.len == 0);
     try std.testing.expect(state.idles.len == 0);
     try std.testing.expectEqualStrings("/var/www/static-test", state.public_dir.?);
@@ -438,7 +446,7 @@ test "zix zixer: site serve, tls site create refuses a missing cert file" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39895);
     var server = try addr.listen(io, .{ .kernel_backlog = 8 });
 
-    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 39895, 1, 8));
+    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 39895, .{ .kernel_backlog = 8 }));
     server.deinit(io);
 }
 
@@ -469,7 +477,7 @@ test "zix zixer: site serve, tls site terminates and serves the static plane" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39894);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39894, 1, 8);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39894, .{ .kernel_backlog = 8 });
     try std.testing.expect(state.tls_ctx != null);
 
     // manual TLS 1.3 client over the real socket: hello record, read the
@@ -563,7 +571,7 @@ test "zix zixer: site serve, the cfg read bound reaches the state and starts a r
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18953);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18953, 1, 8);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18953, .{ .kernel_backlog = 8 });
     try std.testing.expectEqual(@as(u32, 1234), state.upstream_timeout_ms);
     try std.testing.expect(state.reaper.thread != null);
     state.shutdown();
@@ -589,7 +597,7 @@ test "zix zixer: site serve, a site without upstreams takes the default and no r
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18955);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18955, 1, 8);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18955, .{ .kernel_backlog = 8 });
     try std.testing.expectEqual(upstream_deadline.DEFAULT_MS, state.upstream_timeout_ms);
     try std.testing.expect(state.reaper.thread == null);
     state.shutdown();
@@ -650,7 +658,7 @@ test "zix zixer: site serve, a four worker site answers on one shared port" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18963);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18963, 4, 8);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18963, .{ .workers = 4, .kernel_backlog = 8 });
     try std.testing.expectEqual(@as(usize, 4), state.workers.len);
 
     // Four real sockets, not four views of one: the kernel can only spread
@@ -700,7 +708,7 @@ test "zix zixer: site serve, every worker owns its own pool and idle cache" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18964);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18964, 3, 8);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18964, .{ .workers = 3, .kernel_backlog = 8 });
     try std.testing.expectEqual(@as(usize, 3), state.workers.len);
     try std.testing.expectEqual(@as(usize, 3), state.pools.len);
     try std.testing.expectEqual(@as(usize, 3), state.idles.len);
@@ -752,8 +760,123 @@ test "zix zixer: site serve, a zero worker count still runs one accept loop" {
     // main.cfg resolves 0 before it reaches here, so a 0 arriving at create
     // is a caller mistake. A site with no accept loop would bind the port
     // and answer nothing, which is worse than one loop.
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18966, 0, 8);
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18966, .{ .workers = 0, .kernel_backlog = 8 });
     try std.testing.expectEqual(@as(usize, 1), state.workers.len);
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, the site max recv buf overrides the daemon default" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve buffer size test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18969,
+        .public_dir = "/var/www/static-test",
+        .max_recv_buf = 4096,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18969);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18969, .{ .workers = 2, .kernel_backlog = 8, .max_recv_buf = 32 * 1024 });
+
+    try std.testing.expectEqual(@as(usize, 4096), state.stream_buf_bytes);
+    for (state.workers) |*worker| try std.testing.expectEqual(@as(usize, 4096), worker.proxy.stream_buf_bytes);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, a silent site takes the daemon buffer default" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve buffer default test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18970,
+        .public_dir = "/var/www/static-test",
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18970);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18970, .{ .kernel_backlog = 8, .max_recv_buf = 16 * 1024 });
+
+    try std.testing.expectEqual(@as(usize, 16 * 1024), state.stream_buf_bytes);
+    try std.testing.expectEqual(state.allocator.ptr, state.workers[0].proxy.allocator.ptr);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, a site on the smallest buffer still answers" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve small buffer test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = "tmp/zixer_small_buf_site";
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    const index = try std.Io.Dir.cwd().createFile(io, root ++ "/index.html", .{});
+    var index_buf: [64]u8 = undefined;
+    var index_writer = index.writer(io, &index_buf);
+    try index_writer.interface.writeAll("small buffer body\n");
+    try index_writer.interface.flush();
+    index.close(io);
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18971,
+        .public_dir = root,
+        .max_recv_buf = conn_buffer.MIN_BYTES,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18971);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18971, .{ .kernel_backlog = 8 });
+    try std.testing.expectEqual(conn_buffer.MIN_BYTES, state.stream_buf_bytes);
+
+    // A kilobyte per leg is well under the head buffer, so this proves the
+    // two are independent: the head still parses, the file still arrives.
+    var reply_buf: [1024]u8 = undefined;
+    const reply = try testGet(io, 18971, &reply_buf);
+
+    try std.testing.expect(std.mem.indexOf(u8, reply, "200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "small buffer body") != null);
+
     state.shutdown();
 
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });

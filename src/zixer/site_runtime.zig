@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const acme_listener = @import("acme_listener.zig");
+const bind_options = @import("bind_options.zig");
 const h3_edge = @import("h3_edge.zig");
 const port_probe = @import("port_probe.zig");
 const site_cfg = @import("site_cfg.zig");
@@ -11,19 +12,6 @@ const udp_forward = @import("udp_forward.zig");
 
 /// The port the CA validates http-01 on (rfc 8555 8.3).
 pub const ACME_HTTP_PORT: u16 = 80;
-
-/// What the daemon already settled before a site binds.
-///
-/// Note:
-/// - workers is the resolved count, not the raw main.cfg value: the daemon
-///   turns 0 into the thread count once, at start, see worker_count.zig.
-/// - Only a serving tcp site spends workers. A bare bound listener has no
-///   accept loop, and the quic edge and the udp forward each own one
-///   socket whose connection state is keyed to it.
-pub const BindOptions = struct {
-    kernel_backlog: u31 = 1024,
-    workers: usize = 1,
-};
 
 /// One started site inside the daemon.
 ///
@@ -61,14 +49,14 @@ pub const SiteRuntime = struct {
     /// io - std.Io
     /// name - []const u8 (site file name, copied)
     /// cfg - site_cfg.SiteCfg (must have passed validation: engine and port set)
-    /// options - BindOptions (listen backlog and the resolved worker count)
+    /// options - bind_options.BindOptions (the main.cfg values a bind needs)
     ///
     /// Return:
     /// - SiteRuntime holding the bound socket
     /// - error.SiteCfgIncomplete when engine, port, or ip did not survive parse
     /// - error.AddressInUse when another listener owns ip:port
     /// - error.ChallengePortInUse when another listener owns the acme companion port
-    pub fn bind(allocator: std.mem.Allocator, io: std.Io, name: []const u8, cfg: site_cfg.SiteCfg, options: BindOptions) !SiteRuntime {
+    pub fn bind(allocator: std.mem.Allocator, io: std.Io, name: []const u8, cfg: site_cfg.SiteCfg, options: bind_options.BindOptions) !SiteRuntime {
         const kernel_backlog = options.kernel_backlog;
         const engine = cfg.engine orelse return error.SiteCfgIncomplete;
         const port = cfg.port orelse return error.SiteCfgIncomplete;
@@ -91,7 +79,7 @@ pub const SiteRuntime = struct {
                 var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
                 if ((engine == .HTTP1 or engine == .HTTP2 or engine == .GRPC) and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
-                    const state = site_serve.ServeState.create(allocator, io, server, &cfg, port, options.workers, kernel_backlog) catch |err| {
+                    const state = site_serve.ServeState.create(allocator, io, server, &cfg, port, options) catch |err| {
                         server.deinit(io);
                         return err;
                     };

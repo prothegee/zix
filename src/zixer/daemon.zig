@@ -5,6 +5,7 @@ const zix = @import("zix");
 
 const control = @import("control.zig");
 const fault = @import("fault.zig");
+const bind_options = @import("bind_options.zig");
 const main_cfg = @import("main_cfg.zig");
 const root_dir = @import("root_dir.zig");
 const site_cfg = @import("site_cfg.zig");
@@ -203,9 +204,10 @@ pub const Daemon = struct {
             }
         }
 
-        const options = site_runtime.BindOptions{
+        const options = bind_options.BindOptions{
             .kernel_backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog),
             .workers = self.workers,
+            .max_recv_buf = self.cfg.max_recv_buf,
         };
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, options) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
@@ -579,6 +581,49 @@ test "zix zixer: daemon workers, a site starts with the resolved worker count" {
     try std.testing.expectEqual(reloaded.workers, state.workers.len);
     try std.testing.expectEqual(reloaded.workers, state.pools.len);
     try std.testing.expectEqual(reloaded.workers, state.idles.len);
+}
+
+test "zix zixer: daemon max recv buf, the main.cfg value reaches a started site" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: daemon buffer size test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_recv_buf/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_recv_buf") catch {};
+
+    var seed = try testDaemon(io, arena.allocator(), test_root);
+    seed.deinit();
+
+    const main_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "main.cfg" });
+    const file = try std.Io.Dir.cwd().createFile(io, main_path, .{ .truncate = true });
+    var write_buf: [128]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.writeAll("max_recv_buf: 2 * 1024\n");
+    try writer.interface.flush();
+    file.close(io);
+
+    var daemon = try Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = test_root, .source = .ARG });
+    defer daemon.deinit();
+    try std.testing.expectEqual(@as(usize, 2048), daemon.cfg.max_recv_buf);
+
+    try writeSiteFile(io, arena.allocator(), test_root, "buffered.cfg", "engine: http1\nip: 127.0.0.1\nport: 18972\nupstreams: 127.0.0.1:18973\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start buffered.cfg", &reply_buf), "ok: "));
+
+    // The site file names no size, so the daemon value is what the edge
+    // allocates with.
+    const state = daemon.sites.items[0].listener.proxy_edge;
+    try std.testing.expectEqual(@as(usize, 2048), state.stream_buf_bytes);
+    try std.testing.expectEqual(@as(usize, 2048), state.workers[0].proxy.stream_buf_bytes);
 }
 
 test "zix zixer: daemon handleLine, shutdown reports the unbind count and sets the flag" {
