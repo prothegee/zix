@@ -739,6 +739,7 @@ pub fn main() !void {
 - [examples/http_manual_concurrent.zig](examples/http_manual_concurrent.zig) - explicit concurrency control via `Io.Threaded`
 - [examples/http1_basic.zig](examples/http1_basic.zig) - raw `zix.Http1`, dispatch model picked per target
 - [examples/http1_json.zig](examples/http1_json.zig)
+- [examples/http1_jzon.zig](examples/http1_jzon.zig) - a JSON body in and a JSON body out through [jzon](./README-en.md#json-jzon)
 - [examples/http1_params.zig](examples/http1_params.zig)
 - [examples/http1_paths.zig](examples/http1_paths.zig)
 - [examples/http1_query.zig](examples/http1_query.zig) - the QUERY method (RFC 10008)
@@ -2364,7 +2365,7 @@ Both calls take a comptime options struct naming which path runs. Every write pa
 
 A field type a generated path has no JSON form for is a compile error naming the type, never a runtime failure, and `.STD` still takes that shape.
 
-**Examples:** four, none of them a server, so each runs and exits. jzon is a standalone package under `src/jzon` with its own `build.zig`, so build them from there with `zig build examples` (or `zig build jzon-examples` from the repo root).
+**Examples:** six, none of them a server, so each runs and exits. jzon is a standalone package under `src/jzon` with its own `build.zig`, so build them from there with `zig build examples` (or `zig build jzon-examples` from the repo root).
 
 | Example | What it shows |
 | :- | :- |
@@ -2372,6 +2373,23 @@ A field type a generated path has no JSON form for is a compile error naming the
 | [deserialize](src/jzon/examples/deserialize.zig) | a request body into a typed value on an arena, every read strategy, reset between bodies |
 | [strings](src/jzon/examples/strings.zig) | `.COPY` against `.BORROW`, and what borrowing asks of the document's lifetime |
 | [unknown_keys](src/jzon/examples/unknown_keys.zig) | `.REJECT` against `.SKIP` on a document carrying more than the type declares |
+| [bench_serialize](src/jzon/examples/bench_serialize.zig) | what each write strategy costs per render, against the default's rate |
+| [bench_deserialize](src/jzon/examples/bench_deserialize.zig) | what each read strategy costs per parse, on a minified document and a laid-out one |
+
+The two bench examples want `-Doptimize=ReleaseFast`. A Debug build measures the safety checks rather than the paths, and the rows collapse onto each other.
+
+A fifth example is a server, so it lives with the engine examples rather than in the package and is built from the repo root with `zig build example-http1_jzon`.
+
+| Example | What it shows |
+| :- | :- |
+| [http1_jzon](examples/http1_jzon.zig) | an HTTP/1.1 route reading a JSON body into a record on the per-request arena and answering with a record rendered into a stack buffer, nothing allocated on the response path |
+
+| Document | Description |
+| :- | :- |
+| [`docs/jzon/README-en.md`](docs/jzon/README-en.md) | jzon: import, quickstart both directions, strategies, options, type coverage, errors, testing |
+| [`docs/jzon/hld-en.md`](docs/jzon/hld-en.md) | jzon: layers, components, the write and read flows, allocation model, error model |
+| [`docs/jzon/lld-en.md`](docs/jzon/lld-en.md) | jzon: cursors, escape rules, the vector scan, number paths, field bookkeeping, the differences from the default path |
+| [`docs/jzon/benchmark-en.md`](docs/jzon/benchmark-en.md) | jzon: what each path costs per render and per parse, with the method and the system it was measured on |
 
 **When to use:** reach for `.{}` first, which is the std-backed path and takes every shape std takes. Move a hot handler to `.GENERATED` when the shape is a plain record and the parse or the render is on the request path, and add `.strings = .BORROW` when the value dies with the buffer it was read out of.
 
