@@ -1,17 +1,20 @@
 //! Behaviour tests: every jzon write path against every read path.
 //! One order is rendered by the std-backed emitter and by the generated emitter
-//! under all four pairings, then every rendering is read back by both read paths
-//! in both string modes. This is the gate that keeps a strategy a cost decision.
+//! under all four pairings, then every rendering is read back by all three read
+//! paths, the generated one at both scan widths, in both string modes. This is
+//! the gate that keeps a strategy a cost decision.
 
 const std = @import("std");
 const zix = @import("zix");
 
 const Sink = zix.jzon.Sink;
 const generated_emitter = zix.jzon.generated_emitter;
+const generated_parser = zix.jzon.generated_parser;
 const scanner_parser = zix.jzon.scanner_parser;
 const std_emitter = zix.jzon.std_emitter;
 const std_parser = zix.jzon.std_parser;
 
+const ReadShape = generated_parser.Shape;
 const Shape = generated_emitter.Shape;
 
 /// Every pairing the generated emitter runs with.
@@ -20,6 +23,12 @@ const SHAPES = [_]Shape{
     .{ .numbers = .FMT, .escapes = .VECTOR },
     .{ .numbers = .TABLE, .escapes = .SCALAR },
     .{ .numbers = .TABLE, .escapes = .VECTOR },
+};
+
+/// Every width the generated parser runs at.
+const READ_SHAPES = [_]ReadShape{
+    .{ .scan = .SCALAR },
+    .{ .scan = .VECTOR },
 };
 
 const Status = enum { PENDING, SHIPPED, CANCELLED };
@@ -125,7 +134,7 @@ fn expectRoundTrips(order: Order) !void {
     }
 }
 
-/// Read one rendering back through both paths in both string modes.
+/// Read one rendering back through every path in both string modes.
 fn expectEveryReadPath(expected: Order, rendered: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -136,6 +145,11 @@ fn expectEveryReadPath(expected: Order, rendered: []const u8) !void {
     try expectSameOrder(expected, try std_parser.parse(Order, allocator, rendered, .{ .strings = .BORROW }));
     try expectSameOrder(expected, try scanner_parser.parse(Order, allocator, rendered, .{ .strings = .COPY }));
     try expectSameOrder(expected, try scanner_parser.parse(Order, allocator, rendered, .{ .strings = .BORROW }));
+
+    inline for (READ_SHAPES) |shape| {
+        try expectSameOrder(expected, try generated_parser.parse(Order, allocator, rendered, .{ .strings = .COPY }, shape));
+        try expectSameOrder(expected, try generated_parser.parse(Order, allocator, rendered, .{ .strings = .BORROW }, shape));
+    }
 }
 
 /// Assert two orders carry the same value in every field.
