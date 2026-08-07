@@ -423,9 +423,15 @@ fn runTable(io: std.Io, args: Args, timeout_ms: u32) u8 {
         if (!runRowIsolated(io, args, check, timeout_ms)) failed += 1;
     }
 
-    std.debug.print("zixer runner: {d} of {d} demos passed\n", .{ checks.len - failed, checks.len });
+    if (failed > 0) {
+        std.debug.print("{d}/{d} example(s) failed\n", .{ failed, checks.len });
 
-    return if (failed == 0) 0 else 1;
+        return 1;
+    }
+
+    std.debug.print("zixer: all {d} examples passed\n", .{checks.len});
+
+    return 0;
 }
 
 // --------------------------------------------------------- //

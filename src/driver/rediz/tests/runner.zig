@@ -158,5 +158,5 @@ pub fn main(process: std.process.Init) !void {
         return error.ExamplesFailed;
     }
 
-    std.debug.print("all {d} examples passed\n", .{paths.items.len});
+    std.debug.print("rediz: all {d} examples passed\n", .{paths.items.len});
 }
