@@ -181,6 +181,8 @@ fn streamDecrypt(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.
             else => return error.ReadFailed,
         }
 
+        dropConsumedPrefix(r);
+
         // deprotect needs ciphertext-length out space behind the buffered
         // plaintext. The buffer sizing guarantees it, this guard keeps a
         // shortfall an error instead of an overflow.
@@ -197,6 +199,29 @@ fn streamDecrypt(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.
 
         return 0;
     }
+}
+
+/// Move the still-unread bytes to the front of the reader buffer so the
+/// free tail can hold the next record.
+///
+/// Note:
+/// - Without this the buffer only ever grows forward: end walks to the far
+///   wall and the connection then fails on the space guard, whatever the
+///   request rate. On a keep-alive TLS connection that lands after roughly
+///   one buffer of cumulative request bytes.
+/// - The common case costs no copy: a request loop consumes its head and
+///   body before asking for more, so seek equals end and both reset to 0.
+/// - std.Io.Reader.rebase cannot stand in here. It measures free space from
+///   seek, this needs it from end, so rebase returns early on exactly the
+///   buffer state that is about to fail.
+fn dropConsumedPrefix(r: *std.Io.Reader) void {
+    if (r.seek == 0) return;
+
+    const pending = r.buffer[r.seek..r.end];
+    @memmove(r.buffer[0..pending.len], pending);
+
+    r.seek = 0;
+    r.end = pending.len;
 }
 
 /// Writer vtable: seal the staged plaintext plus the incoming slices as
@@ -550,6 +575,107 @@ test "zix zixer: tls edge, reader decrypts across records and ends on close noti
     try testing.expectEqualStrings("hello world", &out);
 
     try testing.expectError(error.EndOfStream, session.reader.readSliceAll(out[0..1]));
+}
+
+test "zix zixer: tls edge, drop consumed prefix reclaims the read buffer" {
+    var buf: [16]u8 = undefined;
+    @memcpy(buf[0..8], "abcdefgh");
+
+    // Partly consumed: the unread tail moves to the front.
+    var reader = std.Io.Reader{ .vtable = &reader_vtable, .buffer = &buf, .seek = 5, .end = 8 };
+    dropConsumedPrefix(&reader);
+    try testing.expectEqual(@as(usize, 0), reader.seek);
+    try testing.expectEqual(@as(usize, 3), reader.end);
+    try testing.expectEqualStrings("fgh", reader.buffer[0..reader.end]);
+
+    // Fully consumed is the common case: both indices reset, no bytes move.
+    reader.seek = 3;
+    reader.end = 3;
+    dropConsumedPrefix(&reader);
+    try testing.expectEqual(@as(usize, 0), reader.seek);
+    try testing.expectEqual(@as(usize, 0), reader.end);
+
+    // Nothing consumed yet: the buffer is left exactly as it was.
+    @memcpy(buf[0..4], "wxyz");
+    reader.seek = 0;
+    reader.end = 4;
+    dropConsumedPrefix(&reader);
+    try testing.expectEqual(@as(usize, 0), reader.seek);
+    try testing.expectEqual(@as(usize, 4), reader.end);
+    try testing.expectEqualStrings("wxyz", reader.buffer[0..reader.end]);
+}
+
+test "zix zixer: tls edge, one session reads past a full read buffer of records" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var pair = try establishPair(io);
+    defer pair.deinit();
+
+    // Two buffers' worth of client bytes on one connection, which is what a
+    // keep-alive client sends over a few hundred requests. The reader has to
+    // reclaim what the caller already took or it walks into the far wall and
+    // the connection dies on the space guard.
+    const CHUNK: usize = 1024;
+    const rounds: usize = 2 * READ_PLAIN_SIZE / CHUNK;
+
+    const wire = try testing.allocator.alloc(u8, rounds * Tls.sealedLen(CHUNK));
+    defer testing.allocator.free(wire);
+
+    var payload: [CHUNK]u8 = undefined;
+    var wire_len: usize = 0;
+    for (0..rounds) |round| {
+        @memset(&payload, @intCast('a' + round % 26));
+        const rec = pair.client.writeAppData(&payload, wire[wire_len..]);
+        wire_len += rec.len;
+    }
+
+    var src = std.Io.Reader.fixed(wire[0..wire_len]);
+    var sink_buf: [64]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    var session: Session = undefined;
+    session.bind(.{ .tls13 = pair.server }, &src, &sink);
+
+    var out: [CHUNK]u8 = undefined;
+    for (0..rounds) |round| {
+        try session.reader.readSliceAll(&out);
+
+        const want: u8 = @intCast('a' + round % 26);
+        try testing.expect(std.mem.allEqual(u8, &out, want));
+    }
+}
+
+test "zix zixer: tls edge, a partly read record survives the next decrypt" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var pair = try establishPair(io);
+    defer pair.deinit();
+
+    // Reading fewer bytes than a record carries leaves a pending tail. The
+    // reclaim has to move that tail, not drop it.
+    var wire: [2048]u8 = undefined;
+    var wire_len: usize = 0;
+    for ([_][]const u8{ "first-record", "second-record" }) |piece| {
+        const rec = pair.client.writeAppData(piece, wire[wire_len..]);
+        wire_len += rec.len;
+    }
+
+    var src = std.Io.Reader.fixed(wire[0..wire_len]);
+    var sink_buf: [64]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    var session: Session = undefined;
+    session.bind(.{ .tls13 = pair.server }, &src, &sink);
+
+    var head: [5]u8 = undefined;
+    try session.reader.readSliceAll(&head);
+    try testing.expectEqualStrings("first", &head);
+
+    var rest: [20]u8 = undefined;
+    try session.reader.readSliceAll(&rest);
+    try testing.expectEqualStrings("-recordsecond-record", &rest);
 }
 
 test "zix zixer: tls edge, writer seals oversize writes as split records" {
