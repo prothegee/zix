@@ -1,6 +1,7 @@
 //! Edge tests: zix.jzon.float at the boundaries.
 //! Covers the extremes of the width, denormals, the two values with no JSON form,
-//! a value f64 cannot hold, and buffers that fit the digits exactly or one short.
+//! a value f64 cannot hold, buffers that fit the digits exactly or one short, and
+//! the text a read refuses even though std.fmt would take it.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -152,5 +153,72 @@ test "zix edge: float writes every width it is handed" {
         try float.append(&sink, @as(Width, 1.25));
 
         try std.testing.expectEqualStrings("1.25", sink.filled());
+    }
+}
+
+test "zix edge: float refuses the words std.fmt would read as numbers" {
+    // std.fmt.parseFloat takes all four of these. None of them is JSON, and a
+    // read cursor bounds a token without checking its grammar, so the refusal has
+    // to happen on this side.
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "inf"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "-inf"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "nan"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "0x1p3"));
+}
+
+test "zix edge: float refuses a number missing a part the grammar needs" {
+    try std.testing.expectError(error.BadNumber, float.parse(f64, ""));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "-"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "."));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, ".5"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "1."));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "1e"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "1e-"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "--1"));
+}
+
+test "zix edge: float refuses a leading zero that is not the whole integer part" {
+    try std.testing.expectEqual(@as(f64, 0), try float.parse(f64, "0"));
+    try std.testing.expectEqual(@as(f64, 0.5), try float.parse(f64, "0.5"));
+    try std.testing.expectEqual(@as(f64, -0.5), try float.parse(f64, "-0.5"));
+
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "01"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "-01"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "007"));
+}
+
+test "zix edge: float refuses anything trailing the number" {
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "1 "));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "1,"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "1.5x"));
+    try std.testing.expectError(error.BadNumber, float.parse(f64, "+1"));
+}
+
+test "zix edge: float reads a value past a width as an infinity, the way std.json does" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ours = try float.parse(f32, "1e300");
+    const theirs = try std.json.parseFromSliceLeaky(f32, arena.allocator(), "1e300", .{});
+
+    try std.testing.expectEqual(std.math.inf(f32), ours);
+    try std.testing.expectEqual(theirs, ours);
+}
+
+test "zix edge: float reads the extremes of f64 back from its own output" {
+    const samples = [_]f64{
+        std.math.floatMax(f64),
+        -std.math.floatMax(f64),
+        std.math.floatMin(f64),
+        std.math.floatTrueMin(f64),
+        std.math.floatEps(f64),
+    };
+
+    for (samples) |sample| {
+        var buf: [512]u8 = undefined;
+        var sink: Sink = .init(&buf);
+        try float.append(&sink, sample);
+
+        try std.testing.expectEqual(sample, try float.parse(f64, sink.filled()));
     }
 }
