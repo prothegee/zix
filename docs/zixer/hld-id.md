@@ -106,6 +106,7 @@ flowchart LR
 | `daemon.zig` | control loop dan registry site yang sudah start |
 | `daemon_spawn.zig` | auto-spawn saat socket diam |
 | `site_runtime.zig` | apa yang dimiliki satu site yang start: listener, companion acme |
+| `port_probe.zig` | apakah listener di luar daemon ini sudah memiliki sebuah port |
 | `site_serve.zig` | accept loop untuk satu site tcp |
 | `http1_proxy.zig`, `http1_head.zig` | edge http1 dan parsing pesannya |
 | `http2_edge.zig` dan kerabatnya | edge h2, frame, translasi, bridge websocket rfc 8441 |

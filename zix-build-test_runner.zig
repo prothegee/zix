@@ -83,6 +83,8 @@ pub fn addSteps(
         .{ "test-runner-http1-websocket", "tests/runner/ws_runner.zig", "tr-server-http1-websocket", "examples/http1_websocket.zig", "9028", "/ws/lobby", "", "" },
         // http1 websocket runner on the io_uring (.URING) dispatch model
         .{ "test-runner-http1-websocket-echo", "tests/runner/ws_runner.zig", "tr-server-http1-websocket-echo", "examples/http1_websocket.zig", "9028", "/ws", "", "" },
+        // jzon runner: a rendered record leaves the server and comes back in as a request body
+        .{ "test-runner-http1-jzon", "tests/runner/jzon_runner.zig", "tr-server-http1-jzon", "examples/http1_jzon.zig", "9033", "", "", "" },
         // http1 response-cache runner (unique port, small body so the GET is bounded)
         .{ "test-runner-http1-cache", "tests/runner/http_get_runner.zig", "tr-server-http1-cache", "examples/http1_cache.zig", "9031", "/cache?kb=1", "", "ok" },
         // http1 over-large request-body drain runner. Only the multiplexed models drain the
@@ -316,6 +318,9 @@ pub fn addSteps(
 
             // webrtc data channel: appended last, argv order stays stable
             .{ "tr-all-server-webrtc", "examples/webrtc/webrtc_datachannel_echo.zig" },
+
+            // jzon over http1: appended last, argv order stays stable
+            .{ "tr-all-server-http1-jzon", "examples/http1_jzon.zig" },
         };
 
         const all_runner_mod = b.createModule(.{

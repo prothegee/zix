@@ -106,6 +106,7 @@ flowchart LR
 | `daemon.zig` | the control loop and the started-site registry |
 | `daemon_spawn.zig` | auto-spawn when the socket is silent |
 | `site_runtime.zig` | what one started site owns: the listener, the acme companion |
+| `port_probe.zig` | whether a listener outside this daemon already owns a port |
 | `site_serve.zig` | the accept loop for one tcp site |
 | `http1_proxy.zig`, `http1_head.zig` | the http1 edge and its message parsing |
 | `http2_edge.zig` and siblings | the h2 edge, frames, translation, the rfc 8441 websocket bridge |

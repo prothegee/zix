@@ -17,6 +17,7 @@ pub fn addSteps(
         .{ "example-http1_cache", "examples/http1_cache.zig", "http1" },
         .{ "example-http1_compression", "examples/http1_compression.zig", "http1" },
         .{ "example-http1_json", "examples/http1_json.zig", "http1" },
+        .{ "example-http1_jzon", "examples/http1_jzon.zig", "http1" },
         .{ "example-http1_middleware", "examples/http1_middleware.zig", "http1" },
         .{ "example-http1_params", "examples/http1_params.zig", "http1" },
         .{ "example-http1_paths", "examples/http1_paths.zig", "http1" },

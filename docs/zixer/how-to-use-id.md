@@ -231,7 +231,13 @@ certbot certonly --webroot -w /var/www/acme -d example.com \
   --deploy-hook 'zixer --dir /srv/zixer restart example.cfg'
 ```
 
-Site TLS di port selain 80 juga bind port 80 untuk challenge, jadi prosesnya butuh hak itu. Bila program lain sudah memegang port 80, pakai `acme_proxy: 127.0.0.1:9080` dan biarkan program itu yang menjawab challenge.
+Site TLS di port selain 80 juga bind port 80 untuk challenge, jadi prosesnya butuh hak itu. Port 80 harus bebas untuknya: program lain yang sudah memegangnya membuat start gagal dengan `challenge port 80 is already in use`.
+
+`acme_proxy` adalah cara lain menjawab challenge, bukan cara menghindari port 80. Companion tetap memegang port itu dan merelay path challenge ke alamat yang Anda tulis, yang persis dibutuhkan `certbot certonly --standalone --http-01-port 9080`:
+
+```
+acme_proxy: 127.0.0.1:9080
+```
 
 ### HTTP/2
 
@@ -308,7 +314,9 @@ Belum ada output log. `logs_dir` harus ada karena `status` memeriksanya, dan tid
 | `control socket path is too long for this platform` | path root dir terlalu dalam | pindahkan root ke tempat yang lebih pendek |
 | `api.cfg has config errors` | site tidak lolos validasi | `zixer status api`, perbaiki tiap key yang disebut |
 | `port 8080 is already used by other.cfg` | site lain yang start memilikinya | ganti port, atau hentikan site itu |
-| `bind failed (AddressInUse)` | sesuatu di luar zixer memiliki port itu | cari dengan `ss -ltnp` |
+| `port 8080 is already in use` | listener di luar daemon ini memilikinya | cari dengan `ss -ltnp`, lalu hentikan atau ganti port |
+| `challenge port 80 is already used by other.cfg` | site lain yang start memiliki port companion acme | simpan key acme di satu site saja, sisanya renew dari webroot site itu |
+| `challenge port 80 is already in use` | listener di luar daemon ini memiliki port 80 | cari dengan `ss -ltnp` lalu hentikan, companion harus memegang port 80 |
 | `bind failed (BadUpstreamAddress)` | upstream site udp bukan literal ip | tulis alamatnya, bukan nama |
 | `502 all upstreams failed` | tiap backend menolak atau gagal | periksa backend, dan pastikan alamat upstream adalah literal ip |
 | `503 no upstream available` | tiap backend sedang di jendela cooldown-nya | periksa backend, coba lagi beberapa detik kemudian |

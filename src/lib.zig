@@ -52,6 +52,11 @@ pub const Driver = struct {
 
 // --------------------------------------------------------- //
 
+/// zix json serialize and deserialize, a standalone package under src/jzon
+pub const jzon = @import("jzon/src/lib.zig");
+
+// --------------------------------------------------------- //
+
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
@@ -421,4 +426,7 @@ test "zix: unit test" {
 
     // # zix.Channel
     std.testing.refAllDecls(@import("channel/channel.zig"));
+
+    // jzon is a standalone package under src/jzon with its own build files, so
+    // its in-file tests belong to `jzon-test-unit` the way each driver's do.
 }

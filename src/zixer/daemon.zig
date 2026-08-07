@@ -195,6 +195,7 @@ pub const Daemon = struct {
         const backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog);
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, backlog) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
+            error.ChallengePortInUse => return print(reply_buf, "error: {s} challenge port {d} is already in use", .{ name, site_runtime.ACME_HTTP_PORT }),
             error.TlsCertFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_cert file", .{name}),
             error.TlsKeyFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_key file", .{name}),
             else => {
@@ -633,11 +634,14 @@ test "zix zixer: daemon handleLine, tls acme site starts or names the port 80 ne
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     const reply = daemon.handleLine("start tls_acme.cfg", &reply_buf);
 
-    // with the privilege (root, capability) the companion binds and the
-    // site starts, without it the reply names the port 80 need.
+    // Three outcomes, all correct: with the privilege and a free port 80 the
+    // companion binds and the site starts, without the privilege the bind
+    // fails and the reply names the port 80 need, and with a listener outside
+    // this daemon on port 80 the probe refuses and the reply names the taken
+    // challenge port. Only the port number is common to the two refusals.
     if (std.mem.startsWith(u8, reply, "ok: ")) {
         try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("stop tls_acme.cfg", &reply_buf), "ok: "));
     } else {
-        try std.testing.expect(std.mem.indexOf(u8, reply, "needs port 80") != null);
+        try std.testing.expect(std.mem.indexOf(u8, reply, "port 80") != null);
     }
 }

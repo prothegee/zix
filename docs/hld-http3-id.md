@@ -41,7 +41,7 @@ flowchart TD
     C --> D["parse client bidi STREAM frames\n(id & 0x03 == 0)"]
     D --> E["QPACK-decode HEADERS\n-> :method, :path"]
     E --> F["Huffman-decode :path if flagged\n-> path_scratch"]
-    F --> G["Router.dispatch(req, res)\nor bare handler"]
+    F --> G["Router.dispatch(req, res, ctx)\nor bare handler"]
     G --> H["handler fills res.status / res.body"]
     H --> I{"body fits one packet?"}
     I -->|yes| J["coalesce ACK + HANDSHAKE_DONE +\nSETTINGS + MAX_STREAMS + MAX_DATA +\nresponse into one sealed 1-RTT packet"]
@@ -88,9 +88,11 @@ Akses via `const zix = @import("zix");`
 | Symbol | Tipe | Deskripsi |
 | :- | :- | :- |
 | `zix.Http3.Server` | struct | `Server.init(handler, config)` mengembalikan server, handler dibaked saat comptime |
-| `zix.Http3.HandlerFn` | fn type | `fn(req: *const Request, res: *Response) void` |
-| `zix.Http3.Request` | struct | Request terdekode: `method`, `path`, `authority`, `body` |
-| `zix.Http3.Response` | struct | Response yang diisi handler: `status`, `body`, `content_type` |
+| `zix.Http3.HandlerFn` | fn type | `*const fn(*const Request, *Response, *Context) anyerror!void` |
+| `zix.Http3.Request` | struct | Request terdekode: `method`, `path`, `authority`, `body`, `accept_encoding` |
+| `zix.Http3.Response` | struct | Response yang diisi handler: `status`, `body`, `content_type`, `content_encoding`, `sent` |
+| `zix.Http3.Context` | struct | Context per-request: `stream_id` (raw escape hatch, QUIC tidak punya fd per-request), `io`, allocator stack-arena, dan deadline handler opsional |
+| `zix.Http3.ContentEncoding` | enum | `identity` / `gzip` / `br`, coding yang dipilih handler untuk `res.body` |
 | `zix.Http3.ServerConfig` | struct | Konfigurasi server (`Http3ServerConfig`) |
 | `zix.Http3.DispatchModel` | enum(u8) | Dibagi dengan engine TCP (ADR-050) |
 | `zix.Http3.Router(routes)` | generic fn | Route table comptime, mencerminkan `zix.Http1` / `zix.Http2` |
@@ -218,23 +220,43 @@ Range (RFC 7233) tidak disajikan di engine ini: response static selalu file utuh
 
 ```zig
 pub const Request = struct {
-    method:    []const u8,
-    path:      []const u8,
-    authority: []const u8 = "",
-    body:      []const u8 = "",
+    method:          []const u8,
+    path:            []const u8,
+    authority:       []const u8 = "",
+    body:            []const u8 = "",
+    accept_encoding: []const u8 = "",
 };
 
 pub const Response = struct {
-    status:       u16        = 200,
-    body:         []const u8 = "",
-    content_type: []const u8 = "text/plain",
+    status:           u16             = 200,
+    body:             []const u8      = "",
+    content_type:     []const u8      = "text/plain",
+    content_encoding: ContentEncoding = .identity,
+    sent:             bool            = false,
 
     pub fn setStatus(self: *Response, status: u16) void { self.status = status; }
-    pub fn send(self: *Response, body: []const u8) void { self.body = body; }
+    pub fn send(self: *Response, body: []const u8) void { self.body = body; self.sent = true; }
+    pub fn setContentEncoding(self: *Response, enc: ContentEncoding) void { self.content_encoding = enc; }
 };
 ```
 
-Slice request menunjuk ke buffer dekode per-connection engine dan hanya valid selama pemanggilan handler. Pada jalur serve saat ini hanya `method` dan `path` yang diisi dari wire (`authority` dan `body` tetap default). Body response disalin ke jalur kirim setelah handler kembali, jadi boleh menunjuk ke memori milik handler atau memori static (lihat scratch threadlocal dan `big_body` process-lifetime di contoh). `content_type` adalah bagian dari API handler tetapi jalur response v1 hanya meng-QPACK-encode `:status` di wire.
+Slice request menunjuk ke buffer dekode per-connection engine dan hanya valid selama pemanggilan handler. Pada jalur serve saat ini `method`, `path`, dan `accept_encoding` yang diisi dari wire (`authority` dan `body` tetap default). Body response disalin ke jalur kirim setelah handler kembali, jadi boleh menunjuk ke memori milik handler atau memori static (lihat scratch threadlocal dan `big_body` process-lifetime di contoh). `content_type` adalah bagian dari API handler tetapi jalur response v1 hanya meng-QPACK-encode `:status` dan, bila handler mengisinya, `content-encoding`.
+
+### Kebijakan error handler
+
+Handler mengembalikan `anyerror!void`. `core.invokeHandler` menyelesaikan handler yang error sebagai satu auto-500, tetapi hanya bila handler belum menulis apa pun (`Response.sent`), sehingga response yang memang sengaja dikirim tidak pernah ditimpa:
+
+| Kondisi | Yang dilakukan engine |
+| :- | :- |
+| error dikembalikan dan `!res.sent` | Mengisi `res.status = 500` dan mengosongkan `res.body`, lalu jalur kirim biasa yang membawanya |
+| error dikembalikan setelah `res.send(...)` | Tidak ada, response yang dibangun handler dikirim apa adanya |
+
+Penyelesaian di sini adalah pengisian struct, bukan penulisan ke socket, dan itu yang memisahkan engine ini dari tiga lainnya:
+
+- Body auto-500 kosong. `zix.Http`, `zix.Http1`, dan `zix.Http2` menulis body `text/plain` berisi `Internal Server Error`, engine ini hanya mengirim status.
+- Tidak ada kasus send yang gagal. `res.send` hanya mengisi struct dan mengembalikan `void`, jadi handler tidak bisa gagal mengirim seperti `try res.send(...)` pada engine TCP, dan setiap error yang sampai ke `invokeHandler` ditentukan murni oleh `res.sent`.
+
+Satu `500` lain datang dari engine sendiri, bukan dari handler yang error: body yang terlalu besar untuk satu paket butuh send-stream slot, dan saat koneksi tidak punya slot bebas, request dijawab `500` dengan body kosong (dipak seperti response kecil). Ada 64 slot per koneksi (`max_send_streams`, tetap, bukan field config), jadi client yang menahan banyak response besar sekaligus bisa menemuinya.
 
 ---
 

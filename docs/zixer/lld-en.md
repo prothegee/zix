@@ -126,7 +126,8 @@ The daemon keeps one array of started sites. Every mutation is serial, so no loc
 | `start` on an already started site is refused | a silent rebind would hide a config edit that was never applied |
 | `restart` on a stopped site starts it | a renewal hook must not fail because a site happened to be down |
 | a port already owned by another started site is refused | tcp sites bind with address reuse, so the kernel would share the port instead of reporting the collision |
-| the acme companion port counts as owned | the same collision applies to port 80 |
+| a port a listener outside this daemon answers on is refused | the registry only sees sites in this process, a connect probe is what finds an owner in another one |
+| the acme companion port counts as owned | the same collision applies to port 80, from the registry and from the probe alike |
 | the listen backlog is the site value, else the main.cfg value | one default, per site override |
 
 A config file larger than 256 KiB is refused rather than loaded.
@@ -145,7 +146,11 @@ One started site owns one listener, and one of these shapes:
 | udp with `upstreams` | the per-flow forward over a bound datagram socket |
 | http3 or udp with neither | the bare datagram socket |
 
-Tcp listeners bind with address reuse, datagram sockets bind strict. A TLS site with acme keys, on any port other than 80, also binds port 80. That bind is not optional: if it fails, the whole `start` fails with a message naming the challenge port.
+Tcp listeners bind with address reuse, datagram sockets bind strict.
+
+Address reuse is why a tcp bind is preceded by a probe. Std pairs the flag with `SO_REUSEPORT` on posix, and the Windows `SO_REUSEADDR` is permissive in the same way, so a second listener joins the port rather than failing and the kernel then splits arriving connections between the two. The probe connects to the address the site is about to listen on, loopback in place of a wildcard because Windows refuses a connect to `0.0.0.0`. A live listener answers and the start is refused with `AddressInUse`, while a socket left in TIME_WAIT refuses the connect, so a restart right after live traffic still rebinds. A datagram socket needs no probe: its bind is strict and reports the collision itself.
+
+A TLS site with acme keys, on any port other than 80, also binds port 80, and the companion port is probed the same way. That bind is not optional: if it fails, the whole `start` fails with a message naming the challenge port.
 
 <br>
 

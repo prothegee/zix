@@ -377,6 +377,23 @@ Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer li
 3. `send()` reads `res.date_cache` directly, no header scan at send time.
 4. Format as IMF-fixdate: `Thu, 08 May 2026 12:34:56 GMT`.
 
+### Handler error policy
+
+The handler returns `anyerror!void`. When it returns an error the engine completes the response itself, but only when the handler wrote nothing yet (`Response.sent`), so a partially sent response is never corrupted:
+
+| Condition | What the engine completes with |
+| :- | :- |
+| `req.body_too_large`: a chunked body outgrew `max_request_body` | `413`, `text/plain`, body `Payload Too Large` |
+| `req.body_malformed`: the chunk framing could not be parsed | `400`, `text/plain`, body `Bad Request` |
+| any other error | `500`, `text/plain`, body `Internal Server Error` |
+
+The first two are the client's fault, so they do not become a `500`. Only a chunked body reaches that branch: a declared `Content-Length` past the limit is refused before the handler ever runs.
+
+Two consequences are worth knowing:
+
+- A failed `send()` never produces a `500`. `send()` marks the response sent before it writes to the socket, so a failing `try res.send(...)` reaches the engine with `Response.sent` already true. The error is dropped and the connection dies on the next read or write, which is the only remedy left: a socket that just refused a write cannot carry a `500` either.
+- The completion write is best effort. When it fails there is no second attempt and no log line from that path.
+
 ---
 
 ## Router

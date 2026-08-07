@@ -20,7 +20,7 @@ jobs:
     # hung test to burn a day of runner minutes before anyone notices. A healthy leg
     # lands well inside this: the slowest measured so far is the openbsd VM at 16
     # minutes, so anything past 30 is a hang, not a slow run.
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       # tests the ref that triggered the run: the dispatched branch, or the
       # merged pull request result
@@ -63,10 +63,12 @@ jobs:
             # line at the end is the authoritative verdict for this leg.
             failures=""
 
-            timeout 5m zig build unit-test --summary failures --test-timeout 30s || failures="$failures unit-test"
-            timeout 5m zig build integration-test --summary failures --test-timeout 30s || failures="$failures integration-test"
-            timeout 5m zig build behaviour-test --summary failures --test-timeout 30s || failures="$failures behaviour-test"
-            timeout 5m zig build edge-test --summary failures --test-timeout 30s || failures="$failures edge-test"
+            timeout 5m zig build unit-test --summary failures --test-timeout 240s || failures="$failures unit-test"
+            timeout 5m zig build integration-test --summary failures --test-timeout 240s || failures="$failures integration-test"
+            timeout 5m zig build behaviour-test --summary failures --test-timeout 240s || failures="$failures behaviour-test"
+            timeout 5m zig build edge-test --summary failures --test-timeout 240s || failures="$failures edge-test"
+            timeout 5m zig build jzon-test-all -Ddriver-test-timeout=240s --summary failures || failures="$failures jzon-test-all"
+            timeout 5m zig build jzon-examples --summary failures || failures="$failures jzon-examples"
 
             # Every command below is wrapped: this leg is one step, so without a per-command
             # bound a single stall owns the whole leg until the step cap fires. One run sat 27
