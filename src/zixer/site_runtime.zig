@@ -12,6 +12,19 @@ const udp_forward = @import("udp_forward.zig");
 /// The port the CA validates http-01 on (rfc 8555 8.3).
 pub const ACME_HTTP_PORT: u16 = 80;
 
+/// What the daemon already settled before a site binds.
+///
+/// Note:
+/// - workers is the resolved count, not the raw main.cfg value: the daemon
+///   turns 0 into the thread count once, at start, see worker_count.zig.
+/// - Only a serving tcp site spends workers. A bare bound listener has no
+///   accept loop, and the quic edge and the udp forward each own one
+///   socket whose connection state is keyed to it.
+pub const BindOptions = struct {
+    kernel_backlog: u31 = 1024,
+    workers: usize = 1,
+};
+
 /// One started site inside the daemon.
 ///
 /// Note:
@@ -48,14 +61,15 @@ pub const SiteRuntime = struct {
     /// io - std.Io
     /// name - []const u8 (site file name, copied)
     /// cfg - site_cfg.SiteCfg (must have passed validation: engine and port set)
-    /// kernel_backlog - u31 (site override or the main.cfg default)
+    /// options - BindOptions (listen backlog and the resolved worker count)
     ///
     /// Return:
     /// - SiteRuntime holding the bound socket
     /// - error.SiteCfgIncomplete when engine, port, or ip did not survive parse
     /// - error.AddressInUse when another listener owns ip:port
     /// - error.ChallengePortInUse when another listener owns the acme companion port
-    pub fn bind(allocator: std.mem.Allocator, io: std.Io, name: []const u8, cfg: site_cfg.SiteCfg, kernel_backlog: u31) !SiteRuntime {
+    pub fn bind(allocator: std.mem.Allocator, io: std.Io, name: []const u8, cfg: site_cfg.SiteCfg, options: BindOptions) !SiteRuntime {
+        const kernel_backlog = options.kernel_backlog;
         const engine = cfg.engine orelse return error.SiteCfgIncomplete;
         const port = cfg.port orelse return error.SiteCfgIncomplete;
         const addr = std.Io.net.IpAddress.parse(cfg.ip, port) catch return error.SiteCfgIncomplete;
@@ -77,7 +91,7 @@ pub const SiteRuntime = struct {
                 var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
                 if ((engine == .HTTP1 or engine == .HTTP2 or engine == .GRPC) and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
-                    const state = site_serve.ServeState.create(allocator, io, server, &cfg, port) catch |err| {
+                    const state = site_serve.ServeState.create(allocator, io, server, &cfg, port, options.workers, kernel_backlog) catch |err| {
                         server.deinit(io);
                         return err;
                     };
@@ -181,10 +195,10 @@ test "zix zixer: site runtime, incomplete cfg refuses to bind" {
     const io = threaded.io();
 
     const no_engine = site_cfg.SiteCfg{ .port = 39860 };
-    try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_engine, 64));
+    try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_engine, .{ .kernel_backlog = 64 }));
 
     const no_port = site_cfg.SiteCfg{ .engine = .HTTP1 };
-    try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_port, 64));
+    try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_port, .{ .kernel_backlog = 64 }));
 }
 
 test "zix zixer: site runtime, tcp bind rebinds cleanly after unbind" {
@@ -194,7 +208,7 @@ test "zix zixer: site runtime, tcp bind rebinds cleanly after unbind" {
 
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39861 };
 
-    var first = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, 64);
+    var first = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expectEqualStrings("a.cfg", first.name);
     try std.testing.expectEqual(@as(u16, 39861), first.port);
     try std.testing.expect(first.listener == .tcp);
@@ -203,7 +217,7 @@ test "zix zixer: site runtime, tcp bind rebinds cleanly after unbind" {
 
     // reuse_address makes the rebind immediate: the probe only refuses a port
     // a listener still answers on, never one left in TIME_WAIT.
-    var again = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, 64);
+    var again = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, .{ .kernel_backlog = 64 });
     again.unbind(std.testing.allocator, io);
 }
 
@@ -214,17 +228,17 @@ test "zix zixer: site runtime, a tcp port a live listener owns is refused" {
 
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 18934 };
 
-    var first = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, 64);
+    var first = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, .{ .kernel_backlog = 64 });
 
     // Without the probe this second bind succeeds: reuse_address carries
     // SO_REUSEPORT, so the kernel hands the port to both and splits the
     // traffic. The collision has to be refused here or it surfaces on a
     // client as a reply that never arrives.
-    try std.testing.expectError(error.AddressInUse, SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, 64));
+    try std.testing.expectError(error.AddressInUse, SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, .{ .kernel_backlog = 64 }));
 
     first.unbind(std.testing.allocator, io);
 
-    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, 64);
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, .{ .kernel_backlog = 64 });
     rebound.unbind(std.testing.allocator, io);
 }
 
@@ -235,10 +249,10 @@ test "zix zixer: site runtime, udp engine binds a datagram socket" {
 
     const cfg = site_cfg.SiteCfg{ .engine = .UDP, .ip = "127.0.0.1", .port = 39862 };
 
-    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, 64);
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .udp);
 
-    try std.testing.expectError(error.AddressInUse, SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, 64));
+    try std.testing.expectError(error.AddressInUse, SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, .{ .kernel_backlog = 64 }));
 
     runtime.unbind(std.testing.allocator, io);
 }
@@ -253,12 +267,12 @@ test "zix zixer: site runtime, http1 with upstreams serves and unbind frees the 
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39859 }};
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39872, .upstreams = &upstreams };
 
-    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, 64);
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .proxy_edge);
 
     runtime.unbind(std.testing.allocator, io);
 
-    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, 64);
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, .{ .kernel_backlog = 64 });
     rebound.unbind(std.testing.allocator, io);
 }
 
@@ -271,7 +285,7 @@ test "zix zixer: site runtime, http1 static-only site serves without upstreams" 
 
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39882, .public_dir = "/var/www/pages" };
 
-    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "static.cfg", cfg, 64);
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "static.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .proxy_edge);
 
     runtime.unbind(std.testing.allocator, io);
@@ -287,13 +301,13 @@ test "zix zixer: site runtime, udp site with upstreams serves the forward" {
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39839 }};
     const cfg = site_cfg.SiteCfg{ .engine = .UDP, .ip = "127.0.0.1", .port = 39888, .upstreams = &upstreams };
 
-    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, 64);
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .udp_forward);
 
     runtime.unbind(std.testing.allocator, io);
 
     // Udp binds strict, so a clean rebind proves unbind released the port.
-    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, 64);
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, .{ .kernel_backlog = 64 });
     rebound.unbind(std.testing.allocator, io);
 }
 
@@ -304,7 +318,7 @@ test "zix zixer: site runtime, http3 engine without planes only binds" {
 
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP3, .ip = "127.0.0.1", .port = 39863 };
 
-    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "pages.cfg", cfg, 64);
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "pages.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .udp);
 
     runtime.unbind(std.testing.allocator, io);
@@ -331,13 +345,13 @@ test "zix zixer: site runtime, http3 site with upstreams serves the quic edge" {
         .upstreams = &upstreams,
     };
 
-    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "pages_h3.cfg", cfg, 64);
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "pages_h3.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .quic_edge);
 
     runtime.unbind(std.testing.allocator, io);
 
     // Udp binds strict, so a clean rebind proves unbind released the port.
-    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "pages_h3.cfg", cfg, 64);
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "pages_h3.cfg", cfg, .{ .kernel_backlog = 64 });
     rebound.unbind(std.testing.allocator, io);
 }
 
@@ -365,7 +379,7 @@ test "zix zixer: site runtime, owns port covers the main listener" {
 
     const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39896 };
 
-    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "own.cfg", cfg, 64);
+    var runtime = try SiteRuntime.bind(std.testing.allocator, io, "own.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.ownsPort(39896));
     try std.testing.expect(!runtime.ownsPort(80));
     try std.testing.expect(runtime.challenge == null);
@@ -412,7 +426,7 @@ test "zix zixer: site runtime, tls acme site binds the port 80 companion" {
         .public_dir = "/var/www/pages",
     };
 
-    var runtime = SiteRuntime.bind(std.testing.allocator, io, "tls.cfg", cfg, 64) catch |err| {
+    var runtime = SiteRuntime.bind(std.testing.allocator, io, "tls.cfg", cfg, .{ .kernel_backlog = 64 }) catch |err| {
         // port 80 is privileged: without the capability (or as non-root)
         // the companion bind cannot be exercised, skip explicitly. The
         // EACCES from a privileged bind surfaces as Unexpected through the

@@ -9,6 +9,7 @@ const main_cfg = @import("main_cfg.zig");
 const root_dir = @import("root_dir.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_runtime = @import("site_runtime.zig");
+const worker_count = @import("worker_count.zig");
 
 /// Hard ceiling for one config file, a larger file fails instead of allocating.
 const MAX_CFG_BYTES: usize = 256 * 1024;
@@ -26,6 +27,10 @@ pub const Daemon = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     cfg: main_cfg.MainCfg,
+    /// Accept loops every started site runs, resolved from cfg.workers once
+    /// here rather than per site: the thread count cannot change under a
+    /// running daemon, and two sites must not disagree about it.
+    workers: usize,
     socket_path: []const u8,
     sites: std.ArrayList(site_runtime.SiteRuntime) = .empty,
     stop_requested: bool = false,
@@ -46,14 +51,20 @@ pub const Daemon = struct {
         const main_cfg_path = try std.fs.path.join(arena, &.{ root.path, "main.cfg" });
         const content = zix.utils.file.load(io, arena, main_cfg_path, MAX_CFG_BYTES) catch return error.NotInitialized;
 
-        const available_threads = std.Thread.getCpuCount() catch 1;
+        const available_threads = worker_count.available();
         var faults = fault.FaultList.init(arena);
         const cfg = try main_cfg.parse(arena, content, root.path, available_threads, &faults);
         if (faults.slice().len != 0) return error.MainCfgInvalid;
 
         const socket_path = try control.socketPath(io, arena, root.path);
 
-        return .{ .allocator = allocator, .io = io, .cfg = cfg, .socket_path = socket_path };
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .cfg = cfg,
+            .workers = worker_count.resolve(cfg.workers, available_threads),
+            .socket_path = socket_path,
+        };
     }
 
     /// Unbind whatever is still started and drop the registry.
@@ -192,8 +203,11 @@ pub const Daemon = struct {
             }
         }
 
-        const backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog);
-        const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, backlog) catch |err| switch (err) {
+        const options = site_runtime.BindOptions{
+            .kernel_backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog),
+            .workers = self.workers,
+        };
+        const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, options) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
             error.ChallengePortInUse => return print(reply_buf, "error: {s} challenge port {d} is already in use", .{ name, site_runtime.ACME_HTTP_PORT }),
             error.TlsCertFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_cert file", .{name}),
@@ -500,6 +514,71 @@ test "zix zixer: daemon backlog, a started site binds with the resolved value" {
     // listener, it only shortens the pending-connection queue.
     try std.testing.expectEqual(@as(usize, 2), daemon.sites.items.len);
     try std.testing.expectEqual(@as(u31, 1024), daemon.cfg.kernel_backlog);
+}
+
+test "zix zixer: daemon workers, the default cfg resolves to one accept loop" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_workers_default/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_workers_default") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    // zixer init writes workers: 1, and the daemon resolves it once at
+    // start so two sites can never disagree about the count.
+    try std.testing.expectEqual(@as(usize, 1), daemon.cfg.workers);
+    try std.testing.expectEqual(@as(usize, 1), daemon.workers);
+}
+
+test "zix zixer: daemon workers, a site starts with the resolved worker count" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: daemon worker count test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_workers_site/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_workers_site") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    // A named count above what this box has would fault main.cfg, so ask
+    // for what the box reports and let 1-core hosts assert the floor.
+    const wanted = worker_count.available();
+    const main_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "main.cfg" });
+    const file = try std.Io.Dir.cwd().createFile(io, main_path, .{ .truncate = true });
+    var write_buf: [128]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.print("workers: {d}\n", .{wanted});
+    try writer.interface.flush();
+    file.close(io);
+
+    var reloaded = try Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = test_root, .source = .ARG });
+    defer reloaded.deinit();
+    try std.testing.expectEqual(worker_count.resolve(wanted, wanted), reloaded.workers);
+
+    try writeSiteFile(io, arena.allocator(), test_root, "many.cfg", "engine: http1\nip: 127.0.0.1\nport: 18967\nupstreams: 127.0.0.1:18968\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, reloaded.handleLine("start many.cfg", &reply_buf), "ok: "));
+
+    // The count reaches the serving site, not just the daemon field.
+    const state = reloaded.sites.items[0].listener.proxy_edge;
+    try std.testing.expectEqual(reloaded.workers, state.workers.len);
+    try std.testing.expectEqual(reloaded.workers, state.pools.len);
+    try std.testing.expectEqual(reloaded.workers, state.idles.len);
 }
 
 test "zix zixer: daemon handleLine, shutdown reports the unbind count and sets the flag" {
