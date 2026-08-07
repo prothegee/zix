@@ -2,6 +2,8 @@
 
 const std = @import("std");
 
+const tcp_nodelay = @import("tcp_nodelay.zig");
+
 /// Idle connections kept per upstream slot. More than this closes on release.
 pub const IDLE_CAP: usize = 4;
 
@@ -22,6 +24,9 @@ pub const UpstreamConn = struct {
 /// - No connect timeout: the std.Io.Threaded backend panics on one (TODO in
 ///   std). A refused port fails fast, a blackholed address waits on the
 ///   operating system's own limit.
+/// - Nagle is turned off here rather than at each caller: the request head
+///   and the request body leave as separate writes, and the option rides
+///   the socket into the idle cache, so a reused conn keeps it.
 ///
 /// Param:
 /// io - std.Io
@@ -37,6 +42,7 @@ pub fn connect(io: std.Io, host: []const u8, port: u16, slot_index: u32) !Upstre
     const addr = std.Io.net.IpAddress.parse(host, port) catch return error.BadUpstreamAddress;
 
     const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    tcp_nodelay.apply(stream);
 
     return .{ .stream = stream, .slot_index = slot_index, .reused = false };
 }
@@ -133,6 +139,42 @@ test "zix zixer: upstream conn, non-literal host is refused before any socket" {
     const io = threaded.io();
 
     try std.testing.expectError(error.BadUpstreamAddress, connect(io, "backend.local", 3000, 0));
+}
+
+test "zix zixer: upstream conn, connect hands back a socket with nagle off" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        // non-linux region: the option is set the same way, but std has no
+        // portable getsockopt in Zig 0.16 to read it back. Nothing is bound.
+        std.log.info("upstream conn nodelay readback needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18942);
+    var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
+    defer server.deinit(io);
+
+    const conn = try connect(io, "127.0.0.1", 18942, 0);
+    defer conn.stream.close(io);
+    const accepted = try server.accept(io);
+    defer accepted.close(io);
+
+    var value: c_int = -1;
+    var value_len: std.os.linux.socklen_t = @sizeOf(c_int);
+    const rc = std.os.linux.getsockopt(
+        conn.stream.socket.handle,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        std.mem.asBytes(&value),
+        &value_len,
+    );
+
+    try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(rc));
+    try std.testing.expect(value != 0);
 }
 
 test "zix zixer: upstream conn, idle cache round trips a conn per slot" {
