@@ -7,11 +7,13 @@ const acme_challenge = @import("acme_challenge.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const grpc_edge = @import("grpc_edge.zig");
 const http2_edge = @import("http2_edge.zig");
+const idle_reaper = @import("idle_reaper.zig");
 const site_cfg = @import("site_cfg.zig");
 const static_files = @import("static_files.zig");
 const tcp_nodelay = @import("tcp_nodelay.zig");
 const tls_edge = @import("tls_edge.zig");
 const upstream_conn = @import("upstream_conn.zig");
+const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
 /// Consecutive accept failures before the loop gives up.
@@ -26,6 +28,8 @@ const MAX_ACCEPT_FAILURES: usize = 100;
 /// - tls_ctx exists only when the site terminates TLS: built from the cfg
 ///   cert / key paths at create, so a restart re-reads renewed cert files
 ///   (the certbot deploy-hook path).
+/// - reaper runs only on a site that has an idle cache, and hands aged
+///   upstream connections back even while the site sits quiet.
 pub const ServeState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -33,6 +37,8 @@ pub const ServeState = struct {
     server: std.Io.net.Server,
     pool: ?upstream_pool.Pool,
     idle: ?upstream_conn.IdleCache,
+    reaper: idle_reaper.Reaper = .{},
+    upstream_timeout_ms: u32,
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
@@ -113,6 +119,7 @@ pub const ServeState = struct {
             .server = server,
             .pool = pool,
             .idle = idle,
+            .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
@@ -122,6 +129,9 @@ pub const ServeState = struct {
             .wake_ip = wake_ip,
             .port = port,
         };
+
+        if (state.idle) |*cache| try state.reaper.start(io, cache);
+        errdefer state.reaper.stop();
 
         state.thread = try std.Thread.spawn(.{}, acceptLoop, .{state});
 
@@ -142,6 +152,7 @@ pub const ServeState = struct {
         wake(io, state.wake_ip, state.port);
         if (state.thread) |thread| thread.join();
         state.conns.cancel(io);
+        state.reaper.stop();
 
         state.server.deinit(io);
         if (state.idle) |*idle| idle.deinit(state.allocator, io);
@@ -192,6 +203,7 @@ fn acceptLoop(state: *ServeState) void {
         .static = static_site,
         .acme = acme,
         .tls_cert_der = if (tls_ctx) |ctx| ctx.cert_der else null,
+        .upstream_timeout_ms = state.upstream_timeout_ms,
     };
 
     var accept_failures: usize = 0;
@@ -444,6 +456,60 @@ test "zix zixer: site serve, tls site terminates and serves the static plane" {
     try std.testing.expect(std.mem.indexOf(u8, response, "Connection: close\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, response, "tls-static"));
 
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, the cfg read bound reaches the state and starts a reaper" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18954 }};
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18953,
+        .upstreams = &upstreams,
+        .upstream_timeout_ms = 1234,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18953);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18953);
+    try std.testing.expectEqual(@as(u32, 1234), state.upstream_timeout_ms);
+    try std.testing.expect(state.reaper.thread != null);
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, a site without upstreams takes the default and no reaper" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18955,
+        .public_dir = "/var/www/static-test",
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18955);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18955);
+    try std.testing.expectEqual(upstream_deadline.DEFAULT_MS, state.upstream_timeout_ms);
+    try std.testing.expect(state.reaper.thread == null);
     state.shutdown();
 
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
