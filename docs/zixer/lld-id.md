@@ -69,7 +69,7 @@ Key dicocokkan berdasarkan nama terhadap sebuah enum, jadi key tak dikenal menja
 
 | key | pemeriksaan |
 | :- | :- |
-| workers | muat di `usize`, paling banyak sebanyak thread mesin dari `std.Thread.getCpuCount` |
+| workers | muat di `usize`, paling banyak sebanyak thread yang boleh dipakai proses ini, yang dibaca `std.Thread.getCpuCount` dari affinity mask di Linux |
 | dispatch | salah satu dari `async`, `epoll`, `uring`, dan di luar Linux hanya `async` |
 | logs_dir, sites_dir | diambil apa adanya, di-default ke `<root>/logs` dan `<root>/sites` bila tidak ada |
 | kernel_backlog | muat di `u31`, minimal 1 |
@@ -136,7 +136,7 @@ File config lebih besar dari 256 KiB ditolak alih-alih dimuat.
 
 ## Site runtime
 
-Satu site yang start memegang satu listener, dengan salah satu bentuk berikut:
+Satu site yang start memegang satu listener per accept loop, dengan salah satu bentuk berikut:
 
 | engine dan config | apa yang dipegang |
 | :- | :- |
@@ -151,6 +151,47 @@ Listener tcp bind dengan address reuse, socket datagram bind ketat.
 Address reuse itulah alasan bind tcp didahului sebuah probe. Std memasangkan flag itu dengan `SO_REUSEPORT` di posix, dan `SO_REUSEADDR` di Windows sama permisifnya, jadi listener kedua ikut bergabung di port itu alih-alih gagal, lalu kernel membagi koneksi yang datang ke keduanya. Probe connect ke alamat yang akan didengarkan site, loopback sebagai ganti wildcard karena Windows menolak connect ke `0.0.0.0`. Listener yang hidup akan menjawab dan start ditolak dengan `AddressInUse`, sedangkan socket yang tertinggal di TIME_WAIT menolak connect itu, jadi restart tepat setelah trafik nyata tetap bisa bind ulang. Socket datagram tidak butuh probe: bind-nya ketat dan melaporkan tabrakannya sendiri.
 
 Site TLS dengan key acme, di port selain 80, juga bind port 80, dan port companion itu diprobe dengan cara yang sama. Bind itu tidak opsional: bila gagal, seluruh `start` gagal dengan pesan yang menyebut port challenge-nya.
+
+<br>
+
+## Worker
+
+Site tcp yang melayani menjalankan `workers` accept loop, dari `main.cfg`.
+Daemon menyelesaikan angkanya sekali saat start, jadi dua site tidak mungkin
+berbeda pendapat soal angka itu.
+
+| dikonfigurasi | hasil resolusi |
+| :- | :- |
+| `0` | semua thread yang boleh dipakai proses ini, yang dibaca `std.Thread.getCpuCount` dari affinity mask di Linux |
+| `n` | `n`, dan `main.cfg` sudah menolak angka di atas thread yang tersedia |
+| berapa pun, di Windows | `1` |
+
+Windows menjadi pengecualian karena address reuse di sana adalah pengambilalihan,
+bukan penggabungan: bind kedua di port itu akan meninggalkan listener pertama
+tanpa trafik. Semua platform lain yang didukung memasangkan flag itu dengan
+`SO_REUSEPORT`, di mana kernel memilih satu listener untuk tiap koneksi yang
+datang.
+
+Apa yang dimiliki satu worker, dan apa yang tetap milik site:
+
+| dimiliki satu worker | dipegang site |
+| :- | :- |
+| listener-nya | string config dan plane static |
+| upstream pool-nya | context TLS, read-only setelah site start |
+| idle connection cache-nya | thread reaper, yang menyapu cache tiap worker |
+| group task koneksinya | flag stop, satu store menghentikan tiap loop |
+
+Worker pertama mengambil listener yang sudah di-bind site, dan sisanya bind
+listener sendiri di alamat yang sama. Yang belakangan tidak butuh port probe:
+site sudah memiliki port itu saat itu, dan bergabung ke sana memang tujuannya.
+
+Shutdown adalah tempat berbagi port ada harganya. Satu koneksi wake bukan satu
+worker, karena kernel yang memutuskan listener mana yang mengambilnya. Sebuah
+worker menutup listener-nya sendiri saat keluar, yang mengeluarkannya dari
+group, jadi site terus membangunkan sampai tiap worker keluar dan tiap
+percobaan ulang sampai ke worker yang masih terblokir. Batasnya 200 percobaan
+per worker, satu per milidetik, dan itu baru berarti bila sebuah worker
+tersangkut di dalam sebuah koneksi, bukan di accept.
 
 <br>
 
@@ -248,7 +289,14 @@ Round-robin O(1) atas upstream yang sedang up:
 - Koneksi keep-alive idle di-cache per slot upstream, sampai 4 per slot, dan sampai 32 untuk seluruh site. Kelebihannya ditutup alih-alih ditumbuhkan.
 - Koneksi yang di-cache juga kedaluwarsa setelah 5000 ms. Pengecekan umur berjalan saat sebuah koneksi diambil, dan satu thread sweep per site menjalankannya tiap 2500 ms supaya site tanpa trafik pun tetap mengembalikan koneksinya. Koneksi idle di pool adalah kapasitas yang diambil dari backend.
 
-Spinlock pendek menjaga pool dan cache, karena task koneksi berjalan bersamaan di dalam satu site.
+Tiap worker sebuah site memiliki pool dan cache-nya sendiri. Spinlock pendek
+menjaga masing-masing, karena task koneksi berjalan bersamaan di dalam satu
+worker, dan tidak ada yang dibagi antar worker. Angka 32 koneksi idle adalah
+batas milik site, jadi worker-nya membagi angka itu: 4 worker memegang 8 per
+worker, tidak pernah di bawah 1. Tiap worker belajar sendiri bahwa sebuah
+upstream mati, jadi backend yang mati berbiaya satu connect gagal per worker,
+bukan satu per site, dan tiap salinan menerima kembali dengan cooldown-nya
+sendiri.
 
 <br>
 
@@ -265,14 +313,15 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | head request | 16 KiB | edge http1 |
 | header per pesan | 64 | edge http1 |
 | path static | 512 byte | `public_dir` plus path request |
-| koneksi upstream idle | 4 per upstream, 32 total | per site |
-| umur koneksi upstream idle | 5000 ms | cache idle per site |
-| interval sweep idle | 2500 ms | thread reaper per site |
-| cooldown upstream | 3000 ms | pool per site |
+| koneksi upstream idle | 4 per upstream, 32 total, dibagi di antara worker | per site |
+| umur koneksi upstream idle | 5000 ms | cache idle per worker |
+| interval sweep idle | 2500 ms | thread reaper per site, untuk tiap cache worker |
+| cooldown upstream | 3000 ms | pool per worker |
 | koneksi QUIC bersamaan | 64 | per site http3 |
 | flow udp | 64 | per site udp |
 | datagram udp | 65535 byte | per site udp |
-| kegagalan accept berturut-turut sebelum loop menyerah | 100 | control loop dan tiap accept loop site |
+| kegagalan accept berturut-turut sebelum loop menyerah | 100 | control loop dan tiap accept loop worker |
+| percobaan wake saat shutdown | 200 per worker, satu per milidetik | per site, sampai tiap accept keluar |
 
 <br>
 
@@ -284,6 +333,6 @@ Tiap modul membawa test-nya sendiri berdampingan dengan kodenya, dijalankan deng
 | :- | :- |
 | test scanner dan math | grammar, comment, list, dan tiap aturan aritmetika |
 | test skema | tiap default, tiap teks fault, dan tiap aturan lintas field |
-| test daemon dan runtime | bahwa nilai hasil parse benar-benar sampai ke bind, mis. backlog yang di-resolve sebuah site |
+| test daemon dan runtime | bahwa nilai hasil parse benar-benar sampai ke bind, mis. backlog yang di-resolve sebuah site dan jumlah worker yang dipakai site saat start |
 
 Matriks demo di bawah `examples/proxies` adalah lapisan ujung ke ujung: `zig build zixer-test-runner-all` menyalakan tiap upstream, mem-bind site demo itu di root sementara, menjalankan client native lewat edge, dan melaporkan satu baris per demo.

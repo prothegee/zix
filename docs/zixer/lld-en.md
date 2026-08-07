@@ -69,7 +69,7 @@ Keys are matched by name against an enum, so an unknown key is a typo report rat
 
 | key | check |
 | :- | :- |
-| workers | fits `usize`, at most the machine thread count from `std.Thread.getCpuCount` |
+| workers | fits `usize`, at most the thread count this process may use, which `std.Thread.getCpuCount` reads from the affinity mask on Linux |
 | dispatch | one of `async`, `epoll`, `uring`, and off Linux only `async` |
 | logs_dir, sites_dir | taken as written, defaulted to `<root>/logs` and `<root>/sites` when absent |
 | kernel_backlog | fits `u31`, at least 1 |
@@ -136,7 +136,7 @@ A config file larger than 256 KiB is refused rather than loaded.
 
 ## Site runtime
 
-One started site owns one listener, and one of these shapes:
+One started site owns one listener per accept loop, and one of these shapes:
 
 | engine and config | what is held |
 | :- | :- |
@@ -151,6 +151,45 @@ Tcp listeners bind with address reuse, datagram sockets bind strict.
 Address reuse is why a tcp bind is preceded by a probe. Std pairs the flag with `SO_REUSEPORT` on posix, and the Windows `SO_REUSEADDR` is permissive in the same way, so a second listener joins the port rather than failing and the kernel then splits arriving connections between the two. The probe connects to the address the site is about to listen on, loopback in place of a wildcard because Windows refuses a connect to `0.0.0.0`. A live listener answers and the start is refused with `AddressInUse`, while a socket left in TIME_WAIT refuses the connect, so a restart right after live traffic still rebinds. A datagram socket needs no probe: its bind is strict and reports the collision itself.
 
 A TLS site with acme keys, on any port other than 80, also binds port 80, and the companion port is probed the same way. That bind is not optional: if it fails, the whole `start` fails with a message naming the challenge port.
+
+<br>
+
+## Workers
+
+A serving tcp site runs `workers` accept loops, from `main.cfg`. The daemon
+resolves the count once at start, so two sites can never disagree about it.
+
+| configured | resolved |
+| :- | :- |
+| `0` | every thread this process may run on, which `std.Thread.getCpuCount` reads from the affinity mask on Linux |
+| `n` | `n`, and `main.cfg` already refused a count above the available threads |
+| anything, on Windows | `1` |
+
+Windows is the exception because address reuse there is a takeover, not a join:
+a second bind on the port would leave the first listener with no traffic. Every
+other supported platform pairs the flag with `SO_REUSEPORT`, where the kernel
+picks one listener per arriving connection.
+
+What a worker owns, and what the site keeps:
+
+| owned by one worker | kept by the site |
+| :- | :- |
+| its listener | the config strings and the static plane |
+| its upstream pool | the TLS context, read-only once the site starts |
+| its idle connection cache | the reaper thread, which sweeps every worker's cache |
+| its connection task group | the stop flag, one store stops every loop |
+
+The first worker takes the listener the site already bound, and the rest bind
+their own on the same address. Those need no port probe: the site owns the port
+by then, and joining it is the whole point.
+
+Shutdown is where sharing a port costs something. One wake connection is not
+one worker, because the kernel decides which listener takes it. A worker closes
+its own listener as it leaves, which takes it out of the group, so the site
+keeps waking until every worker has left and each retry reaches one that is
+still blocked. The bound is 200 attempts per worker, one per millisecond, and
+it only matters if a worker is wedged inside a connection rather than in
+accept.
 
 <br>
 
@@ -248,7 +287,13 @@ An O(1) round-robin over the upstreams currently up:
 - Idle keep-alive connections are cached per upstream slot, up to 4 each, and up to 32 across the whole site. Overflow is closed instead of grown.
 - A cached connection also ages out after 5000 ms. Expiry runs when one is taken, and a sweep thread per site runs it every 2500 ms so a site with no traffic still hands its connections back. An idle pooled connection is capacity taken from the backend.
 
-A short spinlock guards the pool and the cache, because connection tasks run concurrently within a site.
+Each worker of a site owns its own pool and its own cache. A short spinlock
+guards each, because connection tasks run concurrently within a worker, and
+nothing is shared across workers. The 32 idle connections are a site bound, so
+the workers divide it: 4 workers hold 8 each, never below 1. A worker learns on
+its own that an upstream is down, so a dead backend costs one failed connect
+per worker rather than one per site, and each copy re-admits on its own
+cooldown.
 
 <br>
 
@@ -265,14 +310,15 @@ None of these are configurable today.
 | request head | 16 KiB | http1 edge |
 | headers per message | 64 | http1 edge |
 | static path | 512 bytes | `public_dir` plus the request path |
-| idle upstream connections | 4 per upstream, 32 in total | per site |
-| idle upstream connection age | 5000 ms | per site idle cache |
-| idle sweep interval | 2500 ms | per site reaper thread |
-| upstream cooldown | 3000 ms | per site pool |
+| idle upstream connections | 4 per upstream, 32 in total, divided between the workers | per site |
+| idle upstream connection age | 5000 ms | per worker idle cache |
+| idle sweep interval | 2500 ms | per site reaper thread, one for every worker cache |
+| upstream cooldown | 3000 ms | per worker pool |
 | concurrent QUIC connections | 64 | per http3 site |
 | udp flows | 64 | per udp site |
 | udp datagram | 65535 bytes | per udp site |
-| consecutive accept failures before a loop gives up | 100 | control loop and each site accept loop |
+| consecutive accept failures before a loop gives up | 100 | control loop and each worker accept loop |
+| shutdown wake attempts | 200 per worker, one per millisecond | per site, until every accept has left |
 
 <br>
 
@@ -284,6 +330,6 @@ Every module carries its own tests beside the code, run with `zig build zixer-un
 | :- | :- |
 | scanner and math tests | the grammar, comments, lists, and every arithmetic rule |
 | schema tests | every default, every fault text, and every cross-field rule |
-| daemon and runtime tests | that a parsed value reaches the bind, i.e. the backlog a site resolves |
+| daemon and runtime tests | that a parsed value reaches the bind, i.e. the backlog a site resolves and the worker count a site starts with |
 
 The demo matrix under `examples/proxies` is the end-to-end layer: `zig build zixer-test-runner-all` starts each upstream, binds that demo's site in a throwaway root, drives a native client through the edge, and reports one line per demo.
