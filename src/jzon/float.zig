@@ -99,7 +99,16 @@ pub fn parse(comptime T: type, text: []const u8) ReadError!T {
 /// - A leading zero is allowed only as the whole integer part, a fraction needs
 ///   at least one digit after the point, and an exponent needs at least one
 ///   digit after its optional sign.
-fn isNumber(text: []const u8) bool {
+/// - This is the grammar for any JSON number, not only one a float reads. A
+///   parse stepping over a value it does not want asks the same question, so
+///   `1.2.3` is refused whether the number is read or skipped.
+///
+/// Param:
+/// text - []const u8 (the number token's bytes)
+///
+/// Return:
+/// - bool (true when the whole text is one JSON number)
+pub fn isNumber(text: []const u8) bool {
     var pos: usize = 0;
 
     if (pos < text.len and text[pos] == '-') pos += 1;
