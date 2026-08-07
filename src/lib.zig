@@ -431,6 +431,10 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("jzon/sink.zig"));
     std.testing.refAllDecls(@import("jzon/cursor.zig"));
     std.testing.refAllDecls(@import("jzon/escape.zig"));
+    std.testing.refAllDecls(@import("jzon/escape_vector.zig"));
     std.testing.refAllDecls(@import("jzon/integer.zig"));
+    std.testing.refAllDecls(@import("jzon/float.zig"));
+    std.testing.refAllDecls(@import("jzon/serialize/std_emitter.zig"));
+    std.testing.refAllDecls(@import("jzon/serialize/generated_emitter.zig"));
     std.testing.refAllDecls(@import("jzon/jzon.zig"));
 }
