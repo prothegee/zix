@@ -57,6 +57,22 @@ const CONTROL: [0x20]Escaped = build: {
     break :build table;
 };
 
+/// Whether one byte cannot go out raw.
+///
+/// Note:
+/// - This is the whole rule, and every scan over a string asks it. A scan that
+///   classifies bytes some other way, a vector lane at a time say, still spells
+///   each hit through `spell`, so the two never drift apart.
+///
+/// Param:
+/// byte - u8 (the byte to classify)
+///
+/// Return:
+/// - bool (true when the byte has to be escaped)
+pub inline fn isEscaped(byte: u8) bool {
+    return byte == '"' or byte == '\\' or byte < 0x20;
+}
+
 /// Whether `text` holds a byte that cannot go out raw.
 ///
 /// Note:
@@ -70,10 +86,36 @@ const CONTROL: [0x20]Escaped = build: {
 /// - bool (true when at least one byte needs escaping)
 pub fn needsEscape(text: []const u8) bool {
     for (text) |byte| {
-        if (byte == '"' or byte == '\\' or byte < 0x20) return true;
+        if (isEscaped(byte)) return true;
     }
 
     return false;
+}
+
+/// Write one byte's escaped spelling.
+///
+/// Note:
+/// - Meant for a byte `isEscaped` accepts. Any other byte is written as itself,
+///   which is what it would have been anyway, so a caller that classifies wrongly
+///   still emits correct text.
+///
+/// Param:
+/// sink - *Sink (where the spelling goes)
+/// byte - u8 (the byte to spell)
+///
+/// Return:
+/// - void
+/// - error.NoSpaceLeft when the spelling does not fit
+pub fn spell(sink: *Sink, byte: u8) EncodeError!void {
+    switch (byte) {
+        '"' => try sink.literal("\\\""),
+        '\\' => try sink.literal("\\\\"),
+        0x00...0x1f => {
+            const entry = CONTROL[byte];
+            try sink.bytes(entry.text[0..entry.len]);
+        },
+        else => try sink.byte(byte),
+    }
 }
 
 /// Write `text` as a complete JSON string, quotes included.
@@ -111,18 +153,10 @@ pub fn encodeBody(sink: *Sink, text: []const u8) EncodeError!void {
 
     while (index < text.len) : (index += 1) {
         const byte = text[index];
-        if (byte != '"' and byte != '\\' and byte >= 0x20) continue;
+        if (!isEscaped(byte)) continue;
 
         try sink.bytes(text[clean_from..index]);
-
-        switch (byte) {
-            '"' => try sink.literal("\\\""),
-            '\\' => try sink.literal("\\\\"),
-            else => {
-                const entry = CONTROL[byte];
-                try sink.bytes(entry.text[0..entry.len]);
-            },
-        }
+        try spell(sink, byte);
 
         clean_from = index + 1;
     }
@@ -308,6 +342,33 @@ test "zix jzon: needsEscape sees exactly what encode would spell" {
     try std.testing.expect(needsEscape("with \" quote"));
     try std.testing.expect(needsEscape("with \\ backslash"));
     try std.testing.expect(needsEscape("with \n newline"));
+}
+
+test "zix jzon: isEscaped answers for the byte set encode rewrites" {
+    try std.testing.expect(isEscaped('"'));
+    try std.testing.expect(isEscaped('\\'));
+    try std.testing.expect(isEscaped(0x00));
+    try std.testing.expect(isEscaped(0x1f));
+    try std.testing.expect(!isEscaped(0x20));
+    try std.testing.expect(!isEscaped('a'));
+    try std.testing.expect(!isEscaped(0x7f));
+    try std.testing.expect(!isEscaped(0xff));
+}
+
+test "zix jzon: spell writes what encodeBody writes for the same byte" {
+    for (0..256) |value| {
+        const byte: u8 = @intCast(value);
+
+        var one: [8]u8 = undefined;
+        var spelled: Sink = .init(&one);
+        try spell(&spelled, byte);
+
+        var whole: [8]u8 = undefined;
+        var encoded: Sink = .init(&whole);
+        try encodeBody(&encoded, &[_]u8{byte});
+
+        try std.testing.expectEqualStrings(encoded.filled(), spelled.filled());
+    }
 }
 
 test "zix jzon: decode reverses every spelling encode produces" {
