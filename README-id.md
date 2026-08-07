@@ -82,6 +82,7 @@
     - [HTTP/3](./README-id.md#http3)
     - [WebRTC](./README-id.md#webrtc)
     - [Logger](./README-id.md#logger)
+    - [JSON (jzon)](./README-id.md#json-jzon)
 - [Driver](./README-id.md#driver)
 - [zixer](./README-id.md#zixer)
 
@@ -2305,6 +2306,83 @@ Level: `.DEBUG`(0) `.INFO`(1) `.WARN`(2) `.ERROR`(3). Backend file menggunakan w
 Pasangkan logger ke server mana saja dengan mengatur `logger: &logger` di konfigurasinya. Lihat [`docs/hld-logger-id.md`](docs/hld-logger-id.md) untuk dokumentasi lengkap.
 
 **Kapan digunakan:** pasangkan `Logger` ke server mana saja di produksi untuk log file terstruktur yang berotasi dengan baris event per-protokol, dan panggil `logger.system()` untuk event lifecycle dan error milikmu. Mode console menjaga output development tetap terbaca sementara file tetap otoritatif. Aman dipanggil dari OS thread background, jadi satu logger bisa melayani seluruh proses.
+
+<br>
+
+### JSON (jzon)
+
+`zix.jzon` adalah JSON dua arah, ditulis di atas standard library. Dua panggilan yang membawanya: `serialize` mengubah nilai bertipe menjadi teks JSON, `deserialize` mengubah teks JSON kembali menjadi nilai bertipe. Proses render tidak mengalokasikan apa pun, ia diberi sebuah buffer dan mengembalikan berapa byte yang dipakai. Proses parse hanya mengalokasikan apa yang ditunjuk hasilnya, dari allocator yang diberikan, sehingga reset arena membebaskan satu parse utuh dalam satu langkah.
+
+```zig
+const std = @import("std");
+const zix = @import("zix");
+
+const Order = struct {
+    id: u64,
+    customer: []const u8,
+    tags: []const []const u8,
+};
+
+// serialize: tanpa allocator, buffer adalah seluruh anggarannya
+var buf: [256]u8 = undefined;
+const len = try zix.jzon.serialize(&buf, Order{
+    .id       = 7,
+    .customer = "Rekha Nair",
+    .tags     = &.{ "priority", "gift" },
+}, .{});
+// buf[0..len] berisi {"id":7,"customer":"Rekha Nair","tags":["priority","gift"]}
+
+// deserialize: semua yang ditunjuk hasilnya berasal dari allocator ini
+var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
+defer arena.deinit();
+
+const order = try zix.jzon.deserialize(Order, arena.allocator(), buf[0..len], .{});
+```
+
+Kedua panggilan menerima struct options comptime yang menyebut jalur mana yang berjalan. Setiap jalur tulis menghasilkan byte yang sama dan setiap jalur baca membaca kembali nilai yang sama, jadi strategy adalah keputusan biaya semata, diganti di call site tanpa baris lain ikut berubah. Karena comptime, hanya jalur yang disebut yang ikut dikompilasi ke binary.
+
+**Strategy tulis (`zix.jzon.SerializeStrategy`):**
+
+| Strategy | Yang dijalankan |
+| :- | :- |
+| `.STD` | `std.json.Stringify`, yang merender setiap bentuk yang dirender std |
+| `.GENERATED_FMT` | digenerate dari tipenya, integer lewat `std.fmt` |
+| `.GENERATED` | digenerate dari tipenya, digit integer ditulis langsung ke buffer |
+| `.GENERATED_VECTOR` | seperti `.GENERATED`, dengan string dipindai satu vector lane sekaligus |
+
+**Strategy baca (`zix.jzon.DeserializeStrategy`):**
+
+| Strategy | Yang dijalankan |
+| :- | :- |
+| `.STD` | refleksi `std.json`, yang mem-parse setiap bentuk yang di-parse std |
+| `.SCANNER` | token dari `std.json.Scanner`, dengan dispatch field digenerate dari tipenya |
+| `.GENERATED` | digenerate dari tipenya, di atas read cursor milik jzon, satu byte sekaligus |
+| `.GENERATED_VECTOR` | seperti `.GENERATED`, satu vector lane sekaligus |
+
+`.GENERATED_VECTOR` tidak selalu paling cepat. Ia menguntungkan pada dokumen yang datang tertata dengan whitespace atau membawa string panjang, dan merugi pada trafik minified dengan field pendek, karena itu ia tetap pilihan di call site dan bukan default.
+
+**Options baca (`zix.jzon.DeserializeOptions`):**
+
+| Field | Default | Yang ditentukan |
+| :- | :- | :- |
+| `strategy` | `.STD` | jalur baca mana yang berjalan |
+| `strings` | `.COPY` | `.COPY` menyalin setiap string ke allocator, `.BORROW` mengarahkan string tanpa escape ke dokumennya, sehingga dokumen itu harus hidup lebih lama daripada nilainya |
+| `unknown` | `.REJECT` | `.REJECT` gagal pada key yang tidak dideklarasikan tipenya, `.SKIP` melangkahi key beserta seluruh nilainya sedalam apa pun bersarangnya |
+
+**Error:** proses render melaporkan `error.NoSpaceLeft` dan tidak ada yang lain. Proses parse melaporkan satu set yang sama jalur mana pun yang berjalan: `UnknownField`, `MissingField`, `UnknownEnumValue`, `Truncated`, `Unexpected`, `BadNumber`, `BadEscape`, `OutOfMemory`.
+
+Tipe field yang tidak punya bentuk JSON di jalur generated adalah compile error yang menyebut tipenya, bukan kegagalan runtime, dan `.STD` tetap menerima bentuk itu.
+
+**Contoh:** empat, tidak ada yang berupa server, jadi masing-masing berjalan lalu selesai. jzon adalah package mandiri di bawah `src/jzon` dengan `build.zig` miliknya sendiri, jadi bangun dari sana dengan `zig build examples` (atau `zig build jzon-examples` dari root repo).
+
+| Contoh | Yang ditunjukkan |
+| :- | :- |
+| [serialize](src/jzon/examples/serialize.zig) | sebuah nilai ke buffer tetap, setiap strategy tulis, dan apa yang dilaporkan buffer yang terlalu kecil |
+| [deserialize](src/jzon/examples/deserialize.zig) | body permintaan menjadi nilai bertipe di atas arena, setiap strategy baca, reset di antara body |
+| [strings](src/jzon/examples/strings.zig) | `.COPY` berhadapan dengan `.BORROW`, dan apa yang diminta borrow terhadap masa hidup dokumennya |
+| [unknown_keys](src/jzon/examples/unknown_keys.zig) | `.REJECT` berhadapan dengan `.SKIP` pada dokumen yang membawa lebih dari yang dideklarasikan tipenya |
+
+**Kapan digunakan:** pakai `.{}` lebih dulu, itu jalur berbasis std dan menerima setiap bentuk yang diterima std. Pindahkan handler yang panas ke `.GENERATED` ketika bentuknya record biasa dan parse atau render-nya ada di jalur permintaan, lalu tambahkan `.strings = .BORROW` ketika nilainya mati bersama buffer tempat ia dibaca.
 
 <br>
 
