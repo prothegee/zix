@@ -7,6 +7,7 @@ const fault = @import("fault.zig");
 const main_cfg = @import("main_cfg.zig");
 const root_dir = @import("root_dir.zig");
 const site_cfg = @import("site_cfg.zig");
+const worker_count = @import("worker_count.zig");
 
 /// Hard ceiling for one config file, a larger file fails instead of allocating.
 const MAX_CFG_BYTES: usize = 256 * 1024;
@@ -45,7 +46,7 @@ pub fn run(
         return 1;
     };
 
-    const available_threads = std.Thread.getCpuCount() catch 1;
+    const available_threads = worker_count.available();
     var main_faults = fault.FaultList.init(arena);
     const cfg = try main_cfg.parse(arena, content, root.path, available_threads, &main_faults);
     try checkDirExists(io, &main_faults, "logs_dir", cfg.logs_dir);
@@ -93,7 +94,15 @@ pub fn run(
 pub fn renderMain(out: *std.Io.Writer, path: []const u8, cfg: main_cfg.MainCfg, faults: []const fault.Fault) !void {
     try out.print("# {s}\nmain.cfg:\n", .{path});
     try out.print("status: {s}\n", .{statusWord(faults)});
-    try out.print("workers: {d}\n", .{cfg.workers});
+    // A bare "workers: 0" tells an operator nothing about what the daemon
+    // will actually run, and a platform that cannot share a listen port
+    // takes any count down to 1. Print both whenever they differ.
+    const resolved_workers = worker_count.resolve(cfg.workers, worker_count.available());
+    if (resolved_workers == cfg.workers) {
+        try out.print("workers: {d}\n", .{cfg.workers});
+    } else {
+        try out.print("workers: {d} (resolved to {d})\n", .{ cfg.workers, resolved_workers });
+    }
     try out.print("dispatch: {s}\n", .{main_cfg.dispatchName(cfg.dispatch)});
     try out.print("logs_dir: {s}\n", .{cfg.logs_dir});
     try out.print("sites_dir: {s}\n", .{cfg.sites_dir});
@@ -423,6 +432,18 @@ test "zix zixer: cmd status, render main block matches the documented shape" {
         "kernel_backlog: 1024\n" ++
         "\n";
     try std.testing.expectEqualStrings(expected, out.buffered());
+}
+
+test "zix zixer: cmd status, a workers value of zero reports what it resolves to" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const cfg = main_cfg.MainCfg{ .workers = 0, .logs_dir = "/r/logs", .sites_dir = "/r/sites" };
+    try renderMain(&out, "/r/main.cfg", cfg, &.{});
+
+    var expected_buf: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "workers: 0 (resolved to {d})\n", .{worker_count.resolve(0, worker_count.available())});
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), expected) != null);
 }
 
 test "zix zixer: cmd status, render faults are indented under errors" {
