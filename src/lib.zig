@@ -52,8 +52,8 @@ pub const Driver = struct {
 
 // --------------------------------------------------------- //
 
-/// zix json serialize and deserialize
-pub const jzon = @import("jzon/jzon.zig");
+/// zix json serialize and deserialize, a standalone package under src/jzon
+pub const jzon = @import("jzon/src/lib.zig");
 
 // --------------------------------------------------------- //
 
@@ -427,27 +427,6 @@ test "zix: unit test" {
     // # zix.Channel
     std.testing.refAllDecls(@import("channel/channel.zig"));
 
-    // # zix.jzon
-    std.testing.refAllDecls(@import("jzon/sink.zig"));
-    std.testing.refAllDecls(@import("jzon/cursor.zig"));
-    std.testing.refAllDecls(@import("jzon/cursor_vector.zig"));
-    std.testing.refAllDecls(@import("jzon/escape.zig"));
-    std.testing.refAllDecls(@import("jzon/escape_vector.zig"));
-    std.testing.refAllDecls(@import("jzon/integer.zig"));
-    std.testing.refAllDecls(@import("jzon/float.zig"));
-    std.testing.refAllDecls(@import("jzon/reflect.zig"));
-    std.testing.refAllDecls(@import("jzon/serialize/options.zig"));
-    std.testing.refAllDecls(@import("jzon/serialize/std_emitter.zig"));
-    std.testing.refAllDecls(@import("jzon/serialize/generated_emitter.zig"));
-    std.testing.refAllDecls(@import("jzon/serialize/serialize.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/options.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/fields.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/scan.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/skip.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/string_value.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/std_parser.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/scanner_parser.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/generated_parser.zig"));
-    std.testing.refAllDecls(@import("jzon/deserialize/deserialize.zig"));
-    std.testing.refAllDecls(@import("jzon/jzon.zig"));
+    // jzon is a standalone package under src/jzon with its own build files, so
+    // its in-file tests belong to `jzon-test-unit` the way each driver's do.
 }

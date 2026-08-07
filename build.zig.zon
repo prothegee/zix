@@ -15,8 +15,6 @@
         "zixer-build-tests.zig",
         "zixer-build-examples.zig",
         "zixer-build-test_runner.zig",
-        "jzon-build.zig",
-        "jzon-build-tests.zig",
         "build.zig.zon",
         "src",
         "LICENSE",
