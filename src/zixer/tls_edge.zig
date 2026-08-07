@@ -3,15 +3,13 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const conn_buffer = @import("conn_buffer.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const grpc_edge = @import("grpc_edge.zig");
 const http2_edge = @import("http2_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 
 const Tls = zix.Tls;
-
-/// Stream buffer size for the ciphertext legs (matches the proxy edge).
-const STREAM_BUF_SIZE: usize = 8 * 1024;
 
 /// Handshake flight staging (server flight fits well under this).
 const FLIGHT_OUT_SIZE: usize = 8 * 1024;
@@ -445,10 +443,14 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     const io = proxy.io;
     defer client_stream.close(io);
 
-    var read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var stream_reader = client_stream.reader(io, &read_buf);
-    var stream_writer = client_stream.writer(io, &write_buf);
+    // The wire pair only carries ciphertext to and from the socket. The
+    // plaintext side is the Session's own buffers, which stay fixed: a
+    // whole TLS record has to fit whatever the site configured.
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
+    defer buffers.deinit(proxy.allocator);
+
+    var stream_reader = client_stream.reader(io, buffers.client_read);
+    var stream_writer = client_stream.writer(io, buffers.client_write);
 
     var session: Session = undefined;
     handshake(&session, io, ctx, &stream_reader.interface, &stream_writer.interface) catch return;
@@ -469,6 +471,10 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
 // --------------------------------------------------------- //
 
 const testing = std.testing;
+
+/// Ciphertext leg size the rigs below bind with. The serving path takes
+/// its size from the site instead, see conn_buffer.
+const STREAM_BUF_SIZE: usize = 8 * 1024;
 
 const FIXTURE_CERT = "examples/certs/ecdsa_p256_cert.pem";
 const FIXTURE_KEY = "examples/certs/ecdsa_p256_key.pem";
