@@ -4,12 +4,13 @@ const std = @import("std");
 
 const acme_listener = @import("acme_listener.zig");
 const h3_edge = @import("h3_edge.zig");
+const port_probe = @import("port_probe.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_serve = @import("site_serve.zig");
 const udp_forward = @import("udp_forward.zig");
 
 /// The port the CA validates http-01 on (rfc 8555 8.3).
-const ACME_HTTP_PORT: u16 = 80;
+pub const ACME_HTTP_PORT: u16 = 80;
 
 /// One started site inside the daemon.
 ///
@@ -53,6 +54,7 @@ pub const SiteRuntime = struct {
     /// - SiteRuntime holding the bound socket
     /// - error.SiteCfgIncomplete when engine, port, or ip did not survive parse
     /// - error.AddressInUse when another listener owns ip:port
+    /// - error.ChallengePortInUse when another listener owns the acme companion port
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, name: []const u8, cfg: site_cfg.SiteCfg, kernel_backlog: u31) !SiteRuntime {
         const engine = cfg.engine orelse return error.SiteCfgIncomplete;
         const port = cfg.port orelse return error.SiteCfgIncomplete;
@@ -63,11 +65,15 @@ pub const SiteRuntime = struct {
 
         // Tcp listens with reuse_address like every zix engine: without it a
         // restart right after live traffic hits TIME_WAIT and fails the
-        // rebind. Same-port collisions between sites are the daemon
-        // registry's check, the kernel no longer reports them here. Udp has
-        // no TIME_WAIT, so it keeps the strict bind.
+        // rebind. Std pairs that flag with SO_REUSEPORT on posix, so the
+        // kernel reports no collision at all here: a second daemon would join
+        // the port and take half its traffic. Sites inside this daemon are the
+        // registry's check, an owner in another process is the probe's. Udp
+        // has no TIME_WAIT, so it keeps the strict bind and needs neither.
         var listener: Listener = switch (engine) {
             .HTTP1, .HTTP2, .GRPC => blk: {
+                if (port_probe.isTaken(io, addr)) return error.AddressInUse;
+
                 var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
                 if ((engine == .HTTP1 or engine == .HTTP2 or engine == .GRPC) and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
@@ -113,6 +119,8 @@ pub const SiteRuntime = struct {
         var challenge: ?*acme_listener.State = null;
         if (companionPort(&cfg)) |challenge_port| {
             const challenge_addr = std.Io.net.IpAddress.parse(cfg.ip, challenge_port) catch return error.SiteCfgIncomplete;
+            if (port_probe.isTaken(io, challenge_addr)) return error.ChallengePortInUse;
+
             const challenge_server = try challenge_addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
             challenge = acme_listener.State.create(allocator, io, challenge_server, cfg.acme_webroot, cfg.acme_proxy, cfg.ip, challenge_port, port) catch |err| {
@@ -193,10 +201,31 @@ test "zix zixer: site runtime, tcp bind rebinds cleanly after unbind" {
 
     first.unbind(std.testing.allocator, io);
 
-    // reuse_address makes the rebind immediate. Same-port collisions between
-    // sites are the daemon registry's check, not the kernel's.
+    // reuse_address makes the rebind immediate: the probe only refuses a port
+    // a listener still answers on, never one left in TIME_WAIT.
     var again = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, 64);
     again.unbind(std.testing.allocator, io);
+}
+
+test "zix zixer: site runtime, a tcp port a live listener owns is refused" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 18934 };
+
+    var first = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, 64);
+
+    // Without the probe this second bind succeeds: reuse_address carries
+    // SO_REUSEPORT, so the kernel hands the port to both and splits the
+    // traffic. The collision has to be refused here or it surfaces on a
+    // client as a reply that never arrives.
+    try std.testing.expectError(error.AddressInUse, SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, 64));
+
+    first.unbind(std.testing.allocator, io);
+
+    var rebound = try SiteRuntime.bind(std.testing.allocator, io, "b.cfg", cfg, 64);
+    rebound.unbind(std.testing.allocator, io);
 }
 
 test "zix zixer: site runtime, udp engine binds a datagram socket" {
