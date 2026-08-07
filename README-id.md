@@ -574,7 +574,7 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
     - [x] 0.16.x:
         - 0.16.0
     - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1543+6db520a4c
+        - 0.17.0-dev.1606+a06534d73
 
 <br>
 
