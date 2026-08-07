@@ -129,6 +129,13 @@ pub fn build(b: *std.Build) void {
 
     // --------------------------------------------------------- //
 
+    // jzon keeps its own build files (jzon-build*.zig) for its tiered suites.
+    // Its src/ tests ride the zix module and are already in `unit-test`, so what
+    // this wires is tests/jzon only, gated on the same directory zix gates on.
+    @import("jzon-build.zig").addSteps(b, target, optimize, zix, have_tests);
+
+    // --------------------------------------------------------- //
+
     // Per-test bound handed to every driver suite that runs without a container.
     // A test hung mid-body waits forever on its own, and a nested zig build buffers the child's
     // stderr until it finishes, so a hang inside a driver suite reports nothing at all: one CI leg
