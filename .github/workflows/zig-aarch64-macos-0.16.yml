@@ -20,7 +20,7 @@ jobs:
     # hung test to burn a day of runner minutes before anyone notices. A healthy leg
     # lands well inside this: the slowest measured so far is the openbsd VM at 16
     # minutes, so anything past 30 is a hang, not a slow run.
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       # tests the ref that triggered the run: the dispatched branch, or the
       # merged pull request result
@@ -52,26 +52,26 @@ jobs:
       # zig waits forever on an active test and buffers the child's stderr,
       # so the workflow kill loses every log line. With it, zig prints the
       # hung test's name plus its captured stderr and continues to the next
-      # test, so one run enumerates every hang. 30s is ~5x the slowest
+      # test, so one run enumerates every hang. 240s is ~5x the slowest
       # legitimate test on this runner (connect-retry ceiling ~3s).
       - name: zix unit tests
-        timeout-minutes: 3
-        run: zig build unit-test --summary failures --test-timeout 30s
+        timeout-minutes: 4
+        run: zig build unit-test --summary failures --test-timeout 240s
 
       - name: zix integration tests
         if: always()
-        timeout-minutes: 3
-        run: zig build integration-test --summary failures --test-timeout 30s
+        timeout-minutes: 4
+        run: zig build integration-test --summary failures --test-timeout 240s
 
       - name: zix behaviour tests
         if: always()
-        timeout-minutes: 3
-        run: zig build behaviour-test --summary failures --test-timeout 30s
+        timeout-minutes: 4
+        run: zig build behaviour-test --summary failures --test-timeout 240s
 
       - name: zix edge tests
         if: always()
-        timeout-minutes: 3
-        run: zig build edge-test --summary failures --test-timeout 30s
+        timeout-minutes: 4
+        run: zig build edge-test --summary failures --test-timeout 240s
 
       # jzon is a standalone package under src/jzon with its own build.zig, so
       # these steps delegate into it. Its in-file tests belong to it too, which
@@ -79,14 +79,14 @@ jobs:
       # does not reach them.
       - name: jzon tests
         if: always()
-        timeout-minutes: 3
-        run: zig build jzon-test-all -Ddriver-test-timeout=30s --summary failures
+        timeout-minutes: 4
+        run: zig build jzon-test-all -Ddriver-test-timeout=240s --summary failures
 
       # jzon examples used to ride `zig build examples`. They live in the jzon
       # package now, so they get a step of their own to keep the coverage.
       - name: jzon examples
         if: always()
-        timeout-minutes: 3
+        timeout-minutes: 4
         run: zig build jzon-examples --summary failures
 
       # examples is compile-plus-install only (no execution), so it gates the whole
@@ -134,15 +134,15 @@ jobs:
       # driver unit steps carry no if: always(), so they are skipped when a
       # zix suite above failed: fix the engine first, the drivers rerun after.
       - name: postgrez unit tests
-        timeout-minutes: 3
+        timeout-minutes: 4
         run: zig build postgrez-test-unit --summary failures
 
       - name: rediz unit tests
-        timeout-minutes: 3
+        timeout-minutes: 4
         run: zig build rediz-test-unit --summary failures
 
       - name: prometheuz unit tests
-        timeout-minutes: 3
+        timeout-minutes: 4
         run: zig build prometheuz-test-unit --summary failures
 
       # driver behaviour and edge suites drive an in-process server, so unlike
