@@ -739,6 +739,7 @@ pub fn main() !void {
 - [examples/http_manual_concurrent.zig](examples/http_manual_concurrent.zig) - kontrol konkurensi eksplisit via `Io.Threaded`
 - [examples/http1_basic.zig](examples/http1_basic.zig) - `zix.Http1` mentah: model dispatch dipilih per target
 - [examples/http1_json.zig](examples/http1_json.zig)
+- [examples/http1_jzon.zig](examples/http1_jzon.zig) - body JSON masuk dan body JSON keluar lewat [jzon](./README-id.md#json-jzon)
 - [examples/http1_params.zig](examples/http1_params.zig)
 - [examples/http1_paths.zig](examples/http1_paths.zig)
 - [examples/http1_query.zig](examples/http1_query.zig) - method QUERY (RFC 10008)
@@ -2373,7 +2374,7 @@ Kedua panggilan menerima struct options comptime yang menyebut jalur mana yang b
 
 Tipe field yang tidak punya bentuk JSON di jalur generated adalah compile error yang menyebut tipenya, bukan kegagalan runtime, dan `.STD` tetap menerima bentuk itu.
 
-**Contoh:** empat, tidak ada yang berupa server, jadi masing-masing berjalan lalu selesai. jzon adalah package mandiri di bawah `src/jzon` dengan `build.zig` miliknya sendiri, jadi bangun dari sana dengan `zig build examples` (atau `zig build jzon-examples` dari root repo).
+**Contoh:** enam, tidak ada yang berupa server, jadi masing-masing berjalan lalu selesai. jzon adalah package mandiri di bawah `src/jzon` dengan `build.zig` miliknya sendiri, jadi bangun dari sana dengan `zig build examples` (atau `zig build jzon-examples` dari root repo).
 
 | Contoh | Yang ditunjukkan |
 | :- | :- |
@@ -2381,6 +2382,23 @@ Tipe field yang tidak punya bentuk JSON di jalur generated adalah compile error 
 | [deserialize](src/jzon/examples/deserialize.zig) | body permintaan menjadi nilai bertipe di atas arena, setiap strategy baca, reset di antara body |
 | [strings](src/jzon/examples/strings.zig) | `.COPY` berhadapan dengan `.BORROW`, dan apa yang diminta borrow terhadap masa hidup dokumennya |
 | [unknown_keys](src/jzon/examples/unknown_keys.zig) | `.REJECT` berhadapan dengan `.SKIP` pada dokumen yang membawa lebih dari yang dideklarasikan tipenya |
+| [bench_serialize](src/jzon/examples/bench_serialize.zig) | biaya setiap strategy tulis per render, dibanding laju default |
+| [bench_deserialize](src/jzon/examples/bench_deserialize.zig) | biaya setiap strategy baca per parse, pada dokumen minified dan dokumen yang ditata rapi |
+
+Dua contoh bench ini butuh `-Doptimize=ReleaseFast`. Build Debug mengukur safety check, bukan jalurnya, dan barisnya jadi saling menempel.
+
+Contoh kelima berupa server, jadi ia tinggal bersama contoh engine, bukan di dalam package, dan dibangun dari root repo dengan `zig build example-http1_jzon`.
+
+| Contoh | Yang ditunjukkan |
+| :- | :- |
+| [http1_jzon](examples/http1_jzon.zig) | route HTTP/1.1 yang membaca body JSON menjadi record di atas arena per-permintaan lalu menjawab dengan record yang dirender ke buffer stack, tanpa alokasi apa pun di jalur respons |
+
+| Dokumen | Deskripsi |
+| :- | :- |
+| [`docs/jzon/README-id.md`](docs/jzon/README-id.md) | jzon: import, mulai cepat dua arah, strategy, options, cakupan tipe, error, testing |
+| [`docs/jzon/hld-id.md`](docs/jzon/hld-id.md) | jzon: layer, komponen, alur tulis dan alur baca, model alokasi, model error |
+| [`docs/jzon/lld-id.md`](docs/jzon/lld-id.md) | jzon: cursor, aturan escape, vector scan, jalur angka, pembukuan field, perbedaan dari jalur default |
+| [`docs/jzon/benchmark-id.md`](docs/jzon/benchmark-id.md) | jzon: biaya tiap jalur per render dan per parse, dengan metode dan sistem tempat diukurnya |
 
 **Kapan digunakan:** pakai `.{}` lebih dulu, itu jalur berbasis std dan menerima setiap bentuk yang diterima std. Pindahkan handler yang panas ke `.GENERATED` ketika bentuknya record biasa dan parse atau render-nya ada di jalur permintaan, lalu tambahkan `.strings = .BORROW` ketika nilainya mati bersama buffer tempat ia dibaca.
 
