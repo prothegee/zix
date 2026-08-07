@@ -210,6 +210,8 @@ __*Maintained Platforms:*__
 
 [Buka isu.](https://codeberg.org/prothegee/zix/issues/new)
 
+[Pengumuman & Perubahan Besar](https://codeberg.org/prothegee/zix/issues/238)
+
 <br>
 
 ## Repositori

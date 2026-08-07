@@ -210,6 +210,8 @@ __*Maintained Platforms:*__
 
 [Open an issue.](https://codeberg.org/prothegee/zix/issues/new)
 
+[Announcment & Breaking Changes](https://codeberg.org/prothegee/zix/issues/238)
+
 <br>
 
 ## Repositories
