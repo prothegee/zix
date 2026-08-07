@@ -105,6 +105,7 @@ One file, one site. `engine` and `port` are required, everything else has a defa
 | spa_fallback | none | file served when no static file matches, i.e. `index.html` | with `public_dir` | needs `public_dir`, and needs `public_prefix` when the site also has upstreams |
 | kernel_backlog | main.cfg value | listen queue length for this site | http1, http2, grpc, refused on udp, accepted but unused on http3 | `0` faults |
 | max_recv_buf | main.cfg value | intended receive buffer size | reported only, same as in main.cfg | below `1` faults |
+| upstream_timeout_ms | `30000` | how long the edge waits on a silent upstream before answering 504 | http1, http2, http3, refused on grpc and udp | needs `upstreams`, `0` waits forever, above 4294967295 faults |
 
 `ip` and `port` together decide the listening socket. `0.0.0.0` binds every interface, `127.0.0.1` binds loopback only, `::` binds every IPv6 interface.
 
@@ -129,6 +130,32 @@ zixer does not resolve names on the upstream leg, and the config check does not 
 
 Write `127.0.0.1:3000` instead of a name. An IPv6 upstream is written bare, `::1:3000`, because the value splits on its last colon. The bracketed form `[::1]:3000` passes the config check and then fails the same way a name does.
 
+### What upstream_timeout_ms covers
+
+The bound is on the edge waiting for the backend, not on the whole request:
+
+| wait | bounded |
+| :- | :- |
+| the upstream response head, including a stall after an interim 1xx | yes |
+| a `Content-Length` response body | yes |
+| a chunked response body | no |
+| a close-delimited response body | no |
+| a websocket tunnel after the 101 | no |
+| the connect to the upstream | no |
+
+A chunked or close-delimited body carries no total byte count to end the loop on, and a server-sent-event stream is silent between events on purpose, so a deadline there would cut healthy streams. The connect has no bound because the std backend it would use panics on one.
+
+When the head never arrives, the client gets:
+
+```
+HTTP/1.1 504 upstream timeout
+Proxy-Status: zixer; error="http_response_timeout"
+```
+
+The upstream is not marked down for a timeout, and the request is not replayed against another one: it was already delivered, so replaying it could run the same work twice, and a slow backend is still a serving backend. A stall partway through a `Content-Length` body ends that response, because its head is already on the wire.
+
+Set `upstream_timeout_ms: 0` on a site whose backend legitimately thinks for longer than the budget. That is the same unbounded wait every site had before the key existed.
+
 <br>
 
 ## Which key applies to which engine
@@ -143,6 +170,7 @@ Write `127.0.0.1:3000` instead of a name. An IPv6 upstream is written bare, `::1
 | public_dir, public_prefix, spa_fallback | yes | yes | refused | yes | refused |
 | kernel_backlog | yes | yes | yes | accepted, no effect | refused |
 | max_recv_buf | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect | accepted, no effect |
+| upstream_timeout_ms | yes | yes | refused | yes | refused |
 
 "Refused" means the key faults with a fix hint and the site does not start. "Accepted, no effect" means the file validates clean and nothing reads the value.
 
@@ -167,9 +195,10 @@ Every rule below is checked after the whole file is read, so one pass reports ev
 | `acme_webroot` and `acme_proxy` together | `choose acme_webroot or acme_proxy, not both` |
 | acme keys on a cleartext http2, grpc, or http3 site | `needs tls: true or an http1 site` |
 | `engine: http3` without tls | `tls: http3 requires tls: true` |
-| `public_dir` on a grpc site | `not supported on grpc sites, remove it` |
+| `public_dir` or `upstream_timeout_ms` on a grpc site | `not supported on grpc sites, remove it` |
+| `upstream_timeout_ms` on a site with no upstreams | `needs upstreams` |
 | `tls` on a udp site | `udp forward is blind bytes, tls does not apply` |
-| `public_dir`, `kernel_backlog`, or acme keys on a udp site | `does not apply to udp sites, remove it` |
+| `public_dir`, `kernel_backlog`, `upstream_timeout_ms`, or acme keys on a udp site | `does not apply to udp sites, remove it` |
 
 The `spa_fallback` prefix rule exists so a backend miss never disappears into the fallback page: without a prefix bound to the static plane, every 404 from an upstream would answer as the app shell instead.
 

@@ -105,6 +105,7 @@ Satu file, satu site. `engine` dan `port` wajib, sisanya punya default atau opsi
 | spa_fallback | tidak ada | file yang disajikan saat tidak ada file static yang cocok, mis. `index.html` | dengan `public_dir` | butuh `public_dir`, dan butuh `public_prefix` saat site juga punya upstreams |
 | kernel_backlog | nilai main.cfg | panjang listen queue untuk site ini | http1, http2, grpc, ditolak di udp, diterima tapi tidak dipakai di http3 | `0` fault |
 | max_recv_buf | nilai main.cfg | ukuran receive buffer yang dimaksudkan | hanya dilaporkan, sama seperti di main.cfg | di bawah `1` fault |
+| upstream_timeout_ms | `30000` | berapa lama edge menunggu upstream yang diam sebelum menjawab 504 | http1, http2, http3, ditolak di grpc dan udp | butuh `upstreams`, `0` menunggu selamanya, di atas 4294967295 fault |
 
 `ip` dan `port` bersama menentukan socket yang mendengarkan. `0.0.0.0` bind ke semua interface, `127.0.0.1` bind loopback saja, `::` bind ke semua interface IPv6.
 
@@ -129,6 +130,32 @@ zixer tidak melakukan resolusi nama di leg upstream, dan pemeriksaan config belu
 
 Tulis `127.0.0.1:3000`, bukan sebuah nama. Upstream IPv6 ditulis polos, `::1:3000`, karena nilai dipisah pada titik dua terakhirnya. Bentuk berkurung `[::1]:3000` lolos pemeriksaan config lalu gagal dengan cara yang sama seperti sebuah nama.
 
+### Apa yang dicakup upstream_timeout_ms
+
+Batas ini berlaku pada edge yang menunggu backend, bukan pada seluruh request:
+
+| menunggu | dibatasi |
+| :- | :- |
+| head response upstream, termasuk stall setelah 1xx interim | ya |
+| body response `Content-Length` | ya |
+| body response chunked | tidak |
+| body response yang diakhiri close | tidak |
+| tunnel websocket setelah 101 | tidak |
+| connect ke upstream | tidak |
+
+Body chunked atau yang diakhiri close tidak membawa jumlah byte total untuk mengakhiri loop, dan stream server-sent-event memang diam di antara event, jadi deadline di sana akan memotong stream yang sehat. Connect tidak punya batas karena backend std yang akan dipakainya panic saat diberi satu.
+
+Saat head tidak pernah datang, client menerima:
+
+```
+HTTP/1.1 504 upstream timeout
+Proxy-Status: zixer; error="http_response_timeout"
+```
+
+Upstream tidak ditandai down karena timeout, dan request tidak diulang ke upstream lain: request itu sudah terkirim, jadi mengulangnya bisa menjalankan pekerjaan yang sama dua kali, dan backend yang lambat tetap backend yang melayani. Stall di tengah body `Content-Length` mengakhiri response itu, karena head-nya sudah ada di wire.
+
+Set `upstream_timeout_ms: 0` pada site yang backend-nya memang berpikir lebih lama dari budget. Itu sama dengan menunggu tanpa batas seperti sebelum key ini ada.
+
 <br>
 
 ## Key mana berlaku untuk engine mana
@@ -143,6 +170,7 @@ Tulis `127.0.0.1:3000`, bukan sebuah nama. Upstream IPv6 ditulis polos, `::1:300
 | public_dir, public_prefix, spa_fallback | ya | ya | ditolak | ya | ditolak |
 | kernel_backlog | ya | ya | ya | diterima, tanpa efek | ditolak |
 | max_recv_buf | diterima, tanpa efek | diterima, tanpa efek | diterima, tanpa efek | diterima, tanpa efek | diterima, tanpa efek |
+| upstream_timeout_ms | ya | ya | ditolak | ya | ditolak |
 
 "Ditolak" berarti key-nya fault dengan fix hint dan site tidak start. "Diterima, tanpa efek" berarti file lolos validasi dan tidak ada yang membaca nilainya.
 
@@ -167,9 +195,10 @@ Tiap aturan di bawah diperiksa setelah seluruh file dibaca, jadi satu pass melap
 | `acme_webroot` dan `acme_proxy` bersamaan | `choose acme_webroot or acme_proxy, not both` |
 | key acme di site http2, grpc, atau http3 cleartext | `needs tls: true or an http1 site` |
 | `engine: http3` tanpa tls | `tls: http3 requires tls: true` |
-| `public_dir` di site grpc | `not supported on grpc sites, remove it` |
+| `public_dir` atau `upstream_timeout_ms` di site grpc | `not supported on grpc sites, remove it` |
+| `upstream_timeout_ms` di site tanpa upstreams | `needs upstreams` |
 | `tls` di site udp | `udp forward is blind bytes, tls does not apply` |
-| `public_dir`, `kernel_backlog`, atau key acme di site udp | `does not apply to udp sites, remove it` |
+| `public_dir`, `kernel_backlog`, `upstream_timeout_ms`, atau key acme di site udp | `does not apply to udp sites, remove it` |
 
 Aturan prefix pada `spa_fallback` ada supaya sebuah miss dari backend tidak lenyap ke halaman fallback: tanpa prefix yang mengikat static plane, tiap 404 dari upstream akan dijawab sebagai app shell.
 
