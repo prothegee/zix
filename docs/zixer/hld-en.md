@@ -118,6 +118,7 @@ flowchart LR
 | `static_files.zig` | files from `public_dir`, precompressed siblings, the spa fallback |
 | `acme_challenge.zig`, `acme_listener.zig` | the http-01 challenge plane and the port 80 companion |
 | `upstream_pool.zig`, `upstream_conn.zig` | round-robin picking, availability, idle keep-alive |
+| `upstream_deadline.zig`, `idle_reaper.zig` | the bound on one upstream read, the sweep that ages idle conns out |
 | `proxy_headers.zig` | hop-by-hop stripping, `Via`, `Forwarded` |
 
 <br>
@@ -259,7 +260,8 @@ An upstream that fails a connect is marked down and skipped by the round-robin p
 Being explicit about the gaps is part of the design:
 
 - No log output. `logs_dir` must exist and nothing writes into it.
-- No timeouts anywhere. A blackholed upstream waits on the operating system.
+- No connect timeout, and no idle timeout on a websocket tunnel or an SSE stream. A blackholed upstream waits on the operating system. The wait for an upstream response head and for a `Content-Length` body is bounded by `upstream_timeout_ms`, see `config-en.md`.
+- No read deadline on a grpc site. Its upstream leg is one h2 connection multiplexing every stream, which needs its own mechanism, so the key is refused there rather than accepted and ignored.
 - No health checks, only failure learned from live traffic.
 - No hot reload of `main.cfg`, and no reload of every site at once.
 - No per-path routing, header rewriting, rate limiting, or caching.

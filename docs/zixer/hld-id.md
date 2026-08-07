@@ -118,6 +118,7 @@ flowchart LR
 | `static_files.zig` | file dari `public_dir`, sibling terkompresi, fallback spa |
 | `acme_challenge.zig`, `acme_listener.zig` | challenge plane http-01 dan companion port 80 |
 | `upstream_pool.zig`, `upstream_conn.zig` | pemilihan round-robin, ketersediaan, keep-alive idle |
+| `upstream_deadline.zig`, `idle_reaper.zig` | batas satu read upstream, sweep yang mengedaluwarsakan conn idle |
 | `proxy_headers.zig` | pembuangan hop-by-hop, `Via`, `Forwarded` |
 
 <br>
@@ -259,7 +260,8 @@ Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selam
 Menyebut celahnya secara eksplisit adalah bagian dari desain:
 
 - Belum ada output log. `logs_dir` harus ada dan tidak ada yang menulis ke sana.
-- Belum ada timeout di mana pun. Upstream yang membuang trafik ditunggu sampai batas sistem operasi.
+- Belum ada timeout untuk connect, dan belum ada idle timeout untuk tunnel websocket atau stream SSE. Upstream yang membuang trafik ditunggu sampai batas sistem operasi. Menunggu head response upstream dan body `Content-Length` dibatasi oleh `upstream_timeout_ms`, lihat `config-id.md`.
+- Belum ada read deadline di site grpc. Leg upstream-nya satu koneksi h2 yang memultipleks semua stream, jadi butuh mekanisme sendiri, dan key-nya ditolak di sana alih-alih diterima lalu diabaikan.
 - Belum ada health check, hanya kegagalan yang dipelajari dari trafik nyata.
 - Belum ada hot reload `main.cfg`, dan belum ada reload semua site sekaligus.
 - Belum ada routing per path, rewrite header, rate limit, atau caching.
