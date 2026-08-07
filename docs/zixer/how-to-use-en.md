@@ -231,7 +231,13 @@ certbot certonly --webroot -w /var/www/acme -d example.com \
   --deploy-hook 'zixer --dir /srv/zixer restart example.cfg'
 ```
 
-A TLS site on a port other than 80 also binds port 80 for the challenge, so the process needs that privilege. If another program already owns port 80, use `acme_proxy: 127.0.0.1:9080` instead and let that program answer the challenge.
+A TLS site on a port other than 80 also binds port 80 for the challenge, so the process needs that privilege. Port 80 has to be free for it: a program already holding it fails the start with `challenge port 80 is already in use`.
+
+`acme_proxy` is the other way to answer the challenge, not a way around port 80. The companion still holds the port and relays the challenge path to the address you name, which is what `certbot certonly --standalone --http-01-port 9080` expects:
+
+```
+acme_proxy: 127.0.0.1:9080
+```
 
 ### HTTP/2
 
@@ -308,7 +314,9 @@ There is no log output yet. `logs_dir` must exist because `status` checks it, an
 | `control socket path is too long for this platform` | the root dir path is too deep | move the root somewhere shorter |
 | `api.cfg has config errors` | the site did not validate | `zixer status api`, fix each listed key |
 | `port 8080 is already used by other.cfg` | another started site owns it | change the port, or stop the other site |
-| `bind failed (AddressInUse)` | something outside zixer owns the port | find it with `ss -ltnp` |
+| `port 8080 is already in use` | a listener outside this daemon owns it | find it with `ss -ltnp`, then stop it or change the port |
+| `challenge port 80 is already used by other.cfg` | another started site owns the acme companion port | keep the acme keys on one site, the others renew from its webroot |
+| `challenge port 80 is already in use` | a listener outside this daemon owns port 80 | find it with `ss -ltnp` and stop it, the companion has to hold port 80 |
 | `bind failed (BadUpstreamAddress)` | a udp site upstream is not an ip literal | write the address, not a name |
 | `502 all upstreams failed` | every backend refused or failed | check the backend, and that the upstream address is an ip literal |
 | `503 no upstream available` | every backend is in its cooldown window | check the backends, retry after a few seconds |
