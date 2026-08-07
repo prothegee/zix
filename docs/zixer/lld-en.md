@@ -182,6 +182,8 @@ Client h2 streams are served one at a time with the rest queued, and each stream
 
 An extended CONNECT stream (rfc 8441) becomes a websocket bridge: DATA frames to raw bytes toward an h1 websocket upstream, and raw bytes back into DATA frames.
 
+A response the upstream gave a length to leaves in one write. The header block stays staged until the first DATA frame joins it, so a small response costs one segment on the wire instead of two, and one record instead of two on a TLS site. Static files do the same, their size is known before the first read. A chunked or close-delimited response can be a live stream whose first event is seconds out, so its header block goes out on its own and each burst follows as it arrives.
+
 Prior-knowledge h2 is sniffed on a cleartext listener, so a client that never negotiates ALPN still works.
 
 ## The grpc edge

@@ -182,6 +182,8 @@ Stream h2 dari client dilayani satu per satu dengan sisanya diantre, dan tiap st
 
 Stream extended CONNECT (rfc 8441) menjadi bridge websocket: frame DATA menjadi byte mentah ke arah upstream websocket h1, dan byte mentah kembali menjadi frame DATA.
 
+Response yang panjangnya sudah disebut upstream keluar dalam satu write. Blok header ditahan dulu sampai frame DATA pertama menyusul, jadi response kecil memakai satu segment di wire, bukan dua, dan satu record, bukan dua, di site TLS. File static memakai jalur yang sama, ukurannya sudah diketahui sebelum pembacaan pertama. Response chunked atau yang dibatasi penutupan koneksi bisa saja sebuah live stream yang event pertamanya masih beberapa detik lagi, jadi blok header-nya keluar sendiri dan tiap burst menyusul begitu tiba.
+
 h2 prior knowledge disniff di listener cleartext, jadi client yang tidak pernah menegosiasi ALPN tetap bekerja.
 
 ## Edge grpc
