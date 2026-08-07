@@ -110,6 +110,8 @@ flowchart LR
 | `site_serve.zig` | apa yang dimiliki satu site tcp yang melayani: worker, pool, dan idle cache-nya |
 | `site_worker.zig` | satu accept loop dengan listener dan leg upstream sendiri |
 | `worker_count.zig` | berapa accept loop yang dijalankan sebuah site |
+| `bind_options.zig` | nilai main.cfg yang dibutuhkan sebuah site saat bind |
+| `conn_buffer.zig` | blok stream buffer yang dipegang satu koneksi edge |
 | `http1_proxy.zig`, `http1_head.zig` | edge http1 dan parsing pesannya |
 | `http2_edge.zig` dan kerabatnya | edge h2, frame, translasi, bridge websocket rfc 8441 |
 | `grpc_edge.zig` dan kerabatnya | edge grpc, h2 di kedua leg |
@@ -206,6 +208,36 @@ flowchart TB
 
 <br>
 
+## Memory per koneksi
+
+Satu koneksi adalah satu thread dan satu blok buffer, jadi keduanya tumbuh
+mengikuti berapa banyak client yang terbuka, bukan berapa banyak request yang
+mereka kirim.
+
+| apa | dari mana | ukuran |
+| :- | :- | :- |
+| stream buffer | satu alokasi per koneksi, dilepas saat koneksi selesai | `max_recv_buf` per leg, 2 leg di site static dan 4 di site proxy |
+| head buffer | stack milik request loop | 16 KiB masing-masing, tiga buah di koneksi http1 yang di-proxy |
+| TLS session | stack milik TLS edge | sekitar 58 KiB, dan record buffer di dalamnya adalah batas protokol |
+| thread stack | sistem operasi, sesuai kebutuhan | 16 MiB dicadangkan, hanya page yang disentuh koneksi yang menjadi resident |
+
+Buffer adalah bagian yang diatur operator. Head buffer adalah batas protokol:
+menurunkan `max_recv_buf` tidak pernah mengecilkan head request yang boleh
+diterima, ia hanya mengubah berapa byte yang berpindah per baca.
+
+Dua hal tidak ada di tabel itu dan dulu mendominasinya. Alternative signal
+stack yang std berikan ke tiap thread dimatikan di executable ini, karena ia
+memakan 256 KiB resident memory per koneksi demi trace stack overflow yang
+tidak bisa dihasilkan oleh edge loop berkedalaman tetap. Dan copy scratch yang
+dipegang body pump sudah hilang: reader dan writer memindahkan byte di antara
+mereka sendiri.
+
+Diukur pada demo project ini, resident memory per koneksi yang ditahan pada
+`max_recv_buf` default: 76,7 KiB di site static dan 140,8 KiB di site proxy,
+dibanding 332,6 dan 396,6 KiB sebelum kedua perubahan itu.
+
+<br>
+
 ## TLS dan ACME
 
 TLS diterminasi di edge lewat stack TLS zix, dan leg upstream cleartext. Engine site menentukan apa yang ditawarkan handshake: `http/1.1` untuk site http1, `h2` lalu `http/1.1` untuk site http2, `h2` saja untuk site grpc. Site http3 adalah QUIC, di mana TLS bagian dari transport-nya.
@@ -272,5 +304,6 @@ Menyebut celahnya secara eksplisit adalah bagian dari desain:
 - Belum ada read deadline di site grpc. Leg upstream-nya satu koneksi h2 yang memultipleks semua stream, jadi butuh mekanisme sendiri, dan key-nya ditolak di sana alih-alih diterima lalu diabaikan.
 - Belum ada health check, hanya kegagalan yang dipelajari dari trafik nyata.
 - Belum ada hot reload `main.cfg`, dan belum ada reload semua site sekaligus.
+- Belum ada batas berapa koneksi yang dilayani satu site sekaligus. Tiap koneksi adalah satu thread, jadi plafonnya adalah apa yang diberikan sistem operasi ke proses ini.
 - Belum ada routing per path, rewrite header, rate limit, atau caching.
 - `dispatch` dan `max_recv_buf` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.

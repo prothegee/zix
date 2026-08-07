@@ -110,6 +110,8 @@ flowchart LR
 | `site_serve.zig` | what one serving tcp site owns: its workers, pools, and idle caches |
 | `site_worker.zig` | one accept loop with its own listener and upstream leg |
 | `worker_count.zig` | how many accept loops a site runs |
+| `bind_options.zig` | the main.cfg values a site needs at bind time |
+| `conn_buffer.zig` | the stream buffer block one edge connection holds |
 | `http1_proxy.zig`, `http1_head.zig` | the http1 edge and its message parsing |
 | `http2_edge.zig` and siblings | the h2 edge, frames, translation, the rfc 8441 websocket bridge |
 | `grpc_edge.zig` and siblings | the grpc edge, h2 on both legs |
@@ -206,6 +208,34 @@ flowchart TB
 
 <br>
 
+## Memory per connection
+
+One connection is one thread and one buffer block, so both scale with how many
+clients are open rather than with how many requests they send.
+
+| what | where it comes from | size |
+| :- | :- | :- |
+| stream buffers | one allocation per connection, released when it ends | `max_recv_buf` per leg, 2 legs on a static site and 4 on a proxied one |
+| head buffers | the stack of the request loop | 16 KiB each, three of them on a proxied http1 connection |
+| TLS session | the stack of the TLS edge | about 58 KiB, of which the record buffer is a protocol limit |
+| thread stack | the operating system, on demand | 16 MiB reserved, only the pages a connection touches become resident |
+
+The buffers are the part an operator sets. The head buffers are protocol
+limits: lowering `max_recv_buf` never shrinks what a request head may be, it
+only changes how many bytes move per read.
+
+Two things do not appear in that table and used to dominate it. The alternative
+signal stack std gives every thread is off in this executable, because it was
+256 KiB of resident memory per connection for a stack-overflow trace a
+fixed-depth edge loop cannot produce. And the copy scratch the body pumps held
+is gone: the reader and the writer move bytes between themselves.
+
+Measured on this project's demo, resident memory per held connection at the
+default `max_recv_buf`: 76.7 KiB on a static site and 140.8 KiB on a proxied
+one, against 332.6 and 396.6 KiB before those two changes.
+
+<br>
+
 ## TLS and ACME
 
 TLS terminates at the edge over the zix TLS stack, and the upstream leg is cleartext. The site engine decides what the handshake advertises: `http/1.1` for an http1 site, `h2` then `http/1.1` for an http2 site, `h2` only for a grpc site. An http3 site is QUIC, where TLS is part of the transport.
@@ -272,5 +302,6 @@ Being explicit about the gaps is part of the design:
 - No read deadline on a grpc site. Its upstream leg is one h2 connection multiplexing every stream, which needs its own mechanism, so the key is refused there rather than accepted and ignored.
 - No health checks, only failure learned from live traffic.
 - No hot reload of `main.cfg`, and no reload of every site at once.
+- No bound on how many connections one site serves at once. Each is a thread, so the ceiling is what the operating system will give the process.
 - No per-path routing, header rewriting, rate limiting, or caching.
 - `dispatch` and `max_recv_buf` are validated and reported, and nothing reads them. See `config-en.md`.
