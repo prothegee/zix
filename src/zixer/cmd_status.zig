@@ -428,7 +428,7 @@ test "zix zixer: cmd status, render main block matches the documented shape" {
         "dispatch: async\n" ++
         "logs_dir: /r/logs\n" ++
         "sites_dir: /r/sites\n" ++
-        "max_recv_buf: 1472\n" ++
+        "max_recv_buf: 8192\n" ++
         "kernel_backlog: 1024\n" ++
         "\n";
     try std.testing.expectEqualStrings(expected, out.buffered());
