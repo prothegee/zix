@@ -9,6 +9,7 @@ const grpc_edge = @import("grpc_edge.zig");
 const http2_edge = @import("http2_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 const static_files = @import("static_files.zig");
+const tcp_nodelay = @import("tcp_nodelay.zig");
 const tls_edge = @import("tls_edge.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_pool = @import("upstream_pool.zig");
@@ -208,6 +209,11 @@ fn acceptLoop(state: *ServeState) void {
             stream.close(io);
             return;
         }
+
+        // Every engine on this listener writes a reply as more than one
+        // segment somewhere (h2 frames, grpc trailers, a tls record after a
+        // head), so Nagle costs a delayed-ack round trip per request.
+        tcp_nodelay.apply(stream);
 
         const task = ConnTask{ .proxy = proxy, .stream = stream, .tls_ctx = tls_ctx, .engine = state.engine };
         state.conns.concurrent(io, serveTask, .{task}) catch serveTask(task);
