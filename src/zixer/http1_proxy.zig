@@ -6,6 +6,8 @@ const zix = @import("zix");
 const acme_challenge = @import("acme_challenge.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const http1_head = @import("http1_head.zig");
+const process_gate = @import("process_gate.zig");
+const process_wait = @import("process_wait.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
@@ -50,6 +52,9 @@ pub const Proxy = struct {
     /// Zero waits forever, which is what a site with a deliberately slow
     /// backend asks for.
     upstream_timeout_ms: u32 = upstream_deadline.DEFAULT_MS,
+    /// The site's admission gate, shared with every other worker. Null is a
+    /// site that configured no limit, and so is a gate that is off.
+    process_gate: ?*process_gate.Gate = null,
 };
 
 /// After one exchange: keep the edge connection or close it.
@@ -385,6 +390,22 @@ fn exchange(
     const pool = proxy.pool.?;
     const idle = proxy.idle.?;
 
+    // The admission gate stands here, ahead of the pick, because this is
+    // where zixer decides to spend a backend. Everything the earlier planes
+    // answered (static, acme, the https redirect) never reaches it.
+    const admission = process_wait.admit(proxy.process_gate, io);
+    if (admission != .ADMITTED) {
+        writeEdgeError(client_w, 504, admission.reason(), process_wait.PROXY_ERROR);
+
+        return .CLOSE;
+    }
+
+    // Held rather than a plain defer: a websocket exchange hands its slot
+    // back the moment the tunnel is live, so a long-lived tunnel does not
+    // sit on capacity the next request needs.
+    var slot = process_wait.hold(proxy.process_gate);
+    defer slot.release();
+
     // Bounded retry: one try per configured upstream, plus one spare so a
     // single stale idle conn never eats a slot's only chance.
     var attempts: usize = pool.slots.len + 1;
@@ -476,6 +497,11 @@ fn exchange(
                 client_w.flush() catch break :blk false;
                 break :blk true;
             };
+
+            // The tunnel lives as long as its client, so the slot goes back
+            // now. Holding it would let a handful of open sockets pin the
+            // site's whole capacity with the backend sitting idle.
+            slot.release();
 
             if (switched) ws_tunnel.run(.{
                 .io = io,
@@ -747,6 +773,24 @@ fn readLine(src: *std.Io.Reader, buf: []u8) ![]const u8 {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+/// Attempts a fake backend makes at its fixed port, one per BIND_RETRY_MS.
+/// These ports sit inside this box's ephemeral range, so the kernel can be
+/// holding one for an outbound connection the moment a test asks for it.
+/// The hold is brief, so retrying rides it out instead of failing the run.
+const BIND_TRIES: usize = 50;
+const BIND_RETRY_MS: u64 = 10;
+
+fn bindWithRetry(io: std.Io, addr: std.Io.net.IpAddress) ?std.Io.net.Server {
+    var tries: usize = 0;
+    while (tries < BIND_TRIES) : (tries += 1) {
+        if (addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 })) |server| return server else |_| {}
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(BIND_RETRY_MS), .awake) catch {};
+    }
+
+    return null;
+}
+
 test "zix zixer: http1 proxy, upstream head is rebuilt with forwarded and via" {
     const request = try http1_head.parseRequest("POST /api HTTP/1.1\r\nHost: app.example\r\nConnection: close, X-Hop\r\nX-Hop: secret\r\nAccept: */*\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n");
 
@@ -848,7 +892,7 @@ const FakeUpstream = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -1615,7 +1659,7 @@ const FakeWsUpstream = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -1804,7 +1848,7 @@ const FakeSseUpstream = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -1906,7 +1950,7 @@ const SilentUpstream = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -2074,4 +2118,159 @@ test "zix zixer: http1 proxy, a static site allocates no upstream legs" {
 
     try std.testing.expectEqual(@as(usize, 2), legsFor(&static_proxy).count());
     try std.testing.expectEqual(@as(usize, 4), legsFor(&proxied_proxy).count());
+}
+
+test "zix zixer: http1 proxy, a saturated site refuses with 504 before it picks" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: http1 proxy process gate tests need linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // No upstream is listening on this port on purpose: the gate answers
+    // ahead of the pick, so a refused request must never try to connect.
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18979 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+
+    var gate = try process_gate.Gate.init(std.testing.allocator, .{ .limit = 1, .queue_len = 0 });
+    defer gate.deinit(std.testing.allocator);
+
+    // Another request already holds the site's only slot.
+    try std.testing.expectEqual(process_gate.Admission.ADMITTED, gate.enter());
+
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    {
+        var write_buf: [256]u8 = undefined;
+        var writer = client.writer(io, &write_buf);
+        try writer.interface.writeAll("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        try writer.interface.flush();
+    }
+
+    var reply_buf: [1024]u8 = undefined;
+    const reply_len = readAllAvailable(io, client, &reply_buf);
+    const reply = reply_buf[0..reply_len];
+    client.close(io);
+    edge_thread.join();
+
+    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 504 upstream queue full\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, reply, "connection_limit_reached") != null);
+
+    // A refusal takes no slot, so the holder is still the only one counted.
+    try std.testing.expectEqual(@as(usize, 1), gate.inFlight());
+}
+
+test "zix zixer: http1 proxy, a queued request that waits its budget out answers 504" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: http1 proxy process gate tests need linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18980 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+
+    var gate = try process_gate.Gate.init(std.testing.allocator, .{ .limit = 1, .queue_len = 4, .timeout_ms = 60 });
+    defer gate.deinit(std.testing.allocator);
+    try std.testing.expectEqual(process_gate.Admission.ADMITTED, gate.enter());
+
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    {
+        var write_buf: [256]u8 = undefined;
+        var writer = client.writer(io, &write_buf);
+        try writer.interface.writeAll("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        try writer.interface.flush();
+    }
+
+    var reply_buf: [1024]u8 = undefined;
+    const reply_len = readAllAvailable(io, client, &reply_buf);
+    const reply = reply_buf[0..reply_len];
+    client.close(io);
+    edge_thread.join();
+
+    // Room was free, so this one queued and then ran its budget out.
+    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 504 upstream queue timeout\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, reply, "connection_limit_reached") != null);
+
+    // The place in line went back when the wait ended.
+    try std.testing.expectEqual(@as(usize, 0), gate.waitingCount());
+}
+
+test "zix zixer: http1 proxy, an admitted request gives its slot back" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: http1 proxy process gate tests need linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = FakeUpstream{ .io = io, .port = 18981, .request_quota = 1 };
+    const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
+    try waitReady(io, &fake);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18981 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+
+    var gate = try process_gate.Gate.init(std.testing.allocator, .{ .limit = 1, .queue_len = 2 });
+    defer gate.deinit(std.testing.allocator);
+
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    {
+        var write_buf: [256]u8 = undefined;
+        var writer = client.writer(io, &write_buf);
+        try writer.interface.writeAll("GET /api HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+        try writer.interface.flush();
+    }
+
+    var reply_buf: [2048]u8 = undefined;
+    const reply_len = readAllAvailable(io, client, &reply_buf);
+    const reply = reply_buf[0..reply_len];
+    client.close(io);
+
+    edge_thread.join();
+    fake_thread.join();
+
+    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 OK\r\n"));
+
+    // The exchange finished, so the site is idle again and the next
+    // request finds the slot free rather than queueing behind a leak.
+    try std.testing.expectEqual(@as(usize, 0), gate.inFlight());
+    try std.testing.expectEqual(process_gate.Admission.ADMITTED, gate.enter());
 }
