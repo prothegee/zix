@@ -258,6 +258,7 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("grpc_relay.zig"));
     std.testing.refAllDecls(@import("grpc_upstream.zig"));
     std.testing.refAllDecls(@import("grpc_edge.zig"));
+    std.testing.refAllDecls(@import("static_cached.zig"));
     std.testing.refAllDecls(@import("static_files.zig"));
     std.testing.refAllDecls(@import("tls_edge.zig"));
     std.testing.refAllDecls(@import("acme_challenge.zig"));
