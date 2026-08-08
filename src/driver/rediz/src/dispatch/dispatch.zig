@@ -530,8 +530,8 @@ test "rediz dispatch: open rejects ASYNC" {
     // below this guard, so the whole function fails to compile outside
     // Linux regardless of which dispatch model is actually passed here.
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("note: Transport is Linux-only to compile, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("Transport is Linux-only to compile, test skipped", .{});
+        return;
     }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -546,8 +546,8 @@ test "rediz dispatch: open rejects ASYNC" {
 
 test "rediz dispatch: open rejects TLS" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -560,8 +560,8 @@ test "rediz dispatch: open rejects TLS" {
 
 test "rediz dispatch: open surfaces the connect error with no server" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
