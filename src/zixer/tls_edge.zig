@@ -462,7 +462,7 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     } else if (wants_h2) {
         http2_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
     } else {
-        http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+        http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream, null);
     }
     session.sendCloseNotify();
 }
@@ -812,7 +812,7 @@ test "zix zixer: tls edge, handshake terminates a tls13 client over loopback" {
     var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY, &.{.HTTP_1_1});
     defer ctx.deinit();
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39890);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18890);
     var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
     defer server.deinit(io);
 

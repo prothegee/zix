@@ -9,6 +9,7 @@ const http1_head = @import("http1_head.zig");
 const process_gate = @import("process_gate.zig");
 const process_wait = @import("process_wait.zig");
 const proxy_headers = @import("proxy_headers.zig");
+const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_deadline = @import("upstream_deadline.zig");
@@ -17,6 +18,18 @@ const ws_tunnel = @import("ws_tunnel.zig");
 
 /// Bytes one static-file read moves into the client writer at a time.
 const FILE_CHUNK: usize = 16 * 1024;
+
+/// Smallest static body handed to the kernel instead of copied through the
+/// client writer.
+///
+/// Note:
+/// - sendfile writes the socket directly, so the head has to be flushed first
+///   and the body becomes a second syscall on its own segment. Under it, one
+///   buffered write carrying head and body together is cheaper than both.
+/// - Measured on a 12 core box against a real asset set: at and above this
+///   size the kernel path runs 1.2 to 2.4 times faster, and below it a mixed
+///   small-file load at 512 connections loses about a quarter of its rate.
+const ZERO_COPY_MIN_BYTES: u64 = 64 * 1024;
 
 /// Ceiling on one reader-to-writer body move. The pump loops, so this only
 /// bounds how much a single call may carry, not the body length.
@@ -55,6 +68,10 @@ pub const Proxy = struct {
     /// The site's admission gate, shared with every other worker. Null is a
     /// site that configured no limit, and so is a gate that is off.
     process_gate: ?*process_gate.Gate = null,
+    /// How long a cached public_dir file stays fresh, already resolved from
+    /// the site file and the main.cfg default. Zero serves every static
+    /// request through the uncached open.
+    public_dir_cache_ttl_ms: u32 = 0,
 };
 
 /// After one exchange: keep the edge connection or close it.
@@ -78,7 +95,7 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     var client_reader = client_stream.reader(io, buffers.client_read);
     var client_writer = client_stream.writer(io, buffers.client_write);
 
-    serveLoopBuffered(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, buffers);
+    serveLoopBuffered(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, buffers, client_stream.socket.handle);
 }
 
 /// Which legs this site's connections need buffers for. A static-only
@@ -116,7 +133,7 @@ fn writeRefusal(io: std.Io, client_stream: std.Io.net.Stream) void {
 ///   only softens tunnel teardown when the upstream ends first.
 /// - The caller already owns the client pair here, so this allocates the
 ///   upstream pair alone, and nothing at all on a site with no pool.
-pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream) void {
+pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, zero_copy_fd: ?std.posix.fd_t) void {
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = false, .upstream = proxy.pool != null }) catch {
         writeEdgeError(client_w, 503, "edge out of buffers", "connection_limit_reached");
         client_w.flush() catch {};
@@ -124,11 +141,11 @@ pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.I
     };
     defer buffers.deinit(proxy.allocator);
 
-    serveLoopBuffered(proxy, client_r, client_w, client_addr, client_stream, buffers);
+    serveLoopBuffered(proxy, client_r, client_w, client_addr, client_stream, buffers, zero_copy_fd);
 }
 
 /// The request loop proper, over buffers the caller already allocated.
-fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, buffers: conn_buffer.Set) void {
+fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, buffers: conn_buffer.Set, zero_copy_fd: ?std.posix.fd_t) void {
     while (true) {
         var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
         const head_bytes = http1_head.readHead(client_r, &head_buf) catch |err| {
@@ -169,7 +186,7 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
 
         // The static plane answers next: on a hit or a local status the
         // upstream never sees the request.
-        if (staticAnswer(proxy, &request, client_w)) |result| {
+        if (staticAnswer(proxy, &request, client_w, zero_copy_fd)) |result| {
             client_w.flush() catch return;
             if (result == .CLOSE) return;
 
@@ -227,7 +244,12 @@ fn acmeAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, clien
 
     if (acme.webroot) |webroot| {
         if (acme_challenge.resolveWebroot(proxy.io, webroot, request.target)) |resolved| {
-            return sendResolved(proxy.io, client_w, resolved, request);
+            defer resolved.file.close(proxy.io);
+
+            // A challenge token is a handful of bytes on a listener that runs
+            // for one exchange, so it takes the copy path rather than a
+            // sendfile the acme client would never notice.
+            return sendResolved(proxy.io, client_w, resolved, request, null);
         }
 
         writeLocalStatus(client_w, 404, "not found", "", requestCloses(request));
@@ -270,10 +292,19 @@ fn httpsRedirectAnswer(request: *const http1_head.RequestHead, client_w: *std.Io
 
 /// Answer the request from public_dir when the site serves static files.
 ///
+/// Note:
+/// - The shared cache answers first when the site has a freshness window. A
+///   miss there is not a failure, it drops straight through to the open-per
+///   -request path, which is also what produces the 404.
+///
+/// Param:
+/// zero_copy_fd - ?std.posix.fd_t (the client socket when the writer goes
+///   straight to it, null on a TLS edge where the body must be encrypted)
+///
 /// Return:
 /// - EdgeResult when a response was written here
 /// - null when the request continues to the upstream pool
-fn staticAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, client_w: *std.Io.Writer) ?EdgeResult {
+fn staticAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, client_w: *std.Io.Writer, zero_copy_fd: ?std.posix.fd_t) ?EdgeResult {
     const io = proxy.io;
     const static_only = proxy.pool == null;
 
@@ -288,18 +319,36 @@ fn staticAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, cli
 
     if (static_files.handles(site, request.method, request.target)) {
         const accept = acceptEncoding(request);
+        const ttl_ms = proxy.public_dir_cache_ttl_ms;
+
+        if (static_cached.acquire(io, site.public_dir, request.target, accept, ttl_ms)) |hit| {
+            defer static_cached.release(hit);
+
+            return sendCached(io, client_w, hit, request, zero_copy_fd);
+        }
+
         if (static_files.open(io, site.public_dir, request.target, accept)) |resolved| {
-            return sendResolved(io, client_w, resolved, request);
+            defer resolved.file.close(io);
+
+            return sendResolved(io, client_w, resolved, request, zero_copy_fd);
         }
 
         // File miss: a client-side routed app answers its fallback page.
         // Validation ties spa_fallback to static-only sites or a bounded
         // public_prefix, so a backend 404 never swallows into it.
         if (site.spa_fallback) |fallback| {
-            var target_buf: [static_files.MAX_PATH]u8 = undefined;
+            var target_buf: [static_files.PUBLIC_PATH_MAX]u8 = undefined;
             if (std.fmt.bufPrint(&target_buf, "/{s}", .{fallback}) catch null) |fallback_target| {
+                if (static_cached.acquire(io, site.public_dir, fallback_target, accept, ttl_ms)) |hit| {
+                    defer static_cached.release(hit);
+
+                    return sendCached(io, client_w, hit, request, zero_copy_fd);
+                }
+
                 if (static_files.open(io, site.public_dir, fallback_target, accept)) |resolved| {
-                    return sendResolved(io, client_w, resolved, request);
+                    defer resolved.file.close(io);
+
+                    return sendResolved(io, client_w, resolved, request, zero_copy_fd);
                 }
             }
         }
@@ -316,27 +365,82 @@ fn staticAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, cli
     return closeOrKeep(request);
 }
 
-/// Write the resolved file as the response, closing it after.
-fn sendResolved(io: std.Io, client_w: *std.Io.Writer, resolved: static_files.Resolved, request: *const http1_head.RequestHead) EdgeResult {
-    defer resolved.file.close(io);
+/// Write a cached entry as the response. The cache owns the descriptor, so
+/// this never closes it.
+///
+/// Note:
+/// - The head is rendered here rather than replayed from the entry's own
+///   prerendered bytes, so a cached and an uncached answer are byte-identical.
+///   The prerendered one advertises Accept-Ranges, which this edge does not
+///   honour, and hardcodes keep-alive, which this edge decides per request.
+fn sendCached(io: std.Io, client_w: *std.Io.Writer, hit: static_cached.Hit, request: *const http1_head.RequestHead, zero_copy_fd: ?std.posix.fd_t) EdgeResult {
+    const resolved = static_files.Resolved{
+        .file = hit.file,
+        .size = hit.size,
+        .content_type = hit.content_type,
+        .encoding = hit.encoding,
+    };
 
+    return sendResolved(io, client_w, resolved, request, zero_copy_fd);
+}
+
+/// Write the resolved file as the response. The caller owns the descriptor.
+fn sendResolved(io: std.Io, client_w: *std.Io.Writer, resolved: static_files.Resolved, request: *const http1_head.RequestHead, zero_copy_fd: ?std.posix.fd_t) EdgeResult {
     const edge_close = requestCloses(request);
     static_files.writeResolvedHead(client_w, &resolved, edge_close) catch return .CLOSE;
 
     if (!std.mem.eql(u8, request.method, "HEAD")) {
-        var chunk: [FILE_CHUNK]u8 = undefined;
-        var offset: u64 = 0;
-        while (offset < resolved.size) {
-            const want: usize = @intCast(@min(resolved.size - offset, chunk.len));
-            const got = resolved.file.readPositionalAll(io, chunk[0..want], offset) catch return .CLOSE;
-            if (got == 0) return .CLOSE;
-
-            client_w.writeAll(chunk[0..got]) catch return .CLOSE;
-            offset += got;
-        }
+        if (!sendFileBody(io, client_w, resolved.file, resolved.size, zero_copy_fd)) return .CLOSE;
     }
 
     return if (edge_close) .CLOSE else .KEEP;
+}
+
+/// Move the whole file to the client.
+///
+/// Note:
+/// - A body at or above ZERO_COPY_MIN_BYTES on a cleartext linux edge goes to
+///   the kernel and never enters this process. The head is staged in the
+///   client writer, so it has to be flushed first or the body would overtake
+///   it on the wire.
+/// - A smaller body is worth more as one buffered write beside its own head
+///   than as a syscall of its own, so it takes the copy path even here.
+/// - Every other case reads positionally into a stack chunk and writes through
+///   the client writer, which is what keeps a TLS body inside the record path.
+///
+/// Return:
+/// - true when the whole body was accepted
+/// - false when the peer went away or the file could not be read
+fn sendFileBody(io: std.Io, client_w: *std.Io.Writer, file: std.Io.File, size: u64, zero_copy_fd: ?std.posix.fd_t) bool {
+    if (size == 0) return true;
+
+    if (comptime @import("builtin").os.tag == .linux) {
+        if (if (size >= ZERO_COPY_MIN_BYTES) zero_copy_fd else null) |fd| {
+            client_w.flush() catch return false;
+            zix.utils.static_send.sendBody(fd, io, file, 0, size, true, writeAllSocket) catch return false;
+
+            return true;
+        }
+    }
+
+    var chunk: [FILE_CHUNK]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < size) {
+        const want: usize = @intCast(@min(size - offset, chunk.len));
+        const got = file.readPositionalAll(io, chunk[0..want], offset) catch return false;
+        if (got == 0) return false;
+
+        client_w.writeAll(chunk[0..got]) catch return false;
+        offset += got;
+    }
+
+    return true;
+}
+
+/// Socket write handed to the static sender for the copy path it falls back to
+/// off linux. The zero-copy path never calls it.
+fn writeAllSocket(fd: std.posix.fd_t, data: []const u8) zix.utils.static_send.SendError!void {
+    zix.utils.fd_io.writeAll(fd, data) catch return error.BrokenPipe;
 }
 
 /// A request whose body was never read cannot keep the edge conn: the next
@@ -774,9 +878,9 @@ fn readLine(src: *std.Io.Reader, buf: []u8) ![]const u8 {
 // --------------------------------------------------------- //
 
 /// Attempts a fake backend makes at its fixed port, one per BIND_RETRY_MS.
-/// These ports sit inside this box's ephemeral range, so the kernel can be
-/// holding one for an outbound connection the moment a test asks for it.
-/// The hold is brief, so retrying rides it out instead of failing the run.
+/// These ports sit below the ephemeral range, so the kernel never hands one
+/// out as an outbound source port. What is left is a foreign process holding
+/// the port, and retrying rides a brief hold out instead of failing the run.
 const BIND_TRIES: usize = 50;
 const BIND_RETRY_MS: u64 = 10;
 
@@ -982,11 +1086,11 @@ test "zix zixer: http1 proxy, round trip relays body and rewrites both heads" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeUpstream{ .io = io, .port = 39873, .request_quota = 1 };
+    var fake = FakeUpstream{ .io = io, .port = 18873, .request_quota = 1 };
     const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39873 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18873 }};
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
@@ -1034,11 +1138,11 @@ test "zix zixer: http1 proxy, edge keep-alive reuses one upstream conn" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeUpstream{ .io = io, .port = 39874, .request_quota = 2 };
+    var fake = FakeUpstream{ .io = io, .port = 18874, .request_quota = 2 };
     const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39874 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18874 }};
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
@@ -1088,15 +1192,15 @@ test "zix zixer: http1 proxy, dead upstream fails over inside one request" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeUpstream{ .io = io, .port = 39875, .request_quota = 1 };
+    var fake = FakeUpstream{ .io = io, .port = 18875, .request_quota = 1 };
     const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
     // The dead upstream sits first in round-robin order, so the request must
     // fail over to the live one.
     const upstreams = [_]site_cfg.Upstream{
-        .{ .host = "127.0.0.1", .port = 39877 },
-        .{ .host = "127.0.0.1", .port = 39875 },
+        .{ .host = "127.0.0.1", .port = 18877 },
+        .{ .host = "127.0.0.1", .port = 18875 },
     };
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
@@ -1135,7 +1239,7 @@ test "zix zixer: http1 proxy, every upstream down answers 502 with proxy-status"
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39878 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18878 }};
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
@@ -1214,7 +1318,7 @@ test "zix zixer: http1 proxy, static hit serves the file and keeps alive" {
     var out_buf: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
 
-    const result = staticAnswer(&proxy, &request, &out).?;
+    const result = staticAnswer(&proxy, &request, &out, null).?;
     const reply = out.buffered();
 
     try testing.expectEqual(EdgeResult.KEEP, result);
@@ -1239,7 +1343,7 @@ test "zix zixer: http1 proxy, static head request sends no body" {
     var out_buf: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
 
-    const result = staticAnswer(&proxy, &request, &out).?;
+    const result = staticAnswer(&proxy, &request, &out, null).?;
     const reply = out.buffered();
 
     try testing.expectEqual(EdgeResult.KEEP, result);
@@ -1262,7 +1366,7 @@ test "zix zixer: http1 proxy, static miss falls back to the spa page" {
     var out_buf: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
 
-    const result = staticAnswer(&proxy, &request, &out).?;
+    const result = staticAnswer(&proxy, &request, &out, null).?;
     const reply = out.buffered();
 
     try testing.expectEqual(EdgeResult.KEEP, result);
@@ -1282,7 +1386,7 @@ test "zix zixer: http1 proxy, static-only site answers 404 and 405 locally" {
     const miss = try http1_head.parseRequest("GET /absent.txt HTTP/1.1\r\nHost: t\r\n\r\n");
     var miss_buf: [512]u8 = undefined;
     var miss_out = std.Io.Writer.fixed(&miss_buf);
-    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &miss, &miss_out).?);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &miss, &miss_out, null).?);
     try testing.expect(std.mem.startsWith(u8, miss_out.buffered(), "HTTP/1.1 404 not found\r\n"));
     try testing.expect(std.mem.indexOf(u8, miss_out.buffered(), "Proxy-Status") == null);
 
@@ -1291,7 +1395,7 @@ test "zix zixer: http1 proxy, static-only site answers 404 and 405 locally" {
     var post_out = std.Io.Writer.fixed(&post_buf);
 
     // The unread body forces the close, the method earns the 405.
-    try testing.expectEqual(EdgeResult.CLOSE, staticAnswer(&proxy, &post, &post_out).?);
+    try testing.expectEqual(EdgeResult.CLOSE, staticAnswer(&proxy, &post, &post_out, null).?);
     try testing.expect(std.mem.startsWith(u8, post_out.buffered(), "HTTP/1.1 405 method not allowed\r\n"));
     try testing.expect(std.mem.indexOf(u8, post_out.buffered(), "Allow: GET, HEAD\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, post_out.buffered(), "Connection: close\r\n") != null);
@@ -1307,7 +1411,7 @@ test "zix zixer: http1 proxy, mixed site miss continues to the pool" {
     var root_buf: [64]u8 = undefined;
     const root = fixtureRoot(&root_buf, &tmp);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39879 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18879 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     var idle = try upstream_conn.IdleCache.init(testing.allocator, 1);
@@ -1323,20 +1427,20 @@ test "zix zixer: http1 proxy, mixed site miss continues to the pool" {
     const api = try http1_head.parseRequest("GET /api/users HTTP/1.1\r\nHost: t\r\n\r\n");
     var api_buf: [512]u8 = undefined;
     var api_out = std.Io.Writer.fixed(&api_buf);
-    try testing.expect(staticAnswer(&proxy, &api, &api_out) == null);
+    try testing.expect(staticAnswer(&proxy, &api, &api_out, null) == null);
     try testing.expectEqual(@as(usize, 0), api_out.buffered().len);
 
     // A miss under the prefix also proxies on a mixed site.
     const miss = try http1_head.parseRequest("GET /assets/gone.css HTTP/1.1\r\nHost: t\r\n\r\n");
     var miss_buf: [512]u8 = undefined;
     var miss_out = std.Io.Writer.fixed(&miss_buf);
-    try testing.expect(staticAnswer(&proxy, &miss, &miss_out) == null);
+    try testing.expect(staticAnswer(&proxy, &miss, &miss_out, null) == null);
 
     // A hit under the prefix serves from disk.
     const hit = try http1_head.parseRequest("GET /assets/app.css HTTP/1.1\r\nHost: t\r\n\r\n");
     var hit_buf: [512]u8 = undefined;
     var hit_out = std.Io.Writer.fixed(&hit_buf);
-    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &hit, &hit_out).?);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &hit, &hit_out, null).?);
     try testing.expect(std.mem.indexOf(u8, hit_out.buffered(), "Content-Type: text/css\r\n") != null);
 }
 
@@ -1355,7 +1459,7 @@ test "zix zixer: http1 proxy, static request carrying a body closes the edge" {
     var out = std.Io.Writer.fixed(&out_buf);
 
     // The body was never read, so the head says close and the edge closes.
-    try testing.expectEqual(EdgeResult.CLOSE, staticAnswer(&proxy, &request, &out).?);
+    try testing.expectEqual(EdgeResult.CLOSE, staticAnswer(&proxy, &request, &out, null).?);
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Connection: close\r\n") != null);
 }
 
@@ -1375,11 +1479,11 @@ test "zix zixer: http1 proxy, mixed site serves static beside the pool end to en
     var root_buf: [64]u8 = undefined;
     const root = fixtureRoot(&root_buf, &tmp);
 
-    var fake = FakeUpstream{ .io = io, .port = 39880, .request_quota = 1 };
+    var fake = FakeUpstream{ .io = io, .port = 18880, .request_quota = 1 };
     const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39880 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18880 }};
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
@@ -1457,7 +1561,7 @@ test "zix zixer: http1 proxy, acme webroot answers ahead of the static plane" {
     var out = std.Io.Writer.fixed(&out_buf);
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40001 } };
 
-    serveLoop(&proxy, &src, &out, addr, null);
+    serveLoop(&proxy, &src, &out, addr, null, null);
     const reply = out.buffered();
 
     const first = std.mem.indexOf(u8, reply, "acme-answer") orelse return error.TestUnexpectedResult;
@@ -1475,7 +1579,7 @@ test "zix zixer: http1 proxy, acme relay unreachable answers 502 proxy-status" {
 
     const proxy = Proxy{
         .io = io,
-        .acme = .{ .relay = .{ .host = "127.0.0.1", .port = 39892 } },
+        .acme = .{ .relay = .{ .host = "127.0.0.1", .port = 18892 } },
     };
 
     const request = try http1_head.parseRequest("GET /.well-known/acme-challenge/tok HTTP/1.1\r\nHost: t\r\n\r\n");
@@ -1506,7 +1610,7 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
     var foreign = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     var foreign_buf: [512]u8 = undefined;
     var foreign_out = std.Io.Writer.fixed(&foreign_buf);
-    serveLoop(&proxy, &foreign, &foreign_out, addr, null);
+    serveLoop(&proxy, &foreign, &foreign_out, addr, null, null);
 
     try testing.expect(std.mem.startsWith(u8, foreign_out.buffered(), "HTTP/1.1 421 misdirected request\r\n"));
     try testing.expect(std.mem.indexOf(u8, foreign_out.buffered(), "Connection: close\r\n") != null);
@@ -1516,7 +1620,7 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
     var own = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
     var own_buf: [512]u8 = undefined;
     var own_out = std.Io.Writer.fixed(&own_buf);
-    serveLoop(&proxy, &own, &own_out, addr, null);
+    serveLoop(&proxy, &own, &own_out, addr, null, null);
 
     try testing.expect(std.mem.startsWith(u8, own_out.buffered(), "HTTP/1.1 404 "));
 }
@@ -1528,7 +1632,7 @@ test "zix zixer: http1 proxy, https redirect carries the site port" {
     var src = std.Io.Reader.fixed("GET /app/page HTTP/1.1\r\nHost: site.test:80\r\n\r\n");
     var out_buf: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
-    serveLoop(&proxy, &src, &out, addr, null);
+    serveLoop(&proxy, &src, &out, addr, null, null);
 
     try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 301 Moved Permanently\r\n"));
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Location: https://site.test:8443/app/page\r\n") != null);
@@ -1711,16 +1815,16 @@ test "zix zixer: http1 proxy, ws upgrade tunnels end to end and pins one upstrea
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake_a = FakeWsUpstream{ .io = io, .port = 39883 };
-    var fake_b = FakeWsUpstream{ .io = io, .port = 39884 };
+    var fake_a = FakeWsUpstream{ .io = io, .port = 18883 };
+    var fake_b = FakeWsUpstream{ .io = io, .port = 18884 };
     const thread_a = try std.Thread.spawn(.{}, FakeWsUpstream.serve, .{&fake_a});
     const thread_b = try std.Thread.spawn(.{}, FakeWsUpstream.serve, .{&fake_b});
     try waitReadyFlag(io, &fake_a.ready);
     try waitReadyFlag(io, &fake_b.ready);
 
     const upstreams = [_]site_cfg.Upstream{
-        .{ .host = "127.0.0.1", .port = 39883 },
-        .{ .host = "127.0.0.1", .port = 39884 },
+        .{ .host = "127.0.0.1", .port = 18883 },
+        .{ .host = "127.0.0.1", .port = 18884 },
     };
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
@@ -1764,8 +1868,8 @@ test "zix zixer: http1 proxy, ws upgrade tunnels end to end and pins one upstrea
     client.close(io);
     edge_thread.join();
 
-    poke(io, 39883);
-    poke(io, 39884);
+    poke(io, 18883);
+    poke(io, 18884);
     thread_a.join();
     thread_b.join();
 
@@ -1788,11 +1892,11 @@ test "zix zixer: http1 proxy, ws upgrade refused relays the plain response" {
     const io = threaded.io();
 
     // FakeUpstream never upgrades: the offer crosses, the answer is 200.
-    var fake = FakeUpstream{ .io = io, .port = 39889, .request_quota = 1 };
+    var fake = FakeUpstream{ .io = io, .port = 18889, .request_quota = 1 };
     const fake_thread = try std.Thread.spawn(.{}, FakeUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39889 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18889 }};
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
@@ -1884,11 +1988,11 @@ test "zix zixer: http1 proxy, sse stream relays each event as it arrives" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeSseUpstream{ .io = io, .port = 39876 };
+    var fake = FakeSseUpstream{ .io = io, .port = 18876 };
     const fake_thread = try std.Thread.spawn(.{}, FakeSseUpstream.serve, .{&fake});
     try waitReadyFlag(io, &fake.ready);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39876 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18876 }};
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
@@ -2273,4 +2377,142 @@ test "zix zixer: http1 proxy, an admitted request gives its slot back" {
     // request finds the slot free rather than queueing behind a leak.
     try std.testing.expectEqual(@as(usize, 0), gate.inFlight());
     try std.testing.expectEqual(process_gate.Admission.ADMITTED, gate.enter());
+}
+
+test "zix zixer: http1 proxy, a cached answer is byte identical to an uncached one" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "app.js", "console.log(1)");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+    const request = try http1_head.parseRequest("GET /app.js HTTP/1.1\r\nHost: t\r\n\r\n");
+
+    const uncached = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+    var plain_buf: [1024]u8 = undefined;
+    var plain_out = std.Io.Writer.fixed(&plain_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&uncached, &request, &plain_out, null).?);
+
+    static_cached.install(60_000, 16);
+    defer static_cached.shutdown(testing.io);
+
+    const cached = Proxy{
+        .io = testing.io,
+        .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
+        .public_dir_cache_ttl_ms = 60_000,
+    };
+    var hit_buf: [1024]u8 = undefined;
+    var hit_out = std.Io.Writer.fixed(&hit_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&cached, &request, &hit_out, null).?);
+
+    // The head is rendered by this edge in both cases, so the cache never
+    // leaks Accept-Ranges or a hardcoded keep-alive into the answer.
+    try testing.expectEqualStrings(plain_out.buffered(), hit_out.buffered());
+    try testing.expect(std.mem.indexOf(u8, hit_out.buffered(), "Accept-Ranges") == null);
+}
+
+test "zix zixer: http1 proxy, a cached entry answers after the file leaves disk" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "theme.css", "body{color:#000}");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+
+    static_cached.install(60_000, 16);
+    defer static_cached.shutdown(testing.io);
+
+    const proxy = Proxy{
+        .io = testing.io,
+        .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
+        .public_dir_cache_ttl_ms = 60_000,
+    };
+    const request = try http1_head.parseRequest("GET /theme.css HTTP/1.1\r\nHost: t\r\n\r\n");
+
+    var first_buf: [512]u8 = undefined;
+    var first_out = std.Io.Writer.fixed(&first_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &request, &first_out, null).?);
+    try testing.expect(std.mem.endsWith(u8, first_out.buffered(), "body{color:#000}"));
+
+    // The entry holds the descriptor open, so unlinking the name cannot reach
+    // it. That is what proves the second answer came from the table and not
+    // from another open.
+    tmp.dir.deleteFile(testing.io, "theme.css") catch @panic("fixture delete failed");
+
+    var second_buf: [512]u8 = undefined;
+    var second_out = std.Io.Writer.fixed(&second_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &request, &second_out, null).?);
+    try testing.expectEqualStrings(first_out.buffered(), second_out.buffered());
+}
+
+test "zix zixer: http1 proxy, a window of zero keeps every request uncached" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "reset.css", "*{margin:0}");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+
+    static_cached.install(60_000, 16);
+    defer static_cached.shutdown(testing.io);
+
+    // The table exists because another site asked for it, but this site set 0
+    // and must still re-open every time.
+    const proxy = Proxy{
+        .io = testing.io,
+        .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
+        .public_dir_cache_ttl_ms = 0,
+    };
+    const request = try http1_head.parseRequest("GET /reset.css HTTP/1.1\r\nHost: t\r\n\r\n");
+
+    var out_buf: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &request, &out, null).?);
+    try testing.expect(std.mem.endsWith(u8, out.buffered(), "*{margin:0}"));
+
+    tmp.dir.deleteFile(testing.io, "reset.css") catch @panic("fixture delete failed");
+
+    var gone_buf: [512]u8 = undefined;
+    var gone_out = std.Io.Writer.fixed(&gone_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &request, &gone_out, null).?);
+    try testing.expect(std.mem.startsWith(u8, gone_out.buffered(), "HTTP/1.1 404 not found\r\n"));
+}
+
+test "zix zixer: http1 proxy, a cached hit negotiates the precompressed sibling" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "vendor.js", "identity-body");
+    writeFixture(tmp.dir, "vendor.js.br", "br-body");
+
+    var root_buf: [64]u8 = undefined;
+    const root = fixtureRoot(&root_buf, &tmp);
+
+    static_cached.install(60_000, 16);
+    defer static_cached.shutdown(testing.io);
+
+    const proxy = Proxy{
+        .io = testing.io,
+        .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
+        .public_dir_cache_ttl_ms = 60_000,
+    };
+
+    const brotli = try http1_head.parseRequest("GET /vendor.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\n\r\n");
+    var br_buf: [512]u8 = undefined;
+    var br_out = std.Io.Writer.fixed(&br_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &brotli, &br_out, null).?);
+    try testing.expect(std.mem.indexOf(u8, br_out.buffered(), "Content-Encoding: br\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, br_out.buffered(), "br-body"));
+
+    // The same entry answers identity, so the second coding is a table read
+    // rather than a second pass over the disk.
+    const plain = try http1_head.parseRequest("GET /vendor.js HTTP/1.1\r\nHost: t\r\n\r\n");
+    var plain_buf: [512]u8 = undefined;
+    var plain_out = std.Io.Writer.fixed(&plain_buf);
+    try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &plain, &plain_out, null).?);
+    try testing.expect(std.mem.indexOf(u8, plain_out.buffered(), "Content-Encoding") == null);
+    try testing.expect(std.mem.endsWith(u8, plain_out.buffered(), "identity-body"));
 }
