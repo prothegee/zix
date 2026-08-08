@@ -94,7 +94,7 @@
 </h4>
 <br>
 <div align="center">
-    <a href="https://www.http-arena.com/#sort=rps:-1&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
+    <a href="https://www.http-arena.com/#scope=h1&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
         <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" height="44">
     </a>
     &nbsp;&nbsp;
