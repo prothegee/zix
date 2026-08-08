@@ -339,7 +339,10 @@ fn fixtureRoot(tmp: *std.testing.TmpDir, buf: []u8) []const u8 {
 }
 
 test "zix http: static acquireHit takes resident bytes only when zero copy is refused" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -465,7 +468,8 @@ test "zix http: static zeroCopyAllowed refuses the TLS capture sentinel fd" {
     if (comptime builtin.os.tag != .linux) {
         // Every other target takes the copy path unconditionally, so there is
         // no zero-copy decision to make there.
-        return error.SkipZigTest;
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
     }
 
     try testing.expect(zeroCopyAllowed(3));
@@ -515,7 +519,8 @@ test "zix http: static serveCached replays the prerendered 200 and the body" {
     if (comptime builtin.os.tag != .linux) {
         // The wire is captured through a Linux socketpair, and the zero-copy
         // send under test is the Linux sendfile shape.
-        return error.SkipZigTest;
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
     }
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -553,7 +558,10 @@ test "zix http: static serveCached replays the prerendered 200 and the body" {
 }
 
 test "zix http: static serveCached answers a Range and rejects one past the end" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -603,7 +611,10 @@ test "zix http: static serveCached answers a Range and rejects one past the end"
 }
 
 test "zix http: static serveCached serves the gzip sibling when the client accepts it" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -639,7 +650,10 @@ test "zix http: static serveCached serves the gzip sibling when the client accep
 }
 
 test "zix http: static serve falls back to the uncached path with no cache installed" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

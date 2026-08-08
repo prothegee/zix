@@ -438,7 +438,11 @@ test "zix http: request header lookup" {
 }
 
 test "zix http: request body must not truncate when a Content-Length body arrives in segments over a non-blocking fd" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     // Repro for the EPOLL / URING body gap. The accepted fd is non-blocking, but body() reads the
     // remaining body with a posix.read loop that `catch break`s on the first EAGAIN. When the body is
     // split across TCP segments (only the first has arrived), the loop bails with a TRUNCATED body.
@@ -488,7 +492,11 @@ test "zix http: request body must not truncate when a Content-Length body arrive
 }
 
 test "zix http: request chunked body must not truncate when chunks arrive in segments over a non-blocking fd" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     // Same EPOLL / URING gap on the chunked path: readChunkedBody() reads until the terminal
     // "0\r\n\r\n" chunk, and must wait across segment boundaries instead of bailing at the first
     // EAGAIN. The writer delivers the terminator only in the second segment.
@@ -538,7 +546,11 @@ test "zix http: request chunked body must not truncate when chunks arrive in seg
 }
 
 test "zix http: request body delivers a body far larger than the read buffer" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     // zix.Http sizes the body allocation from Content-Length and reads until it
     // is filled, so the read buffer never caps what the handler sees. The .ASYNC
     // path of zix.Http1 truncates the delivered slice at its body chunk instead,
@@ -576,7 +588,11 @@ test "zix http: request body delivers a body far larger than the read buffer" {
 }
 
 test "zix http: request body reports a short read when the peer closes before Content-Length" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     // The returned slice is what the keep-alive decision reads: a body shorter
     // than Content-Length still comes back as a successful read, so a caller
     // that trusts the length alone cannot tell the request was cut off.
