@@ -220,6 +220,7 @@ test "zix: unit test" {
 
     // # zix.io_uring (shared ring runtime, .URING dispatch model)
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/ring.zig"));
+    if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/ring_wait.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/reuseport.zig"));
     std.testing.refAllDecls(@import("multiplexers/slab.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/tls_conn.zig"));
