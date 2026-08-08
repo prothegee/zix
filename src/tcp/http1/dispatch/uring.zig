@@ -7,6 +7,7 @@ const core = @import("../core.zig");
 const cache = @import("../../../utils/response_cache.zig");
 const ws = @import("../websocket.zig");
 const uring = @import("../../../multiplexers/ring.zig");
+const ring_wait = @import("../../../multiplexers/ring_wait.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
@@ -72,14 +73,14 @@ const URING_INTRA_SUBMIT: usize = 16;
 const URING_INTRA_SUBMIT_MIN_BATCH: usize = 128;
 
 /// Ceiling for the adaptive completion-wait: a hot loop waits for up to this
-/// many completions per enter (guarded by the coalesce timer) so wakeups
+/// many completions per enter (bounded by the coalesce window) so wakeups
 /// amortize instead of firing once per completion. A cooling loop decays back
 /// to single-completion waits within a pass.
 const URING_WAIT_COALESCE_MAX: u32 = 32;
 
-/// Coalesce-timer window in nanoseconds, the stall guard for a wait_nr > 1
-/// pass: a lone completion is never held past this. Far below any request
-/// round trip, far above the enter cost it amortizes.
+/// Coalesce window in nanoseconds, the deadline on a wait_nr > 1 pass: a batch
+/// shorter than wait_nr is never held past this. Far below any request round
+/// trip, far above the enter cost it amortizes.
 const URING_WAIT_COALESCE_NS: i64 = 20_000;
 
 /// Per-connection staged-response buffer. Since URING is fully async (unlike
@@ -1397,27 +1398,31 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
             self.armAccept();
             if (self.tls_listener_fd != -1) self.armTlsAccept();
 
-            const coalesce_ts: linux.kernel_timespec = .{ .sec = 0, .nsec = URING_WAIT_COALESCE_NS };
+            // A batch wait is only safe when the kernel can bound it from inside the
+            // wait. Without IORING_FEAT_EXT_ARG the ceiling drops to one completion,
+            // which anything already queued satisfies, so a worker can never park on
+            // completions its remaining connections will not produce.
+            const coalesce_max: u32 = if (ring_wait.boundedWaitSupported(&self.ring)) URING_WAIT_COALESCE_MAX else 1;
+
             var wait_nr: u32 = 1;
             var cqes: [URING_CQE_BATCH]linux.io_uring_cqe = undefined;
             while (true) {
-                // Hot-loop wakeup coalescing: when the last reap was large,
-                // wait for a batch of completions per enter instead of one,
-                // with the short timer as the stall guard. Without a timer
-                // slot the pass falls back to a single-completion wait.
+                // Hot-loop wakeup coalescing: when the last reap was large, wait for a
+                // batch of completions per enter instead of one, bounded by the coalesce
+                // window so a short batch is handed over rather than held. A pass that
+                // only wants one completion needs no window, and skipping it there is
+                // what lets an idle worker sleep instead of waking on a timer.
                 if (wait_nr > 1) {
-                    if (self.getSqe()) |sqe| {
-                        sqe.prep_timeout(&coalesce_ts, 0, 0);
-                        sqe.user_data = uring.packUserData(.timeout, 0, 0);
-                    } else {
-                        wait_nr = 1;
-                    }
+                    ring_wait.submitAndWaitTimeout(&self.ring, wait_nr, URING_WAIT_COALESCE_NS) catch |err| switch (err) {
+                        error.SignalInterrupt => continue,
+                        else => return,
+                    };
+                } else {
+                    _ = self.ring.submit_and_wait(1) catch |err| switch (err) {
+                        error.SignalInterrupt => continue,
+                        else => return,
+                    };
                 }
-
-                _ = self.ring.submit_and_wait(wait_nr) catch |err| switch (err) {
-                    error.SignalInterrupt => continue,
-                    else => return,
-                };
 
                 // The submit above pushed the staged SQEs to the kernel, so the
                 // SQ has room again: retry the pending accept re-arm and the
@@ -1425,7 +1430,7 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
                 self.drainParked();
 
                 const count = self.ring.copy_cqes(&cqes, 0) catch return;
-                wait_nr = @min(@max(@as(u32, @intCast(count / 2)), 1), URING_WAIT_COALESCE_MAX);
+                wait_nr = @min(@max(@as(u32, @intCast(count / 2)), 1), coalesce_max);
                 for (cqes[0..count], 0..) |cqe, cqe_idx| {
                     const decoded = uring.unpackUserData(cqe.user_data);
                     switch (decoded.op) {
