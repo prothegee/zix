@@ -103,6 +103,7 @@ Flat `key: value` lines, `#` comments, comma-separated lists, and integer math o
 | `acme_webroot`, `acme_proxy` | answer the rfc 8555 http-01 challenge |
 | `upstreams` | comma list of `host:port` backends, picked round-robin |
 | `public_dir`, `public_prefix`, `spa_fallback` | serve static files from this site |
+| `public_dir_cache_ttl_ms` | keep those files open between requests, `0` is off |
 | `kernel_backlog`, `max_recv_buf` | listener tuning |
 | `upstream_timeout_ms` | how long the edge waits on a silent upstream before answering 504 |
 | `process_limit`, `process_queue_len`, `process_queue_timeout_ms` | overload valve, how many requests may run against the backends at once |

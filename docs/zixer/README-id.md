@@ -103,6 +103,7 @@ Baris `key: value` yang flat, komentar `#`, list dipisah koma, dan matematika in
 | `acme_webroot`, `acme_proxy` | menjawab challenge http-01 rfc 8555 |
 | `upstreams` | list `host:port` dipisah koma, dipilih round-robin |
 | `public_dir`, `public_prefix`, `spa_fallback` | menyajikan file static dari site ini |
+| `public_dir_cache_ttl_ms` | menahan file itu tetap terbuka antar request, `0` berarti mati |
 | `kernel_backlog`, `max_recv_buf` | tuning listener |
 | `upstream_timeout_ms` | berapa lama edge menunggu upstream yang diam sebelum menjawab 504 |
 | `process_limit`, `process_queue_len`, `process_queue_timeout_ms` | katup beban, berapa request yang boleh berjalan ke backend sekaligus |
