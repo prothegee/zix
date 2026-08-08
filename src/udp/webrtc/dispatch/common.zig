@@ -429,7 +429,10 @@ test "zix webrtc: dispatch common, an unread clock reports no time passed" {
 }
 
 test "zix webrtc: dispatch common, the monotonic clock only moves forward" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const first = monotonicMs();
     const second = monotonicMs();
@@ -453,14 +456,20 @@ test "zix webrtc: dispatch common, the worker count follows the config and then 
 }
 
 test "zix webrtc: dispatch common, pinning a worker to any slot is survivable" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const linux = std.os.linux;
 
     // The pin moves the calling thread, and here that thread is the test runner, so its own mask is
     // put back before anything else runs.
     var original: linux.cpu_set_t = undefined;
-    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &original) != 0) return error.SkipZigTest;
+    if (linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &original) != 0) {
+        std.log.info("the thread affinity mask could not be read, the pin cannot be checked, test skipped", .{});
+        return;
+    }
 
     defer linux.sched_setaffinity(0, &original) catch {};
 
