@@ -8,7 +8,7 @@
 //!
 //! Run:
 //! zig build zixer-example-tls
-//! ./zig-out/bin/zixer-example-tls-<arch>-<os>
+//! ./zig-out/bin/zixer-example-tls-<arch>-<os>-<optimize>
 //!
 //! Through the proxy (self-signed certificate, hence -k):
 //! curl -k https://localhost:9120/

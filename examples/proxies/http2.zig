@@ -9,7 +9,7 @@
 //!
 //! Run:
 //! zig build zixer-example-http2
-//! ./zig-out/bin/zixer-example-http2-<arch>-<os>
+//! ./zig-out/bin/zixer-example-http2-<arch>-<os>-<optimize>
 //!
 //! Through the proxy:
 //! curl --http2-prior-knowledge http://127.0.0.1:9106/
