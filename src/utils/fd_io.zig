@@ -238,7 +238,10 @@ pub fn waitReadable(fd: posix.fd_t, timeout_ms: i32) bool {
 // --------------------------------------------------------- //
 
 test "zix utils: fd_io writeAll then readAll moves a whole buffer across a connected pair" {
-    if (comptime is_windows) return error.SkipZigTest;
+    if (comptime is_windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try testSocketPair(&pair);
@@ -255,7 +258,10 @@ test "zix utils: fd_io writeAll then readAll moves a whole buffer across a conne
 }
 
 test "zix utils: fd_io readAll reports ConnectionClosed when the peer hangs up early" {
-    if (comptime is_windows) return error.SkipZigTest;
+    if (comptime is_windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try testSocketPair(&pair);
@@ -270,7 +276,10 @@ test "zix utils: fd_io readAll reports ConnectionClosed when the peer hangs up e
 }
 
 test "zix utils: fd_io waitReadable sees pending bytes and times out on a quiet descriptor" {
-    if (comptime is_windows) return error.SkipZigTest;
+    if (comptime is_windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try testSocketPair(&pair);
@@ -286,7 +295,10 @@ test "zix utils: fd_io waitReadable sees pending bytes and times out on a quiet 
 }
 
 test "zix utils: fd_io readAll on a closed descriptor errors instead of reporting a filled buffer" {
-    if (comptime is_windows) return error.SkipZigTest;
+    if (comptime is_windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try testSocketPair(&pair);
@@ -300,7 +312,10 @@ test "zix utils: fd_io readAll on a closed descriptor errors instead of reportin
 }
 
 test "zix utils: fd_io readOnce on a closed descriptor errors instead of reporting a byte count" {
-    if (comptime is_windows) return error.SkipZigTest;
+    if (comptime is_windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try testSocketPair(&pair);
@@ -312,7 +327,10 @@ test "zix utils: fd_io readOnce on a closed descriptor errors instead of reporti
 }
 
 test "zix utils: fd_io writeAll on a closed descriptor errors instead of reporting a drained slice" {
-    if (comptime is_windows) return error.SkipZigTest;
+    if (comptime is_windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try testSocketPair(&pair);
@@ -327,8 +345,12 @@ test "zix utils: fd_io writeAll on a closed descriptor errors instead of reporti
 /// Note:
 /// - Each branch checks its own return convention, for the reason readSyscall spells out. A pair
 ///   that failed to open must surface as an error here, never as two undefined descriptors.
+/// - The guard below is what keeps the body off Windows: a comptime true early return makes the
+///   rest of the function dead, so the POSIX calls are never analyzed there. It names a real error
+///   rather than a skip, because a skip would leave the caller holding two descriptors that were
+///   never opened. Every caller guards Windows first, so the error is unreachable at runtime.
 fn testSocketPair(fds: *[2]posix.fd_t) !void {
-    if (comptime is_windows) return error.SkipZigTest;
+    if (comptime is_windows) return error.SocketPairNeedsPosix;
 
     if (comptime is_linux) {
         const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);

@@ -1767,8 +1767,10 @@ test "zix http1: URING dispatch decodes a fully-present chunked body" {
 
 test "zix http1: URING dispatch refuses a declared body past the limit with 413" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1800,8 +1802,10 @@ test "zix http1: URING dispatch refuses a declared body past the limit with 413"
 
 test "zix http1: URING dispatch sends 100 Continue while the body is still arriving" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1829,8 +1833,10 @@ test "zix http1: URING dispatch sends 100 Continue while the body is still arriv
 
 test "zix http1: URING dispatch answers 400 on a malformed chunked body instead of waiting" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1862,8 +1868,10 @@ test "zix http1: URING dispatch answers 400 on a malformed chunked body instead 
 
 test "zix http1: URING dispatch answers 413 for a chunked body past the body buffer" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -2025,8 +2033,10 @@ test "zix http1: URING dispatch defers an oversized body and serves the counted 
 
 test "zix http1: URING dispatch waits for a body that fits the buffer and then reports the full count" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -2066,8 +2076,10 @@ test "zix http1: URING dispatch waits for a body that fits the buffer and then r
 
 test "zix http1: URING keeps a deferred request parked while its drain is unfinished" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     // The counterpart to .ASYNC reporting an incomplete body: this model does not
     // report one, it holds the request until the drain finishes and serves
     // nothing if it never does. Nothing pinned that the parked request stays
@@ -2227,11 +2239,17 @@ test "zix http1: URING wsHandleBuf accumulates a frame split across ring deliver
 }
 
 test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     // Skip where io_uring is unavailable (older kernel, or blocked by a seccomp
     // sandbox): the engine itself falls back to EPOLL in that case.
-    var ring = initUringRing() catch return error.SkipZigTest;
+    var ring = initUringRing() catch {
+        std.log.info("io_uring is unavailable on this kernel, test skipped", .{});
+        return;
+    };
     defer ring.deinit();
 
     // Usable whether the kernel accepted the single-issuer fast-path flags or
@@ -2240,7 +2258,10 @@ test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)
 }
 
 test "zix http1: URING finishClose rings the close and recycles the slot" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const linux = std.os.linux;
     const gpa = std.testing.allocator;
@@ -2251,10 +2272,15 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
     // fds[1] is handed to finishClose, which closes it via the ring (not here).
 
     const Worker = UringWorker(testOkHandler);
+    const ring = initUringRing() catch {
+        std.log.info("io_uring is unavailable on this kernel, test skipped", .{});
+        return;
+    };
+
     const slots = try gpa.alloc(UringConn, @as(usize, @intCast(fds[1])) + 1);
     var free_slots: [4]u32 = undefined;
     var worker = Worker{
-        .ring = initUringRing() catch return error.SkipZigTest,
+        .ring = ring,
         .slots = slots,
         .free_slots = &free_slots,
         .listener_fd = -1,
@@ -2301,7 +2327,10 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
 }
 
 test "zix http1: URING releaseSlot pools warm under cap, acquireSlot reuses LIFO" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const page = std.heap.page_size_min;
 
@@ -2443,7 +2472,10 @@ test "zix http1: URING drainParked drops a stale gen entry without touching the 
 }
 
 test "zix http1: URING pending accept re-arm is retried by drainParked" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const linux = std.os.linux;
 
@@ -2456,7 +2488,10 @@ test "zix http1: URING pending accept re-arm is retried by drainParked" {
 
     const Worker = UringWorker(testOkHandler);
     var worker = Worker{
-        .ring = initUringRing() catch return error.SkipZigTest,
+        .ring = initUringRing() catch {
+            std.log.info("io_uring is unavailable on this kernel, test skipped", .{});
+            return;
+        },
         .slots = &[_]UringConn{},
         .listener_fd = fds[0],
         .gen_counter = 0,
@@ -2479,7 +2514,10 @@ test "zix http1: URING pending accept re-arm is retried by drainParked" {
 }
 
 test "zix http1: URING drainParked re-arms a parked recv on the ring" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const linux = std.os.linux;
     const gpa = std.testing.allocator;
@@ -2493,9 +2531,14 @@ test "zix http1: URING drainParked re-arms a parked recv on the ring" {
 
     const Worker = UringWorker(testOkHandler);
     var entries: [4]ParkEntry = undefined;
+    const ring = initUringRing() catch {
+        std.log.info("io_uring is unavailable on this kernel, test skipped", .{});
+        return;
+    };
+
     const slots = try gpa.alloc(UringConn, @as(usize, @intCast(fds[1])) + 1);
     var worker = Worker{
-        .ring = initUringRing() catch return error.SkipZigTest,
+        .ring = ring,
         .slots = slots,
         .listener_fd = -1,
         .gen_counter = 0,
@@ -2529,7 +2572,10 @@ test "zix http1: URING drainParked re-arms a parked recv on the ring" {
 }
 
 test "zix http1: URING drainParked re-arms a parked WS recv through the buffer ring" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const linux = std.os.linux;
     const gpa = std.testing.allocator;
@@ -2543,9 +2589,14 @@ test "zix http1: URING drainParked re-arms a parked WS recv through the buffer r
 
     const Worker = UringWorker(testOkHandler);
     var entries: [4]ParkEntry = undefined;
+    const ring = initUringRing() catch {
+        std.log.info("io_uring is unavailable on this kernel, test skipped", .{});
+        return;
+    };
+
     const slots = try gpa.alloc(UringConn, @as(usize, @intCast(fds[1])) + 1);
     var worker = Worker{
-        .ring = initUringRing() catch return error.SkipZigTest,
+        .ring = ring,
         .slots = slots,
         .listener_fd = -1,
         .gen_counter = 0,
@@ -2564,7 +2615,10 @@ test "zix http1: URING drainParked re-arms a parked WS recv through the buffer r
 
     // Shared provided-buffer ring, skip where the kernel lacks buffer rings
     // (the engine then uses the plain recv path, covered by the test above).
-    worker.ws_bufs = IoUring.BufferGroup.init(&worker.ring, gpa, WS_RING_BGID, WS_RING_BUF_SIZE, 4) catch return error.SkipZigTest;
+    worker.ws_bufs = IoUring.BufferGroup.init(&worker.ring, gpa, WS_RING_BGID, WS_RING_BUF_SIZE, 4) catch {
+        std.log.info("io_uring buffer groups are unavailable on this kernel, test skipped", .{});
+        return;
+    };
     defer if (worker.ws_bufs) |*bg| bg.deinit(gpa);
 
     var conn_buf: [64]u8 = undefined;
@@ -2616,7 +2670,10 @@ test "zix http1: URING idleCap clamps between the floor and the ceiling as live 
 }
 
 test "zix http1: URING releaseSlot past the ceiling returns the oldest warm stride to the OS" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const page = std.heap.page_size_min;
 
@@ -2815,7 +2872,10 @@ fn testCacheHitHandler(req: *core.Request, res: *core.Response, _: *core.Context
 }
 
 test "zix http1: URING pretouchSlab touches only the floor strides and keeps them zero" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const page = std.heap.page_size_min;
 

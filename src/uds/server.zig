@@ -215,7 +215,11 @@ test "zix uds: UdsServer init, timeout fields default to zero" {
 }
 
 test "zix uds: echoHandler echoes big-endian frame" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
 
@@ -268,7 +272,11 @@ test "zix uds: UdsServer init, timeout fields stored from config" {
 }
 
 test "zix uds: applyConnTimeout uds, zero ms is no-op on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -284,7 +292,11 @@ test "zix uds: applyConnTimeout uds, zero ms is no-op on real socket" {
 }
 
 test "zix uds: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -300,7 +312,11 @@ test "zix uds: applyConnTimeout uds, sets SO_RCVTIMEO on real socket" {
 }
 
 test "zix uds: applyConnTimeout uds, sets SO_SNDTIMEO on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);

@@ -2386,11 +2386,17 @@ test "zix http1: parseGetFastPath raw_headers covers host line" {
 }
 
 test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     // Skip where io_uring is unavailable (older kernel, or blocked by a seccomp
     // sandbox): the engine itself falls back to POOL in that case.
-    var ring = initUringRing() catch return error.SkipZigTest;
+    var ring = initUringRing() catch {
+        std.log.info("io_uring is unavailable on this kernel, test skipped", .{});
+        return;
+    };
     defer ring.deinit();
 
     // Usable whether the kernel accepted the single-issuer fast-path flags or
@@ -2399,7 +2405,10 @@ test "zix http1: initUringRing yields a usable ring (flags or flagless fallback)
 }
 
 test "zix http1: URING finishClose rings the close and recycles the slot" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const linux = std.os.linux;
     const gpa = std.testing.allocator;
@@ -2411,7 +2420,10 @@ test "zix http1: URING finishClose rings the close and recycles the slot" {
 
     const Worker = UringWorker(testOkHandler, null);
     var worker = Worker{
-        .ring = initUringRing() catch return error.SkipZigTest,
+        .ring = initUringRing() catch {
+            std.log.info("io_uring is unavailable on this kernel, test skipped", .{});
+            return;
+        },
         .slots = try gpa.alloc(?*UringConn, @as(usize, @intCast(fds[1])) + 1),
         .listener_fd = -1,
         .gen_counter = 0,
@@ -2564,7 +2576,10 @@ test "zix http1: URING releaseConn shrinks a grown send_buf back to the base siz
 }
 
 test "zix http1: URING releaseConn past the cap returns buffer pages to the OS" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     const page = std.heap.page_allocator;
 

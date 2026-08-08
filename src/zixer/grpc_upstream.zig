@@ -167,7 +167,10 @@ test "zix zixer: grpc upstream, stream ids allocate odd and increasing" {
 }
 
 test "zix zixer: grpc upstream, open runs the client preface on the wire" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();

@@ -602,7 +602,11 @@ test "zix http1: orderPhysicalCoresFirst keeps mask order on unique keys" {
 }
 
 test "zix http1: ConnRegistry evicts a connection past its deadline" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -630,7 +634,11 @@ test "zix http1: ConnRegistry evicts a connection past its deadline" {
 }
 
 test "zix http1: ConnRegistry leaves a connection before its deadline alone" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

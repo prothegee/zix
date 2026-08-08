@@ -288,7 +288,10 @@ fn installTlsSink(sink: *core.TlsStreamSink) void {
 }
 
 test "zix http1: static acquireHit takes resident bytes only when zero copy is refused" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -400,7 +403,10 @@ test "zix http1: static serveCached serves a sibling from resident bytes over TL
 }
 
 test "zix http1: static serve rejects directory traversal" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -411,7 +417,10 @@ test "zix http1: static serve rejects directory traversal" {
 }
 
 test "zix http1: static serve returns false for a missing file" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -422,7 +431,10 @@ test "zix http1: static serve returns false for a missing file" {
 }
 
 test "zix http1: static serve returns false when the path overflows the join buffer" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -447,7 +459,8 @@ test "zix http1: static zeroCopyAllowed refuses the TLS capture sentinel fd" {
     if (comptime builtin.target.os.tag != .linux) {
         // Every other target takes the copy path unconditionally, so there is
         // no zero-copy decision to make there.
-        return error.SkipZigTest;
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
     }
 
     // A real socket in cleartext is the only case that may hand the file to the kernel.
@@ -512,7 +525,8 @@ test "zix http1: static serveCached replays the prerendered 200 and the body" {
     if (comptime builtin.target.os.tag != .linux) {
         // The wire is captured through a Linux socketpair, and the zero-copy
         // send under test is the Linux sendfile shape.
-        return error.SkipZigTest;
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
     }
 
     var tmp = testing.tmpDir(.{});
@@ -547,7 +561,10 @@ test "zix http1: static serveCached replays the prerendered 200 and the body" {
 }
 
 test "zix http1: static serveCached answers a Range from the cached file" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -580,7 +597,10 @@ test "zix http1: static serveCached answers a Range from the cached file" {
 }
 
 test "zix http1: static serveCached serves the brotli sibling when the client accepts it" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -614,7 +634,10 @@ test "zix http1: static serveCached serves the brotli sibling when the client ac
 }
 
 test "zix http1: static serve falls back to the uncached path for a file the cache declines" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

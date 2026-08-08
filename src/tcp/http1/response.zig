@@ -399,7 +399,10 @@ fn socketPair(fds: *[2]std.posix.fd_t) !void {
 }
 
 test "zix http1: Response setters mutate status, content type, keep alive" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var res = Response.init(TEST_FD, undefined, std.testing.allocator);
 
@@ -557,7 +560,10 @@ test "zix http1: Response.addHeader splices extra lines before the final CRLF" {
 }
 
 test "zix http1: Response.addHeader rejects CR LF injection and enforces the cap" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

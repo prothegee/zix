@@ -179,8 +179,8 @@ pub const Server = struct {
 
 test "zix http: EpollConnTable slab alloc and free lifecycle" {
     if (comptime builtin.os.tag == .windows) {
-        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped", .{});
+        return;
     }
 
     var table = try common.EpollConnTable.init(256);
@@ -204,8 +204,8 @@ test "zix http: EpollConnTable slab alloc and free lifecycle" {
 
 test "zix http: EpollConnTable filled tracks accumulated bytes" {
     if (comptime builtin.os.tag == .windows) {
-        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped", .{});
+        return;
     }
 
     var table = try common.EpollConnTable.init(512);
@@ -221,8 +221,8 @@ test "zix http: EpollConnTable filled tracks accumulated bytes" {
 
 test "zix http: EpollConnTable get returns null for out-of-range fd" {
     if (comptime builtin.os.tag == .windows) {
-        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped", .{});
+        return;
     }
 
     var table = try common.EpollConnTable.init(64);
@@ -234,8 +234,8 @@ test "zix http: EpollConnTable get returns null for out-of-range fd" {
 
 test "zix http: EpollConnTable packs recv buffers into compact slots, not the fd range" {
     if (comptime builtin.os.tag == .windows) {
-        std.debug.print("warn: EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL conn table indexes integer descriptors, Windows handles are opaque, test skipped", .{});
+        return;
     }
 
     var table = try common.EpollConnTable.init(4096);
@@ -303,8 +303,10 @@ fn testBodyReadingHandler(req: *Request, res: *Response, _: *Context) anyerror!v
 
 test "zix http: bodyComplete is true once a Content-Length body is fully read" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // The guard tests below read the connection outcome, which would still look
     // right if the flag were stuck false. This asserts the flag itself.
     const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
@@ -336,8 +338,10 @@ test "zix http: bodyComplete is true once a Content-Length body is fully read" {
 
 test "zix http: bodyComplete is true once a chunked body reaches its terminator" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
     const router = @import("router.zig").Router(&routes);
     var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
@@ -372,8 +376,10 @@ test "zix http: bodyComplete is true once a chunked body reaches its terminator"
 
 test "zix http: bodyComplete is false when the handler never reads the body" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // zix.Http reads lazily, so an untouched body is an unread body. This is the
     // case zix.Http1 cannot have, since its engine reads before the handler runs.
     const routes = [_]Route{.{ .path = "/sink", .handler = testBodyIgnoringHandler }};
@@ -404,8 +410,10 @@ test "zix http: bodyComplete is false when the handler never reads the body" {
 
 test "zix http: processRequest refuses a declared body past the limit with 413" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // The allocation for a Content-Length body was sized straight from the header,
     // so a claimed length was a claim on server memory. The limit is checked before
     // a Request is even built.
@@ -437,8 +445,10 @@ test "zix http: processRequest refuses a declared body past the limit with 413" 
 
 test "zix http: processRequest refuses a chunked body past the limit with 413" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // Chunked declares no length, so the limit has to be a running total the read
     // loop aborts on rather than a check before it starts.
     const routes = [_]Route{.{ .path = "/sink", .handler = testBodyReadingHandler }};
@@ -473,8 +483,10 @@ test "zix http: processRequest refuses a chunked body past the limit with 413" {
 
 test "zix http: processRequest sends 100 Continue before reading a body that expects it" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // The client will not send the body until the server agrees to take it. This
     // engine never parsed the header, so every such request paid the client's own
     // timeout before the body moved. zix.Http1 has answered it from the start.
@@ -506,8 +518,10 @@ test "zix http: processRequest sends 100 Continue before reading a body that exp
 
 test "zix http: processRequest sends no 100 Continue for a request without a body" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     const routes = [_]Route{.{ .path = "/sink", .handler = testBodyIgnoringHandler }};
     const router = @import("router.zig").Router(&routes);
     var server = Server.init(router.dispatch, .{ .io = undefined, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
@@ -535,8 +549,10 @@ test "zix http: processRequest sends no 100 Continue for a request without a bod
 
 test "zix http: processRequest closes when a chunked body is left unread" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // The unconsumed-body guard keys on content_length, which a chunked request
     // leaves at zero. Keeping the connection alive hands the unread chunked body
     // to the next parse, where it is read as a second request.
@@ -569,8 +585,10 @@ test "zix http: processRequest closes when a chunked body is left unread" {
 
 test "zix http: processRequest closes when a coding-list chunked body is left unread" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // Same hazard reached through the Transfer-Encoding coding list: the parser
     // has to see chunked past the leading codings, otherwise the request frames
     // as bodyless and the body becomes the next request.
@@ -602,8 +620,10 @@ test "zix http: processRequest closes when a coding-list chunked body is left un
 
 test "zix http: processRequest delivers a chunked body that arrives after the head" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // readChunkedBody sizes its raw buffer from the bytes that happened to
     // arrive with the head, not from max_recv_buf. A body that lands in a later
     // segment has almost no room, so it is silently cut short.
@@ -646,8 +666,10 @@ test "zix http: processRequest delivers a chunked body that arrives after the he
 
 test "zix http: processRequest closes when the peer stops before Content-Length" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
+
     // A body cut short still caches a slice, so the unconsumed-body guard reads
     // it as consumed. The request was never completed, so the connection cannot
     // be trusted for another one.

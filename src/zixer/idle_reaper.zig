@@ -1,8 +1,11 @@
 //! zixer upstream leg: background sweep that gives aged idle conns back
 
 const std = @import("std");
+const zix = @import("zix");
 
 const upstream_conn = @import("upstream_conn.zig");
+
+const monotonic_clock = zix.utils.monotonic_clock;
 
 /// Gap between two sweeps. Half the age bound, so a conn is handed back
 /// within roughly one and a half times IDLE_TTL_MS of going quiet.
@@ -60,7 +63,7 @@ fn sweepLoop(reaper: *Reaper) void {
     while (!reaper.stop_flag.load(.acquire)) {
         if (!sleepInterval(reaper)) return;
 
-        const now_ms = nowMs(reaper.io);
+        const now_ms = monotonic_clock.nowMs(reaper.io);
         for (reaper.caches) |*cache| _ = cache.sweepExpired(reaper.io, now_ms);
     }
 }
@@ -76,10 +79,6 @@ fn sleepInterval(reaper: *Reaper) bool {
     }
 
     return true;
-}
-
-fn nowMs(io: std.Io) i64 {
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
 // --------------------------------------------------------- //
@@ -107,7 +106,7 @@ test "zix zixer: idle reaper, a quiet site gets its aged conn closed" {
 
     // Parked with a stamp already past the age bound, so the first sweep
     // takes it. No request is ever made against this site.
-    const stale_stamp = nowMs(io) - upstream_conn.IDLE_TTL_MS;
+    const stale_stamp = monotonic_clock.nowMs(io) - upstream_conn.IDLE_TTL_MS;
     const parked = upstream_conn.UpstreamConn{
         .stream = .{ .socket = .{ .handle = fds[0], .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } } } },
         .slot_index = 0,
@@ -157,7 +156,7 @@ test "zix zixer: idle reaper, stop joins promptly and leaves a fresh conn alone"
         .slot_index = 0,
         .reused = false,
     };
-    cache.release(io, parked, nowMs(io));
+    cache.release(io, parked, monotonic_clock.nowMs(io));
 
     var reaper: Reaper = undefined;
     try reaper.start(io, (&cache)[0..1]);
@@ -192,7 +191,7 @@ test "zix zixer: idle reaper, one thread sweeps every worker cache of a site" {
         _ = std.os.linux.close(fds[1]);
     };
 
-    const stale_stamp = nowMs(io) - upstream_conn.IDLE_TTL_MS;
+    const stale_stamp = monotonic_clock.nowMs(io) - upstream_conn.IDLE_TTL_MS;
     for (&pairs, &caches) |*fds, *cache| {
         try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, fds));
         cache.release(io, .{

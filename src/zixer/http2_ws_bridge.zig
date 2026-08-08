@@ -275,7 +275,10 @@ fn readClientFrame(reader: *std.Io.Reader, payload_buf: []u8) !http2_frames.Fram
 }
 
 test "zix zixer: http2 ws bridge, data frames and raw bytes cross both ways" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -334,7 +337,10 @@ test "zix zixer: http2 ws bridge, data frames and raw bytes cross both ways" {
 }
 
 test "zix zixer: http2 ws bridge, upstream end sends end stream and unblocks the client leg" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -379,7 +385,10 @@ test "zix zixer: http2 ws bridge, upstream end sends end stream and unblocks the
 }
 
 test "zix zixer: http2 ws bridge, down leg waits for window credit" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();

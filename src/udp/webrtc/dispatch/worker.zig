@@ -606,7 +606,10 @@ fn passOnce(served: *Worker, comptime handler: core.HandlerFn, socket: std.Io.ne
 test "zix webrtc: worker, a peer whose ufrag the config never named still carries a session" {
     // Both halves read common.monotonicMs, which only answers on Linux, so the sessions below are
     // driven there and the models this worker serves are Linux-only anyway.
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -618,13 +621,19 @@ test "zix webrtc: worker, a peer whose ufrag the config never named still carrie
     config.peer_ice_ufrag = "nobodybythisname";
     config.accept_any_peer_ice_ufrag = true;
 
-    const socket = common.bindSocket(config) catch return error.SkipZigTest;
+    const socket = common.bindSocket(config) catch {
+        std.log.info("the webrtc test port could not be bound, test skipped", .{});
+        return;
+    };
     defer socket.close(io);
 
     var served = try Worker.initSocket(config, socket);
     defer served.deinit();
 
-    var driver = session.Driver.init(io, TEST_ANY_UFRAG_PORT, 0) catch return error.SkipZigTest;
+    var driver = session.Driver.init(io, TEST_ANY_UFRAG_PORT, 0) catch {
+        std.log.info("the webrtc test driver could not open its socket, test skipped", .{});
+        return;
+    };
     defer driver.deinit();
 
     var rounds: usize = 0;
@@ -641,7 +650,10 @@ test "zix webrtc: worker, a peer whose ufrag the config never named still carrie
 }
 
 test "zix webrtc: worker, a broadcast reaches the room and skips the peer that sent it" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -652,7 +664,10 @@ test "zix webrtc: worker, a broadcast reaches the room and skips the peer that s
     var config = session.testConfig(io, std.testing.allocator, &tls, TEST_BROADCAST_PORT);
     config.accept_any_peer_ice_ufrag = true;
 
-    const socket = common.bindSocket(config) catch return error.SkipZigTest;
+    const socket = common.bindSocket(config) catch {
+        std.log.info("the webrtc test port could not be bound, test skipped", .{});
+        return;
+    };
     defer socket.close(io);
 
     var served = try Worker.initSocket(config, socket);
@@ -663,7 +678,10 @@ test "zix webrtc: worker, a broadcast reaches the room and skips the peer that s
     defer for (room[0..joined]) |*member| member.deinit();
 
     while (joined < room.len) : (joined += 1) {
-        room[joined] = session.Driver.init(io, TEST_BROADCAST_PORT, 0) catch return error.SkipZigTest;
+        room[joined] = session.Driver.init(io, TEST_BROADCAST_PORT, 0) catch {
+            std.log.info("the webrtc test driver could not open its socket, test skipped", .{});
+            return;
+        };
         room[joined].speak = false;
     }
 

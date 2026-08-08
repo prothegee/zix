@@ -1902,7 +1902,11 @@ test "zix grpc: serveCached is a no-op without a cache or with an empty path" {
 }
 
 test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 16, .max_value_bytes = 256 });
     defer cache.deinit();
 

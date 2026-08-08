@@ -246,7 +246,10 @@ test "zix zixer: site runtime, udp engine binds a datagram socket" {
 }
 
 test "zix zixer: site runtime, http1 with upstreams serves and unbind frees the port" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -265,7 +268,10 @@ test "zix zixer: site runtime, http1 with upstreams serves and unbind frees the 
 }
 
 test "zix zixer: site runtime, http1 static-only site serves without upstreams" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -280,7 +286,10 @@ test "zix zixer: site runtime, http1 static-only site serves without upstreams" 
 }
 
 test "zix zixer: site runtime, udp site with upstreams serves the forward" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -396,8 +405,15 @@ fn canBindPort80() bool {
 }
 
 test "zix zixer: site runtime, tls acme site binds the port 80 companion" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
-    if (!canBindPort80()) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    if (!canBindPort80()) {
+        std.log.info("binding the privileged port 80 needs a capability this run lacks, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -419,7 +435,10 @@ test "zix zixer: site runtime, tls acme site binds the port 80 companion" {
         // the companion bind cannot be exercised, skip explicitly. The
         // EACCES from a privileged bind surfaces as Unexpected through the
         // std listen error mapping.
-        if (err == error.AccessDenied or err == error.PermissionDenied or err == error.AddressInUse or err == error.Unexpected) return error.SkipZigTest;
+        if (err == error.AccessDenied or err == error.PermissionDenied or err == error.AddressInUse or err == error.Unexpected) {
+            std.log.info("binding the privileged port 80 needs a capability this run lacks, test skipped", .{});
+            return;
+        }
 
         return err;
     };

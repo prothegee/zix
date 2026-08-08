@@ -327,7 +327,7 @@ Badan loop tiap model adalah method `pass()` (satu tunggu plus apa pun yang ia b
 
 Tabel runner berisi satu baris per binary **server**, jadi `webrtc_datachannel_echo` punya baris dan `webrtc_native_pair` tidak: pair adalah client yang memanggil lalu keluar, dan pemeriksaannya menjalankan sesi yang sama in-process lewat `webrtc_client.zig`. Menjaga loop pemanggilan di satu berkas itulah yang mencegah example manual dan pemeriksaan otomatis saling menyimpang.
 
-Skip memakai `return error.SkipZigTest`, tidak pernah `catch return` diam-diam, sehingga hitungan skip di ringkasan membuktikan test sesi benar-benar berjalan.
+Skip menyebut alasannya lewat `std.log.info` lalu return biasa, tidak pernah `catch return` diam-diam dan tidak pernah `return error.SkipZigTest`, sehingga run-nya menyebut kenapa sebuah test sesi berhenti, bukan meninggalkan lubang di ringkasan.
 
 `webrtc_native_pair` tidak bisa dijalankan dua kali dalam 30 detik terhadap echo server yang sama, dan itu memang diharapkan. Pemanggil mem-bind port lokal tetap dan server mengunci peer berdasarkan 4-tuple-nya, jadi jalannya yang kedua mendarat pada peer yang ditinggalkan jalan pertama, yang sudah lewat handshake dan mengabaikan ClientHello baru. Server melepaskannya pada `peer_idle_ms`. **Jangan** "memperbaiki" ini di engine dengan memulai ulang sesi begitu ada ClientHello: dengan credential ICE tetap, server tidak bisa membedakan restart dari replay, dan restart WebRTC sungguhan datang dengan credential baru.
 

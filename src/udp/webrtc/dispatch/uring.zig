@@ -395,7 +395,10 @@ test "zix webrtc: uring, run is refused off linux and every slot arms on it" {
 
     // Skip where io_uring is unavailable (old kernel, seccomp, a locked memory cap) or the port is
     // taken. The fold to epoll covers that case in the running server.
-    var ring = Ring.init(config) catch return error.SkipZigTest;
+    var ring = Ring.init(config) catch {
+        std.log.info("io_uring is unavailable on this kernel or the test port is taken, test skipped", .{});
+        return;
+    };
     defer ring.deinit();
 
     ring.prime();
@@ -406,7 +409,10 @@ test "zix webrtc: uring, run is refused off linux and every slot arms on it" {
 }
 
 test "zix webrtc: uring, a worker carries one whole session over a real socket" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -417,12 +423,18 @@ test "zix webrtc: uring, a worker carries one whole session over a real socket" 
     var config = session.testConfig(io, std.testing.allocator, &tls, TEST_SERVER_PORT);
     config.dispatch_model = .URING;
 
-    var ring = Ring.init(config) catch return error.SkipZigTest;
+    var ring = Ring.init(config) catch {
+        std.log.info("io_uring is unavailable on this kernel or the test port is taken, test skipped", .{});
+        return;
+    };
     defer ring.deinit();
 
     ring.prime();
 
-    var driver = session.Driver.init(io, TEST_SERVER_PORT, TEST_DIALER_PORT) catch return error.SkipZigTest;
+    var driver = session.Driver.init(io, TEST_SERVER_PORT, TEST_DIALER_PORT) catch {
+        std.log.info("the webrtc test driver could not open its socket, test skipped", .{});
+        return;
+    };
     defer driver.deinit();
 
     // Every pass is one submit_and_wait plus whatever it brought, so the session is driven a pass
@@ -441,7 +453,10 @@ test "zix webrtc: uring, a worker carries one whole session over a real socket" 
 }
 
 test "zix webrtc: uring, a pass with nothing to read ends on the timeout and drops nobody" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -450,7 +465,10 @@ test "zix webrtc: uring, a pass with nothing to read ends on the timeout and dro
     var config = session.testConfig(threaded.io(), std.testing.allocator, &tls, TEST_SERVER_PORT);
     config.tick_interval_ms = 10;
 
-    var ring = Ring.init(config) catch return error.SkipZigTest;
+    var ring = Ring.init(config) catch {
+        std.log.info("io_uring is unavailable on this kernel or the test port is taken, test skipped", .{});
+        return;
+    };
     defer ring.deinit();
 
     ring.prime();

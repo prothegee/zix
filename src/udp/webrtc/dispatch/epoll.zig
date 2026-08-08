@@ -228,7 +228,10 @@ test "zix webrtc: epoll, run is refused off linux and every worker binds on it" 
 
     // On Linux the same call would never return, so what is checked here is the piece run() reaches
     // first: a worker that can actually take the socket.
-    var listener = Listener.init(config) catch return error.SkipZigTest;
+    var listener = Listener.init(config) catch {
+        std.log.info("the webrtc listener could not bind its test port, test skipped", .{});
+        return;
+    };
     defer listener.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), listener.worker.peers.live);
@@ -236,7 +239,10 @@ test "zix webrtc: epoll, run is refused off linux and every worker binds on it" 
 }
 
 test "zix webrtc: epoll, a worker carries one whole session over a real socket" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -246,10 +252,16 @@ test "zix webrtc: epoll, a worker carries one whole session over a real socket" 
     var tls = try session.testContext(std.testing.allocator);
     const config = session.testConfig(io, std.testing.allocator, &tls, TEST_SERVER_PORT);
 
-    var listener = Listener.init(config) catch return error.SkipZigTest;
+    var listener = Listener.init(config) catch {
+        std.log.info("the webrtc listener could not bind its test port, test skipped", .{});
+        return;
+    };
     defer listener.deinit();
 
-    var driver = session.Driver.init(io, TEST_SERVER_PORT, TEST_DIALER_PORT) catch return error.SkipZigTest;
+    var driver = session.Driver.init(io, TEST_SERVER_PORT, TEST_DIALER_PORT) catch {
+        std.log.info("the webrtc test driver could not open its socket, test skipped", .{});
+        return;
+    };
     defer driver.deinit();
 
     // Every pass is one epoll_wait plus whatever it brought, so the session is driven a pass at a
@@ -268,7 +280,10 @@ test "zix webrtc: epoll, a worker carries one whole session over a real socket" 
 }
 
 test "zix webrtc: epoll, a pass with nothing to read still returns and drops nobody" {
-    if (comptime builtin.target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -277,7 +292,10 @@ test "zix webrtc: epoll, a pass with nothing to read still returns and drops nob
     var config = session.testConfig(threaded.io(), std.testing.allocator, &tls, TEST_SERVER_PORT);
     config.tick_interval_ms = 10;
 
-    var listener = Listener.init(config) catch return error.SkipZigTest;
+    var listener = Listener.init(config) catch {
+        std.log.info("the webrtc listener could not bind its test port, test skipped", .{});
+        return;
+    };
     defer listener.deinit();
 
     // Nobody has written to the socket, so this waits out the tick interval and comes back.

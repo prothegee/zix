@@ -327,7 +327,7 @@ Each model's loop body is a `pass()` method (one wait plus whatever it brought),
 
 The runner table is one row per **server** binary, so `webrtc_datachannel_echo` has a row and `webrtc_native_pair` does not: the pair is a client that dials and exits, and the check drives the same session in-process through `webrtc_client.zig`. Keeping the dial loop in one file is what stops the hand-run example and the automated check from drifting.
 
-Skips are `return error.SkipZigTest`, never a silent `catch return`, so the summary's skip count proves the session tests actually ran.
+A skip names its reason with `std.log.info` and then returns plainly, never a silent `catch return` and never `return error.SkipZigTest`, so the run says why a session test stopped instead of leaving a hole in the summary.
 
 `webrtc_native_pair` cannot be run twice inside 30 seconds against the same echo server, and that is expected. The dialer binds a fixed local port and the server keys a peer by its 4-tuple, so a second run lands on the peer the first one left behind, which is past its handshake and ignores a fresh ClientHello. The server lets go at `peer_idle_ms`. Do **not** "fix" this in the engine by restarting a session on a ClientHello: with fixed ICE credentials the server cannot tell a restart from a replay, and a real WebRTC restart arrives with new credentials.
 

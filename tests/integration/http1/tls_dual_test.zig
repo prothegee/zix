@@ -185,7 +185,10 @@ fn expectCleartextOk(io: std.Io, port: u16) !void {
 }
 
 test "zix integration: Http1 dual listener EPOLL serves cleartext on port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -195,7 +198,10 @@ test "zix integration: Http1 dual listener EPOLL serves cleartext on port" {
 }
 
 test "zix integration: Http1 dual listener EPOLL serves TLS on tls_port with the same routes" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -205,7 +211,10 @@ test "zix integration: Http1 dual listener EPOLL serves TLS on tls_port with the
 }
 
 test "zix integration: Http1 dual listener URING serves cleartext on port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -215,7 +224,10 @@ test "zix integration: Http1 dual listener URING serves cleartext on port" {
 }
 
 test "zix integration: Http1 dual listener URING serves TLS on-ring on tls_port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -225,7 +237,10 @@ test "zix integration: Http1 dual listener URING serves TLS on-ring on tls_port"
 }
 
 test "zix integration: Http1 dual listener ASYNC serves cleartext on port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -235,7 +250,10 @@ test "zix integration: Http1 dual listener ASYNC serves cleartext on port" {
 }
 
 test "zix integration: Http1 dual listener ASYNC serves TLS via the extra accept thread" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -245,7 +263,10 @@ test "zix integration: Http1 dual listener ASYNC serves TLS via the extra accept
 }
 
 test "zix integration: Http1 tls_port equal to port is rejected at run" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

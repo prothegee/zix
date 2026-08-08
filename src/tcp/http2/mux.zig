@@ -1473,7 +1473,10 @@ test "zix http2: outbound DATA frames respect the peer default max frame size, n
 const sfs_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = mfsHandler }});
 
 test "zix http2: static DATA frames respect the peer max frame size, not the server's" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

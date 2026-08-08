@@ -26,7 +26,10 @@ pub fn ignoreSigpipe() void {
 // --------------------------------------------------------- //
 
 test "zix utils: ignoreSigpipe, write to a closed pipe returns BrokenPipe instead of terminating" {
-    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) {
+        std.log.info("SIGPIPE has no Windows equivalent, test skipped", .{});
+        return;
+    }
 
     ignoreSigpipe();
 

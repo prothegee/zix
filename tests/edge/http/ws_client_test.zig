@@ -22,7 +22,11 @@ test "zix edge: WsClient.connect, non-ws scheme returns InvalidUrl" {
 }
 
 test "zix edge: WsConn.send mask bit present in every frame header" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     var fds: [2]i32 = undefined;
     const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
     try std.testing.expectEqual(@as(usize, 0), result);
@@ -43,7 +47,11 @@ test "zix edge: WsConn.send mask bit present in every frame header" {
 }
 
 test "zix edge: WsConn.send empty payload, mask bit still set" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     var fds: [2]i32 = undefined;
     const result = std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds);
     try std.testing.expectEqual(@as(usize, 0), result);

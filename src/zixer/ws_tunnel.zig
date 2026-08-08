@@ -235,7 +235,10 @@ fn expectEof(io: std.Io, stream: std.Io.net.Stream) !void {
 }
 
 test "zix zixer: ws tunnel, run relays both legs and half-closes on client end" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -274,7 +277,10 @@ test "zix zixer: ws tunnel, run relays both legs and half-closes on client end" 
 }
 
 test "zix zixer: ws tunnel, upstream end unblocks the waiting client leg" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();

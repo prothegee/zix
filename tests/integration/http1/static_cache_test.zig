@@ -49,7 +49,8 @@ fn writeFixture(dir: std.Io.Dir, name: []const u8, data: []const u8) void {
 test "zix integration: Http1 router serves an unmatched path from the static cache" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         // The wire is captured through a Linux socketpair.
-        return error.SkipZigTest;
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
     }
 
     var tmp = std.testing.tmpDir(.{});
@@ -84,7 +85,10 @@ test "zix integration: Http1 router serves an unmatched path from the static cac
 }
 
 test "zix integration: Http1 router still 404s an unmatched path with no file behind it" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -114,7 +118,10 @@ test "zix integration: Http1 router still 404s an unmatched path with no file be
 }
 
 test "zix integration: Http1 router keeps routed paths ahead of the static cache" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -147,7 +154,10 @@ test "zix integration: Http1 router keeps routed paths ahead of the static cache
 }
 
 test "zix integration: Http1 router repeats a cached file byte for byte across requests" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -184,7 +194,10 @@ test "zix integration: Http1 router repeats a cached file byte for byte across r
 }
 
 test "zix integration: Http1 router serves the same file uncached when no cache is installed" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

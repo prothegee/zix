@@ -132,7 +132,11 @@ test "zix edge: GrpcClient.connect port zero returns PortNotConfigured" {
 }
 
 test "zix edge: gRPC serveConn closes cleanly on immediate client disconnect" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -150,7 +154,10 @@ test "zix edge: gRPC serveConn closes cleanly on immediate client disconnect" {
 }
 
 test "zix edge: gRPC finish-only handler delivers error status to client" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });

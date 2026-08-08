@@ -408,7 +408,10 @@ fn wake(io: std.Io, ip: []const u8, port: u16) void {
 const port_probe = @import("port_probe.zig");
 
 test "zix zixer: site serve, create binds a thread and shutdown frees the port" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -431,7 +434,10 @@ test "zix zixer: site serve, create binds a thread and shutdown frees the port" 
 }
 
 test "zix zixer: site serve, static-only site runs without a pool" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -492,7 +498,10 @@ test "zix zixer: site serve, tls site create refuses a missing cert file" {
 }
 
 test "zix zixer: site serve, tls site terminates and serves the static plane" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -594,7 +603,10 @@ test "zix zixer: site serve, tls site terminates and serves the static plane" {
 }
 
 test "zix zixer: site serve, the cfg read bound reaches the state and starts a reaper" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -622,7 +634,10 @@ test "zix zixer: site serve, the cfg read bound reaches the state and starts a r
 }
 
 test "zix zixer: site serve, a site without upstreams takes the default and no reaper" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

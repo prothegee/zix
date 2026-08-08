@@ -18,6 +18,8 @@ const upstream_conn = @import("upstream_conn.zig");
 const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
+const monotonic_clock = zix.utils.monotonic_clock;
+
 const Http2 = zix.Http2;
 
 /// Streams the edge holds while one is being served, advertised as
@@ -624,15 +626,15 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
     while (attempts > 0) : (attempts -= 1) {
-        const picked = pool.pick(nowMs(io)) orelse {
+        const picked = pool.pick(monotonic_clock.nowMs(io)) orelse {
             if (failed_here) break;
 
             return if (localAnswer(conn, active.id, 503, "destination_unavailable") == .CLOSED) .CONN_DEAD else .DONE;
         };
 
-        const conn_up = idle.acquire(io, picked.index, nowMs(io)) orelse
+        const conn_up = idle.acquire(io, picked.index, monotonic_clock.nowMs(io)) orelse
             upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
-            pool.markDown(picked.index, nowMs(io));
+            pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
         };
@@ -643,7 +645,7 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
 
         up_writer.interface.writeAll(upstream_head) catch {
             conn_up.stream.close(io);
-            if (!conn_up.reused) pool.markDown(picked.index, nowMs(io));
+            if (!conn_up.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
         };
@@ -674,7 +676,7 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
         up_writer.interface.flush() catch {
             conn_up.stream.close(io);
             if (!entry.needs_body) {
-                if (!conn_up.reused) pool.markDown(picked.index, nowMs(io));
+                if (!conn_up.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
                 failed_here = true;
                 continue;
             }
@@ -696,7 +698,7 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
                 else => {},
             }
             if (!entry.needs_body) {
-                if (!conn_up.reused) pool.markDown(picked.index, nowMs(io));
+                if (!conn_up.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
                 failed_here = true;
                 continue;
             }
@@ -793,7 +795,7 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
     };
 
     const reusable = !relay_failed and !response.connection_close and response.framing != .until_close;
-    if (reusable) conn.proxy.idle.?.release(io, conn_up, nowMs(io)) else conn_up.stream.close(io);
+    if (reusable) conn.proxy.idle.?.release(io, conn_up, monotonic_clock.nowMs(io)) else conn_up.stream.close(io);
 
     return relay_result;
 }
@@ -1117,15 +1119,15 @@ fn serveConnect(conn: *Conn) Outcome {
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
     while (attempts > 0) : (attempts -= 1) {
-        const picked = pool.pick(nowMs(io)) orelse {
+        const picked = pool.pick(monotonic_clock.nowMs(io)) orelse {
             if (failed_here) break;
 
             return if (localAnswer(conn, active.id, 503, "destination_unavailable") == .CLOSED) .CONN_DEAD else .DONE;
         };
 
-        const conn_up = idle.acquire(io, picked.index, nowMs(io)) orelse
+        const conn_up = idle.acquire(io, picked.index, monotonic_clock.nowMs(io)) orelse
             upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
-            pool.markDown(picked.index, nowMs(io));
+            pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
         };
@@ -1140,7 +1142,7 @@ fn serveConnect(conn: *Conn) Outcome {
         };
         if (!sent) {
             conn_up.stream.close(io);
-            if (!conn_up.reused) pool.markDown(picked.index, nowMs(io));
+            if (!conn_up.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
         }
@@ -1154,7 +1156,7 @@ fn serveConnect(conn: *Conn) Outcome {
 
         const head_bytes = http1_head.readHead(&up_reader.interface, &resp_head_buf) catch {
             conn_up.stream.close(io);
-            if (!conn_up.reused) pool.markDown(picked.index, nowMs(io));
+            if (!conn_up.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
         };
@@ -1321,10 +1323,6 @@ fn unlockWrite(conn: *Conn) void {
 /// The read bound for one upstream leg of this site.
 fn upstreamGate(conn: *Conn, conn_up: upstream_conn.UpstreamConn) upstream_deadline.Gate {
     return .{ .stream = conn_up.stream, .budget_ms = conn.proxy.upstream_timeout_ms };
-}
-
-fn nowMs(io: std.Io) i64 {
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
 // --------------------------------------------------------- //
@@ -1740,7 +1738,10 @@ fn buildClientWire(buf: []u8, headers: []const Http2.Header) ![]const u8 {
 }
 
 test "zix zixer: http2 edge, preface sniff serves h2 and falls back to h1" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1785,7 +1786,10 @@ test "zix zixer: http2 edge, preface sniff serves h2 and falls back to h1" {
 }
 
 test "zix zixer: http2 edge, get proxies end to end and reuses the upstream conn" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1856,7 +1860,10 @@ test "zix zixer: http2 edge, get proxies end to end and reuses the upstream conn
 }
 
 test "zix zixer: http2 edge, post with content length reaches the upstream intact" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1907,7 +1914,10 @@ test "zix zixer: http2 edge, post with content length reaches the upstream intac
 }
 
 test "zix zixer: http2 edge, post without length re-frames as chunked" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1958,7 +1968,10 @@ test "zix zixer: http2 edge, post without length re-frames as chunked" {
 }
 
 test "zix zixer: http2 edge, queued streams answer in order and pick per stream" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2019,7 +2032,10 @@ test "zix zixer: http2 edge, queued streams answer in order and pick per stream"
 }
 
 test "zix zixer: http2 edge, big body crosses the flow windows complete" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2086,7 +2102,10 @@ test "zix zixer: http2 edge, big body crosses the flow windows complete" {
 }
 
 test "zix zixer: http2 edge, extended connect tunnels through the h1 upgrade" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2160,7 +2179,10 @@ test "zix zixer: http2 edge, extended connect tunnels through the h1 upgrade" {
 }
 
 test "zix zixer: http2 edge, refused upgrade relays the plain response" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2212,7 +2234,10 @@ test "zix zixer: http2 edge, refused upgrade relays the plain response" {
 }
 
 test "zix zixer: http2 edge, static plane serves files head and misses" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2284,7 +2309,10 @@ test "zix zixer: http2 edge, static plane serves files head and misses" {
 }
 
 test "zix zixer: http2 edge, tls certificate gate answers 421 on a foreign authority" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2332,7 +2360,10 @@ test "zix zixer: http2 edge, tls certificate gate answers 421 on a foreign autho
 }
 
 test "zix zixer: http2 edge, malformed stream resets and the connection survives" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2373,7 +2404,10 @@ test "zix zixer: http2 edge, malformed stream resets and the connection survives
 }
 
 test "zix zixer: http2 edge, client goaway drains and closes the connection" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2425,7 +2459,10 @@ const SilentBackend = struct {
 };
 
 test "zix zixer: http2 edge, a silent upstream answers 504 with proxy status" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();

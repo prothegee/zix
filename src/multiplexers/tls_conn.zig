@@ -286,7 +286,10 @@ fn setNonBlockTest(fd: posix.fd_t) void {
 }
 
 test "zix multiplexers: tls_conn, sendRaw writes through when the socket has room" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
@@ -306,7 +309,10 @@ test "zix multiplexers: tls_conn, sendRaw writes through when the socket has roo
 }
 
 test "zix multiplexers: tls_conn, backpressure stages then onWritable flushes in order" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var pair: [2]posix.fd_t = undefined;
     try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
@@ -359,7 +365,10 @@ test "zix multiplexers: tls_conn, backpressure stages then onWritable flushes in
 }
 
 test "zix multiplexers: tls_conn, stageWrite grows past wbuf_initial and keeps live bytes" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     // fd -1: every write fails, but stageWrite is exercised directly so no write happens.
     var transport = Transport{ .fd = -1, .tls = undefined, .wbuf_initial = 32 };
@@ -377,7 +386,10 @@ test "zix multiplexers: tls_conn, stageWrite grows past wbuf_initial and keeps l
 }
 
 test "zix multiplexers: tls_conn, ConnTable put get drop frees through free_conn" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     const Probe = struct {
         transport: Transport,

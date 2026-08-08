@@ -50,7 +50,11 @@ fn clientConnect(io: std.Io, port: u16) !std.posix.fd_t {
 // --------------------------------------------------------- //
 
 test "zix edge: bad PRI preface causes server to close connection" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
@@ -73,7 +77,11 @@ test "zix edge: bad PRI preface causes server to close connection" {
 }
 
 test "zix edge: client sends GOAWAY and server connection loop exits" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
+
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
