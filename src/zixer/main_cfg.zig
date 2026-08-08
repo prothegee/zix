@@ -8,6 +8,7 @@ const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const fault = @import("fault.zig");
 const process_gate = @import("process_gate.zig");
+const static_cached = @import("static_cached.zig");
 
 /// Dispatch enum is the zix one, so the daemon hands it straight to the engines.
 pub const Dispatch = zix.Http1.DispatchModel;
@@ -28,6 +29,12 @@ pub const MainCfg = struct {
     process_queue_len: usize = 0,
     /// How long a waiting request holds on before the edge answers 504.
     process_queue_timeout_ms: u32 = process_gate.DEFAULT_TIMEOUT_MS,
+    /// How long a cached public_dir file stays fresh. 0 keeps caching off, so
+    /// every static request re-opens and re-stats the file.
+    public_dir_cache_ttl_ms: u32 = static_cached.DEFAULT_TTL_MS,
+    /// Files the shared cache may hold. Daemon-wide on purpose: there is one
+    /// table per process and its size is fixed the first time a site needs it.
+    public_dir_cache_max_entries: u32 = static_cached.DEFAULT_MAX_ENTRIES,
 };
 
 /// Known main.cfg keys. Field names mirror the cfg key strings exactly so
@@ -42,6 +49,8 @@ const Key = enum {
     process_limit,
     process_queue_len,
     process_queue_timeout_ms,
+    public_dir_cache_ttl_ms,
+    public_dir_cache_max_entries,
 };
 
 /// Parse and validate main.cfg content.
@@ -192,6 +201,34 @@ pub fn parse(
                 }
 
                 cfg.process_queue_timeout_ms = timeout_ms;
+            },
+            .public_dir_cache_ttl_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const ttl_ms = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the cache off", .{static_cached.MAX_TTL_MS});
+                    continue;
+                };
+
+                if (!static_cached.ttlInRange(ttl_ms)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the cache off", .{static_cached.MAX_TTL_MS});
+                    continue;
+                }
+
+                cfg.public_dir_cache_ttl_ms = ttl_ms;
+            },
+            .public_dir_cache_max_entries => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const entries = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 1-{d} files", .{static_cached.MAX_ENTRIES});
+                    continue;
+                };
+
+                if (!static_cached.maxEntriesInRange(entries)) {
+                    try faults.add(entry.key, "must be 1-{d} files", .{static_cached.MAX_ENTRIES});
+                    continue;
+                }
+
+                cfg.public_dir_cache_max_entries = entries;
             },
         }
     }
@@ -489,6 +526,98 @@ test "zix zixer: main cfg, the process gate ceilings are accepted" {
     try std.testing.expectEqual(process_gate.MAX_SLOTS, cfg.process_limit);
     try std.testing.expectEqual(process_gate.MAX_SLOTS, cfg.process_queue_len);
     try std.testing.expectEqual(process_gate.MAX_TIMEOUT_MS, cfg.process_queue_timeout_ms);
+}
+
+test "zix zixer: main cfg, the static cache defaults to off with room reserved" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 0), cfg.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(static_cached.DEFAULT_MAX_ENTRIES, cfg.public_dir_cache_max_entries);
+}
+
+test "zix zixer: main cfg, the static cache keys parse with math values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(
+        arena.allocator(),
+        "public_dir_cache_ttl_ms: 5 * 1000\npublic_dir_cache_max_entries: 4 * 256\n",
+        "/srv/zixer",
+        8,
+        &faults,
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 5000), cfg.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(@as(u32, 1024), cfg.public_dir_cache_max_entries);
+}
+
+test "zix zixer: main cfg, entries stay meaningful while the window is off" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Unlike a process queue with no limit, this pair is not dead config: a
+    // site may switch its own window on and the entry count is what it gets.
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "public_dir_cache_max_entries: 64\n", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 0), cfg.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(@as(u32, 64), cfg.public_dir_cache_max_entries);
+}
+
+test "zix zixer: main cfg, static cache values above their ceilings fault" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var content_buf: [160]u8 = undefined;
+    const content = try std.fmt.bufPrint(&content_buf, "public_dir_cache_ttl_ms: {d}\npublic_dir_cache_max_entries: {d}\n", .{
+        static_cached.MAX_TTL_MS + 1,
+        static_cached.MAX_ENTRIES + 1,
+    });
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 2), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 0), cfg.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(static_cached.DEFAULT_MAX_ENTRIES, cfg.public_dir_cache_max_entries);
+}
+
+test "zix zixer: main cfg, a zero entry count faults and keeps the default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "public_dir_cache_max_entries: 0\n", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try std.testing.expectEqualStrings("public_dir_cache_max_entries", faults.slice()[0].key);
+    try std.testing.expectEqual(static_cached.DEFAULT_MAX_ENTRIES, cfg.public_dir_cache_max_entries);
+}
+
+test "zix zixer: main cfg, the static cache ceilings are accepted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var content_buf: [160]u8 = undefined;
+    const content = try std.fmt.bufPrint(&content_buf, "public_dir_cache_ttl_ms: {d}\npublic_dir_cache_max_entries: {d}\n", .{
+        static_cached.MAX_TTL_MS,
+        static_cached.MAX_ENTRIES,
+    });
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(static_cached.MAX_TTL_MS, cfg.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(static_cached.MAX_ENTRIES, cfg.public_dir_cache_max_entries);
 }
 
 test "zix zixer: main cfg, dispatch names round trip" {
