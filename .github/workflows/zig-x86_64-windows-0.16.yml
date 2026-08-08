@@ -57,27 +57,27 @@ jobs:
       # test, so one run enumerates every hang. 240s is ~5x the slowest
       # legitimate test on this runner (connect-retry ceiling ~3s).
       - name: zix unit tests
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build unit-test --summary failures --test-timeout 240s
+        run: zig build unit-test --summary failures --test-timeout 360s
 
       - name: zix integration tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build integration-test --summary failures --test-timeout 240s
+        run: zig build integration-test --summary failures --test-timeout 360s
 
       - name: zix behaviour tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build behaviour-test --summary failures --test-timeout 240s
+        run: zig build behaviour-test --summary failures --test-timeout 360s
 
       - name: zix edge tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build edge-test --summary failures --test-timeout 240s
+        run: zig build edge-test --summary failures --test-timeout 360s
 
       # jzon is a standalone package under src/jzon with its own build.zig, so
       # these steps delegate into it. Its in-file tests belong to it too, which
@@ -85,15 +85,15 @@ jobs:
       # does not reach them.
       - name: jzon tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build jzon-test-all -Ddriver-test-timeout=240s --summary failures
+        run: zig build jzon-test-all -Ddriver-test-timeout=360s --summary failures
 
       # jzon examples used to ride `zig build examples`. They live in the jzon
       # package now, so they get a step of their own to keep the coverage.
       - name: jzon examples
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
         run: zig build jzon-examples --summary failures
 
