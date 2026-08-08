@@ -174,7 +174,7 @@ zig build examples                 # all of them
 zig build example-serialize        # one of them
 ```
 
-Or from the repo root with `zig build jzon-examples`. The binaries land in `src/jzon/zig-out/bin` as `jzon-example-<name>-<arch>-<os>`.
+Or from the repo root with `zig build jzon-examples`. The binaries land in `src/jzon/zig-out/bin` as `jzon-example-<name>-<arch>-<os>-<optimize>`, where the mode is `debug` unless `-Doptimize` says otherwise.
 
 The two bench examples want `-Doptimize=ReleaseFast`. A Debug build measures the safety checks rather than the paths.
 
