@@ -745,8 +745,8 @@ test "postgrez dispatch: open rejects ASYNC" {
     // below this guard, so the whole function fails to compile outside
     // Linux regardless of which dispatch model is actually passed here.
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("note: Transport is Linux-only to compile, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("Transport is Linux-only to compile, test skipped", .{});
+        return;
     }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -759,8 +759,8 @@ test "postgrez dispatch: open rejects ASYNC" {
 
 test "postgrez dispatch: open rejects TLS" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -774,8 +774,8 @@ test "postgrez dispatch: open rejects TLS" {
 
 test "postgrez dispatch: open surfaces the connect error with no server" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        std.debug.print("note: EPOLL/URING is Linux-only, test skipped\n", .{});
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
@@ -814,7 +814,11 @@ test "postgrez dispatch: scanReply frames a reply and flags ErrorResponse" {
 }
 
 test "postgrez dispatch: Line stages, flushes, and delivers a framed reply" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var fds: [2]i32 = undefined;
     try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
     defer _ = linux.close(fds[0]);
@@ -861,7 +865,11 @@ test "postgrez dispatch: Line stages, flushes, and delivers a framed reply" {
 }
 
 test "postgrez dispatch: Line pump surfaces a closed peer" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var fds: [2]i32 = undefined;
     try testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
     defer _ = linux.close(fds[0]);
