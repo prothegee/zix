@@ -9,8 +9,12 @@
 //! - SHUT_RD only, never SHUT_RDWR. A full shutdown wakes the same read but also takes the send side
 //!   away, which is the difference between a caller that can still write its own reply on the way out
 //!   and one that cannot.
-//! - Windows has no shutdown() over the raw AFD endpoints std opens for a socket, the equivalent is
-//!   windows_io's partial-disconnect ioctl with only the receive direction set.
+//! - Windows never completes a receive already parked in the kernel on a receive-only disconnect
+//!   (documented winsock SD_RECEIVE behavior: it only disallows later receives), so the cut there
+//!   is windows_io's partial-disconnect ioctl plus a cancel of every request pending on the handle.
+//!   windows_io.readOnce reports both completions as end-of-stream. A std reader cannot (zig 0.16
+//!   and 0.17 both treat a cancelled receive as unreachable), so a read that must survive a cut on
+//!   Windows goes through windows_io.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -68,8 +72,17 @@ test "zix utils: socket_cut shutdownRead wakes a parked read and leaves the writ
         var woke_at_eof: bool = false;
 
         // The client never sends anything, so this read has nowhere to wake from except the cut.
+        // On Windows it parks in windows_io.readOnce, the engines' read path there and the only
+        // one that reports a cancelled receive as end-of-stream (a std reader treats it as
+        // unreachable on zig 0.16 and 0.17).
         fn run(stream: std.Io.net.Stream, parked_io: std.Io) void {
             var buf: [1]u8 = undefined;
+            if (comptime is_windows) {
+                const n = win_io.readOnce(stream.socket.handle, &buf) catch return;
+                woke_at_eof = (n == 0);
+                return;
+            }
+
             var reader = stream.reader(parked_io, &buf);
             reader.interface.readSliceAll(&buf) catch |err| {
                 woke_at_eof = (err == error.EndOfStream);
@@ -117,7 +130,15 @@ test "zix utils: socket_cut shutdownRead on an already-cut socket is a no-op" {
     shutdownRead(accepted.socket.handle);
     shutdownRead(accepted.socket.handle);
 
+    // On Windows a receive issued after the cut fails as PIPE_DISCONNECTED, which only
+    // windows_io.readOnce reports as end-of-stream.
     var read_buf: [1]u8 = undefined;
+    if (comptime is_windows) {
+        const n = try win_io.readOnce(accepted.socket.handle, &read_buf);
+        try std.testing.expect(n == 0);
+        return;
+    }
+
     var reader = accepted.reader(io, &read_buf);
     try std.testing.expectError(error.EndOfStream, reader.interface.readSliceAll(&read_buf));
 }
