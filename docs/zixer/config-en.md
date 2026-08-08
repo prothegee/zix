@@ -70,6 +70,9 @@ Anything the grammar cannot read is a fault, never a silent skip:
 | sites_dir | `<root>/sites` | where site `.cfg` files are read from | every `list`, `status`, `start`, and `restart` | a missing directory faults, and no site is found |
 | kernel_backlog | `1024` | default listen queue length for tcp site listeners | http1, http2, and grpc sites without their own value, plus the acme companion listener | `0` faults, the kernel still caps the value at `net.core.somaxconn` |
 | max_recv_buf | `8192` | bytes one per-connection stream buffer gets, see below | http1, http2, grpc, and TLS sites, as the default a site file may override | outside `1024` to `262144` it faults and stays at the default |
+| process_limit | `0` | requests one site may run upstream at once, `0` turns the gate off, see below | every proxied site, as the default a site file may override | above `65536` it faults and stays at the default |
+| process_queue_len | `0` | requests that may wait for a slot, `0` refuses instead of queueing | with `process_limit` above `0` | above `65536` it faults, and a value above `0` with `process_limit: 0` faults |
+| process_queue_timeout_ms | `6000` | how long one request waits before the edge answers 504 | with `process_queue_len` above `0` | outside `1` to `600000` it faults and stays at the default |
 
 Only `dispatch` is validated without being applied. A blank `main.cfg` is valid: every key falls back to the defaults above.
 
@@ -79,7 +82,7 @@ A started tcp site runs `workers` accept loops instead of one. Each loop holds
 its own listener on the site's port, and the kernel hands each of them a share
 of the arriving connections, so accepting stops being one thread's job.
 
-- `workers: 0` means every thread this process may run on. On Linux that is read from the process affinity mask, so a daemon pinned to a cpuset gets the cores it was given, not the ones the machine has. A container limited by a cpu quota rather than a cpuset should name a count instead.
+- `workers: 0` means every thread this process may run on. On Linux that is read from the process affinity mask, so a daemon pinned to a cpuset gets the cores it was given, not the ones the machine has. A container limited by a cpu quota rather than a cpuset should name a count instead. This is what `zixer init` writes, and the default above is what an absent key falls back to.
 - Each loop also owns its own upstream pool and idle connection cache. The site's idle bound is divided between them, so a backend never loses more of its capacity because the edge runs more loops.
 - `zixer status` prints the resolved count beside the configured one whenever they differ, i.e. `workers: 0 (resolved to 12)`.
 - The count is read once, when the daemon starts. Editing `main.cfg` and restarting a single site does not change it, the daemon has to be restarted.
@@ -118,6 +121,54 @@ connection: 62.7 KiB at `1024`, 64.7 KiB at `2048`, 76.7 KiB at `8192`, and
 124.7 KiB at `32768`. The proxied site is 112.7, 116.8, 140.8, and 236.8 KiB
 at the same four values.
 
+### What the process gate does
+
+The three `process_` keys are one overload valve. `process_limit` is how many
+requests a site may have running against its backends at any moment,
+`process_queue_len` is how many more may wait for a free slot, and
+`process_queue_timeout_ms` is how long one of them may wait.
+
+Past both, the edge answers:
+
+```
+HTTP/1.1 504 upstream queue full
+Proxy-Status: zixer; error="connection_limit_reached"
+```
+
+and a request that waited its whole budget gets `504 upstream queue timeout`
+with the same `Proxy-Status`.
+
+Size `process_limit` by what the backend can absorb, not by what this machine
+can run. That is why the count is per site and shared by every worker: with
+`workers: 0` the loop count follows the machine's thread count, and the
+backend does not care how many threads zixer happens to have.
+
+- `0` is the gate off, and is the default. A site that never sets it behaves exactly as it did before the keys existed.
+- `process_limit` with `process_queue_len: 0` is a valid choice: run this many, refuse the rest at once. That sheds load in microseconds instead of holding connections open.
+- `process_queue_len` above `0` with `process_limit: 0` is refused, because without a limit nothing ever queues and the line would silently do nothing.
+- The range is `0` to `65536` for both counts, and `1` to `600000` ms for the wait.
+- A site file may name any of the three, and each one falls back to the main.cfg value on its own.
+- A static request never enters the gate. It has no backend to spend, so `public_dir` keeps answering at full rate while the proxy plane is saturated.
+
+Where a request gives its slot back depends on how long its exchange lives:
+
+| engine | slot held until |
+| :- | :- |
+| http1 | the response is fully relayed |
+| http2 | that stream's response is fully relayed |
+| http3 | that stream's response is fully relayed |
+| grpc | the request block reaches the upstream, the stream then runs outside the gate |
+| websocket | the 101 is relayed, the tunnel then runs outside the gate |
+
+A websocket tunnel and a grpc stream live as long as their client, so they
+release at handover. Holding a slot for a whole tunnel would let a handful of
+open sockets pin the site's capacity with the backend sitting idle.
+
+grpc differs one more way: it never queues. Its frame loop pumps every live
+stream on the connection, so parking it to wait would stall work already
+running. At the limit a new grpc stream gets a trailers-only `UNAVAILABLE`,
+which is what a grpc client retries on.
+
 ### Keys that are validated but not applied yet
 
 `dispatch` is parsed, range-checked, and printed by `zixer status`, and nothing in the serving path reads it. `dispatch: async`, `dispatch: epoll`, and `dispatch: uring` all serve through the same edge loops, where each accept loop dispatches every connection as a concurrent task.
@@ -147,6 +198,9 @@ One file, one site. `engine` and `port` are required, everything else has a defa
 | kernel_backlog | main.cfg value | listen queue length for this site | http1, http2, grpc, refused on udp, accepted but unused on http3 | `0` faults |
 | max_recv_buf | main.cfg value | bytes one per-connection stream buffer gets | http1, http2, grpc, and TLS sites | outside `1024` to `262144` it faults and the site falls back to the main.cfg value |
 | upstream_timeout_ms | `30000` | how long the edge waits on a silent upstream before answering 504 | http1, http2, http3, refused on grpc and udp | needs `upstreams`, `0` waits forever, above 4294967295 faults |
+| process_limit | main.cfg value | requests this site may run upstream at once, `0` turns the gate off for this site | http1, http2, grpc, http3, refused on udp | needs `upstreams`, above `65536` faults |
+| process_queue_len | main.cfg value | requests that may wait for a slot | same as `process_limit` | needs `upstreams`, refused on udp, and a value above `0` with `process_limit: 0` on the same file faults |
+| process_queue_timeout_ms | main.cfg value | how long one request waits before the edge answers 504 | same as `process_limit` | needs `upstreams`, refused on udp, outside `1` to `600000` faults |
 
 `ip` and `port` together decide the listening socket. `0.0.0.0` binds every interface, `127.0.0.1` binds loopback only, `::` binds every IPv6 interface.
 
@@ -212,6 +266,7 @@ Set `upstream_timeout_ms: 0` on a site whose backend legitimately thinks for lon
 | kernel_backlog | yes | yes | yes | accepted, no effect | refused |
 | max_recv_buf | sizes the stream buffers | sizes the stream buffers | sizes the stream buffers | accepted, no effect | accepted, no effect |
 | upstream_timeout_ms | yes | yes | refused | yes | refused |
+| process_limit, process_queue_len, process_queue_timeout_ms | yes | yes | yes, setup only and never queues | yes | refused |
 
 "Refused" means the key faults with a fix hint and the site does not start. "Accepted, no effect" means the file validates clean and nothing reads the value.
 
@@ -239,7 +294,9 @@ Every rule below is checked after the whole file is read, so one pass reports ev
 | `public_dir` or `upstream_timeout_ms` on a grpc site | `not supported on grpc sites, remove it` |
 | `upstream_timeout_ms` on a site with no upstreams | `needs upstreams` |
 | `tls` on a udp site | `udp forward is blind bytes, tls does not apply` |
-| `public_dir`, `kernel_backlog`, `upstream_timeout_ms`, or acme keys on a udp site | `does not apply to udp sites, remove it` |
+| `public_dir`, `kernel_backlog`, `upstream_timeout_ms`, the `process_` keys, or acme keys on a udp site | `does not apply to udp sites, remove it` |
+| any `process_` key on a site with no upstreams | `needs upstreams` |
+| `process_queue_len` above `0` while `process_limit` is `0` | `needs process_limit above 0, otherwise nothing ever queues` |
 
 The `spa_fallback` prefix rule exists so a backend miss never disappears into the fallback page: without a prefix bound to the static plane, every 404 from an upstream would answer as the app shell instead.
 
@@ -260,6 +317,7 @@ logs_dir: /srv/zixer/logs
 sites_dir: /srv/zixer/sites
 max_recv_buf: 8192
 kernel_backlog: 1024
+process_limit: 0 (gate off)
 
 # /srv/zixer/sites/api.cfg
 api.cfg:

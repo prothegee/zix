@@ -70,6 +70,9 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 | sites_dir | `<root>/sites` | tempat file `.cfg` site dibaca | tiap `list`, `status`, `start`, dan `restart` | direktori yang hilang menjadi fault, dan tidak ada site yang ditemukan |
 | kernel_backlog | `1024` | panjang listen queue default untuk listener site tcp | site http1, http2, dan grpc yang tidak punya nilai sendiri, plus listener companion acme | `0` fault, kernel tetap membatasi nilainya di `net.core.somaxconn` |
 | max_recv_buf | `8192` | jumlah byte untuk satu stream buffer per koneksi, lihat di bawah | site http1, http2, grpc, dan TLS, sebagai default yang boleh ditimpa file site | di luar `1024` sampai `262144` ia fault dan tetap di default |
+| process_limit | `0` | request yang boleh satu site jalankan ke upstream sekaligus, `0` mematikan gate, lihat di bawah | tiap site yang di-proxy, sebagai default yang boleh ditimpa file site | di atas `65536` ia fault dan tetap di default |
+| process_queue_len | `0` | request yang boleh menunggu slot, `0` menolak alih-alih mengantre | dengan `process_limit` di atas `0` | di atas `65536` ia fault, dan nilai di atas `0` dengan `process_limit: 0` juga fault |
+| process_queue_timeout_ms | `6000` | berapa lama satu request menunggu sebelum edge menjawab 504 | dengan `process_queue_len` di atas `0` | di luar `1` sampai `600000` ia fault dan tetap di default |
 
 Hanya `dispatch` yang divalidasi tanpa dipakai. `main.cfg` kosong tetap valid: tiap key jatuh ke default di atas.
 
@@ -80,7 +83,7 @@ loop memegang listener-nya sendiri di port site itu, dan kernel memberi tiap
 listener sebagian dari koneksi yang datang, jadi menerima koneksi tidak lagi
 menjadi pekerjaan satu thread saja.
 
-- `workers: 0` berarti semua thread yang boleh dipakai proses ini. Di Linux nilainya dibaca dari affinity mask proses, jadi daemon yang di-pin ke sebuah cpuset mendapat core yang diberikan padanya, bukan core yang dimiliki mesin. Container yang dibatasi cpu quota, bukan cpuset, sebaiknya menyebut angkanya langsung.
+- `workers: 0` berarti semua thread yang boleh dipakai proses ini. Di Linux nilainya dibaca dari affinity mask proses, jadi daemon yang di-pin ke sebuah cpuset mendapat core yang diberikan padanya, bukan core yang dimiliki mesin. Container yang dibatasi cpu quota, bukan cpuset, sebaiknya menyebut angkanya langsung. Inilah yang ditulis `zixer init`, dan default di tabel atas adalah nilai yang dipakai saat key-nya tidak ada.
 - Tiap loop juga memiliki upstream pool dan idle connection cache sendiri. Batas idle milik site dibagi di antara mereka, jadi backend tidak pernah kehilangan kapasitas lebih banyak hanya karena edge menjalankan lebih banyak loop.
 - `zixer status` mencetak nilai hasil resolusi di samping nilai config setiap kali keduanya berbeda, misalnya `workers: 0 (resolved to 12)`.
 - Nilainya dibaca sekali, saat daemon start. Mengubah `main.cfg` lalu restart satu site tidak mengubahnya, daemon-nya yang harus di-restart.
@@ -121,6 +124,58 @@ ditahan: 62,7 KiB di `1024`, 64,7 KiB di `2048`, 76,7 KiB di `8192`, dan
 124,7 KiB di `32768`. Site yang di-proxy adalah 112,7, 116,8, 140,8, dan
 236,8 KiB pada empat nilai yang sama.
 
+### Apa yang dilakukan process gate
+
+Tiga key `process_` adalah satu katup beban. `process_limit` adalah berapa
+request yang boleh satu site jalankan ke backend-nya pada satu saat,
+`process_queue_len` adalah berapa lagi yang boleh menunggu slot kosong, dan
+`process_queue_timeout_ms` adalah berapa lama satu request boleh menunggu.
+
+Lewat keduanya, edge menjawab:
+
+```
+HTTP/1.1 504 upstream queue full
+Proxy-Status: zixer; error="connection_limit_reached"
+```
+
+dan request yang habis seluruh jatah tunggunya mendapat
+`504 upstream queue timeout` dengan `Proxy-Status` yang sama.
+
+Ukur `process_limit` dari apa yang sanggup diserap backend, bukan dari apa
+yang sanggup dijalankan mesin ini. Karena itu angkanya per site dan dipakai
+bersama oleh semua worker: dengan `workers: 0` jumlah loop mengikuti jumlah
+thread mesin, dan backend tidak peduli berapa thread yang kebetulan dimiliki
+zixer.
+
+- `0` berarti gate mati, dan itu default-nya. Site yang tidak pernah menyetelnya berperilaku persis seperti sebelum key ini ada.
+- `process_limit` dengan `process_queue_len: 0` adalah pilihan yang sah: jalankan sebanyak ini, tolak sisanya seketika. Itu membuang beban dalam hitungan mikrodetik alih-alih menahan koneksi tetap terbuka.
+- `process_queue_len` di atas `0` dengan `process_limit: 0` ditolak, karena tanpa limit tidak ada request yang pernah mengantre dan antreannya diam-diam tidak melakukan apa pun.
+- Rentangnya `0` sampai `65536` untuk kedua hitungan, dan `1` sampai `600000` ms untuk waktu tunggu.
+- File site boleh menyebut salah satu dari ketiganya, dan masing-masing jatuh ke nilai main.cfg sendiri-sendiri.
+- Request static tidak pernah masuk gate. Ia tidak punya backend untuk dipakai, jadi `public_dir` tetap menjawab pada laju penuh sementara jalur proxy jenuh.
+
+Kapan sebuah request mengembalikan slot-nya bergantung pada seberapa panjang
+umur pertukarannya:
+
+| engine | slot ditahan sampai |
+| :- | :- |
+| http1 | response selesai direlay |
+| http2 | response stream itu selesai direlay |
+| http3 | response stream itu selesai direlay |
+| grpc | blok request sampai di upstream, stream-nya lalu berjalan di luar gate |
+| websocket | 101 selesai direlay, tunnel-nya lalu berjalan di luar gate |
+
+Tunnel websocket dan stream grpc hidup selama client-nya hidup, jadi keduanya
+melepas slot saat serah terima. Menahan slot selama satu tunnel penuh akan
+membuat segelintir socket terbuka mengunci kapasitas site sementara backend
+menganggur.
+
+grpc berbeda satu hal lagi: ia tidak pernah mengantre. Frame loop-nya memompa
+setiap stream yang hidup di koneksi itu, jadi memarkirnya untuk menunggu akan
+menahan pekerjaan yang sudah berjalan. Pada batasnya, stream grpc baru
+mendapat `UNAVAILABLE` trailers-only, yang memang menjadi sinyal retry bagi
+client grpc.
+
 ### Key yang divalidasi tapi belum dipakai
 
 `dispatch` di-parse, dicek rentangnya, dan dicetak oleh `zixer status`, dan tidak ada satu pun jalur serving yang membacanya. `dispatch: async`, `dispatch: epoll`, dan `dispatch: uring` semuanya melayani lewat edge loop yang sama, dan tiap accept loop menjalankan tiap koneksi sebagai task bersamaan.
@@ -150,6 +205,9 @@ Satu file, satu site. `engine` dan `port` wajib, sisanya punya default atau opsi
 | kernel_backlog | nilai main.cfg | panjang listen queue untuk site ini | http1, http2, grpc, ditolak di udp, diterima tapi tidak dipakai di http3 | `0` fault |
 | max_recv_buf | nilai main.cfg | jumlah byte untuk satu stream buffer per koneksi | site http1, http2, grpc, dan TLS | di luar `1024` sampai `262144` ia fault dan site jatuh ke nilai main.cfg |
 | upstream_timeout_ms | `30000` | berapa lama edge menunggu upstream yang diam sebelum menjawab 504 | http1, http2, http3, ditolak di grpc dan udp | butuh `upstreams`, `0` menunggu selamanya, di atas 4294967295 fault |
+| process_limit | nilai main.cfg | request yang boleh site ini jalankan ke upstream sekaligus, `0` mematikan gate untuk site ini | http1, http2, grpc, http3, ditolak di udp | butuh `upstreams`, di atas `65536` fault |
+| process_queue_len | nilai main.cfg | request yang boleh menunggu slot | sama seperti `process_limit` | butuh `upstreams`, ditolak di udp, dan nilai di atas `0` dengan `process_limit: 0` di file yang sama fault |
+| process_queue_timeout_ms | nilai main.cfg | berapa lama satu request menunggu sebelum edge menjawab 504 | sama seperti `process_limit` | butuh `upstreams`, ditolak di udp, di luar `1` sampai `600000` fault |
 
 `ip` dan `port` bersama menentukan socket yang mendengarkan. `0.0.0.0` bind ke semua interface, `127.0.0.1` bind loopback saja, `::` bind ke semua interface IPv6.
 
@@ -215,6 +273,7 @@ Set `upstream_timeout_ms: 0` pada site yang backend-nya memang berpikir lebih la
 | kernel_backlog | ya | ya | ya | diterima, tanpa efek | ditolak |
 | max_recv_buf | menentukan ukuran stream buffer | menentukan ukuran stream buffer | menentukan ukuran stream buffer | diterima, tanpa efek | diterima, tanpa efek |
 | upstream_timeout_ms | ya | ya | ditolak | ya | ditolak |
+| process_limit, process_queue_len, process_queue_timeout_ms | ya | ya | ya, hanya setup dan tidak pernah mengantre | ya | ditolak |
 
 "Ditolak" berarti key-nya fault dengan fix hint dan site tidak start. "Diterima, tanpa efek" berarti file lolos validasi dan tidak ada yang membaca nilainya.
 
@@ -242,7 +301,9 @@ Tiap aturan di bawah diperiksa setelah seluruh file dibaca, jadi satu pass melap
 | `public_dir` atau `upstream_timeout_ms` di site grpc | `not supported on grpc sites, remove it` |
 | `upstream_timeout_ms` di site tanpa upstreams | `needs upstreams` |
 | `tls` di site udp | `udp forward is blind bytes, tls does not apply` |
-| `public_dir`, `kernel_backlog`, `upstream_timeout_ms`, atau key acme di site udp | `does not apply to udp sites, remove it` |
+| `public_dir`, `kernel_backlog`, `upstream_timeout_ms`, key `process_`, atau key acme di site udp | `does not apply to udp sites, remove it` |
+| key `process_` apa pun di site tanpa upstreams | `needs upstreams` |
+| `process_queue_len` di atas `0` sementara `process_limit` bernilai `0` | `needs process_limit above 0, otherwise nothing ever queues` |
 
 Aturan prefix pada `spa_fallback` ada supaya sebuah miss dari backend tidak lenyap ke halaman fallback: tanpa prefix yang mengikat static plane, tiap 404 dari upstream akan dijawab sebagai app shell.
 
@@ -263,6 +324,7 @@ logs_dir: /srv/zixer/logs
 sites_dir: /srv/zixer/sites
 max_recv_buf: 8192
 kernel_backlog: 1024
+process_limit: 0 (gate off)
 
 # /srv/zixer/sites/api.cfg
 api.cfg:
