@@ -28,9 +28,16 @@ const content = @import("../tcp/http/content.zig");
 
 pub const Encoding = compression.Encoding;
 
-/// Longest resolved path (public_dir, a separator, then the request path) a slot
-/// stores. A longer path is not cacheable and falls back to the uncached path.
-pub const RESOLVED_PATH_MAX: usize = 256;
+/// Longest path under public_dir (the root, a separator, then the request path)
+/// anything static serving touches. It is one number on purpose: a slot stores a
+/// path this long, and every caller that buffers a request target sizes that
+/// buffer by it, so a path can never resolve on one side and be refused on the
+/// other. A longer path is not cacheable and falls back to the uncached path.
+///
+/// Note:
+/// - Raising it costs bytes per LIVE cache entry only. The slot table is
+///   demand-paged, so an untouched slot stays out of resident memory.
+pub const PUBLIC_PATH_MAX: usize = 512;
 
 /// Prerendered 200 header cap. The longest shape is the status line plus the
 /// longest known content type, a 20-digit length, a content encoding, and the
@@ -106,7 +113,7 @@ const Slot = struct {
     state: std.atomic.Value(u32),
     insert_tick_ms: u64,
     path_len: u16,
-    path_buf: [RESOLVED_PATH_MAX]u8,
+    path_buf: [PUBLIC_PATH_MAX]u8,
     variants: [VARIANT_COUNT]Variant,
 };
 
@@ -304,7 +311,7 @@ pub const StaticCache = struct {
     ) ?Hit {
         if (ttl_ms == 0) return null;
 
-        var path_buf: [RESOLVED_PATH_MAX]u8 = undefined;
+        var path_buf: [PUBLIC_PATH_MAX]u8 = undefined;
         const path = resolvePath(&path_buf, public_dir, req_path) orelse return null;
         const key = hashPath(path);
 
@@ -667,7 +674,7 @@ fn buildVariants(slot: *Slot, io: std.Io, path: []const u8) bool {
 
     if (!openVariant(&slot.variants[variantIndex(.IDENTITY)], io, path, path, .IDENTITY)) return false;
 
-    var sibling_buf: [RESOLVED_PATH_MAX + 8]u8 = undefined;
+    var sibling_buf: [PUBLIC_PATH_MAX + 8]u8 = undefined;
     for (SIBLINGS) |sibling| {
         const sibling_path = std.fmt.bufPrint(&sibling_buf, "{s}{s}", .{ path, sibling.suffix }) catch continue;
         _ = openVariant(&slot.variants[variantIndex(sibling.encoding)], io, sibling_path, path, sibling.encoding);
@@ -842,7 +849,7 @@ fn writeFixture(dir: std.Io.Dir, name: []const u8, data: []const u8) void {
 }
 
 test "zix static_cache: resolvePath joins and rejects unsafe paths" {
-    var buf: [RESOLVED_PATH_MAX]u8 = undefined;
+    var buf: [PUBLIC_PATH_MAX]u8 = undefined;
 
     try testing.expectEqualStrings("public/a.txt", resolvePath(&buf, "public", "a.txt").?);
     try testing.expectEqualStrings("./public/dir/a.txt", resolvePath(&buf, "./public", "dir/a.txt").?);
@@ -852,7 +859,7 @@ test "zix static_cache: resolvePath joins and rejects unsafe paths" {
     try testing.expect(resolvePath(&buf, "public", "a/../b") == null);
     try testing.expect(resolvePath(&buf, "public", "/absolute") == null);
 
-    var long: [RESOLVED_PATH_MAX]u8 = @splat('a');
+    var long: [PUBLIC_PATH_MAX]u8 = @splat('a');
     try testing.expect(resolvePath(&buf, "public", &long) == null);
 }
 

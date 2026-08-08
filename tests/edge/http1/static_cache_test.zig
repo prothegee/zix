@@ -34,7 +34,7 @@ test "zix edge: static cache declines a resolved path longer than its buffer" {
     var cache = try static_cache.StaticCache.init(8);
     defer cache.deinit(std.testing.io);
 
-    var long: [static_cache.RESOLVED_PATH_MAX]u8 = @splat('n');
+    var long: [static_cache.PUBLIC_PATH_MAX]u8 = @splat('n');
 
     try std.testing.expect(cache.acquire(std.testing.io, "public", &long, null, 1000, 100) == null);
 }

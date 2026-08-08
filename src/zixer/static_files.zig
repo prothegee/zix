@@ -6,8 +6,11 @@ const zix = @import("zix");
 
 const compression = zix.utils.compression;
 
-/// Longest joined path (public_dir plus the request path) this resolver serves.
-pub const MAX_PATH: usize = 512;
+/// Longest joined path (public_dir plus the request path) this resolver serves,
+/// re-exported so a zixer file names it without reaching across the package. It
+/// is the same number the shared static cache stores, which is what keeps a path
+/// from resolving here and being refused there.
+pub const PUBLIC_PATH_MAX: usize = zix.utils.static_cache.PUBLIC_PATH_MAX;
 
 /// Static serving surface of one site. The strings are owned by the serve
 /// state and must outlive every connection.
@@ -85,7 +88,7 @@ fn underPrefix(path: []const u8, prefix: []const u8) bool {
 /// - Resolved with the file open
 /// - null when the path is unsafe, missing, or not a regular file
 pub fn open(io: std.Io, public_dir: []const u8, target: []const u8, accept_encoding: ?[]const u8) ?Resolved {
-    var path_buf: [MAX_PATH]u8 = undefined;
+    var path_buf: [PUBLIC_PATH_MAX]u8 = undefined;
     const path = resolvePath(&path_buf, public_dir, requestPath(target)) orelse return null;
 
     var supported_buf: [SIBLINGS.len]compression.Encoding = undefined;
@@ -99,7 +102,7 @@ pub fn open(io: std.Io, public_dir: []const u8, target: []const u8, accept_encod
         const chosen = compression.negotiate(accept_encoding, supported_buf[0..supported_len]) orelse .IDENTITY;
         if (chosen == .IDENTITY) break;
 
-        var sibling_buf: [MAX_PATH + 8]u8 = undefined;
+        var sibling_buf: [PUBLIC_PATH_MAX + 8]u8 = undefined;
         const sibling_path = std.fmt.bufPrint(&sibling_buf, "{s}{s}", .{ path, suffixOf(chosen) }) catch break;
         if (openFile(io, sibling_path, path, chosen)) |resolved| return resolved;
 
@@ -226,7 +229,7 @@ test "zix zixer: static files, handles gates method and prefix" {
 }
 
 test "zix zixer: static files, resolve rejects unsafe paths" {
-    var buf: [MAX_PATH]u8 = undefined;
+    var buf: [PUBLIC_PATH_MAX]u8 = undefined;
 
     try testing.expectEqualStrings("/www/a.txt", resolvePath(&buf, "/www", "/a.txt").?);
 
@@ -236,13 +239,13 @@ test "zix zixer: static files, resolve rejects unsafe paths" {
     try testing.expect(resolvePath(&buf, "/www", "/a/../b") == null);
     try testing.expect(resolvePath(&buf, "/www", "/a\x00.txt") == null);
 
-    var long: [MAX_PATH]u8 = @splat('a');
+    var long: [PUBLIC_PATH_MAX]u8 = @splat('a');
     long[0] = '/';
     try testing.expect(resolvePath(&buf, "/www", &long) == null);
 }
 
 test "zix zixer: static files, trailing slash maps to index.html" {
-    var buf: [MAX_PATH]u8 = undefined;
+    var buf: [PUBLIC_PATH_MAX]u8 = undefined;
 
     try testing.expectEqualStrings("/www/index.html", resolvePath(&buf, "/www", "/").?);
     try testing.expectEqualStrings("/www/docs/index.html", resolvePath(&buf, "/www", "/docs/").?);
