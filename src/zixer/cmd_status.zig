@@ -119,6 +119,15 @@ pub fn renderMain(out: *std.Io.Writer, path: []const u8, cfg: main_cfg.MainCfg, 
         try out.print("process_queue_timeout_ms: {d}\n", .{cfg.process_queue_timeout_ms});
     }
 
+    // The entry count means nothing while the window is 0, so the same one
+    // honest line stands in for both keys.
+    if (cfg.public_dir_cache_ttl_ms == 0) {
+        try out.writeAll("public_dir_cache_ttl_ms: 0 (cache off)\n");
+    } else {
+        try out.print("public_dir_cache_ttl_ms: {d}\n", .{cfg.public_dir_cache_ttl_ms});
+        try out.print("public_dir_cache_max_entries: {d}\n", .{cfg.public_dir_cache_max_entries});
+    }
+
     try renderFaults(out, faults);
     try out.writeAll("\n");
 }
@@ -156,6 +165,7 @@ pub fn renderSite(out: *std.Io.Writer, path: []const u8, name: []const u8, cfg: 
     if (cfg.process_limit) |process_limit| try out.print("process_limit: {d}\n", .{process_limit});
     if (cfg.process_queue_len) |process_queue_len| try out.print("process_queue_len: {d}\n", .{process_queue_len});
     if (cfg.process_queue_timeout_ms) |process_queue_timeout_ms| try out.print("process_queue_timeout_ms: {d}\n", .{process_queue_timeout_ms});
+    if (cfg.public_dir_cache_ttl_ms) |public_dir_cache_ttl_ms| try out.print("public_dir_cache_ttl_ms: {d}\n", .{public_dir_cache_ttl_ms});
 
     try renderFaults(out, faults);
     try out.writeAll("\n");
@@ -444,6 +454,7 @@ test "zix zixer: cmd status, render main block matches the documented shape" {
         "max_recv_buf: 8192\n" ++
         "kernel_backlog: 1024\n" ++
         "process_limit: 0 (gate off)\n" ++
+        "public_dir_cache_ttl_ms: 0 (cache off)\n" ++
         "\n";
     try std.testing.expectEqualStrings(expected, out.buffered());
 }
@@ -532,4 +543,47 @@ test "zix zixer: cmd status, a configured upstream read bound is reported back" 
     // every other optional key.
     const unbounded_at = std.mem.indexOf(u8, report.buffered(), "unbounded.cfg:").?;
     try std.testing.expect(std.mem.indexOf(u8, report.buffered()[unbounded_at..], "upstream_timeout_ms") == null);
+}
+
+test "zix zixer: cmd status, the main block reports the static cache off in one line" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    try renderMain(&out, "/r/main.cfg", .{ .logs_dir = "/r/logs", .sites_dir = "/r/sites" }, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_ttl_ms: 0 (cache off)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_max_entries") == null);
+}
+
+test "zix zixer: cmd status, the main block reports both static cache keys when armed" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const cfg = main_cfg.MainCfg{
+        .logs_dir = "/r/logs",
+        .sites_dir = "/r/sites",
+        .public_dir_cache_ttl_ms = 5000,
+        .public_dir_cache_max_entries = 512,
+    };
+
+    try renderMain(&out, "/r/main.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_ttl_ms: 5000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_max_entries: 512\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "cache off") == null);
+}
+
+test "zix zixer: cmd status, a site block prints the window only when it names one" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const bare = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 8080, .public_dir = "/var/www" };
+    try renderSite(&out, "/r/sites/static.cfg", "static.cfg", bare, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_ttl_ms") == null);
+
+    var set_buf: [1024]u8 = undefined;
+    var set_out = std.Io.Writer.fixed(&set_buf);
+    const set = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 8080, .public_dir = "/var/www", .public_dir_cache_ttl_ms = 2500 };
+    try renderSite(&set_out, "/r/sites/static.cfg", "static.cfg", set, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, set_out.buffered(), "public_dir_cache_ttl_ms: 2500\n") != null);
 }
