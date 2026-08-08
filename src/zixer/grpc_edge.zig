@@ -11,6 +11,8 @@ const http1_proxy = @import("http1_proxy.zig");
 const http2_frames = @import("http2_frames.zig");
 const process_wait = @import("process_wait.zig");
 
+const monotonic_clock = zix.utils.monotonic_clock;
+
 const Http2 = zix.Http2;
 
 /// Concurrent client streams one edge connection relays, advertised as
@@ -582,7 +584,7 @@ fn findOrOpenUpstream(session: *Session) ?usize {
 
     var attempts: usize = pool.slots.len + 1;
     while (attempts > 0) : (attempts -= 1) {
-        const picked = pool.pick(nowMs(io)) orelse return anyOpenUpstream(session);
+        const picked = pool.pick(monotonic_clock.nowMs(io)) orelse return anyOpenUpstream(session);
 
         lockState(session);
         var existing: ?usize = null;
@@ -599,7 +601,7 @@ fn findOrOpenUpstream(session: *Session) ?usize {
         const open_index = free_index orelse return anyOpenUpstream(session);
 
         grpc_upstream.openInto(&session.up_conns[open_index], io, session.proxy.allocator, session.proxy.stream_buf_bytes, picked.host, picked.port, picked.index) catch {
-            pool.markDown(picked.index, nowMs(io));
+            pool.markDown(picked.index, monotonic_clock.nowMs(io));
             continue;
         };
 
@@ -1086,10 +1088,6 @@ fn lockState(session: *Session) void {
 
 fn unlockState(session: *Session) void {
     session.state_lock.store(false, .release);
-}
-
-fn nowMs(io: std.Io) i64 {
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
 // --------------------------------------------------------- //
