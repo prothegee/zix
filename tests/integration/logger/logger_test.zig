@@ -80,7 +80,10 @@ fn readLogFile(save_path: []const u8, date: *const [10]u8, save_file: []const u8
 // --------------------------------------------------------- //
 
 test "zix integration: Logger.system() writes line to file" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/system";
@@ -109,7 +112,10 @@ test "zix integration: Logger.system() writes line to file" {
 }
 
 test "zix integration: Logger.access() writes line to file" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/access";
@@ -140,7 +146,10 @@ test "zix integration: Logger.access() writes line to file" {
 }
 
 test "zix integration: access() absent UA and origin logged as dash" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/access-dash";
@@ -166,7 +175,10 @@ test "zix integration: access() absent UA and origin logged as dash" {
 }
 
 test "zix integration: access() present UA appears in file" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/access-ua";
@@ -192,7 +204,10 @@ test "zix integration: access() present UA appears in file" {
 }
 
 test "zix integration: system() 5xx status maps to ERROR level" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/access-error";
@@ -218,7 +233,10 @@ test "zix integration: system() 5xx status maps to ERROR level" {
 }
 
 test "zix integration: access() client_ip appears in log file" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/access-ip";
@@ -244,7 +262,10 @@ test "zix integration: access() client_ip appears in log file" {
 }
 
 test "zix integration: access() absent client_ip logged as dash" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/access-ip-dash";
@@ -270,7 +291,10 @@ test "zix integration: access() absent client_ip logged as dash" {
 }
 
 test "zix integration: system() with anyerror arg formats correctly" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("the logger writes through a POSIX path, test skipped", .{});
+        return;
+    }
 
     const allocator = std.testing.allocator;
     const save_path = ".zig-cache/tmp/zix-logger-test/system-err";

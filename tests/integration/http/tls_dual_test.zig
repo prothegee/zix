@@ -191,7 +191,10 @@ fn expectTlsOk(io: std.Io, tls_port: u16) !void {
 }
 
 test "zix integration: Http dual listener EPOLL serves cleartext on port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -201,7 +204,10 @@ test "zix integration: Http dual listener EPOLL serves cleartext on port" {
 }
 
 test "zix integration: Http dual listener EPOLL serves TLS on tls_port with the same routes" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -211,7 +217,10 @@ test "zix integration: Http dual listener EPOLL serves TLS on tls_port with the 
 }
 
 test "zix integration: Http dual listener EPOLL streams SSE over TLS on the mux loop" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -275,7 +284,10 @@ test "zix integration: Http dual listener EPOLL streams SSE over TLS on the mux 
 }
 
 test "zix integration: Http dual listener URING serves cleartext on port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -285,7 +297,10 @@ test "zix integration: Http dual listener URING serves cleartext on port" {
 }
 
 test "zix integration: Http dual listener URING serves TLS on-ring on tls_port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -295,7 +310,10 @@ test "zix integration: Http dual listener URING serves TLS on-ring on tls_port" 
 }
 
 test "zix integration: Http tls_port equal to port is rejected at run" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

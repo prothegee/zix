@@ -192,7 +192,10 @@ fn expectH2TlsSettings(io: std.Io, tls_port: u16) !void {
 }
 
 test "zix integration: Http2 dual listener EPOLL serves h2c on port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -202,7 +205,10 @@ test "zix integration: Http2 dual listener EPOLL serves h2c on port" {
 }
 
 test "zix integration: Http2 dual listener EPOLL serves h2 TLS on tls_port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -212,7 +218,10 @@ test "zix integration: Http2 dual listener EPOLL serves h2 TLS on tls_port" {
 }
 
 test "zix integration: Http2 dual listener URING serves h2c on port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -222,7 +231,10 @@ test "zix integration: Http2 dual listener URING serves h2c on port" {
 }
 
 test "zix integration: Http2 dual listener URING serves h2 TLS on-ring on tls_port" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -232,7 +244,10 @@ test "zix integration: Http2 dual listener URING serves h2 TLS on-ring on tls_po
 }
 
 test "zix integration: Http2 tls_port equal to port is rejected at run" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

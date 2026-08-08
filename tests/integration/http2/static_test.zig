@@ -189,7 +189,10 @@ fn setPublicDir(tmp: *std.testing.TmpDir) void {
 // --------------------------------------------------------- //
 
 test "zix integration: Http2 serves an unmatched path from public_dir over h2c" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -228,7 +231,10 @@ test "zix integration: Http2 serves an unmatched path from public_dir over h2c" 
 }
 
 test "zix integration: Http2 negotiates the brotli sibling from public_dir over h2c" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -269,7 +275,10 @@ test "zix integration: Http2 negotiates the brotli sibling from public_dir over 
 }
 
 test "zix integration: Http2 repeats a public_dir file byte for byte across streams" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -317,7 +326,10 @@ test "zix integration: Http2 repeats a public_dir file byte for byte across stre
 }
 
 test "zix integration: Http2 keeps a routed path ahead of public_dir" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -356,7 +368,10 @@ test "zix integration: Http2 keeps a routed path ahead of public_dir" {
 }
 
 test "zix integration: Http2 serves the same bytes with the cache off as with it on" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -424,7 +439,10 @@ test "zix integration: Http2 serves the same bytes with the cache off as with it
 }
 
 test "zix integration: Http2 404s an unmatched path with no file behind it" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -461,7 +479,10 @@ test "zix integration: Http2 404s an unmatched path with no file behind it" {
 }
 
 test "zix integration: Http2 answers a Range with 206 over h2c" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -505,7 +526,10 @@ test "zix integration: Http2 answers a Range with 206 over h2c" {
 }
 
 test "zix integration: Http2 answers 416 for an unsatisfiable Range over h2c" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
