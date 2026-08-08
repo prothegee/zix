@@ -11,6 +11,7 @@ const idle_reaper = @import("idle_reaper.zig");
 const process_gate = @import("process_gate.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_worker = @import("site_worker.zig");
+const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
 const tls_edge = @import("tls_edge.zig");
 const upstream_conn = @import("upstream_conn.zig");
@@ -55,6 +56,10 @@ pub const ServeState = struct {
     /// mean what the backend absorbs, and workers follows the thread count.
     /// Off (admits everything) unless the config asked for a limit.
     process_gate: process_gate.Gate,
+    /// How long a cached public_dir file stays fresh for this site, already
+    /// resolved from the site file and the main.cfg default. 0 serves every
+    /// static request through the uncached open, which is the default.
+    public_dir_cache_ttl_ms: u32,
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
@@ -147,6 +152,11 @@ pub const ServeState = struct {
         ));
         errdefer gate.deinit(allocator);
 
+        // The table is process-wide and shared by every site, so this only
+        // builds one the first time any site asks. A window of 0 builds none.
+        const cache_ttl_ms = static_cached.resolveTtl(cfg.public_dir_cache_ttl_ms, options.public_dir_cache_ttl_ms);
+        if (public_dir != null) static_cached.install(cache_ttl_ms, options.public_dir_cache_max_entries);
+
         state.* = .{
             .allocator = allocator,
             .io = io,
@@ -157,6 +167,7 @@ pub const ServeState = struct {
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
             .stream_buf_bytes = conn_buffer.resolve(cfg.max_recv_buf, options.max_recv_buf),
             .process_gate = gate,
+            .public_dir_cache_ttl_ms = if (public_dir == null) 0 else cache_ttl_ms,
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
@@ -318,6 +329,7 @@ fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
         .allocator = state.allocator,
         .stream_buf_bytes = state.stream_buf_bytes,
         .process_gate = &state.process_gate,
+        .public_dir_cache_ttl_ms = state.public_dir_cache_ttl_ms,
     };
 }
 
@@ -428,22 +440,24 @@ test "zix zixer: site serve, static-only site runs without a pool" {
     const cfg = site_cfg.SiteCfg{
         .engine = .HTTP1,
         .ip = "127.0.0.1",
-        .port = 39881,
+        .port = 18881,
         .public_dir = "/var/www/static-test",
         .spa_fallback = "index.html",
     };
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39881);
-    const server = try addr.listen(io, .{ .kernel_backlog = 64 });
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18881);
+    const server = try addr.listen(io, .{ .kernel_backlog = 64, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39881, .{ .kernel_backlog = 64 });
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18881, .{ .kernel_backlog = 64 });
     try std.testing.expect(state.pools.len == 0);
     try std.testing.expect(state.idles.len == 0);
     try std.testing.expectEqualStrings("/var/www/static-test", state.public_dir.?);
     state.shutdown();
 
-    var rebound = try addr.listen(io, .{ .kernel_backlog = 64 });
-    rebound.deinit(io);
+    // Asked by connect for the reason the create test spells out above: the
+    // shutdown wake connection can leave this address in TIME_WAIT, and a
+    // strict bind then fails over a socket that is no longer accepting.
+    try std.testing.expect(!port_probe.isTaken(io, addr));
 }
 
 test "zix zixer: site serve, wake tolerates a dead port" {
@@ -451,8 +465,8 @@ test "zix zixer: site serve, wake tolerates a dead port" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    wake(io, "0.0.0.0", 39871);
-    wake(io, "not an ip", 39871);
+    wake(io, "0.0.0.0", 18871);
+    wake(io, "not an ip", 18871);
 }
 
 test "zix zixer: site serve, tls site create refuses a missing cert file" {
@@ -463,17 +477,17 @@ test "zix zixer: site serve, tls site create refuses a missing cert file" {
     const cfg = site_cfg.SiteCfg{
         .engine = .HTTP1,
         .ip = "127.0.0.1",
-        .port = 39895,
+        .port = 18895,
         .tls = true,
         .tls_cert = "examples/certs/absent.pem",
         .tls_key = "examples/certs/ecdsa_p256_key.pem",
         .public_dir = "/var/www/static-test",
     };
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39895);
-    var server = try addr.listen(io, .{ .kernel_backlog = 8 });
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18895);
+    var server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 39895, .{ .kernel_backlog = 8 }));
+    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 18895, .{ .kernel_backlog = 8 }));
     server.deinit(io);
 }
 
@@ -494,17 +508,17 @@ test "zix zixer: site serve, tls site terminates and serves the static plane" {
     const cfg = site_cfg.SiteCfg{
         .engine = .HTTP1,
         .ip = "127.0.0.1",
-        .port = 39894,
+        .port = 18894,
         .tls = true,
         .tls_cert = "examples/certs/ecdsa_p256_cert.pem",
         .tls_key = "examples/certs/ecdsa_p256_key.pem",
         .public_dir = root,
     };
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39894);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18894);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39894, .{ .kernel_backlog = 8 });
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18894, .{ .kernel_backlog = 8 });
     try std.testing.expect(state.tls_ctx != null);
 
     // manual TLS 1.3 client over the real socket: hello record, read the
@@ -908,4 +922,77 @@ test "zix zixer: site serve, a site on the smallest buffer still answers" {
 
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
     rebound.deinit(io);
+}
+
+test "zix zixer: site serve, the cache window resolves the site over the daemon" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18884,
+        .public_dir = "/var/www/static-test",
+        .public_dir_cache_ttl_ms = 2500,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18884);
+    const server = try addr.listen(io, .{ .kernel_backlog = 64, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18884, .{
+        .kernel_backlog = 64,
+        .public_dir_cache_ttl_ms = 9000,
+        .public_dir_cache_max_entries = 32,
+    });
+    defer static_cached.shutdown(io);
+
+    // The site wins, and every worker's proxy carries the same resolved value.
+    try std.testing.expectEqual(@as(u32, 2500), state.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(@as(u32, 2500), buildProxy(state, 0).public_dir_cache_ttl_ms);
+    try std.testing.expect(zix.utils.static_cache.instance() != null);
+
+    state.shutdown();
+    try std.testing.expect(!port_probe.isTaken(io, addr));
+}
+
+test "zix zixer: site serve, a site with no public dir builds no cache table" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18886 }};
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18885,
+        .upstreams = &upstreams,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18885);
+    const server = try addr.listen(io, .{ .kernel_backlog = 64, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18885, .{
+        .kernel_backlog = 64,
+        .public_dir_cache_ttl_ms = 9000,
+    });
+    defer static_cached.shutdown(io);
+
+    // A proxy-only site has no files to hold, so the daemon window buys it
+    // nothing and no descriptors are spent on a table.
+    try std.testing.expectEqual(@as(u32, 0), state.public_dir_cache_ttl_ms);
+    try std.testing.expect(zix.utils.static_cache.instance() == null);
+
+    state.shutdown();
+    try std.testing.expect(!port_probe.isTaken(io, addr));
 }
