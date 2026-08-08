@@ -159,10 +159,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Installed example binaries carry the target triplet so per-target builds
-    // coexist in zig-out/bin. A foreign target (cross build) compiles every suite
-    // and example but skips execution.
+    // Installed example binaries carry the target triplet and the optimize mode
+    // so per-target and per-mode builds coexist in zig-out/bin. A foreign target
+    // (cross build) compiles every suite and example but skips execution.
     const triplet = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
+
+    // The optimize mode, lowercased, is the last part of every installed name.
+    // No -Doptimize means Debug, so a plain build writes -debug. Spelled out
+    // rather than lowercased at runtime so a new mode is a compile error here.
+    const mode = switch (optimize) {
+        .Debug => "debug",
+        .ReleaseSafe => "releasesafe",
+        .ReleaseFast => "releasefast",
+        .ReleaseSmall => "releasesmall",
+    };
+
     const host = b.graph.host.result;
     const foreign_target = target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch;
     if (foreign_target) {
@@ -216,7 +227,7 @@ pub fn build(b: *std.Build) void {
         example_module.addImport("jzon", jzon);
 
         const example_exe = b.addExecutable(.{
-            .name = b.fmt("jzon-example-{s}-{s}", .{ name, triplet }),
+            .name = b.fmt("jzon-example-{s}-{s}-{s}", .{ name, triplet, mode }),
             .root_module = example_module,
         });
 
