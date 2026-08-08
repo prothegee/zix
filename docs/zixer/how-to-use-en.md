@@ -14,7 +14,7 @@ zixer builds from the zix repository:
 zig build zixer
 ```
 
-The binary lands in `zig-out/bin/zixer-<triplet>`, i.e. `zixer-x86_64-linux`. Copy it anywhere on your path. The rest of this page writes it as `zixer`.
+The binary lands in `zig-out/bin/zixer-<triplet>-<optimize>`, i.e. `zixer-x86_64-linux-debug`. Without `-Doptimize` the mode is `debug`. Copy it anywhere on your path. The rest of this page writes it as `zixer`.
 
 ```bash
 $ zixer version

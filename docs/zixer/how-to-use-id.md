@@ -14,7 +14,7 @@ zixer dibangun dari repository zix:
 zig build zixer
 ```
 
-Binary-nya mendarat di `zig-out/bin/zixer-<triplet>`, mis. `zixer-x86_64-linux`. Salin ke mana pun di path Anda. Sisa halaman ini menulisnya sebagai `zixer`.
+Binary-nya mendarat di `zig-out/bin/zixer-<triplet>-<optimize>`, mis. `zixer-x86_64-linux-debug`. Tanpa `-Doptimize`, mode-nya `debug`. Salin ke mana pun di path Anda. Sisa halaman ini menulisnya sebagai `zixer`.
 
 ```bash
 $ zixer version
