@@ -1872,15 +1872,15 @@ test "zix zixer: h3 edge, create starts the receive thread and shutdown frees th
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39803 }};
-    const cfg = tlsCfg(39802, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18903 }};
+    const cfg = tlsCfg(18902, &upstreams);
 
-    const socket = try bindSite(io, 39802);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39802, .{});
+    const socket = try bindSite(io, 18902);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18902, .{});
     state.shutdown();
 
     // Udp binds strict, so a clean rebind proves the port came back.
-    const again = try bindSite(io, 39802);
+    const again = try bindSite(io, 18902);
     again.close(io);
 }
 
@@ -1894,16 +1894,16 @@ test "zix zixer: h3 edge, a cleartext cfg refuses to serve" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39803 }};
-    var cfg = tlsCfg(39804, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18903 }};
+    var cfg = tlsCfg(18904, &upstreams);
     cfg.tls = false;
     cfg.tls_cert = null;
     cfg.tls_key = null;
 
-    const socket = try bindSite(io, 39804);
+    const socket = try bindSite(io, 18904);
     defer socket.close(io);
 
-    try testing.expectError(error.TlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 39804, .{}));
+    try testing.expectError(error.TlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 18904, .{}));
 }
 
 test "zix zixer: h3 edge, a request crosses quic to the http1 upstream and back" {
@@ -1916,17 +1916,17 @@ test "zix zixer: h3 edge, a request crosses quic to the http1 upstream and back"
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39806, .request_quota = 1, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18906, .request_quota = 1, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39806 }};
-    const cfg = tlsCfg(39805, &upstreams);
-    const socket = try bindSite(io, 39805);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39805, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18906 }};
+    const cfg = tlsCfg(18905, &upstreams);
+    const socket = try bindSite(io, 18905);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18905, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39805);
+    var client = try H3Client.connect(io, 18905);
     defer client.close();
 
     const fields = getFields("localhost", "/hello");
@@ -1960,17 +1960,17 @@ test "zix zixer: h3 edge, a request body reaches the upstream" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39808, .request_quota = 1, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18908, .request_quota = 1, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39808 }};
-    const cfg = tlsCfg(39807, &upstreams);
-    const socket = try bindSite(io, 39807);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39807, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18908 }};
+    const cfg = tlsCfg(18907, &upstreams);
+    const socket = try bindSite(io, 18907);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18907, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39807);
+    var client = try H3Client.connect(io, 18907);
     defer client.close();
 
     const fields = [_]h3_qpack.Field{
@@ -2004,17 +2004,17 @@ test "zix zixer: h3 edge, a body split across data frames joins for the upstream
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39822, .request_quota = 1, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18922, .request_quota = 1, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39822 }};
-    const cfg = tlsCfg(39821, &upstreams);
-    const socket = try bindSite(io, 39821);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39821, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18922 }};
+    const cfg = tlsCfg(18921, &upstreams);
+    const socket = try bindSite(io, 18921);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18921, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39821);
+    var client = try H3Client.connect(io, 18921);
     defer client.close();
 
     const fields = [_]h3_qpack.Field{
@@ -2047,17 +2047,17 @@ test "zix zixer: h3 edge, a big response spans packets and arrives whole" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39810, .request_quota = 1, .mode = .BIG };
+    var fake = FakeBackend{ .io = io, .port = 18910, .request_quota = 1, .mode = .BIG };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39810 }};
-    const cfg = tlsCfg(39809, &upstreams);
-    const socket = try bindSite(io, 39809);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39809, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18910 }};
+    const cfg = tlsCfg(18909, &upstreams);
+    const socket = try bindSite(io, 18909);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18909, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39809);
+    var client = try H3Client.connect(io, 18909);
     defer client.close();
 
     const fields = getFields("localhost", "/big");
@@ -2086,17 +2086,17 @@ test "zix zixer: h3 edge, a chunked upstream body relays with its trailers" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39812, .request_quota = 1, .mode = .CHUNKED };
+    var fake = FakeBackend{ .io = io, .port = 18912, .request_quota = 1, .mode = .CHUNKED };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39812 }};
-    const cfg = tlsCfg(39811, &upstreams);
-    const socket = try bindSite(io, 39811);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39811, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18912 }};
+    const cfg = tlsCfg(18911, &upstreams);
+    const socket = try bindSite(io, 18911);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18911, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39811);
+    var client = try H3Client.connect(io, 18911);
     defer client.close();
 
     const fields = getFields("localhost", "/stream");
@@ -2123,13 +2123,13 @@ test "zix zixer: h3 edge, a dead upstream answers 502 with proxy status" {
     const io = threaded.io();
 
     // Nothing listens on the upstream port.
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39814 }};
-    const cfg = tlsCfg(39813, &upstreams);
-    const socket = try bindSite(io, 39813);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39813, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18914 }};
+    const cfg = tlsCfg(18913, &upstreams);
+    const socket = try bindSite(io, 18913);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18913, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39813);
+    var client = try H3Client.connect(io, 18913);
     defer client.close();
 
     const fields = getFields("localhost", "/gone");
@@ -2160,14 +2160,14 @@ test "zix zixer: h3 edge, the static plane serves a file and misses fall through
     var root_buf: [128]u8 = undefined;
     const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
 
-    var cfg = tlsCfg(39815, &.{});
+    var cfg = tlsCfg(18915, &.{});
     cfg.public_dir = root;
 
-    const socket = try bindSite(io, 39815);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39815, .{});
+    const socket = try bindSite(io, 18915);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18915, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39815);
+    var client = try H3Client.connect(io, 18915);
     defer client.close();
 
     const fields = getFields("localhost", "/page.html");
@@ -2199,13 +2199,13 @@ test "zix zixer: h3 edge, a foreign authority is refused with 421" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39818 }};
-    const cfg = tlsCfg(39816, &upstreams);
-    const socket = try bindSite(io, 39816);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39816, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18918 }};
+    const cfg = tlsCfg(18916, &upstreams);
+    const socket = try bindSite(io, 18916);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18916, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39816);
+    var client = try H3Client.connect(io, 18916);
     defer client.close();
 
     const foreign = getFields("evil.example", "/");
@@ -2228,17 +2228,17 @@ test "zix zixer: h3 edge, two requests multiplex on one connection" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39820, .request_quota = 2, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18920, .request_quota = 2, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39820 }};
-    const cfg = tlsCfg(39819, &upstreams);
-    const socket = try bindSite(io, 39819);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39819, .{});
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18920 }};
+    const cfg = tlsCfg(18919, &upstreams);
+    const socket = try bindSite(io, 18919);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18919, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39819);
+    var client = try H3Client.connect(io, 18919);
     defer client.close();
 
     const first = getFields("localhost", "/one");
