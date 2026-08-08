@@ -86,6 +86,8 @@ pub const Daemon = struct {
     /// - error.ControlPathTooLong when the root dir cannot host a socket
     /// - error.ControlSocketBroken when accept keeps failing
     pub fn run(self: *Daemon) !void {
+        zix.utils.ignore_sigpipe.ignoreSigpipe();
+
         if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
         if (!control.fitsSocket(self.socket_path)) return error.ControlPathTooLong;
 
@@ -788,6 +790,42 @@ test "zix zixer: daemon end to end, socket round trip start ping shutdown" {
     daemon_thread.join();
 
     try std.testing.expectEqual(@as(usize, 0), daemon.sites.items.len);
+}
+
+test "zix zixer: daemon run, sigpipe is ignored before the accept loop starts" {
+    if (comptime @import("builtin").os.tag == .windows) {
+        std.log.info("zix zixer: daemon sigpipe test needs POSIX sigaction, skip on windows", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_sigpipe/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_sigpipe") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    const daemon_thread = try std.Thread.spawn(.{}, runDaemonThread, .{&daemon});
+
+    var tries: usize = 0;
+    while (tries < 100 and !control_client.ping(io, daemon.socket_path)) : (tries += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
+    }
+    try std.testing.expect(tries < 100);
+
+    var old_action: std.posix.Sigaction = undefined;
+    std.posix.sigaction(std.posix.SIG.PIPE, null, &old_action);
+    try std.testing.expectEqual(std.posix.SIG.IGN, old_action.handler.handler);
+
+    var stop_buf: [control.MAX_LINE]u8 = undefined;
+    _ = try control_client.call(io, daemon.socket_path, "shutdown", &stop_buf);
+    daemon_thread.join();
 }
 
 test "zix zixer: daemon handleLine, tls site with a missing cert file refuses" {
