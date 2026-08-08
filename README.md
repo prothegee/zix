@@ -89,8 +89,6 @@
 
 <hr>
 
-<!-- RESERVED -->
-
 <h4 align="center">
     <b><i>Benchmark by HttpArena:</i></b>
 </h4>
@@ -120,6 +118,14 @@
         <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44">
     </a>
 </div>
+
+<!-- <br> -->
+
+<!-- RESERVED localbench -->
+
+<!-- <br> -->
+
+<!-- RESERVED sponsor -->
 
 <br>
 
