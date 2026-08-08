@@ -183,6 +183,34 @@ pub fn shutdown(handle: windows.HANDLE) void {
     if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
 }
 
+/// Best-effort read-side shutdown of a socket handle, so a thread blocked
+/// reading it wakes with end-of-stream while the send side stays usable.
+/// Mirrors shutdown(fd, SHUT_RD).
+pub fn shutdownRead(handle: windows.HANDLE) void {
+    const event = createIoEvent() catch return;
+    defer close(event);
+
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    const info = windows.AFD.PARTIAL_DISCONNECT_INFO{
+        .DisconnectMode = .{ .SEND = false, .RECEIVE = true },
+        .Timeout = -1,
+    };
+
+    const status = windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        event,
+        null,
+        null,
+        &iosb,
+        windows.IOCTL.AFD.PARTIAL_DISCONNECT,
+        @ptrCast(&info),
+        @sizeOf(windows.AFD.PARTIAL_DISCONNECT_INFO),
+        null,
+        0,
+    );
+    if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+}
+
 /// Close a socket handle. Mirrors close(fd).
 pub fn close(handle: windows.HANDLE) void {
     _ = windows.ntdll.NtClose(handle);
