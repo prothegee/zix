@@ -90,7 +90,7 @@ pub const Pool = struct {
     /// Next upstream in round-robin order, null when none is up.
     ///
     /// Param:
-    /// now_ms - i64 (monotonic-enough clock, drives cooldown re-admit)
+    /// now_ms - i64 (a monotonic_clock.nowMs stamp, drives cooldown re-admit)
     ///
     /// Return:
     /// - ?Pick
