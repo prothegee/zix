@@ -20,7 +20,7 @@ zixer adalah executable yang ikut dari repository zix, bukan paket yang Anda jad
 zig build zixer
 ```
 
-Binary-nya jatuh di `zig-out/bin/zixer-<triplet>`, mis. `zixer-x86_64-linux`. Salin ke mana pun di path Anda. Sisa halaman ini menulisnya sebagai `zixer`.
+Binary-nya jatuh di `zig-out/bin/zixer-<triplet>-<optimize>`, mis. `zixer-x86_64-linux-debug`. Tanpa `-Doptimize`, mode-nya `debug`. Salin ke mana pun di path Anda. Sisa halaman ini menulisnya sebagai `zixer`.
 
 ```bash
 $ zixer version
