@@ -208,6 +208,23 @@ flowchart TB
 
 <br>
 
+## The overload valve
+
+Accepting is per worker, but spending a backend is not. One site has one
+admission gate, shared by every worker, and a request passes it at the moment
+the edge decides to originate upstream. Nothing earlier reaches it: a static
+answer, an acme challenge, and an https redirect are all served before the
+gate is asked.
+
+- `process_limit` is how many requests may be running upstream at once, `process_queue_len` is how many may wait, and `process_queue_timeout_ms` bounds that wait. All three default to off, see `config-en.md`.
+- Site-wide rather than per worker on purpose. Splitting the count across workers would make one written number mean a different thing on every machine, because `workers: 0` follows the thread count, and a valve has to be sized by what the backend absorbs.
+- The gate never blocks. A request that cannot proceed is handed a ticket and its own task waits on it, which is why the same structure serves a task-per-connection loop and would serve a single-threaded readiness or completion loop, where the loop would check tickets from its own ready pass instead.
+- A full waiting room refuses in microseconds rather than holding the connection for the whole budget. Shedding early is the point: an unbounded line under a storm would pin every waiter's buffers and then fail all of them late.
+- A long-lived exchange releases its slot at handover. A websocket tunnel and a grpc stream live as long as their client, so holding the slot for their whole life would let a handful of open sockets pin the site.
+- grpc never queues. Its frame loop drives every live stream on the connection, so parking it would stall work already admitted, and a new stream is shed with a trailers-only `UNAVAILABLE` instead.
+
+<br>
+
 ## Memory per connection
 
 One connection is one thread and one buffer block, so both scale with how many
@@ -278,6 +295,8 @@ The proxy edges follow the intermediary rules rather than passing everything thr
 | the request already streamed its body | no retry, the failure is reported as is |
 | `Host` not covered by the certificate | `421 misdirected request` |
 | static path missing and no `spa_fallback` | `404 not found` from the edge, no upstream involved |
+| the site is at `process_limit` and the waiting room is full | `504 upstream queue full` with a `Proxy-Status` reason |
+| a queued request waited out `process_queue_timeout_ms` | `504 upstream queue timeout` with the same reason |
 
 An upstream that fails a connect is marked down and skipped by the round-robin picker for a cooldown window, then re-admitted and marked down again by the next failure. There is no health check thread and no probe: availability is learned from real traffic only.
 
@@ -302,6 +321,6 @@ Being explicit about the gaps is part of the design:
 - No read deadline on a grpc site. Its upstream leg is one h2 connection multiplexing every stream, which needs its own mechanism, so the key is refused there rather than accepted and ignored.
 - No health checks, only failure learned from live traffic.
 - No hot reload of `main.cfg`, and no reload of every site at once.
-- No bound on how many connections one site serves at once. Each is a thread, so the ceiling is what the operating system will give the process.
+- No bound on how many connections one site accepts at once. The process gate bounds requests running against the backend, not sockets held open, so the accept ceiling is still what the operating system will give the process.
 - No per-path routing, header rewriting, rate limiting, or caching.
-- `dispatch` and `max_recv_buf` are validated and reported, and nothing reads them. See `config-en.md`.
+- `dispatch` is validated and reported, and nothing reads it. See `config-en.md`.

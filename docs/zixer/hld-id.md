@@ -208,6 +208,23 @@ flowchart TB
 
 <br>
 
+## Katup beban
+
+Menerima koneksi bersifat per worker, tapi memakai backend tidak. Satu site
+punya satu admission gate yang dipakai bersama oleh semua worker, dan sebuah
+request melewatinya tepat saat edge memutuskan untuk meneruskan ke upstream.
+Tidak ada yang lebih awal sampai ke sana: jawaban static, challenge acme, dan
+redirect https semuanya dilayani sebelum gate ditanya.
+
+- `process_limit` adalah berapa request yang boleh berjalan ke upstream sekaligus, `process_queue_len` berapa yang boleh menunggu, dan `process_queue_timeout_ms` membatasi lama tunggu itu. Ketiganya default mati, lihat `config-id.md`.
+- Sengaja per site, bukan per worker. Membagi hitungannya ke tiap worker akan membuat satu angka yang ditulis berarti lain di tiap mesin, karena `workers: 0` mengikuti jumlah thread, dan sebuah katup harus diukur dari apa yang sanggup diserap backend.
+- Gate tidak pernah memblokir. Request yang tidak bisa lanjut diberi tiket dan task-nya sendiri yang menunggu, sehingga struktur yang sama melayani loop task-per-koneksi dan akan melayani readiness atau completion loop satu thread, di mana loop-nya memeriksa tiket dari ready pass-nya sendiri.
+- Ruang tunggu yang penuh menolak dalam hitungan mikrodetik, bukan menahan koneksi selama seluruh jatah waktu. Membuang beban lebih awal itulah intinya: antrean tanpa batas saat badai akan mengunci buffer tiap penunggu lalu menggagalkan semuanya belakangan.
+- Pertukaran berumur panjang melepas slot-nya saat serah terima. Tunnel websocket dan stream grpc hidup selama client-nya, jadi menahan slot selama umur mereka akan membuat segelintir socket terbuka mengunci site.
+- grpc tidak pernah mengantre. Frame loop-nya menggerakkan setiap stream hidup di koneksi itu, jadi memarkirnya akan menahan pekerjaan yang sudah masuk, dan stream baru dibuang dengan `UNAVAILABLE` trailers-only.
+
+<br>
+
 ## Memory per koneksi
 
 Satu koneksi adalah satu thread dan satu blok buffer, jadi keduanya tumbuh
@@ -280,6 +297,8 @@ Edge proxy mengikuti aturan intermediary, bukan meneruskan semuanya:
 | request sudah mulai men-stream body-nya | tidak ada retry, kegagalan dilaporkan apa adanya |
 | `Host` tidak dicakup certificate | `421 misdirected request` |
 | path static hilang dan tidak ada `spa_fallback` | `404 not found` dari edge, tanpa melibatkan upstream |
+| site berada di `process_limit` dan ruang tunggunya penuh | `504 upstream queue full` dengan alasan `Proxy-Status` |
+| request yang mengantre habis `process_queue_timeout_ms` | `504 upstream queue timeout` dengan alasan yang sama |
 
 Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selama jendela cooldown, lalu diterima lagi dan ditandai down lagi oleh kegagalan berikutnya. Tidak ada thread health check dan tidak ada probe: ketersediaan hanya dipelajari dari trafik nyata.
 
@@ -304,6 +323,6 @@ Menyebut celahnya secara eksplisit adalah bagian dari desain:
 - Belum ada read deadline di site grpc. Leg upstream-nya satu koneksi h2 yang memultipleks semua stream, jadi butuh mekanisme sendiri, dan key-nya ditolak di sana alih-alih diterima lalu diabaikan.
 - Belum ada health check, hanya kegagalan yang dipelajari dari trafik nyata.
 - Belum ada hot reload `main.cfg`, dan belum ada reload semua site sekaligus.
-- Belum ada batas berapa koneksi yang dilayani satu site sekaligus. Tiap koneksi adalah satu thread, jadi plafonnya adalah apa yang diberikan sistem operasi ke proses ini.
+- Belum ada batas berapa koneksi yang diterima satu site sekaligus. Process gate membatasi request yang berjalan ke backend, bukan socket yang tetap terbuka, jadi plafon penerimaan tetap apa yang diberikan sistem operasi ke proses ini.
 - Belum ada routing per path, rewrite header, rate limit, atau caching.
-- `dispatch` dan `max_recv_buf` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.
+- `dispatch` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.
