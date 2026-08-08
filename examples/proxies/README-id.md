@@ -19,17 +19,19 @@ Jalankan semuanya dari root repository. Path di config site (`public_dir`, `tls_
 relatif terhadap tempat daemon berjalan.
 
 ```bash
-zig build zixer                 # membangun zig-out/bin/zixer-<arch>-<os>
+zig build zixer                 # membangun zig-out/bin/zixer-<arch>-<os>-<optimize>
 zig build zixer-examples        # membangun tiap upstream demo
 mkdir -p examples/proxies/logs  # logs/ tidak ada di repository, buat sekali
 ```
 
-Perpendek path untuk sisa halaman ini (triplet-nya milik mesin ini, ganti dengan milik Anda):
+Perpendek path untuk sisa halaman ini. Triplet-nya milik mesin ini, ganti dengan milik Anda, dan
+`MODE` adalah nilai `-Doptimize` dalam huruf kecil, yaitu `debug` bila flag-nya tidak diberikan:
 
 ```bash
 BIN=./zig-out/bin
 TRIPLET=x86_64-linux
-ZIXER=$BIN/zixer-$TRIPLET
+MODE=debug
+ZIXER=$BIN/zixer-$TRIPLET-$MODE
 ```
 
 Periksa config sebelum menyalakan apa pun. Tiap file mendapat verdict dan tiap masalah
@@ -45,7 +47,7 @@ $ZIXER --dir examples/proxies list
 ## Alur harian
 
 ```bash
-$BIN/zixer-example-http1-$TRIPLET &         # upstream dulu
+$BIN/zixer-example-http1-$TRIPLET-$MODE &   # upstream dulu
 $ZIXER --dir examples/proxies start http1.cfg   # men-spawn daemon bila perlu
 curl http://127.0.0.1:9100/
 $ZIXER --dir examples/proxies stop http1.cfg

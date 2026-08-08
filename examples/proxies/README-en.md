@@ -18,17 +18,19 @@ Run everything from the repository root. Paths in the site configs (`public_dir`
 `tls_cert`) are relative to where the daemon runs.
 
 ```bash
-zig build zixer                 # builds zig-out/bin/zixer-<arch>-<os>
+zig build zixer                 # builds zig-out/bin/zixer-<arch>-<os>-<optimize>
 zig build zixer-examples        # builds every demo upstream
 mkdir -p examples/proxies/logs  # logs/ is not in the repository, create it once
 ```
 
-Shorten the paths for the rest of this page (the triplet is this machine's, swap in yours):
+Shorten the paths for the rest of this page. The triplet is this machine's, swap in yours, and
+`MODE` is the lowercased `-Doptimize` value, which is `debug` when the flag is not passed:
 
 ```bash
 BIN=./zig-out/bin
 TRIPLET=x86_64-linux
-ZIXER=$BIN/zixer-$TRIPLET
+MODE=debug
+ZIXER=$BIN/zixer-$TRIPLET-$MODE
 ```
 
 Check the configs before starting anything. Every file gets a verdict and every problem
@@ -44,7 +46,7 @@ $ZIXER --dir examples/proxies list
 ## Daily flow
 
 ```bash
-$BIN/zixer-example-http1-$TRIPLET &         # the upstream first
+$BIN/zixer-example-http1-$TRIPLET-$MODE &   # the upstream first
 $ZIXER --dir examples/proxies start http1.cfg   # spawns the daemon if needed
 curl http://127.0.0.1:9100/
 $ZIXER --dir examples/proxies stop http1.cfg
