@@ -102,7 +102,7 @@ pub const SiteRuntime = struct {
                 }
 
                 if (engine == .HTTP3 and (cfg.upstreams.len > 0 or cfg.public_dir != null)) {
-                    const state = h3_edge.EdgeState.create(allocator, io, socket, &cfg, port) catch |err| {
+                    const state = h3_edge.EdgeState.create(allocator, io, socket, &cfg, port, options) catch |err| {
                         socket.close(io);
                         return err;
                     };

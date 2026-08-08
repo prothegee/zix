@@ -8,7 +8,10 @@ const h3_frames = @import("h3_frames.zig");
 const h3_qpack = @import("h3_qpack.zig");
 const h3_streams = @import("h3_streams.zig");
 const h3_translate = @import("h3_translate.zig");
+const bind_options = @import("bind_options.zig");
 const http1_head = @import("http1_head.zig");
+const process_gate = @import("process_gate.zig");
+const process_wait = @import("process_wait.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const site_cfg = @import("site_cfg.zig");
 const static_files = @import("static_files.zig");
@@ -102,6 +105,9 @@ pub const EdgeState = struct {
     idle: ?upstream_conn.IdleCache,
     reaper: idle_reaper.Reaper = .{},
     upstream_timeout_ms: u32,
+    /// How many requests this site may run upstream at once. One gate for
+    /// the whole edge, shared by every request task the receive loop spawns.
+    process_gate: process_gate.Gate,
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
@@ -127,6 +133,7 @@ pub const EdgeState = struct {
     /// socket - std.Io.net.Socket (bound datagram socket for this site)
     /// cfg - *const site_cfg.SiteCfg (validated http3 site config, tls required)
     /// port - u16
+    /// options - bind_options.BindOptions (the main.cfg values the site resolves against)
     ///
     /// Return:
     /// - *EdgeState with the receive thread running
@@ -138,6 +145,7 @@ pub const EdgeState = struct {
         socket: std.Io.net.Socket,
         cfg: *const site_cfg.SiteCfg,
         port: u16,
+        options: bind_options.BindOptions,
     ) !*EdgeState {
         if (!cfg.tls or cfg.tls_cert == null or cfg.tls_key == null) return error.TlsRequired;
 
@@ -169,6 +177,18 @@ pub const EdgeState = struct {
         var tls_ctx = try tls_edge.buildContext(allocator, io, cfg.tls_cert.?, cfg.tls_key.?, tls_edge.alpnPrefs(.HTTP3));
         errdefer tls_ctx.deinit();
 
+        var gate = try process_gate.Gate.init(allocator, process_gate.resolve(
+            cfg.process_limit,
+            cfg.process_queue_len,
+            cfg.process_queue_timeout_ms,
+            .{
+                .limit = options.process_limit,
+                .queue_len = options.process_queue_len,
+                .timeout_ms = options.process_queue_timeout_ms,
+            },
+        ));
+        errdefer gate.deinit(allocator);
+
         state.* = .{
             .allocator = allocator,
             .io = io,
@@ -176,6 +196,7 @@ pub const EdgeState = struct {
             .pool = pool,
             .idle = idle,
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
+            .process_gate = gate,
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
@@ -217,6 +238,7 @@ pub const EdgeState = struct {
 
         state.socket.close(io);
         state.allocator.free(state.slots);
+        state.process_gate.deinit(state.allocator);
         if (state.idle) |*idle| idle.deinit(state.allocator, io);
         if (state.pool) |*pool| pool.deinit(state.allocator);
         state.tls_ctx.deinit();
@@ -667,6 +689,18 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
         answerLocal(task, 431, null);
         return;
     };
+
+    // One place in the gate per request stream. A quic connection carries
+    // many of them, and each spends a backend on its own.
+    const admission = process_wait.admit(&state.process_gate, io);
+    if (admission != .ADMITTED) {
+        answerLocal(task, 504, process_wait.PROXY_ERROR);
+
+        return;
+    }
+
+    var slot = process_wait.hold(&state.process_gate);
+    defer slot.release();
 
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
@@ -1615,13 +1649,23 @@ const FakeBackend = struct {
     seen_body: [4096]u8 = undefined,
     seen_body_len: usize = 0,
     ready: std.atomic.Value(bool) = .init(false),
+    /// Set when every bind attempt lost, so the waiter fails with the
+    /// reason instead of timing out on a thread that already gave up.
+    bind_failed: std.atomic.Value(bool) = .init(false),
     answered: std.atomic.Value(usize) = .init(0),
 
     fn serve(fake: *FakeBackend) void {
         const io = fake.io;
 
-        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
+
+        var server = bindWithRetry(io, addr) orelse {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -1755,13 +1799,39 @@ const BIG_BODY_LEN: usize = 300 * 1024;
 const FAKE_POLL_MS: u32 = 50;
 const FAKE_IDLE_SLICES: usize = 200;
 
+/// Attempts the fake backend makes at its fixed port, one per BIND_RETRY_MS.
+/// These ports sit inside this box's ephemeral range, so the kernel can be
+/// holding one for an outbound connection the moment a test asks for it.
+/// The hold is brief, so retrying rides it out instead of failing the run.
+const BIND_TRIES: usize = 50;
+const BIND_RETRY_MS: u64 = 10;
+
+fn bindWithRetry(io: std.Io, addr: std.Io.net.IpAddress) ?std.Io.net.Server {
+    var tries: usize = 0;
+    while (tries < BIND_TRIES) : (tries += 1) {
+        if (addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 })) |server| return server else |_| {}
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(BIND_RETRY_MS), .awake) catch {};
+    }
+
+    return null;
+}
+
 fn waitBackend(io: std.Io, fake: *FakeBackend) !void {
     var tries: usize = 0;
-    while (tries < 200 and !fake.ready.load(.acquire)) : (tries += 1) {
+    while (tries < 200 and !fake.ready.load(.acquire) and !fake.bind_failed.load(.acquire)) : (tries += 1) {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
     }
 
-    try testing.expect(tries < 200);
+    // Told apart on purpose: a lost port is an environment problem, a quiet
+    // thread is a real one, and the old bare bound reported both the same.
+    if (fake.bind_failed.load(.acquire)) {
+        std.log.err("zix zixer: h3 edge, the fake backend could not take port {d} in {d} tries", .{ fake.port, BIND_TRIES });
+
+        return error.FakeBindFailed;
+    }
+
+    try testing.expect(fake.ready.load(.acquire));
 }
 
 /// The request fields a plain GET carries.
@@ -1806,7 +1876,7 @@ test "zix zixer: h3 edge, create starts the receive thread and shutdown frees th
     const cfg = tlsCfg(39802, &upstreams);
 
     const socket = try bindSite(io, 39802);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39802);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39802, .{});
     state.shutdown();
 
     // Udp binds strict, so a clean rebind proves the port came back.
@@ -1833,7 +1903,7 @@ test "zix zixer: h3 edge, a cleartext cfg refuses to serve" {
     const socket = try bindSite(io, 39804);
     defer socket.close(io);
 
-    try testing.expectError(error.TlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 39804));
+    try testing.expectError(error.TlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 39804, .{}));
 }
 
 test "zix zixer: h3 edge, a request crosses quic to the http1 upstream and back" {
@@ -1853,7 +1923,7 @@ test "zix zixer: h3 edge, a request crosses quic to the http1 upstream and back"
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39806 }};
     const cfg = tlsCfg(39805, &upstreams);
     const socket = try bindSite(io, 39805);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39805);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39805, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39805);
@@ -1897,7 +1967,7 @@ test "zix zixer: h3 edge, a request body reaches the upstream" {
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39808 }};
     const cfg = tlsCfg(39807, &upstreams);
     const socket = try bindSite(io, 39807);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39807);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39807, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39807);
@@ -1941,7 +2011,7 @@ test "zix zixer: h3 edge, a body split across data frames joins for the upstream
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39822 }};
     const cfg = tlsCfg(39821, &upstreams);
     const socket = try bindSite(io, 39821);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39821);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39821, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39821);
@@ -1984,7 +2054,7 @@ test "zix zixer: h3 edge, a big response spans packets and arrives whole" {
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39810 }};
     const cfg = tlsCfg(39809, &upstreams);
     const socket = try bindSite(io, 39809);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39809);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39809, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39809);
@@ -2023,7 +2093,7 @@ test "zix zixer: h3 edge, a chunked upstream body relays with its trailers" {
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39812 }};
     const cfg = tlsCfg(39811, &upstreams);
     const socket = try bindSite(io, 39811);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39811);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39811, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39811);
@@ -2056,7 +2126,7 @@ test "zix zixer: h3 edge, a dead upstream answers 502 with proxy status" {
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39814 }};
     const cfg = tlsCfg(39813, &upstreams);
     const socket = try bindSite(io, 39813);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39813);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39813, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39813);
@@ -2094,7 +2164,7 @@ test "zix zixer: h3 edge, the static plane serves a file and misses fall through
     cfg.public_dir = root;
 
     const socket = try bindSite(io, 39815);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39815);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39815, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39815);
@@ -2132,7 +2202,7 @@ test "zix zixer: h3 edge, a foreign authority is refused with 421" {
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39818 }};
     const cfg = tlsCfg(39816, &upstreams);
     const socket = try bindSite(io, 39816);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39816);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39816, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39816);
@@ -2165,7 +2235,7 @@ test "zix zixer: h3 edge, two requests multiplex on one connection" {
     const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39820 }};
     const cfg = tlsCfg(39819, &upstreams);
     const socket = try bindSite(io, 39819);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39819);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39819, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 39819);
@@ -2200,7 +2270,7 @@ const SilentBackend = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -2236,7 +2306,7 @@ test "zix zixer: h3 edge, a silent upstream answers 504 with proxy status" {
     cfg.upstream_timeout_ms = 200;
 
     const socket = try bindSite(io, 18951);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18951);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18951, .{});
     defer state.shutdown();
 
     var client = try H3Client.connect(io, 18951);
