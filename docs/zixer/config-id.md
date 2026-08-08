@@ -73,6 +73,8 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 | process_limit | `0` | request yang boleh satu site jalankan ke upstream sekaligus, `0` mematikan gate, lihat di bawah | tiap site yang di-proxy, sebagai default yang boleh ditimpa file site | di atas `65536` ia fault dan tetap di default |
 | process_queue_len | `0` | request yang boleh menunggu slot, `0` menolak alih-alih mengantre | dengan `process_limit` di atas `0` | di atas `65536` ia fault, dan nilai di atas `0` dengan `process_limit: 0` juga fault |
 | process_queue_timeout_ms | `6000` | berapa lama satu request menunggu sebelum edge menjawab 504 | dengan `process_queue_len` di atas `0` | di luar `1` sampai `600000` ia fault dan tetap di default |
+| public_dir_cache_ttl_ms | `0` | berapa lama file yang dilayani tetap ter-cache, `0` mematikan cache, lihat di bawah | tiap site yang punya `public_dir`, sebagai default yang boleh ditimpa file site | di atas `3600000` ia fault dan tetap di default |
+| public_dir_cache_max_entries | `256` | berapa file yang boleh ditahan terbuka oleh cache, seluruh daemon | satu cache table yang dibangun daemon ini | `0` atau di atas `1048576` fault dan tetap di default |
 
 Hanya `dispatch` yang divalidasi tanpa dipakai. `main.cfg` kosong tetap valid: tiap key jatuh ke default di atas.
 
@@ -176,6 +178,70 @@ menahan pekerjaan yang sudah berjalan. Pada batasnya, stream grpc baru
 mendapat `UNAVAILABLE` trailers-only, yang memang menjadi sinyal retry bagi
 client grpc.
 
+### Apa yang dilakukan cache public_dir
+
+Dengan `public_dir_cache_ttl_ms: 0`, nilai default, tiap request static membuka
+file-nya, mem-stat, membaca, lalu menutupnya. Browser membuatnya lebih berat
+dari kelihatannya: browser mengirim `Accept-Encoding: gzip, deflate, br`, jadi
+zixer mencari sibling `.br`, lalu sibling `.gz`, baru file-nya sendiri. Untuk
+file yang tidak punya sibling precompressed, itu tiga kali open untuk satu
+response.
+
+Di atas `0`, file ditahan terbuka, sibling-nya diselesaikan sekali saat entry
+dibangun, dan request berikutnya untuk file itu cukup satu lookup table. Ada
+satu table per daemon, dipakai bersama tiap site dan tiap worker, jadi satu
+file memakai satu descriptor untuk seluruh proses, bukan satu per accept loop.
+Di mesin dengan `workers: 0`, selisih itu sebesar jumlah thread.
+
+**Kapan layak dinyalakan**
+
+| situasi | nyalakan |
+| :- | :- |
+| bundle front-end hasil build, banyak file, jarang berubah antar deploy | ya, ini memang tujuannya |
+| file dilayani ke browser sungguhan, jadi `Accept-Encoding` selalu ada | ya, dua open spekulatif per request hilang |
+| file besar, puluhan KB ke atas | ya, dan lihat catatan body besar di bawah |
+| file terus digenerate ulang, lebih cepat dari window mana pun yang bisa diterima | tidak, tiap entry sudah basi sebelum terpakai |
+| hanya satu dua file kecil dan tidak ada lainnya | nyaris tidak, page cache sudah membuat open-nya murah |
+
+**Apa biayanya**
+
+- Satu descriptor per variant yang di-cache. `public_dir_cache_max_entries` membatasi jumlahnya, dan table itu tetap membatasi dirinya ke seperempat batas descriptor proses, jadi ia tidak bisa membuat socket kehabisan jatah.
+- Staleness. Window itu sekaligus berapa lama file yang sudah diedit masih melayani byte lamanya. Sebuah deploy muncul dalam satu window tanpa restart, jadi pilih window yang bisa diterima sebagai jeda deploy: hitungan detik untuk mesin yang diedit manual, lebih panjang untuk mesin yang hanya berubah saat rilis.
+
+Tidak ada bagian dari ini yang bisa menggagalkan request. Table penuh, file
+tidak terbaca, atau path terlalu panjang untuk disimpan, semuanya jatuh ke
+open tanpa cache, yang juga merupakan jalan yang menghasilkan 404.
+
+**Body besar keluar lewat jalan berbeda**
+
+Di site http1 cleartext pada Linux, body berukuran 64 KB ke atas diserahkan ke
+kernel dan tidak pernah masuk ke memori zixer. Di bawah ukuran itu, body
+ditulis bersama head-nya sekaligus, yang lebih murah daripada satu syscall
+terpisah di segment-nya sendiri. Ini otomatis dan tidak punya key.
+
+Site TLS tidak pernah lewat jalan itu, karena byte-nya harus dienkripsi. Site
+http2 atau http3 juga tidak, karena tiap byte harus dibingkai jadi frame. Site
+tersebut tetap mendapat semua keuntungan dari table itu sendiri.
+
+**Hasil pengukurannya**
+
+Mesin 12 core, bundle front-end 20 file dengan sibling `.br` dan `.gz`,
+`h2load` pada 8 connection, kedua build tanpa optimize:
+
+| beban | mati | nyala |
+| :- | :- | :- |
+| seluruh bundle, `Accept-Encoding` browser | 100,066 req/s | 113,666 req/s |
+| seluruh bundle, tanpa `Accept-Encoding` | 81,162 req/s | 105,559 req/s |
+| satu file 67 KB dengan sibling `.br` | 65,996 req/s | 97,319 req/s |
+| satu file 22 KB tanpa sibling | 86,664 req/s | 115,679 req/s |
+| satu file 307 KB, tanpa kompresi | 24,189 req/s | 59,661 req/s |
+
+Baris 307 KB itu jalur kernel, bukan table. Baca angka ini sebagai bentuk
+keuntungannya, bukan sebagai rate untuk dijadikan patokan: ini build debug di
+mesin yang sedang mengerjakan hal lain, dan pada 512 connection baris yang sama
+di build yang sama bergerak antara 63,704 sampai 99,173 req/s, lebih lebar
+daripada efeknya sendiri.
+
 ### Key yang divalidasi tapi belum dipakai
 
 `dispatch` di-parse, dicek rentangnya, dan dicetak oleh `zixer status`, dan tidak ada satu pun jalur serving yang membacanya. `dispatch: async`, `dispatch: epoll`, dan `dispatch: uring` semuanya melayani lewat edge loop yang sama, dan tiap accept loop menjalankan tiap koneksi sebagai task bersamaan.
@@ -208,6 +274,7 @@ Satu file, satu site. `engine` dan `port` wajib, sisanya punya default atau opsi
 | process_limit | nilai main.cfg | request yang boleh site ini jalankan ke upstream sekaligus, `0` mematikan gate untuk site ini | http1, http2, grpc, http3, ditolak di udp | butuh `upstreams`, di atas `65536` fault |
 | process_queue_len | nilai main.cfg | request yang boleh menunggu slot | sama seperti `process_limit` | butuh `upstreams`, ditolak di udp, dan nilai di atas `0` dengan `process_limit: 0` di file yang sama fault |
 | process_queue_timeout_ms | nilai main.cfg | berapa lama satu request menunggu sebelum edge menjawab 504 | sama seperti `process_limit` | butuh `upstreams`, ditolak di udp, di luar `1` sampai `600000` fault |
+| public_dir_cache_ttl_ms | nilai main.cfg | berapa lama file yang dilayani tetap ter-cache untuk site ini, `0` mematikan cache untuk site ini | http1, http2, http3, ditolak di grpc dan udp | butuh `public_dir`, di atas `3600000` fault |
 
 `ip` dan `port` bersama menentukan socket yang mendengarkan. `0.0.0.0` bind ke semua interface, `127.0.0.1` bind loopback saja, `::` bind ke semua interface IPv6.
 
@@ -274,6 +341,8 @@ Set `upstream_timeout_ms: 0` pada site yang backend-nya memang berpikir lebih la
 | max_recv_buf | menentukan ukuran stream buffer | menentukan ukuran stream buffer | menentukan ukuran stream buffer | diterima, tanpa efek | diterima, tanpa efek |
 | upstream_timeout_ms | ya | ya | ditolak | ya | ditolak |
 | process_limit, process_queue_len, process_queue_timeout_ms | ya | ya | ya, hanya setup dan tidak pernah mengantre | ya | ditolak |
+| public_dir_cache_ttl_ms | ya | ya | ditolak | ya | ditolak |
+| public_dir_cache_max_entries | hanya main.cfg, satu table per daemon | hanya main.cfg | hanya main.cfg | hanya main.cfg | hanya main.cfg |
 
 "Ditolak" berarti key-nya fault dengan fix hint dan site tidak start. "Diterima, tanpa efek" berarti file lolos validasi dan tidak ada yang membaca nilainya.
 
@@ -294,14 +363,16 @@ Tiap aturan di bawah diperiksa setelah seluruh file dibaca, jadi satu pass melap
 | tidak ada `upstreams` maupun `public_dir` | `site needs upstreams or public_dir` |
 | `public_prefix` tanpa `public_dir` | `needs public_dir` |
 | `spa_fallback` tanpa `public_dir` | `needs public_dir` |
+| `public_dir_cache_ttl_ms` tanpa `public_dir` | `needs public_dir` |
 | `spa_fallback` dengan upstreams tapi tanpa prefix | `needs public_prefix when upstreams are set` |
 | `acme_webroot` dan `acme_proxy` bersamaan | `choose acme_webroot or acme_proxy, not both` |
 | key acme di site http2, grpc, atau http3 cleartext | `needs tls: true or an http1 site` |
 | `engine: http3` tanpa tls | `tls: http3 requires tls: true` |
-| `public_dir` atau `upstream_timeout_ms` di site grpc | `not supported on grpc sites, remove it` |
+| `public_dir`, `public_dir_cache_ttl_ms`, atau `upstream_timeout_ms` di site grpc | `not supported on grpc sites, remove it` |
 | `upstream_timeout_ms` di site tanpa upstreams | `needs upstreams` |
 | `tls` di site udp | `udp forward is blind bytes, tls does not apply` |
-| `public_dir`, `kernel_backlog`, `upstream_timeout_ms`, key `process_`, atau key acme di site udp | `does not apply to udp sites, remove it` |
+| `public_dir`, `public_dir_cache_ttl_ms`, `kernel_backlog`, `upstream_timeout_ms`, key `process_`, atau key acme di site udp | `does not apply to udp sites, remove it` |
+| `public_dir_cache_max_entries` di file site | `set it in main.cfg, the cache table is one per daemon and every site shares it` |
 | key `process_` apa pun di site tanpa upstreams | `needs upstreams` |
 | `process_queue_len` di atas `0` sementara `process_limit` bernilai `0` | `needs process_limit above 0, otherwise nothing ever queues` |
 
@@ -325,6 +396,7 @@ sites_dir: /srv/zixer/sites
 max_recv_buf: 8192
 kernel_backlog: 1024
 process_limit: 0 (gate off)
+public_dir_cache_ttl_ms: 0 (cache off)
 
 # /srv/zixer/sites/api.cfg
 api.cfg:
@@ -352,7 +424,9 @@ port: 8080
 upstreams: 127.0.0.1:3000, 127.0.0.1:3001
 ```
 
-Single page app static, tanpa backend:
+Single page app static, tanpa backend. Bundle hasil build hanya berubah saat
+deploy, jadi window yang panjang tidak merugikan dan tiap file tetap terbuka
+di antara request:
 
 ```
 engine: http1
@@ -360,6 +434,7 @@ ip: 0.0.0.0
 port: 8080
 public_dir: /var/www/app/dist
 spa_fallback: index.html
+public_dir_cache_ttl_ms: 60000
 ```
 
 Aset static berdampingan dengan backend yang diproxy. Hanya `/assets/...` yang diambil dari disk, sisanya ke upstream:
