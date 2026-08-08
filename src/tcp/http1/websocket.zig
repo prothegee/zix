@@ -674,7 +674,11 @@ fn testEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
 }
 
 test "zix http1 ws: pump echoes masked client frames over a socketpair" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -774,7 +778,11 @@ test "zix http1 ws: pumpRing reports close and consumes the close frame" {
 }
 
 test "zix http1 ws: broadcast fans one built frame out to every member" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     // Three members, each the read end of its own socketpair.
     var pairs: [3][2]i32 = undefined;
     for (&pairs) |*p| {
@@ -801,7 +809,11 @@ test "zix http1 ws: broadcast fans one built frame out to every member" {
 }
 
 test "zix http1 ws: broadcast skips a dead fd and still reaches live members" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var live: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &live));
     defer _ = std.os.linux.close(live[0]);

@@ -241,7 +241,10 @@ pub const Request = struct {
 // --------------------------------------------------------- //
 
 test "zix http1: Request view exposes method, path, query" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const parsed = try core.parseHead("GET /users?active=1 HTTP/1.1\r\nHost: x\r\n\r\n");
     const req = Request.init(&parsed.head, "", 3);
@@ -254,7 +257,10 @@ test "zix http1: Request view exposes method, path, query" {
 }
 
 test "zix http1: an unimplemented method never reaches a Request" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     // The parser refuses these now, so no handler ever sees one mislabelled as a
     // GET. The caller answers 501 from the error instead.
@@ -267,7 +273,10 @@ test "zix http1: an unimplemented method never reaches a Request" {
 }
 
 test "zix http1: Request method keeps its GET fallback for a hand-built head" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     // A Request built directly rather than parsed can still hold any token, so
     // the accessor keeps a total answer instead of a null a handler must unwrap.
@@ -280,7 +289,10 @@ test "zix http1: Request method keeps its GET fallback for a hand-built head" {
 }
 
 test "zix http1: Request queryParam and header lookups" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const parsed = try core.parseHead("GET /p?name=alice&age=30 HTTP/1.1\r\nContent-Type: text/plain\r\n\r\n");
     const req = Request.init(&parsed.head, "", -1);
@@ -292,7 +304,10 @@ test "zix http1: Request queryParam and header lookups" {
 }
 
 test "zix http1: Request pathParam reads its own captured set first" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const parsed = try core.parseHead("GET /users/alice HTTP/1.1\r\n\r\n");
     const captured = [_]router.PathParam{.{ .name = "id", .value = "alice" }};
@@ -303,7 +318,10 @@ test "zix http1: Request pathParam reads its own captured set first" {
 }
 
 test "zix http1: Request body returns the engine-delivered slice" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const parsed = try core.parseHead("POST /submit HTTP/1.1\r\nContent-Length: 5\r\n\r\n");
     var req = Request.init(&parsed.head, "hello", -1);
@@ -313,7 +331,10 @@ test "zix http1: Request body returns the engine-delivered slice" {
 }
 
 test "zix http1: Request bodyReceived defaults to the body length and takes an engine override" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const parsed = try core.parseHead("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\n");
 
@@ -332,7 +353,10 @@ test "zix http1: Request bodyReceived defaults to the body length and takes an e
 }
 
 test "zix http1: Request bodyComplete defaults true and takes an engine override" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const parsed = try core.parseHead("POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\n");
 
@@ -354,7 +378,10 @@ test "zix http1: Request bodyComplete defaults true and takes an engine override
 }
 
 test "zix http1: Request pathSegments splits non-empty segments" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -370,7 +397,10 @@ test "zix http1: Request pathSegments splits non-empty segments" {
 }
 
 test "zix http1: Request queryParams returns every pair, valueless keys null" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

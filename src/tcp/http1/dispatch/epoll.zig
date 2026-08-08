@@ -1046,8 +1046,10 @@ fn testEchoReceivedHandler(req: *core.Request, res: *core.Response, _: *core.Con
 
 test "zix http1: EPOLL reports the counted body total for an over-large body" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     // Both event loops defer the handler until the drain finishes and hand it
     // the counted total, so the same request reports the same size on either.
     const fds = try core.testTcpPair();
@@ -1087,8 +1089,10 @@ test "zix http1: EPOLL reports the counted body total for an over-large body" {
 
 test "zix http1: EPOLL never serves a request whose peer quit mid-drain" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     // The counterpart to .ASYNC reporting an incomplete body: this model does not
     // report one, it never invokes the handler at all. Nothing pinned that, and
     // a future edit could start serving the parked request on a hangup.
@@ -1129,8 +1133,10 @@ test "zix http1: EPOLL never serves a request whose peer quit mid-drain" {
 
 test "zix http1: EPOLL drain consumes exactly the declared body so the pipelined request survives" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     const fds = try core.testTcpPair();
     defer _ = std.os.linux.close(fds[0]);
     defer _ = std.os.linux.close(fds[1]);
@@ -1171,8 +1177,10 @@ test "zix http1: EPOLL drain consumes exactly the declared body so the pipelined
 
 test "zix http1: EPOLL waits for a body that fits the buffer and then reports the full count" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1218,8 +1226,10 @@ fn testCacheHandler(req: *core.Request, res: *core.Response, _: *core.Context) a
 
 test "zix http1: EPOLL refuses a declared body past the limit with 413" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1253,8 +1263,10 @@ test "zix http1: EPOLL refuses a declared body past the limit with 413" {
 
 test "zix http1: EPOLL sends 100 Continue once while the body is still arriving" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1293,8 +1305,10 @@ test "zix http1: EPOLL sends 100 Continue once while the body is still arriving"
 
 test "zix http1: EPOLL answers 400 on a malformed chunked body instead of waiting" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
@@ -1324,8 +1338,10 @@ test "zix http1: EPOLL answers 400 on a malformed chunked body instead of waitin
 
 test "zix http1: EPOLL answers 413 for a chunked body past the body buffer" {
     if (comptime @import("builtin").target.os.tag != .linux) {
-        return error.SkipZigTest;
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
     }
+
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer _ = std.os.linux.close(fds[0]);
