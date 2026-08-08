@@ -370,7 +370,8 @@ fn drain(peer: std.posix.fd_t, buf: []u8) []const u8 {
 test "zix http2: static zeroCopyAllowed refuses a coalescing batch and the sentinel fd" {
     if (comptime builtin.os.tag != .linux) {
         // Every other target takes the copy path unconditionally.
-        return error.SkipZigTest;
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
     }
 
     try testing.expect(zeroCopyAllowed(3));
@@ -392,7 +393,10 @@ test "zix http2: static zeroCopyAllowed refuses a coalescing batch and the senti
 }
 
 test "zix http2: static serve frames a file as HEADERS plus DATA with END_STREAM" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -447,7 +451,10 @@ test "zix http2: static serve rejects traversal and a missing file" {
 }
 
 test "zix http2: static serve chunks a body past the max frame size" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -490,7 +497,10 @@ test "zix http2: static serve chunks a body past the max frame size" {
 }
 
 test "zix http2: static serve closes the stream on the HEADERS frame for an empty file" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -763,7 +773,10 @@ test "zix http2: static chunks a range at the peer's frame size" {
 }
 
 test "zix http2: static acquireHit takes resident bytes only when zero copy is refused" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -883,7 +896,10 @@ test "zix http2: static serves the brotli sibling from resident bytes while coal
 }
 
 test "zix http2: static serve picks the brotli sibling from the cache" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    if (comptime builtin.os.tag != .linux) {
+        std.log.info("sendfile zero-copy is the Linux shape, every other target copies, test skipped", .{});
+        return;
+    }
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

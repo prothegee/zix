@@ -347,7 +347,11 @@ test "zix grpc: GrpcClient.connect port zero returns PortNotConfigured" {
 }
 
 test "zix grpc: applySocketTimeout, zero ms is a no-op on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -363,7 +367,11 @@ test "zix grpc: applySocketTimeout, zero ms is a no-op on real socket" {
 }
 
 test "zix grpc: applySocketTimeout, sets SO_RCVTIMEO on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -379,7 +387,11 @@ test "zix grpc: applySocketTimeout, sets SO_RCVTIMEO on real socket" {
 }
 
 test "zix grpc: applySocketTimeout, short timeout does not fire when data arrives immediately" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
