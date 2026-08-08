@@ -109,6 +109,16 @@ pub fn renderMain(out: *std.Io.Writer, path: []const u8, cfg: main_cfg.MainCfg, 
     try out.print("max_recv_buf: {d}\n", .{cfg.max_recv_buf});
     try out.print("kernel_backlog: {d}\n", .{cfg.kernel_backlog});
 
+    // The queue and its wait mean nothing while the limit is 0, so an
+    // untouched daemon prints one honest line instead of three.
+    if (cfg.process_limit == 0) {
+        try out.writeAll("process_limit: 0 (gate off)\n");
+    } else {
+        try out.print("process_limit: {d}\n", .{cfg.process_limit});
+        try out.print("process_queue_len: {d}\n", .{cfg.process_queue_len});
+        try out.print("process_queue_timeout_ms: {d}\n", .{cfg.process_queue_timeout_ms});
+    }
+
     try renderFaults(out, faults);
     try out.writeAll("\n");
 }
@@ -143,6 +153,9 @@ pub fn renderSite(out: *std.Io.Writer, path: []const u8, name: []const u8, cfg: 
     if (cfg.kernel_backlog) |kernel_backlog| try out.print("kernel_backlog: {d}\n", .{kernel_backlog});
     if (cfg.max_recv_buf) |max_recv_buf| try out.print("max_recv_buf: {d}\n", .{max_recv_buf});
     if (cfg.upstream_timeout_ms) |upstream_timeout_ms| try out.print("upstream_timeout_ms: {d}\n", .{upstream_timeout_ms});
+    if (cfg.process_limit) |process_limit| try out.print("process_limit: {d}\n", .{process_limit});
+    if (cfg.process_queue_len) |process_queue_len| try out.print("process_queue_len: {d}\n", .{process_queue_len});
+    if (cfg.process_queue_timeout_ms) |process_queue_timeout_ms| try out.print("process_queue_timeout_ms: {d}\n", .{process_queue_timeout_ms});
 
     try renderFaults(out, faults);
     try out.writeAll("\n");
@@ -430,8 +443,41 @@ test "zix zixer: cmd status, render main block matches the documented shape" {
         "sites_dir: /r/sites\n" ++
         "max_recv_buf: 8192\n" ++
         "kernel_backlog: 1024\n" ++
+        "process_limit: 0 (gate off)\n" ++
         "\n";
     try std.testing.expectEqualStrings(expected, out.buffered());
+}
+
+test "zix zixer: cmd status, an armed process gate prints all three values" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const cfg = main_cfg.MainCfg{
+        .logs_dir = "/r/logs",
+        .sites_dir = "/r/sites",
+        .process_limit = 64,
+        .process_queue_len = 256,
+        .process_queue_timeout_ms = 6000,
+    };
+    try renderMain(&out, "/r/main.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_limit: 64\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_len: 256\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_timeout_ms: 6000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "gate off") == null);
+}
+
+test "zix zixer: cmd status, a site prints only the gate keys it names" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 3000 }};
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 8080, .upstreams = &upstreams, .process_limit = 4 };
+    try renderSite(&out, "/r/sites/a.cfg", "a.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_limit: 4\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_len") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_timeout_ms") == null);
 }
 
 test "zix zixer: cmd status, a workers value of zero reports what it resolves to" {
