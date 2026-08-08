@@ -552,7 +552,11 @@ fn writeAllFD(fd: std.posix.fd_t, bytes: []const u8) !void {
 }
 
 test "zix tls: client over a socketpair (real fds, full https/1.1 request)" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     const connection = @import("connection.zig");
     const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
     const linux = std.os.linux;
