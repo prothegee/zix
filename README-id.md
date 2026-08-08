@@ -2479,8 +2479,9 @@ Yang akan memberikan Anda kinerja, efisiensi, dan transparansi.
 
 ## AI Policies
 
-- __*Anda boleh menggunakannya sebagai alat Anda sendiri.*__
-- __*Keputusan dan penilaian akhir ada di pihak kami (Anda dan pengelola).*__
+- __*Anda dapat menggunakannya sebagai alat internal.*__
+- __*Issue & Pull Request harus dibuat atas nama Anda.*__
+- __*Keputusan dan penilaian akhir berada di tangan kami (Anda dan para maintainer).*__
 
 <br>
 

@@ -2471,6 +2471,7 @@ That will bring you performance, efficiency, & transparency.
 ## AI Policies
 
 - __*You can use it as your own tool.*__
+- __*Issue & Pull Request must made on your behalf.*__
 - __*The last decision and judgement it's on our end (you and maintainers).*__
 
 <br>
