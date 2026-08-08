@@ -1,12 +1,12 @@
 // Usage:
 // zig build example-webrtc_datachannel_echo
 // zig build example-webrtc_native_pair
-// ./zig-out/bin/zix-example-webrtc_datachannel_echo-<arch>-<os> &
-// ./zig-out/bin/zix-example-webrtc_native_pair-<arch>-<os>
+// ./zig-out/bin/zix-example-webrtc_datachannel_echo-<arch>-<os>-<optimize> &
+// ./zig-out/bin/zix-example-webrtc_native_pair-<arch>-<os>-<optimize>
 //
 // Both ports can be overridden, which is how the same dialer runs the session through a
 // gateway instead of straight at the answering peer:
-// ./zig-out/bin/zix-example-webrtc_native_pair-<arch>-<os> --peer-port 9123 --bind-port 9084
+// ./zig-out/bin/zix-example-webrtc_native_pair-<arch>-<os>-<optimize> --peer-port 9123 --bind-port 9084
 //
 // The dialing half of a native WebRTC pair: no browser, no SDP, and no signalling server. It runs
 // the whole session against webrtc_datachannel_echo over a real loopback socket, in the order the
