@@ -10,6 +10,7 @@ const main_cfg = @import("main_cfg.zig");
 const root_dir = @import("root_dir.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_runtime = @import("site_runtime.zig");
+const static_cached = @import("static_cached.zig");
 const worker_count = @import("worker_count.zig");
 
 /// Hard ceiling for one config file, a larger file fails instead of allocating.
@@ -211,6 +212,8 @@ pub const Daemon = struct {
             .process_limit = self.cfg.process_limit,
             .process_queue_len = self.cfg.process_queue_len,
             .process_queue_timeout_ms = self.cfg.process_queue_timeout_ms,
+            .public_dir_cache_ttl_ms = self.cfg.public_dir_cache_ttl_ms,
+            .public_dir_cache_max_entries = self.cfg.public_dir_cache_max_entries,
         };
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, options) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
@@ -247,6 +250,10 @@ pub const Daemon = struct {
         for (self.sites.items) |*site| site.unbind(self.allocator, self.io);
 
         self.sites.clearRetainingCapacity();
+
+        // Every site is stopped, so no response can still be holding a cached
+        // file. Closing the table here is what returns its descriptors.
+        static_cached.shutdown(self.io);
     }
 
     /// One conn, one exchange: read a line, reply, close.
@@ -403,11 +410,11 @@ test "zix zixer: daemon handleLine, start stop restart walk the registry" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 39864\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 18864\nupstreams: 127.0.0.1:3000\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "ok: service_a.cfg started on 127.0.0.1:39864",
+        "ok: service_a.cfg started on 127.0.0.1:18864",
         daemon.handleLine("start service_a.cfg", &reply_buf),
     );
     try std.testing.expectEqual(@as(usize, 1), daemon.sites.items.len);
@@ -418,7 +425,7 @@ test "zix zixer: daemon handleLine, start stop restart walk the registry" {
     );
 
     try std.testing.expectEqualStrings(
-        "ok: service_a.cfg restarted on 127.0.0.1:39864",
+        "ok: service_a.cfg restarted on 127.0.0.1:18864",
         daemon.handleLine("restart service_a.cfg", &reply_buf),
     );
 
@@ -431,7 +438,7 @@ test "zix zixer: daemon handleLine, start stop restart walk the registry" {
     );
 
     try std.testing.expectEqualStrings(
-        "ok: service_a.cfg started on 127.0.0.1:39864",
+        "ok: service_a.cfg started on 127.0.0.1:18864",
         daemon.handleLine("restart service_a.cfg", &reply_buf),
     );
 }
@@ -475,13 +482,13 @@ test "zix zixer: daemon handleLine, two sites on one port collide at start" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "one.cfg", "engine: http1\nip: 127.0.0.1\nport: 39865\nupstreams: 127.0.0.1:3000\n");
-    try writeSiteFile(io, arena.allocator(), test_root, "two.cfg", "engine: http1\nip: 127.0.0.1\nport: 39865\nupstreams: 127.0.0.1:3001\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "one.cfg", "engine: http1\nip: 127.0.0.1\nport: 18865\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "two.cfg", "engine: http1\nip: 127.0.0.1\nport: 18865\nupstreams: 127.0.0.1:3001\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start one.cfg", &reply_buf), "ok: "));
     try std.testing.expectEqualStrings(
-        "error: two.cfg port 39865 is already used by one.cfg",
+        "error: two.cfg port 18865 is already used by one.cfg",
         daemon.handleLine("start two.cfg", &reply_buf),
     );
 }
@@ -508,8 +515,8 @@ test "zix zixer: daemon backlog, a started site binds with the resolved value" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "inherited.cfg", "engine: http1\nip: 127.0.0.1\nport: 39867\nupstreams: 127.0.0.1:3000\n");
-    try writeSiteFile(io, arena.allocator(), test_root, "own.cfg", "engine: http1\nip: 127.0.0.1\nport: 39868\nupstreams: 127.0.0.1:3000\nkernel_backlog: 7\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "inherited.cfg", "engine: http1\nip: 127.0.0.1\nport: 18867\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "own.cfg", "engine: http1\nip: 127.0.0.1\nport: 18868\nupstreams: 127.0.0.1:3000\nkernel_backlog: 7\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start inherited.cfg", &reply_buf), "ok: "));
@@ -730,7 +737,7 @@ test "zix zixer: daemon handleLine, shutdown reports the unbind count and sets t
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 39866\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 18866\nupstreams: 127.0.0.1:3000\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     _ = daemon.handleLine("start service_a.cfg", &reply_buf);
@@ -758,7 +765,7 @@ test "zix zixer: daemon end to end, socket round trip start ping shutdown" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 39867\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 18867\nupstreams: 127.0.0.1:3000\n");
 
     const daemon_thread = try std.Thread.spawn(.{}, runDaemonThread, .{&daemon});
 
@@ -772,7 +779,7 @@ test "zix zixer: daemon end to end, socket round trip start ping shutdown" {
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     const started = try control_client.call(io, daemon.socket_path, "start service_a.cfg", &reply_buf);
     try std.testing.expect(started.ok);
-    try std.testing.expectEqualStrings("service_a.cfg started on 127.0.0.1:39867", started.text);
+    try std.testing.expectEqualStrings("service_a.cfg started on 127.0.0.1:18867", started.text);
 
     var stop_buf: [control.MAX_LINE]u8 = undefined;
     const stopped = try control_client.call(io, daemon.socket_path, "shutdown", &stop_buf);
@@ -796,7 +803,7 @@ test "zix zixer: daemon handleLine, tls site with a missing cert file refuses" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "tls_bad.cfg", "engine: http1\nip: 127.0.0.1\nport: 39898\n" ++
+    try writeSiteFile(io, arena.allocator(), test_root, "tls_bad.cfg", "engine: http1\nip: 127.0.0.1\nport: 18898\n" ++
         "tls: true\ntls_cert: examples/certs/absent.pem\ntls_key: examples/certs/ecdsa_p256_key.pem\n" ++
         "public_dir: /var/www/pages\n");
 
@@ -842,7 +849,7 @@ test "zix zixer: daemon handleLine, tls acme site starts or names the port 80 ne
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "tls_acme.cfg", "engine: http1\nip: 127.0.0.1\nport: 39899\n" ++
+    try writeSiteFile(io, arena.allocator(), test_root, "tls_acme.cfg", "engine: http1\nip: 127.0.0.1\nport: 18899\n" ++
         "tls: true\ntls_cert: examples/certs/ecdsa_p256_cert.pem\ntls_key: examples/certs/ecdsa_p256_key.pem\n" ++
         "acme_webroot: /var/www/acme\npublic_dir: /var/www/pages\n");
 
