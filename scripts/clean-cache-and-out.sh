@@ -8,10 +8,12 @@ if [[ "$(pwd)" != */zix ]]; then
 fi
 
 rm -rf "$(pwd)/.zig-cache"
+rm -rf "$(pwd)/zig-out"
+rm -rf "$(pwd)/src/jzon/.zig-cache"
 rm -rf "$(pwd)/src/driver/postgrez/.zig-cache"
 rm -rf "$(pwd)/src/driver/rediz/.zig-cache"
 rm -rf "$(pwd)/src/driver/prometheuz/.zig-cache"
-rm -rf "$(pwd)/zig-out"
+rm -rf "$(pwd)/src/jzon/zig-out"
 rm -rf "$(pwd)/src/driver/postgrez/zig-out"
 rm -rf "$(pwd)/src/driver/rediz/zig-out"
 rm -rf "$(pwd)/src/driver/prometheuz/zig-out"

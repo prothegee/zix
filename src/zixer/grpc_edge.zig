@@ -4,15 +4,14 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const conn_buffer = @import("conn_buffer.zig");
 const grpc_relay = @import("grpc_relay.zig");
 const grpc_upstream = @import("grpc_upstream.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const http2_frames = @import("http2_frames.zig");
+const process_wait = @import("process_wait.zig");
 
 const Http2 = zix.Http2;
-
-/// Stream buffer size for the client socket legs (matches the h1 edge).
-const STREAM_BUF_SIZE: usize = 8 * 1024;
 
 /// Concurrent client streams one edge connection relays, advertised as
 /// SETTINGS_MAX_CONCURRENT_STREAMS. Overflow answers REFUSED_STREAM, the
@@ -102,10 +101,11 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
     const io = proxy.io;
     defer client_stream.close(io);
 
-    var read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var client_reader = client_stream.reader(io, &read_buf);
-    var client_writer = client_stream.writer(io, &write_buf);
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
+    defer buffers.deinit(proxy.allocator);
+
+    var client_reader = client_stream.reader(io, buffers.client_read);
+    var client_writer = client_stream.writer(io, buffers.client_write);
 
     serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream);
 }
@@ -154,7 +154,7 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
     session.pumps.cancel(session.io);
 
     for (session.up_used, 0..) |used, index| {
-        if (used) session.up_conns[index].stream.close(session.io);
+        if (used) grpc_upstream.close(&session.up_conns[index], session.io, session.proxy.allocator);
     }
 }
 
@@ -326,6 +326,23 @@ fn acceptStream(session: *Session, id: u31, headers: []const Http2.Header, end_s
 
     if (slot == null) return streamError(session, id, Http2.ERR_REFUSED_STREAM);
     const entry = slot.?;
+
+    // The gate sheds here instead of parking: this runs on the frame loop
+    // that pumps every live stream on the connection, so waiting would
+    // stall streams already admitted. A trailers-only UNAVAILABLE is what
+    // a grpc client retries on.
+    if (process_wait.admitNow(session.proxy.process_gate) != .ADMITTED) {
+        var busy_buf: [256]u8 = undefined;
+        const busy_block = grpc_relay.encodeUnavailableBlock(&busy_buf) catch return .OK;
+
+        return writeBlockToClient(session, id, busy_block, true);
+    }
+
+    // Released once the request block is on the upstream wire. A grpc
+    // stream lives as long as its client, so holding the slot for the whole
+    // exchange would let a few long calls pin the site's capacity.
+    var stream_slot = process_wait.hold(session.proxy.process_gate);
+    defer stream_slot.release();
 
     const up_index = findOrOpenUpstream(session) orelse {
         var local_buf: [256]u8 = undefined;
@@ -581,7 +598,7 @@ fn findOrOpenUpstream(session: *Session) ?usize {
         if (existing) |index| return index;
         const open_index = free_index orelse return anyOpenUpstream(session);
 
-        grpc_upstream.openInto(&session.up_conns[open_index], io, picked.host, picked.port, picked.index) catch {
+        grpc_upstream.openInto(&session.up_conns[open_index], io, session.proxy.allocator, session.proxy.stream_buf_bytes, picked.host, picked.port, picked.index) catch {
             pool.markDown(picked.index, nowMs(io));
             continue;
         };
@@ -592,7 +609,7 @@ fn findOrOpenUpstream(session: *Session) ?usize {
         unlockState(session);
 
         session.pumps.concurrent(io, downPumpTask, .{ session, open_index }) catch {
-            session.up_conns[open_index].stream.close(io);
+            grpc_upstream.close(&session.up_conns[open_index], io, session.proxy.allocator);
             lockState(session);
             session.up_conns[open_index].alive = false;
             unlockState(session);
@@ -1303,6 +1320,9 @@ const FakeGrpcUpstream = struct {
     /// whole connection (upstream death mid-stream).
     die_first_conn: bool = false,
     ready: std.atomic.Value(bool) = .init(false),
+    /// Set when every bind attempt lost, so the waiter fails with the
+    /// reason instead of spinning out its whole budget on a dead thread.
+    bind_failed: std.atomic.Value(bool) = .init(false),
     conns_accepted: usize = 0,
     streams_served: std.atomic.Value(usize) = .init(0),
     rst_seen: std.atomic.Value(usize) = .init(0),
@@ -1321,8 +1341,15 @@ const FakeGrpcUpstream = struct {
     fn serve(fake: *FakeGrpcUpstream) void {
         const io = fake.io;
 
-        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 4 }) catch return;
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
+
+        var server = bindWithRetry(io, addr) orelse {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -1545,9 +1572,35 @@ const FakeGrpcUpstream = struct {
     }
 };
 
+/// Attempts the fake upstream makes at its fixed port, one per BIND_RETRY_MS.
+/// These ports sit below the ephemeral range, so the kernel never hands one
+/// out as an outbound source port. What is left is a foreign process holding
+/// the port, and retrying rides a brief hold out instead of failing the run.
+const BIND_TRIES: usize = 50;
+const BIND_RETRY_MS: u64 = 10;
+
+fn bindWithRetry(io: std.Io, addr: std.Io.net.IpAddress) ?std.Io.net.Server {
+    var tries: usize = 0;
+    while (tries < BIND_TRIES) : (tries += 1) {
+        if (addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 4 })) |server| return server else |_| {}
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(BIND_RETRY_MS), .awake) catch {};
+    }
+
+    return null;
+}
+
 fn waitReady(io: std.Io, fake: *FakeGrpcUpstream) !void {
     var spins: usize = 0;
     while (!fake.ready.load(.acquire)) : (spins += 1) {
+        // Told apart on purpose: a lost port is an environment problem, a
+        // quiet thread is a real one, and the old bound reported both alike.
+        if (fake.bind_failed.load(.acquire)) {
+            std.log.err("zix zixer: grpc edge, the fake upstream could not take port {d} in {d} tries", .{ fake.port, BIND_TRIES });
+
+            return error.FakeBindFailed;
+        }
+
         if (spins > 5000) return error.FakeNeverReady;
 
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
@@ -1570,11 +1623,11 @@ test "zix zixer: grpc edge, unary echo end-to-end with trailers and via" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39841, .mode = .ECHO };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18841, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39841 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18841 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1620,11 +1673,11 @@ test "zix zixer: grpc edge, request trailers relay to the upstream" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39842, .mode = .ECHO };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18842, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39842 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18842 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1661,11 +1714,11 @@ test "zix zixer: grpc edge, trailers-only answer and sequential streams reuse on
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39843, .mode = .TRAILERS_ONLY };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18843, .mode = .TRAILERS_ONLY };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39843 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18843 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1704,11 +1757,11 @@ test "zix zixer: grpc edge, two in-flight streams multiplex one upstream conn" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39844, .mode = .ECHO };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18844, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39844 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18844 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1753,16 +1806,16 @@ test "zix zixer: grpc edge, pick per stream lands on both upstreams" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake_a = FakeGrpcUpstream{ .io = io, .port = 39845, .mode = .TRAILERS_ONLY };
-    var fake_b = FakeGrpcUpstream{ .io = io, .port = 39846, .mode = .TRAILERS_ONLY };
+    var fake_a = FakeGrpcUpstream{ .io = io, .port = 18845, .mode = .TRAILERS_ONLY };
+    var fake_b = FakeGrpcUpstream{ .io = io, .port = 18846, .mode = .TRAILERS_ONLY };
     const thread_a = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake_a});
     const thread_b = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake_b});
     try waitReady(io, &fake_a);
     try waitReady(io, &fake_b);
 
     const upstreams = [_]site_cfg.Upstream{
-        .{ .host = "127.0.0.1", .port = 39845 },
-        .{ .host = "127.0.0.1", .port = 39846 },
+        .{ .host = "127.0.0.1", .port = 18845 },
+        .{ .host = "127.0.0.1", .port = 18846 },
     };
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
@@ -1798,11 +1851,11 @@ test "zix zixer: grpc edge, server streaming keeps messages as separate frames" 
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39848, .mode = .STREAM3 };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18848, .mode = .STREAM3 };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39848 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18848 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1838,11 +1891,11 @@ test "zix zixer: grpc edge, response data respects the client stream window" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39854, .mode = .ECHO };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18854, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39854 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18854 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1891,11 +1944,11 @@ test "zix zixer: grpc edge, request data credit comes back per frame" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39832, .mode = .HOLD };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18832, .mode = .HOLD };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39832 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18832 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1933,7 +1986,7 @@ test "zix zixer: grpc edge, no reachable upstream answers grpc unavailable" {
     const io = threaded.io();
 
     // Nothing listens on the upstream port.
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39847 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18847 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -1966,11 +2019,11 @@ test "zix zixer: grpc edge, ninth concurrent stream is refused" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39830, .mode = .HOLD };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18830, .mode = .HOLD };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39830 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18830 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -2005,11 +2058,11 @@ test "zix zixer: grpc edge, client reset forwards to the upstream stream" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39831, .mode = .HOLD };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18831, .mode = .HOLD };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39831 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18831 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -2047,11 +2100,11 @@ test "zix zixer: grpc edge, upstream death resets the stream and the next one re
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39849, .mode = .ECHO, .conn_quota = 2, .die_first_conn = true };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18849, .mode = .ECHO, .conn_quota = 2, .die_first_conn = true };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39849 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18849 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -2095,7 +2148,7 @@ test "zix zixer: grpc edge, connection specific header resets the stream only" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39847 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18847 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -2136,7 +2189,7 @@ test "zix zixer: grpc edge, non-preface bytes close without an answer" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39847 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18847 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };
@@ -2168,11 +2221,11 @@ test "zix zixer: grpc edge, client goaway drains and the edge answers goaway" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeGrpcUpstream{ .io = io, .port = 39855, .mode = .TRAILERS_ONLY };
+    var fake = FakeGrpcUpstream{ .io = io, .port = 18855, .mode = .TRAILERS_ONLY };
     const fake_thread = try std.Thread.spawn(.{}, FakeGrpcUpstream.serve, .{&fake});
     try waitReady(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39855 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18855 }};
     var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(testing.allocator);
     const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool };

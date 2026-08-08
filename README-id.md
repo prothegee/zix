@@ -145,8 +145,8 @@ Dokumentasi driver (setiap README menyebar ke dokumen hld, lld, dan config milik
 Zix dispatch model untuk IOCP dan KQUEUE tidak didukung.
 
 __*Platform Development Status:*__ <br>
-<img src="https://img.shields.io/badge/x86__64-Linux-green">
-<img src="https://img.shields.io/badge/aarch64-Linux-green">
+<img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
+<img src="https://img.shields.io/badge/aarch64-Linux-brightgreen">
 <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
 <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
 <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
@@ -194,6 +194,7 @@ __*Maintained Platforms:*__
 - "Nice to have" dan "mungkin kita perlu ini" bersifat tersier.
 - Selalu perbaiki dari sisi kita terlebih dahulu daripada dari sisi fitur Zig.
 - Jika bias/ambigu, coba diskusikan. Minimal libatkan 1-2 entitas lain.
+- Jangan gunakan abstraksi yang bergantung pada mesin atau tujuan tertentu, hindarilah jika memang harus.
 - Fast path raw-syscall Linux x86_64/aarch64 itu guarded, perubahan di situ bisa merusak implementasi.
 - Kamu dan timmu (Junior/Mid/Senior) menggunakan bahasa selain Inggris, kamu bisa berkontribusi dalam bahasa tersebut.
 
@@ -208,6 +209,8 @@ __*Maintained Platforms:*__
 [Milestones.](https://codeberg.org/prothegee/zix/milestones)
 
 [Buka isu.](https://codeberg.org/prothegee/zix/issues/new)
+
+[Pengumuman & Perubahan Besar](https://codeberg.org/prothegee/zix/issues/238)
 
 <br>
 
@@ -571,7 +574,7 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
     - [x] 0.16.x:
         - 0.16.0
     - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1543+6db520a4c
+        - 0.17.0-dev.1606+a06534d73
 
 <br>
 
@@ -635,18 +638,18 @@ Entry point yang sebenarnya adalah step bernama. Daftarkan kapan saja dengan `zi
 | `zig build` | Hanya meng-compile module graph. Tidak ada artifact yang dihasilkan, karena zix adalah source module. |
 | `zig build test-all` | Menjalankan tes unit, integration, behaviour, dan edge. |
 | `zig build unit-test` | Menjalankan tes unit saja. Juga `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `zix-example-<name>-<arch>-<os>`, jadi hasil build beberapa target bisa hidup berdampingan. |
+| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `zix-example-<name>-<arch>-<os>-<optimize>`, jadi hasil build beberapa target dan beberapa optimize mode bisa hidup berdampingan. Tanpa `-Doptimize`, mode-nya `debug`. |
 | `zig build example-<group>` | Membangun satu grup example, misalnya `example-http1` atau `example-grpc`. |
-| `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Binary yang terinstal membawa target triple, jalankan dari sana. |
+| `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Binary yang terinstal membawa target triple dan optimize mode, jalankan dari sana. |
 | `zig build test-runner-<name>` | Menjalankan pengecekan integrasi server plus client, misalnya `test-runner-http1-websocket`. |
 | `zig build test-runner-all` | Menjalankan setiap runner integrasi server plus client. |
 
 Binary example yang dibangun ada di `zig-out/bin/`. Untuk membangun semua example, lalu menjalankan satu di background dan menghentikannya:
 
 ```sh
-zig build examples                                   # bangun setiap example ke zig-out/bin/
-./zig-out/bin/zix-example-http1_websocket-x86_64-linux & # jalankan satu di background
-kill %1                                              # hentikan
+zig build examples                                             # bangun setiap example ke zig-out/bin/
+./zig-out/bin/zix-example-http1_websocket-x86_64-linux-debug & # jalankan satu di background
+kill %1                                                        # hentikan
 ```
 
 Setiap step menerima `-Dtarget=<arch>-<os>`, mencakup tujuh target: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd. Pada target foreign, step tes dan runner meng-compile semuanya dan melewati eksekusi dengan warning. `scripts/build-all-targets.sh` menyapu setiap opsi build zix dan para driver di ketujuh target.
@@ -2433,7 +2436,7 @@ upstreams: 127.0.0.1:3000
 ```
 
 ```bash
-zig build zixer            # membangun zig-out/bin/zixer-<arch>-<os>
+zig build zixer            # membangun zig-out/bin/zixer-<arch>-<os>-<optimize>
 zixer init                 # membuat kerangka root dir: main.cfg, sites/, logs/
 zixer status               # memvalidasi tiap config, keluar 1 bila ada fault
 zixer start example.cfg    # men-spawn daemon bila belum ada yang berjalan
@@ -2453,6 +2456,7 @@ Key `engine` memilih edge, dan tiap engine kecuali `udp` melakukan re-originatio
 
 | Dokumen | Keterangan |
 | :- | :- |
+| [`docs/zixer/README-id.md`](docs/zixer/README-id.md) | zixer: build, mulai cepat, root dir, perintah, key site, apa yang dilakukan tiap engine di edge |
 | [`docs/zixer/how-to-use-id.md`](docs/zixer/how-to-use-id.md) | zixer: build, site pertama, satu resep per bentuk, renewal certbot, penelusuran masalah |
 | [`docs/zixer/config-id.md`](docs/zixer/config-id.md) | Rujukan config zixer: tiap key main.cfg dan site, default, aturan lintas field, teks fault |
 | [`docs/zixer/hld-id.md`](docs/zixer/hld-id.md) | zixer: process model, komponen, siklus hidup site, engine, concurrency model, TLS dan ACME |
@@ -2475,8 +2479,9 @@ Yang akan memberikan Anda kinerja, efisiensi, dan transparansi.
 
 ## AI Policies
 
-- __*Anda boleh menggunakannya sebagai alat Anda sendiri.*__
-- __*Keputusan dan penilaian akhir ada di pihak kami (Anda dan pengelola).*__
+- __*Anda dapat menggunakannya sebagai alat internal.*__
+- __*Issue & Pull Request harus dibuat atas nama Anda.*__
+- __*Keputusan dan penilaian akhir berada di tangan kami (Anda dan para maintainer).*__
 
 <br>
 

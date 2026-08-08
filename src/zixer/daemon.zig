@@ -5,10 +5,13 @@ const zix = @import("zix");
 
 const control = @import("control.zig");
 const fault = @import("fault.zig");
+const bind_options = @import("bind_options.zig");
 const main_cfg = @import("main_cfg.zig");
 const root_dir = @import("root_dir.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_runtime = @import("site_runtime.zig");
+const static_cached = @import("static_cached.zig");
+const worker_count = @import("worker_count.zig");
 
 /// Hard ceiling for one config file, a larger file fails instead of allocating.
 const MAX_CFG_BYTES: usize = 256 * 1024;
@@ -26,6 +29,10 @@ pub const Daemon = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     cfg: main_cfg.MainCfg,
+    /// Accept loops every started site runs, resolved from cfg.workers once
+    /// here rather than per site: the thread count cannot change under a
+    /// running daemon, and two sites must not disagree about it.
+    workers: usize,
     socket_path: []const u8,
     sites: std.ArrayList(site_runtime.SiteRuntime) = .empty,
     stop_requested: bool = false,
@@ -46,14 +53,20 @@ pub const Daemon = struct {
         const main_cfg_path = try std.fs.path.join(arena, &.{ root.path, "main.cfg" });
         const content = zix.utils.file.load(io, arena, main_cfg_path, MAX_CFG_BYTES) catch return error.NotInitialized;
 
-        const available_threads = std.Thread.getCpuCount() catch 1;
+        const available_threads = worker_count.available();
         var faults = fault.FaultList.init(arena);
         const cfg = try main_cfg.parse(arena, content, root.path, available_threads, &faults);
         if (faults.slice().len != 0) return error.MainCfgInvalid;
 
         const socket_path = try control.socketPath(io, arena, root.path);
 
-        return .{ .allocator = allocator, .io = io, .cfg = cfg, .socket_path = socket_path };
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .cfg = cfg,
+            .workers = worker_count.resolve(cfg.workers, available_threads),
+            .socket_path = socket_path,
+        };
     }
 
     /// Unbind whatever is still started and drop the registry.
@@ -192,8 +205,17 @@ pub const Daemon = struct {
             }
         }
 
-        const backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog);
-        const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, backlog) catch |err| switch (err) {
+        const options = bind_options.BindOptions{
+            .kernel_backlog = resolveBacklog(cfg.kernel_backlog, self.cfg.kernel_backlog),
+            .workers = self.workers,
+            .max_recv_buf = self.cfg.max_recv_buf,
+            .process_limit = self.cfg.process_limit,
+            .process_queue_len = self.cfg.process_queue_len,
+            .process_queue_timeout_ms = self.cfg.process_queue_timeout_ms,
+            .public_dir_cache_ttl_ms = self.cfg.public_dir_cache_ttl_ms,
+            .public_dir_cache_max_entries = self.cfg.public_dir_cache_max_entries,
+        };
+        const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, options) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
             error.ChallengePortInUse => return print(reply_buf, "error: {s} challenge port {d} is already in use", .{ name, site_runtime.ACME_HTTP_PORT }),
             error.TlsCertFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_cert file", .{name}),
@@ -228,6 +250,10 @@ pub const Daemon = struct {
         for (self.sites.items) |*site| site.unbind(self.allocator, self.io);
 
         self.sites.clearRetainingCapacity();
+
+        // Every site is stopped, so no response can still be holding a cached
+        // file. Closing the table here is what returns its descriptors.
+        static_cached.shutdown(self.io);
     }
 
     /// One conn, one exchange: read a line, reply, close.
@@ -384,11 +410,11 @@ test "zix zixer: daemon handleLine, start stop restart walk the registry" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 39864\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 18864\nupstreams: 127.0.0.1:3000\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     try std.testing.expectEqualStrings(
-        "ok: service_a.cfg started on 127.0.0.1:39864",
+        "ok: service_a.cfg started on 127.0.0.1:18864",
         daemon.handleLine("start service_a.cfg", &reply_buf),
     );
     try std.testing.expectEqual(@as(usize, 1), daemon.sites.items.len);
@@ -399,7 +425,7 @@ test "zix zixer: daemon handleLine, start stop restart walk the registry" {
     );
 
     try std.testing.expectEqualStrings(
-        "ok: service_a.cfg restarted on 127.0.0.1:39864",
+        "ok: service_a.cfg restarted on 127.0.0.1:18864",
         daemon.handleLine("restart service_a.cfg", &reply_buf),
     );
 
@@ -412,7 +438,7 @@ test "zix zixer: daemon handleLine, start stop restart walk the registry" {
     );
 
     try std.testing.expectEqualStrings(
-        "ok: service_a.cfg started on 127.0.0.1:39864",
+        "ok: service_a.cfg started on 127.0.0.1:18864",
         daemon.handleLine("restart service_a.cfg", &reply_buf),
     );
 }
@@ -456,13 +482,13 @@ test "zix zixer: daemon handleLine, two sites on one port collide at start" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "one.cfg", "engine: http1\nip: 127.0.0.1\nport: 39865\nupstreams: 127.0.0.1:3000\n");
-    try writeSiteFile(io, arena.allocator(), test_root, "two.cfg", "engine: http1\nip: 127.0.0.1\nport: 39865\nupstreams: 127.0.0.1:3001\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "one.cfg", "engine: http1\nip: 127.0.0.1\nport: 18865\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "two.cfg", "engine: http1\nip: 127.0.0.1\nport: 18865\nupstreams: 127.0.0.1:3001\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start one.cfg", &reply_buf), "ok: "));
     try std.testing.expectEqualStrings(
-        "error: two.cfg port 39865 is already used by one.cfg",
+        "error: two.cfg port 18865 is already used by one.cfg",
         daemon.handleLine("start two.cfg", &reply_buf),
     );
 }
@@ -489,8 +515,8 @@ test "zix zixer: daemon backlog, a started site binds with the resolved value" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "inherited.cfg", "engine: http1\nip: 127.0.0.1\nport: 39867\nupstreams: 127.0.0.1:3000\n");
-    try writeSiteFile(io, arena.allocator(), test_root, "own.cfg", "engine: http1\nip: 127.0.0.1\nport: 39868\nupstreams: 127.0.0.1:3000\nkernel_backlog: 7\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "inherited.cfg", "engine: http1\nip: 127.0.0.1\nport: 18867\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "own.cfg", "engine: http1\nip: 127.0.0.1\nport: 18868\nupstreams: 127.0.0.1:3000\nkernel_backlog: 7\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start inherited.cfg", &reply_buf), "ok: "));
@@ -500,6 +526,202 @@ test "zix zixer: daemon backlog, a started site binds with the resolved value" {
     // listener, it only shortens the pending-connection queue.
     try std.testing.expectEqual(@as(usize, 2), daemon.sites.items.len);
     try std.testing.expectEqual(@as(u31, 1024), daemon.cfg.kernel_backlog);
+}
+
+test "zix zixer: daemon workers, the default cfg resolves to every thread" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_workers_default/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_workers_default") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    // zixer init writes workers: 0, and the daemon resolves it once at
+    // start so two sites can never disagree about the count.
+    try std.testing.expectEqual(@as(usize, 0), daemon.cfg.workers);
+    try std.testing.expectEqual(worker_count.resolve(0, worker_count.available()), daemon.workers);
+}
+
+test "zix zixer: daemon workers, a site starts with the resolved worker count" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: daemon worker count test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_workers_site/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_workers_site") catch {};
+
+    var daemon = try testDaemon(io, arena.allocator(), test_root);
+    defer daemon.deinit();
+
+    // A named count above what this box has would fault main.cfg, so ask
+    // for what the box reports and let 1-core hosts assert the floor.
+    const wanted = worker_count.available();
+    const main_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "main.cfg" });
+    const file = try std.Io.Dir.cwd().createFile(io, main_path, .{ .truncate = true });
+    var write_buf: [128]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.print("workers: {d}\n", .{wanted});
+    try writer.interface.flush();
+    file.close(io);
+
+    var reloaded = try Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = test_root, .source = .ARG });
+    defer reloaded.deinit();
+    try std.testing.expectEqual(worker_count.resolve(wanted, wanted), reloaded.workers);
+
+    try writeSiteFile(io, arena.allocator(), test_root, "many.cfg", "engine: http1\nip: 127.0.0.1\nport: 18967\nupstreams: 127.0.0.1:18968\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, reloaded.handleLine("start many.cfg", &reply_buf), "ok: "));
+
+    // The count reaches the serving site, not just the daemon field.
+    const state = reloaded.sites.items[0].listener.proxy_edge;
+    try std.testing.expectEqual(reloaded.workers, state.workers.len);
+    try std.testing.expectEqual(reloaded.workers, state.pools.len);
+    try std.testing.expectEqual(reloaded.workers, state.idles.len);
+}
+
+test "zix zixer: daemon max recv buf, the main.cfg value reaches a started site" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: daemon buffer size test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_recv_buf/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_recv_buf") catch {};
+
+    var seed = try testDaemon(io, arena.allocator(), test_root);
+    seed.deinit();
+
+    const main_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "main.cfg" });
+    const file = try std.Io.Dir.cwd().createFile(io, main_path, .{ .truncate = true });
+    var write_buf: [128]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.writeAll("max_recv_buf: 2 * 1024\n");
+    try writer.interface.flush();
+    file.close(io);
+
+    var daemon = try Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = test_root, .source = .ARG });
+    defer daemon.deinit();
+    try std.testing.expectEqual(@as(usize, 2048), daemon.cfg.max_recv_buf);
+
+    try writeSiteFile(io, arena.allocator(), test_root, "buffered.cfg", "engine: http1\nip: 127.0.0.1\nport: 18972\nupstreams: 127.0.0.1:18973\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start buffered.cfg", &reply_buf), "ok: "));
+
+    // The site file names no size, so the daemon value is what the edge
+    // allocates with.
+    const state = daemon.sites.items[0].listener.proxy_edge;
+    try std.testing.expectEqual(@as(usize, 2048), state.stream_buf_bytes);
+    try std.testing.expectEqual(@as(usize, 2048), state.workers[0].proxy.stream_buf_bytes);
+}
+
+test "zix zixer: daemon process gate, the main.cfg values reach a started site" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: daemon process gate test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_process_gate/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_process_gate") catch {};
+
+    var seed = try testDaemon(io, arena.allocator(), test_root);
+    seed.deinit();
+
+    const main_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "main.cfg" });
+    const file = try std.Io.Dir.cwd().createFile(io, main_path, .{ .truncate = true });
+    var write_buf: [192]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.writeAll("process_limit: 6\nprocess_queue_len: 12\nprocess_queue_timeout_ms: 2500\n");
+    try writer.interface.flush();
+    file.close(io);
+
+    var daemon = try Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = test_root, .source = .ARG });
+    defer daemon.deinit();
+    try std.testing.expectEqual(@as(usize, 6), daemon.cfg.process_limit);
+
+    try writeSiteFile(io, arena.allocator(), test_root, "gated.cfg", "engine: http1\nip: 127.0.0.1\nport: 18975\nupstreams: 127.0.0.1:18976\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start gated.cfg", &reply_buf), "ok: "));
+
+    // The site file names none of the three, so the daemon values are what
+    // the gate runs with, and every worker's proxy points at that one gate.
+    const state = daemon.sites.items[0].listener.proxy_edge;
+    try std.testing.expectEqual(@as(usize, 6), state.process_gate.settings.limit);
+    try std.testing.expectEqual(@as(usize, 12), state.process_gate.settings.queue_len);
+    try std.testing.expectEqual(@as(u32, 2500), state.process_gate.settings.timeout_ms);
+    try std.testing.expectEqual(@as(usize, 12), state.process_gate.slots.len);
+    try std.testing.expectEqual(&state.process_gate, state.workers[0].proxy.process_gate.?);
+}
+
+test "zix zixer: daemon process gate, a site override beats the main.cfg value" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: daemon process gate override test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_daemon_gate_override/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_daemon_gate_override") catch {};
+
+    var seed = try testDaemon(io, arena.allocator(), test_root);
+    seed.deinit();
+
+    const main_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "main.cfg" });
+    const file = try std.Io.Dir.cwd().createFile(io, main_path, .{ .truncate = true });
+    var write_buf: [192]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.writeAll("process_limit: 6\nprocess_queue_len: 12\n");
+    try writer.interface.flush();
+    file.close(io);
+
+    var daemon = try Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = test_root, .source = .ARG });
+    defer daemon.deinit();
+
+    try writeSiteFile(io, arena.allocator(), test_root, "own.cfg", "engine: http1\nip: 127.0.0.1\nport: 18977\nupstreams: 127.0.0.1:18978\nprocess_limit: 2\n");
+
+    var reply_buf: [control.MAX_LINE]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, daemon.handleLine("start own.cfg", &reply_buf), "ok: "));
+
+    // Only the limit was overridden, so the queue and the wait still come
+    // from main.cfg.
+    const state = daemon.sites.items[0].listener.proxy_edge;
+    try std.testing.expectEqual(@as(usize, 2), state.process_gate.settings.limit);
+    try std.testing.expectEqual(@as(usize, 12), state.process_gate.settings.queue_len);
 }
 
 test "zix zixer: daemon handleLine, shutdown reports the unbind count and sets the flag" {
@@ -515,7 +737,7 @@ test "zix zixer: daemon handleLine, shutdown reports the unbind count and sets t
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 39866\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 18866\nupstreams: 127.0.0.1:3000\n");
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     _ = daemon.handleLine("start service_a.cfg", &reply_buf);
@@ -543,7 +765,7 @@ test "zix zixer: daemon end to end, socket round trip start ping shutdown" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 39867\nupstreams: 127.0.0.1:3000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "service_a.cfg", "engine: http1\nip: 127.0.0.1\nport: 18867\nupstreams: 127.0.0.1:3000\n");
 
     const daemon_thread = try std.Thread.spawn(.{}, runDaemonThread, .{&daemon});
 
@@ -557,7 +779,7 @@ test "zix zixer: daemon end to end, socket round trip start ping shutdown" {
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     const started = try control_client.call(io, daemon.socket_path, "start service_a.cfg", &reply_buf);
     try std.testing.expect(started.ok);
-    try std.testing.expectEqualStrings("service_a.cfg started on 127.0.0.1:39867", started.text);
+    try std.testing.expectEqualStrings("service_a.cfg started on 127.0.0.1:18867", started.text);
 
     var stop_buf: [control.MAX_LINE]u8 = undefined;
     const stopped = try control_client.call(io, daemon.socket_path, "shutdown", &stop_buf);
@@ -581,7 +803,7 @@ test "zix zixer: daemon handleLine, tls site with a missing cert file refuses" {
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "tls_bad.cfg", "engine: http1\nip: 127.0.0.1\nport: 39898\n" ++
+    try writeSiteFile(io, arena.allocator(), test_root, "tls_bad.cfg", "engine: http1\nip: 127.0.0.1\nport: 18898\n" ++
         "tls: true\ntls_cert: examples/certs/absent.pem\ntls_key: examples/certs/ecdsa_p256_key.pem\n" ++
         "public_dir: /var/www/pages\n");
 
@@ -627,7 +849,7 @@ test "zix zixer: daemon handleLine, tls acme site starts or names the port 80 ne
     var daemon = try testDaemon(io, arena.allocator(), test_root);
     defer daemon.deinit();
 
-    try writeSiteFile(io, arena.allocator(), test_root, "tls_acme.cfg", "engine: http1\nip: 127.0.0.1\nport: 39899\n" ++
+    try writeSiteFile(io, arena.allocator(), test_root, "tls_acme.cfg", "engine: http1\nip: 127.0.0.1\nport: 18899\n" ++
         "tls: true\ntls_cert: examples/certs/ecdsa_p256_cert.pem\ntls_key: examples/certs/ecdsa_p256_key.pem\n" ++
         "acme_webroot: /var/www/acme\npublic_dir: /var/www/pages\n");
 

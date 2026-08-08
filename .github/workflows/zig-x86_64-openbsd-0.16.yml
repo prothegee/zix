@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     # backstop for the whole leg. GitHub's own default is 6 hours, long enough for a
     # hung test to burn a day of runner minutes before anyone notices. A healthy leg
-    # lands inside this: the slowest measured on this VM is 21 minutes, so anything
-    # past 33 is a hang, not a slow run.
-    timeout-minutes: 33
+    # lands inside this: green runs measured 21m46s to 25m30s, and the step below
+    # leaves room for two parked suites on top of that, so anything past 36 is a hang.
+    timeout-minutes: 36
     steps:
       # tests the ref that triggered the run: the dispatched branch, or the
       # merged pull request result
@@ -32,13 +32,17 @@ jobs:
       # OpenBSD VM on top of this ubuntu host and runs the suite inside it.
       # No docker daemon in that VM, so postgrez and rediz test-integration
       # (container lifecycle) are skipped here.
-      # A leg that goes silent for many minutes can be a stuck VM rather than
-      # a hung test: re-run the job once before diagnosing.
+      # The == lines in the run script say which suite is in flight, so a leg that
+      # goes quiet names what it is quiet on.
       # The whole leg is one step, so a step-level cap is the only per-leg bound there is.
       # It sits under the job cap on purpose: killing the step still runs Post Checkout, so
       # the log is uploaded. A job-level kill loses the step body entirely.
+      # 33 over a leg measured at 21m46s to 25m30s: a parked suite plus its retry costs
+      # about 2m10s, and the cap has to clear two of those or a park is reported as a kill
+      # with no verdict line. 30 was too thin: the first green run to park landed 27m33s,
+      # leaving 2m27s, so a second park in the same leg would have been killed instead.
       - name: Test in OpenBSD
-        timeout-minutes: 28
+        timeout-minutes: 33
         uses: vmactions/openbsd-vm@v1
         with:
           release: "7.9"
@@ -60,50 +64,117 @@ jobs:
 
             # This VM shares its host: a stall can freeze one process for tens of seconds
             # while its neighbors finish in milliseconds, and the fixed bounds tuned for
-            # native speed then kill healthy work. Every bound in this leg is widened to
-            # 60s instead: the runner's per-check kill (this env), the suite --test-timeout
-            # flags below, and the -Ddriver-test-timeout option the drivers and jzon share.
-            # jzon runs nested, so --test-timeout never reaches it and the option is what
-            # carries its bound.
+            # native speed then kill healthy work. Two bounds are widened here: the runner's
+            # per-check kill (this env) to 60s, and the per-test bound to 120s. 120s is far
+            # past anything that ever ran honestly on this VM, and a test parked past it has
+            # never recovered, so the 240s it used to carry only made a park cost twice as
+            # much of the step budget. jzon and the drivers run nested, so --test-timeout
+            # never reaches them and -Ddriver-test-timeout is what carries their bound.
             export ZIX_CHECK_TIMEOUT_MS=60000
+            per_test=120s
 
             # The whole leg is one ssh script, so a failed suite must not stop
             # the rest: every suite runs and failures accumulate. The failed:
             # line at the end is the authoritative verdict for this leg.
             failures=""
 
-            timeout 6m zig build unit-test --summary failures --test-timeout 240s || failures="$failures unit-test"
-            timeout 6m zig build integration-test --summary failures --test-timeout 240s || failures="$failures integration-test"
-            timeout 6m zig build behaviour-test --summary failures --test-timeout 240s || failures="$failures behaviour-test"
-            timeout 6m zig build edge-test --summary failures --test-timeout 240s || failures="$failures edge-test"
-            timeout 6m zig build jzon-test-all -Ddriver-test-timeout=240s --summary failures || failures="$failures jzon-test-all"
-            timeout 6m zig build jzon-examples --summary failures || failures="$failures jzon-examples"
+            # Run one suite under its own bound and record it if it fails.
+            #
+            # Every suite is wrapped: this leg is one step, so without a per-suite bound a
+            # single stall owns the whole leg until the step cap fires. One run sat 27
+            # minutes on rediz-test-edge and reported nothing.
+            #
+            # A timed-out suite is retried once. A park here is a property of the VM, not of
+            # any one test: five failures in one day parked five different tests across four
+            # suites, never the same test twice, and none of them reproduce off this VM. A
+            # real hang parks both times and is still reported. Only a timeout earns the
+            # retry, so a genuine failure costs its one run and nothing more.
+            #
+            # The == line is this leg's progress. A passing suite prints nothing of its own
+            # under --summary failures, which used to leave 16 unbroken minutes of silence
+            # that read as a stuck VM, and it is also what names the suite the step cap died
+            # on, since a killed step never reaches the verdict line.
+            #
+            # Every path returns 0 and a failure is only ever recorded in failures, so the
+            # leg reaches its verdict whether or not the action wraps this script in set -e.
+            run_suite() {
+              name=$1
+              cap=$2
+              shift 2
 
-            # Every command below is wrapped: this leg is one step, so without a per-command
-            # bound a single stall owns the whole leg until the step cap fires. One run sat 27
-            # minutes on rediz-test-edge and reported nothing. timeout exits 124, which the ||
-            # records like any other failure, so a stall costs its own command and the rest of
-            # the leg still runs. The native legs get the same bounds from their step caps.
+              echo "== $name"
+
+              # the status is written from inside the pipeline because a pipeline reports its
+              # last command, which is tee. set +e keeps a failing suite from killing that
+              # subshell before it writes, and the 1 seeded first is what the leg reads if the
+              # subshell dies anyway: a suite whose outcome went missing counts as failed.
+              echo 1 > /tmp/suite_status
+              ( set +e; timeout "$cap" zig build "$name" "$@" --summary failures 2>&1; echo $? > /tmp/suite_status ) | tee /tmp/suite_out
+              status=$(cat /tmp/suite_status)
+
+              if [ "$status" -eq 0 ]; then
+                return 0
+              fi
+
+              # 124 is the wrapper killing the suite, the grep catches a test the build runner bounded
+              if [ "$status" -ne 124 ] && ! grep -q 'timed out after' /tmp/suite_out; then
+                failures="$failures $name"
+
+                return 0
+              fi
+
+              # the retry reports itself: --summary all so a retry that skipped its work
+              # still prints a step table, and its own elapsed seconds measured inside the
+              # VM. The host log timestamps cannot settle this: a suite's output arrives in
+              # one buffered burst, so the first green retry looked like it finished in 0.67s
+              # where the suite's own tests cost about 8s on this VM. A retry that is orders
+              # of magnitude too fast did not re-run anything, and the green it produced is
+              # not evidence of a passing suite.
+              echo "== $name retry after timeout"
+              retry_start=$(date +%s)
+              if timeout "$cap" zig build "$name" "$@" --summary all; then
+                retry_status=0
+              else
+                retry_status=$?
+              fi
+              echo "== $name retry finished in $(( $(date +%s) - retry_start ))s, status $retry_status"
+
+              if [ "$retry_status" -eq 0 ]; then
+                return 0
+              fi
+
+              failures="$failures $name"
+
+              return 0
+            }
+
+            run_suite unit-test 6m --test-timeout $per_test
+            run_suite integration-test 6m --test-timeout $per_test
+            run_suite behaviour-test 6m --test-timeout $per_test
+            run_suite edge-test 6m --test-timeout $per_test
+            run_suite jzon-test-all 6m -Ddriver-test-timeout=$per_test
+            run_suite jzon-examples 6m
+
             # examples is compile-plus-install only. test-runner-all drives every zix protocol
             # end to end over real sockets inside this VM, so both get more than the 5 minutes a
             # driver suite gets from the native legs. examples gets 8: it is the step that builds
             # every example binary, and one run had it blow a 6 minute cap while every runtime
             # suite in the same run passed, which is the VM losing wall clock and nothing else.
-            timeout 8m zig build examples --summary failures || failures="$failures examples"
-            timeout 6m zig build zixer --summary failures || failures="$failures zixer"
-            timeout 6m zig build zixer-unit-test --summary failures || failures="$failures zixer-unit-test"
-            timeout 6m zig build zixer-examples --summary failures || failures="$failures zixer-examples"
-            timeout 10m zig build zixer-test-runner-all --summary failures || failures="$failures zixer-test-runner-all"
-            timeout 9m zig build test-runner-all --summary failures || failures="$failures test-runner-all"
-            timeout 6m zig build postgrez-test-unit -Ddriver-test-timeout=240s --summary failures || failures="$failures postgrez-test-unit"
-            timeout 6m zig build rediz-test-unit -Ddriver-test-timeout=240s --summary failures || failures="$failures rediz-test-unit"
-            timeout 6m zig build prometheuz-test-unit -Ddriver-test-timeout=240s --summary failures || failures="$failures prometheuz-test-unit"
-            timeout 6m zig build postgrez-test-behaviour -Ddriver-test-timeout=240s --summary failures || failures="$failures postgrez-test-behaviour"
-            timeout 6m zig build postgrez-test-edge -Ddriver-test-timeout=240s --summary failures || failures="$failures postgrez-test-edge"
-            timeout 6m zig build rediz-test-behaviour -Ddriver-test-timeout=240s --summary failures || failures="$failures rediz-test-behaviour"
-            timeout 6m zig build rediz-test-edge -Ddriver-test-timeout=240s --summary failures || failures="$failures rediz-test-edge"
-            timeout 6m zig build prometheuz-test-behaviour -Ddriver-test-timeout=240s --summary failures || failures="$failures prometheuz-test-behaviour"
-            timeout 6m zig build prometheuz-test-edge -Ddriver-test-timeout=240s --summary failures || failures="$failures prometheuz-test-edge"
+            run_suite examples 8m
+            run_suite zixer 6m
+            run_suite zixer-unit-test 6m
+            run_suite zixer-examples 6m
+            run_suite zixer-test-runner-all 10m
+            run_suite test-runner-all 9m
+            run_suite postgrez-test-unit 6m -Ddriver-test-timeout=$per_test
+            run_suite rediz-test-unit 6m -Ddriver-test-timeout=$per_test
+            run_suite prometheuz-test-unit 6m -Ddriver-test-timeout=$per_test
+            run_suite postgrez-test-behaviour 6m -Ddriver-test-timeout=$per_test
+            run_suite postgrez-test-edge 6m -Ddriver-test-timeout=$per_test
+            run_suite rediz-test-behaviour 6m -Ddriver-test-timeout=$per_test
+            run_suite rediz-test-edge 6m -Ddriver-test-timeout=$per_test
+            run_suite prometheuz-test-behaviour 6m -Ddriver-test-timeout=$per_test
+            run_suite prometheuz-test-edge 6m -Ddriver-test-timeout=$per_test
 
             if [ -n "$failures" ]; then
               echo "failed:$failures"

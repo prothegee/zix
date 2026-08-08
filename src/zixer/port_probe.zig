@@ -71,11 +71,14 @@ pub fn isTaken(io: std.Io, addr: net.IpAddress) bool {
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
-// These bind in the 189xx band, below the ephemeral range every supported
-// platform allocates outgoing source ports from. A wildcard bind inside that
-// range races the kernel: any outgoing connection on the box can already hold
-// the port, and the listen then fails with AddressInUse for a reason that has
-// nothing to do with what is under test.
+// These bind in the 189xx band, and every other zixer test port sits below
+// 32768 too, under the ephemeral range every supported platform allocates
+// outgoing source ports from. A bind inside that range races the kernel: an
+// outgoing connection on the box can hold the port, and a closed one keeps
+// holding it for the length of TIME_WAIT. reuse_address does not rescue that
+// case: a plain client socket never sets it, so the kernel keeps the conflict
+// and the listen fails with AddressInUse for a reason that has nothing to do
+// with what is under test.
 
 test "zix zixer: port probe, a port nothing listens on reads free" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});

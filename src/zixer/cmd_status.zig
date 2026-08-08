@@ -7,6 +7,7 @@ const fault = @import("fault.zig");
 const main_cfg = @import("main_cfg.zig");
 const root_dir = @import("root_dir.zig");
 const site_cfg = @import("site_cfg.zig");
+const worker_count = @import("worker_count.zig");
 
 /// Hard ceiling for one config file, a larger file fails instead of allocating.
 const MAX_CFG_BYTES: usize = 256 * 1024;
@@ -45,7 +46,7 @@ pub fn run(
         return 1;
     };
 
-    const available_threads = std.Thread.getCpuCount() catch 1;
+    const available_threads = worker_count.available();
     var main_faults = fault.FaultList.init(arena);
     const cfg = try main_cfg.parse(arena, content, root.path, available_threads, &main_faults);
     try checkDirExists(io, &main_faults, "logs_dir", cfg.logs_dir);
@@ -93,12 +94,39 @@ pub fn run(
 pub fn renderMain(out: *std.Io.Writer, path: []const u8, cfg: main_cfg.MainCfg, faults: []const fault.Fault) !void {
     try out.print("# {s}\nmain.cfg:\n", .{path});
     try out.print("status: {s}\n", .{statusWord(faults)});
-    try out.print("workers: {d}\n", .{cfg.workers});
+    // A bare "workers: 0" tells an operator nothing about what the daemon
+    // will actually run, and a platform that cannot share a listen port
+    // takes any count down to 1. Print both whenever they differ.
+    const resolved_workers = worker_count.resolve(cfg.workers, worker_count.available());
+    if (resolved_workers == cfg.workers) {
+        try out.print("workers: {d}\n", .{cfg.workers});
+    } else {
+        try out.print("workers: {d} (resolved to {d})\n", .{ cfg.workers, resolved_workers });
+    }
     try out.print("dispatch: {s}\n", .{main_cfg.dispatchName(cfg.dispatch)});
     try out.print("logs_dir: {s}\n", .{cfg.logs_dir});
     try out.print("sites_dir: {s}\n", .{cfg.sites_dir});
     try out.print("max_recv_buf: {d}\n", .{cfg.max_recv_buf});
     try out.print("kernel_backlog: {d}\n", .{cfg.kernel_backlog});
+
+    // The queue and its wait mean nothing while the limit is 0, so an
+    // untouched daemon prints one honest line instead of three.
+    if (cfg.process_limit == 0) {
+        try out.writeAll("process_limit: 0 (gate off)\n");
+    } else {
+        try out.print("process_limit: {d}\n", .{cfg.process_limit});
+        try out.print("process_queue_len: {d}\n", .{cfg.process_queue_len});
+        try out.print("process_queue_timeout_ms: {d}\n", .{cfg.process_queue_timeout_ms});
+    }
+
+    // The entry count means nothing while the window is 0, so the same one
+    // honest line stands in for both keys.
+    if (cfg.public_dir_cache_ttl_ms == 0) {
+        try out.writeAll("public_dir_cache_ttl_ms: 0 (cache off)\n");
+    } else {
+        try out.print("public_dir_cache_ttl_ms: {d}\n", .{cfg.public_dir_cache_ttl_ms});
+        try out.print("public_dir_cache_max_entries: {d}\n", .{cfg.public_dir_cache_max_entries});
+    }
 
     try renderFaults(out, faults);
     try out.writeAll("\n");
@@ -133,6 +161,11 @@ pub fn renderSite(out: *std.Io.Writer, path: []const u8, name: []const u8, cfg: 
     if (cfg.spa_fallback) |spa_fallback| try out.print("spa_fallback: {s}\n", .{spa_fallback});
     if (cfg.kernel_backlog) |kernel_backlog| try out.print("kernel_backlog: {d}\n", .{kernel_backlog});
     if (cfg.max_recv_buf) |max_recv_buf| try out.print("max_recv_buf: {d}\n", .{max_recv_buf});
+    if (cfg.upstream_timeout_ms) |upstream_timeout_ms| try out.print("upstream_timeout_ms: {d}\n", .{upstream_timeout_ms});
+    if (cfg.process_limit) |process_limit| try out.print("process_limit: {d}\n", .{process_limit});
+    if (cfg.process_queue_len) |process_queue_len| try out.print("process_queue_len: {d}\n", .{process_queue_len});
+    if (cfg.process_queue_timeout_ms) |process_queue_timeout_ms| try out.print("process_queue_timeout_ms: {d}\n", .{process_queue_timeout_ms});
+    if (cfg.public_dir_cache_ttl_ms) |public_dir_cache_ttl_ms| try out.print("public_dir_cache_ttl_ms: {d}\n", .{public_dir_cache_ttl_ms});
 
     try renderFaults(out, faults);
     try out.writeAll("\n");
@@ -418,10 +451,56 @@ test "zix zixer: cmd status, render main block matches the documented shape" {
         "dispatch: async\n" ++
         "logs_dir: /r/logs\n" ++
         "sites_dir: /r/sites\n" ++
-        "max_recv_buf: 1472\n" ++
+        "max_recv_buf: 8192\n" ++
         "kernel_backlog: 1024\n" ++
+        "process_limit: 0 (gate off)\n" ++
+        "public_dir_cache_ttl_ms: 0 (cache off)\n" ++
         "\n";
     try std.testing.expectEqualStrings(expected, out.buffered());
+}
+
+test "zix zixer: cmd status, an armed process gate prints all three values" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const cfg = main_cfg.MainCfg{
+        .logs_dir = "/r/logs",
+        .sites_dir = "/r/sites",
+        .process_limit = 64,
+        .process_queue_len = 256,
+        .process_queue_timeout_ms = 6000,
+    };
+    try renderMain(&out, "/r/main.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_limit: 64\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_len: 256\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_timeout_ms: 6000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "gate off") == null);
+}
+
+test "zix zixer: cmd status, a site prints only the gate keys it names" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 3000 }};
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 8080, .upstreams = &upstreams, .process_limit = 4 };
+    try renderSite(&out, "/r/sites/a.cfg", "a.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_limit: 4\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_len") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "process_queue_timeout_ms") == null);
+}
+
+test "zix zixer: cmd status, a workers value of zero reports what it resolves to" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const cfg = main_cfg.MainCfg{ .workers = 0, .logs_dir = "/r/logs", .sites_dir = "/r/sites" };
+    try renderMain(&out, "/r/main.cfg", cfg, &.{});
+
+    var expected_buf: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "workers: 0 (resolved to {d})\n", .{worker_count.resolve(0, worker_count.available())});
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), expected) != null);
 }
 
 test "zix zixer: cmd status, render faults are indented under errors" {
@@ -433,4 +512,78 @@ test "zix zixer: cmd status, render faults are indented under errors" {
 
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "status: error\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "errors:\n    workers: workers exceed") != null);
+}
+
+test "zix zixer: cmd status, a configured upstream read bound is reported back" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const test_root = "tmp/zixer_status_timeout_test/root";
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zixer_status_timeout_test") catch {};
+
+    var init_buf: [2048]u8 = undefined;
+    var init_report = std.Io.Writer.fixed(&init_buf);
+    _ = try cmd_init.run(io, arena.allocator(), &init_report, .{ .path = test_root, .source = .ARG });
+
+    try writeSiteFile(io, arena.allocator(), test_root, "bounded.cfg", "engine: http1\nport: 8081\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 2 * 1000\n");
+    try writeSiteFile(io, arena.allocator(), test_root, "unbounded.cfg", "engine: http1\nport: 8082\nupstreams: 127.0.0.1:3000\n");
+
+    var report_buf: [8192]u8 = undefined;
+    var report = std.Io.Writer.fixed(&report_buf);
+    const code = try run(io, arena.allocator(), &report, .{ .path = test_root, .source = .ARG }, &.{});
+
+    try std.testing.expectEqual(@as(u8, 0), code);
+    try std.testing.expect(std.mem.indexOf(u8, report.buffered(), "upstream_timeout_ms: 2000") != null);
+
+    // A site that never set the key prints no line for it, the same as
+    // every other optional key.
+    const unbounded_at = std.mem.indexOf(u8, report.buffered(), "unbounded.cfg:").?;
+    try std.testing.expect(std.mem.indexOf(u8, report.buffered()[unbounded_at..], "upstream_timeout_ms") == null);
+}
+
+test "zix zixer: cmd status, the main block reports the static cache off in one line" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    try renderMain(&out, "/r/main.cfg", .{ .logs_dir = "/r/logs", .sites_dir = "/r/sites" }, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_ttl_ms: 0 (cache off)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_max_entries") == null);
+}
+
+test "zix zixer: cmd status, the main block reports both static cache keys when armed" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const cfg = main_cfg.MainCfg{
+        .logs_dir = "/r/logs",
+        .sites_dir = "/r/sites",
+        .public_dir_cache_ttl_ms = 5000,
+        .public_dir_cache_max_entries = 512,
+    };
+
+    try renderMain(&out, "/r/main.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_ttl_ms: 5000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_max_entries: 512\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "cache off") == null);
+}
+
+test "zix zixer: cmd status, a site block prints the window only when it names one" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const bare = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 8080, .public_dir = "/var/www" };
+    try renderSite(&out, "/r/sites/static.cfg", "static.cfg", bare, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "public_dir_cache_ttl_ms") == null);
+
+    var set_buf: [1024]u8 = undefined;
+    var set_out = std.Io.Writer.fixed(&set_buf);
+    const set = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 8080, .public_dir = "/var/www", .public_dir_cache_ttl_ms = 2500 };
+    try renderSite(&set_out, "/r/sites/static.cfg", "static.cfg", set, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, set_out.buffered(), "public_dir_cache_ttl_ms: 2500\n") != null);
 }

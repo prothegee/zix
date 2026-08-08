@@ -8,7 +8,7 @@
 //!
 //! Run:
 //! zig build zixer-example-http3
-//! ./zig-out/bin/zixer-example-http3-<arch>-<os>
+//! ./zig-out/bin/zixer-example-http3-<arch>-<os>-<optimize>
 //!
 //! Through the proxy (curl must be built with HTTP/3):
 //! curl -k --http3-only https://localhost:9110/

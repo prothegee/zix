@@ -145,8 +145,8 @@ Driver documentation (each README fans out to its own hld, lld, and config docs)
 Zix dispatch model for IOCP and KQUEUE not supported.
 
 __*Platform Development Status:*__ <br>
-<img src="https://img.shields.io/badge/x86__64-Linux-green">
-<img src="https://img.shields.io/badge/aarch64-Linux-green">
+<img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
+<img src="https://img.shields.io/badge/aarch64-Linux-brightgreen">
 <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
 <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
 <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
@@ -194,6 +194,7 @@ __*Maintained Platforms:*__
 - A "nice to have" and "maybe we need this" is tertiary.
 - Always fix from our side first rather than Zig feature/s side.
 - If bias/ambigue, try to discuss it. At least involved with other 1-2 entities.
+- Don't use abstraction on specific engine or specific intent, avoid it if you must.
 - Linux x86_64/aarch64 raw-syscall fast path is guarded, any change there can harm the implementation.
 - You and your people (Junior/Mid/Senior) use another language beside english, you can contribute that.
 
@@ -208,6 +209,8 @@ __*Maintained Platforms:*__
 [Milestones.](https://codeberg.org/prothegee/zix/milestones)
 
 [Open an issue.](https://codeberg.org/prothegee/zix/issues/new)
+
+[Announcment & Breaking Changes](https://codeberg.org/prothegee/zix/issues/238)
 
 <br>
 
@@ -571,7 +574,7 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
     - [x] 0.16.x:
         - 0.16.0
     - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1543+6db520a4c
+        - 0.17.0-dev.1606+a06534d73
 
 <br>
 
@@ -635,18 +638,18 @@ The real entry points are the named steps. List them any time with `zig build -l
 | `zig build` | Compile the module graph only. No artifact is emitted, because zix is a source module. |
 | `zig build test-all` | Run unit, integration, behaviour, and edge tests. |
 | `zig build unit-test` | Run unit tests only. Also `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Build every example into `zig-out/bin/`. Binaries are named `zix-example-<name>-<arch>-<os>`, so builds for several targets coexist. |
+| `zig build examples` | Build every example into `zig-out/bin/`. Binaries are named `zix-example-<name>-<arch>-<os>-<optimize>`, so builds for several targets and several optimize modes coexist. Without `-Doptimize` the mode is `debug`. |
 | `zig build example-<group>` | Build one group of examples, for example `example-http1` or `example-grpc`. |
-| `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. The installed binary carries the target triple, run it from there. |
+| `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. The installed binary carries the target triple and the optimize mode, run it from there. |
 | `zig build test-runner-<name>` | Spawn a server plus client integration check, for example `test-runner-http1-websocket`. |
 | `zig build test-runner-all` | Run every server-plus-client integration runner. |
 
 Built example binaries land in `zig-out/bin/`. To build all examples, then run one in the background and stop it:
 
 ```sh
-zig build examples                                   # build every example into zig-out/bin/
-./zig-out/bin/zix-example-http1_websocket-x86_64-linux & # run one in the background
-kill %1                                              # stop it
+zig build examples                                             # build every example into zig-out/bin/
+./zig-out/bin/zix-example-http1_websocket-x86_64-linux-debug & # run one in the background
+kill %1                                                        # stop it
 ```
 
 Every step accepts `-Dtarget=<arch>-<os>`, covering seven targets: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd. On a foreign target the test and runner steps compile everything and skip execution with a warning. `scripts/build-all-targets.sh` sweeps every build option of zix and the drivers over all seven.
@@ -2424,7 +2427,7 @@ upstreams: 127.0.0.1:3000
 ```
 
 ```bash
-zig build zixer            # builds zig-out/bin/zixer-<arch>-<os>
+zig build zixer            # builds zig-out/bin/zixer-<arch>-<os>-<optimize>
 zixer init                 # scaffold the root dir: main.cfg, sites/, logs/
 zixer status               # validate every config, exit 1 on any fault
 zixer start example.cfg    # spawns the daemon when none is running
@@ -2444,6 +2447,7 @@ The `engine` key picks the edge, and every engine except `udp` re-originates the
 
 | Document | Description |
 | :- | :- |
+| [`docs/zixer/README-en.md`](docs/zixer/README-en.md) | zixer: build, quickstart, root dir, commands, site keys, what each engine does at the edge |
 | [`docs/zixer/how-to-use-en.md`](docs/zixer/how-to-use-en.md) | zixer: build, first site, one recipe per shape, certbot renewal, troubleshooting |
 | [`docs/zixer/config-en.md`](docs/zixer/config-en.md) | zixer config reference: every main.cfg and site key, defaults, cross-field rules, fault texts |
 | [`docs/zixer/hld-en.md`](docs/zixer/hld-en.md) | zixer: process model, components, site lifecycle, engines, concurrency model, TLS and ACME |
@@ -2467,6 +2471,7 @@ That will bring you performance, efficiency, & transparency.
 ## AI Policies
 
 - __*You can use it as your own tool.*__
+- __*Issue & Pull Request must made on your behalf.*__
 - __*The last decision and judgement it's on our end (you and maintainers).*__
 
 <br>

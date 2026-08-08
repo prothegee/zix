@@ -5,6 +5,7 @@ const std = @import("std");
 const acme_challenge = @import("acme_challenge.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const site_cfg = @import("site_cfg.zig");
+const tcp_nodelay = @import("tcp_nodelay.zig");
 
 /// Consecutive accept failures before the loop gives up.
 const MAX_ACCEPT_FAILURES: usize = 100;
@@ -109,8 +110,12 @@ pub const State = struct {
 fn acceptLoop(state: *State) void {
     const io = state.io;
 
+    // No pool here, so a challenge connection buffers the client pair
+    // alone. The companion is not a load path, so it keeps the built-in
+    // size rather than the site's.
     const proxy = http1_proxy.Proxy{
         .io = io,
+        .allocator = state.allocator,
         .acme = .{ .webroot = state.webroot, .relay = state.relay },
         .redirect_https = state.https_port,
     };
@@ -130,6 +135,8 @@ fn acceptLoop(state: *State) void {
             stream.close(io);
             return;
         }
+
+        tcp_nodelay.apply(stream);
 
         const task = ConnTask{ .proxy = proxy, .stream = stream };
         state.conns.concurrent(io, serveTask, .{task}) catch serveTask(task);
@@ -212,21 +219,21 @@ test "zix zixer: acme listener, challenge answers and the rest redirects" {
     var root_buf: [128]u8 = undefined;
     const webroot = fixtureRoot(&root_buf, &tmp);
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39893);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18893);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try State.create(std.testing.allocator, io, server, webroot, null, "127.0.0.1", 39893, 39894);
+    const state = try State.create(std.testing.allocator, io, server, webroot, null, "127.0.0.1", 18893, 18894);
 
     var reply_buf: [1024]u8 = undefined;
-    const challenge_len = try fetch(io, 39893, "GET /.well-known/acme-challenge/tok_a HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n", &reply_buf);
+    const challenge_len = try fetch(io, 18893, "GET /.well-known/acme-challenge/tok_a HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n", &reply_buf);
     const challenge = reply_buf[0..challenge_len];
     try testing.expect(std.mem.startsWith(u8, challenge, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.endsWith(u8, challenge, "tok_a.print"));
 
-    const redirect_len = try fetch(io, 39893, "GET /app/page HTTP/1.1\r\nHost: site.test:39893\r\nConnection: close\r\n\r\n", &reply_buf);
+    const redirect_len = try fetch(io, 18893, "GET /app/page HTTP/1.1\r\nHost: site.test:18893\r\nConnection: close\r\n\r\n", &reply_buf);
     const redirect = reply_buf[0..redirect_len];
     try testing.expect(std.mem.startsWith(u8, redirect, "HTTP/1.1 301 Moved Permanently\r\n"));
-    try testing.expect(std.mem.indexOf(u8, redirect, "Location: https://site.test:39894/app/page\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, redirect, "Location: https://site.test:18894/app/page\r\n") != null);
 
     state.shutdown();
 

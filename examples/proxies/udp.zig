@@ -8,10 +8,10 @@
 //!
 //! Run:
 //! zig build zixer-example-udp
-//! ./zig-out/bin/zixer-example-udp-<arch>-<os>
+//! ./zig-out/bin/zixer-example-udp-<arch>-<os>-<optimize>
 //!
 //! Through the proxy, with the udp client example aimed at the edge port:
-//! ./zig-out/bin/zix-example-udp_client-<arch>-<os> --server-port 9112
+//! ./zig-out/bin/zix-example-udp_client-<arch>-<os>-<optimize> --server-port 9112
 
 const std = @import("std");
 const zix = @import("zix");

@@ -18,17 +18,19 @@ Run everything from the repository root. Paths in the site configs (`public_dir`
 `tls_cert`) are relative to where the daemon runs.
 
 ```bash
-zig build zixer                 # builds zig-out/bin/zixer-<arch>-<os>
+zig build zixer                 # builds zig-out/bin/zixer-<arch>-<os>-<optimize>
 zig build zixer-examples        # builds every demo upstream
 mkdir -p examples/proxies/logs  # logs/ is not in the repository, create it once
 ```
 
-Shorten the paths for the rest of this page (the triplet is this machine's, swap in yours):
+Shorten the paths for the rest of this page. The triplet is this machine's, swap in yours, and
+`MODE` is the lowercased `-Doptimize` value, which is `debug` when the flag is not passed:
 
 ```bash
 BIN=./zig-out/bin
 TRIPLET=x86_64-linux
-ZIXER=$BIN/zixer-$TRIPLET
+MODE=debug
+ZIXER=$BIN/zixer-$TRIPLET-$MODE
 ```
 
 Check the configs before starting anything. Every file gets a verdict and every problem
@@ -44,7 +46,7 @@ $ZIXER --dir examples/proxies list
 ## Daily flow
 
 ```bash
-$BIN/zixer-example-http1-$TRIPLET &         # the upstream first
+$BIN/zixer-example-http1-$TRIPLET-$MODE &   # the upstream first
 $ZIXER --dir examples/proxies start http1.cfg   # spawns the daemon if needed
 curl http://127.0.0.1:9100/
 $ZIXER --dir examples/proxies stop http1.cfg
@@ -67,7 +69,7 @@ calls after a renewal.
 | grpc | 9108 | 9109 | h2 end to end, trailers survive |
 | http3 | 9110 | 9111 | QUIC client edge, http1 upstream |
 | udp | 9112 | 9113 | per-flow datagram forward |
-| static | 9114 | none | static-only site, spa_fallback |
+| static | 9114 | none | static-only site, spa_fallback, its own cache window |
 | mixed | 9115 | 9116 | public_prefix static beside a proxied backend |
 | round_robin | 9117 | 9118, 9119 | rotation, and bounded retry when one dies |
 | tls | 9120 | 9121 | TLS terminated at zixer, cleartext upstream |
@@ -90,10 +92,13 @@ Every site config carries its own run and drive commands in its header, so
 | `upstreams` (several) | round_robin |
 | `public_dir`, `spa_fallback` | static |
 | `public_prefix` | mixed |
+| `public_dir_cache_ttl_ms` | main.cfg for the daemon default, static for a site override |
+| `public_dir_cache_max_entries` | main.cfg, there is one cache table per daemon |
 | `kernel_backlog` | main.cfg, inherited by every site here |
 
-`acme_webroot` and `acme_proxy` have no demo, because a real challenge needs port 80 and a
-certificate authority. Their behavior is described in
+`acme_webroot`, `acme_proxy`, and `upstream_timeout_ms` have no demo: a real challenge needs
+port 80 and a certificate authority, and a read deadline only shows itself against a backend
+that stalls on purpose. Their behavior is described in
 [`docs/zixer/config-en.md`](../../docs/zixer/config-en.md).
 
 <br>

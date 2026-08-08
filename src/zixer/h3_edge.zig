@@ -8,12 +8,18 @@ const h3_frames = @import("h3_frames.zig");
 const h3_qpack = @import("h3_qpack.zig");
 const h3_streams = @import("h3_streams.zig");
 const h3_translate = @import("h3_translate.zig");
+const bind_options = @import("bind_options.zig");
 const http1_head = @import("http1_head.zig");
+const process_gate = @import("process_gate.zig");
+const process_wait = @import("process_wait.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const site_cfg = @import("site_cfg.zig");
+const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
 const tls_edge = @import("tls_edge.zig");
+const idle_reaper = @import("idle_reaper.zig");
 const upstream_conn = @import("upstream_conn.zig");
+const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 
 const socket_poll = zix.utils.socket_poll;
@@ -87,6 +93,8 @@ const ConnSlot = struct {
 /// Note:
 /// - pool and idle exist only when the site has upstreams, a static-only site
 ///   leaves both null.
+/// - reaper runs only on a site that has an idle cache, and hands aged
+///   upstream connections back even while the site sits quiet.
 /// - The QUIC handshake takes its ALPN ("h3") and its transport parameters
 ///   from the engine's flight builder, so the TLS context here supplies only
 ///   the certificate and its signing key.
@@ -96,6 +104,15 @@ pub const EdgeState = struct {
     socket: std.Io.net.Socket,
     pool: ?upstream_pool.Pool,
     idle: ?upstream_conn.IdleCache,
+    reaper: idle_reaper.Reaper = .{},
+    upstream_timeout_ms: u32,
+    /// How many requests this site may run upstream at once. One gate for
+    /// the whole edge, shared by every request task the receive loop spawns.
+    process_gate: process_gate.Gate,
+    /// How long a cached public_dir file stays fresh, already resolved from
+    /// the site file and the main.cfg default. Zero serves every static
+    /// request through the uncached open.
+    public_dir_cache_ttl_ms: u32,
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
@@ -121,6 +138,7 @@ pub const EdgeState = struct {
     /// socket - std.Io.net.Socket (bound datagram socket for this site)
     /// cfg - *const site_cfg.SiteCfg (validated http3 site config, tls required)
     /// port - u16
+    /// options - bind_options.BindOptions (the main.cfg values the site resolves against)
     ///
     /// Return:
     /// - *EdgeState with the receive thread running
@@ -132,6 +150,7 @@ pub const EdgeState = struct {
         socket: std.Io.net.Socket,
         cfg: *const site_cfg.SiteCfg,
         port: u16,
+        options: bind_options.BindOptions,
     ) !*EdgeState {
         if (!cfg.tls or cfg.tls_cert == null or cfg.tls_key == null) return error.TlsRequired;
 
@@ -163,12 +182,32 @@ pub const EdgeState = struct {
         var tls_ctx = try tls_edge.buildContext(allocator, io, cfg.tls_cert.?, cfg.tls_key.?, tls_edge.alpnPrefs(.HTTP3));
         errdefer tls_ctx.deinit();
 
+        var gate = try process_gate.Gate.init(allocator, process_gate.resolve(
+            cfg.process_limit,
+            cfg.process_queue_len,
+            cfg.process_queue_timeout_ms,
+            .{
+                .limit = options.process_limit,
+                .queue_len = options.process_queue_len,
+                .timeout_ms = options.process_queue_timeout_ms,
+            },
+        ));
+        errdefer gate.deinit(allocator);
+
+        // The table is process-wide, so this builds one only when no site has
+        // yet. A window of 0 builds none and every lookup falls through.
+        const cache_ttl_ms = static_cached.resolveTtl(cfg.public_dir_cache_ttl_ms, options.public_dir_cache_ttl_ms);
+        if (public_dir != null) static_cached.install(cache_ttl_ms, options.public_dir_cache_max_entries);
+
         state.* = .{
             .allocator = allocator,
             .io = io,
             .socket = socket,
             .pool = pool,
             .idle = idle,
+            .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
+            .process_gate = gate,
+            .public_dir_cache_ttl_ms = if (public_dir == null) 0 else cache_ttl_ms,
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
@@ -177,6 +216,11 @@ pub const EdgeState = struct {
             .wake_ip = wake_ip,
             .port = port,
         };
+
+        // One cache: a quic edge owns a single socket, so it has no workers
+        // to divide the idle bound between.
+        if (state.idle) |*cache| try state.reaper.start(io, cache[0..1]);
+        errdefer state.reaper.stop();
 
         state.thread = try std.Thread.spawn(.{}, receiveLoop, .{state});
 
@@ -195,6 +239,7 @@ pub const EdgeState = struct {
         wakeDatagram(io, state.wake_ip, state.port);
         if (state.thread) |thread| thread.join();
         state.tasks.cancel(io);
+        state.reaper.stop();
 
         for (state.slots) |maybe_slot| {
             const slot = maybe_slot orelse continue;
@@ -204,6 +249,7 @@ pub const EdgeState = struct {
 
         state.socket.close(io);
         state.allocator.free(state.slots);
+        state.process_gate.deinit(state.allocator);
         if (state.idle) |*idle| idle.deinit(state.allocator, io);
         if (state.pool) |*pool| pool.deinit(state.allocator);
         state.tls_ctx.deinit();
@@ -593,15 +639,35 @@ fn misdirected(task: RequestTask, request: *const h3_translate.Request) bool {
 fn serveStatic(task: RequestTask, site: *const static_files.StaticSite, request: *const h3_translate.Request, accept_encoding: ?[]const u8) bool {
     const io = task.state.io;
 
+    const ttl_ms = task.state.public_dir_cache_ttl_ms;
+
+    if (static_cached.acquire(io, site.public_dir, request.target, accept_encoding, ttl_ms)) |hit| {
+        defer static_cached.release(hit);
+
+        sendFile(task, resolvedFromHit(hit), request.is_head);
+        return true;
+    }
+
     if (static_files.open(io, site.public_dir, request.target, accept_encoding)) |resolved| {
+        defer resolved.file.close(io);
+
         sendFile(task, resolved, request.is_head);
         return true;
     }
 
     if (site.spa_fallback) |fallback| {
-        var target_buf: [static_files.MAX_PATH]u8 = undefined;
+        var target_buf: [static_files.PUBLIC_PATH_MAX]u8 = undefined;
         if (std.fmt.bufPrint(&target_buf, "/{s}", .{fallback}) catch null) |fallback_target| {
+            if (static_cached.acquire(io, site.public_dir, fallback_target, accept_encoding, ttl_ms)) |hit| {
+                defer static_cached.release(hit);
+
+                sendFile(task, resolvedFromHit(hit), request.is_head);
+                return true;
+            }
+
             if (static_files.open(io, site.public_dir, fallback_target, accept_encoding)) |resolved| {
+                defer resolved.file.close(io);
+
                 sendFile(task, resolved, request.is_head);
                 return true;
             }
@@ -611,11 +677,27 @@ fn serveStatic(task: RequestTask, site: *const static_files.StaticSite, request:
     return false;
 }
 
+/// A cache entry in the shape the file sender already takes.
+fn resolvedFromHit(hit: static_cached.Hit) static_files.Resolved {
+    return .{
+        .file = hit.file,
+        .size = hit.size,
+        .content_type = hit.content_type,
+        .encoding = hit.encoding,
+    };
+}
+
 /// Write one resolved file as the response body.
+///
+/// Note:
+/// - The caller owns the descriptor. An uncached answer closes it after, a
+///   cached one leaves it to the table.
+/// - The body is copied into this stream's send buffer as it goes, so nothing
+///   here has to outlive the call and a plain hit is enough. Asking the table
+///   for a resident snapshot would hold a second copy for no gain.
 fn sendFile(task: RequestTask, resolved: static_files.Resolved, is_head: bool) void {
     const io = task.state.io;
-    var file = resolved.file;
-    defer file.close(io);
+    const file = resolved.file;
 
     var block_buf: [1024]u8 = undefined;
     const block = h3_translate.encodeStaticBlock(&block_buf, resolved.content_type, resolved.size, resolved.encoding.contentEncoding()) catch {
@@ -655,6 +737,18 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
         return;
     };
 
+    // One place in the gate per request stream. A quic connection carries
+    // many of them, and each spends a backend on its own.
+    const admission = process_wait.admit(&state.process_gate, io);
+    if (admission != .ADMITTED) {
+        answerLocal(task, 504, process_wait.PROXY_ERROR);
+
+        return;
+    }
+
+    var slot = process_wait.hold(&state.process_gate);
+    defer slot.release();
+
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
     while (attempts > 0) : (attempts -= 1) {
@@ -665,7 +759,7 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
             return;
         };
 
-        const conn_up = idle.acquire(picked.index) orelse
+        const conn_up = idle.acquire(io, picked.index, nowMs(io)) orelse
             upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
             pool.markDown(picked.index, nowMs(io));
             failed_here = true;
@@ -692,8 +786,18 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
         }
 
         const method: []const u8 = if (request.is_head) "HEAD" else "GET";
-        const response = readUpstreamHead(task, &up_reader.interface, method) catch {
+        const gate = upstreamGate(state, conn_up);
+        const response = readUpstreamHead(task, &up_reader.interface, method, gate) catch |err| {
             conn_up.stream.close(io);
+
+            // A silent upstream is not a dead one: the request was already
+            // delivered, so it is neither replayed elsewhere nor is the
+            // slot taken out of rotation.
+            if (err == error.UpstreamTimeout) {
+                answerLocal(task, 504, "http_response_timeout");
+                return;
+            }
+
             if (!conn_up.reused) pool.markDown(picked.index, nowMs(io));
             failed_here = true;
             continue;
@@ -708,11 +812,13 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
 
 /// Read the upstream response head, relaying interim 1xx heads as informational
 /// field sections. A 101 was never asked for and counts as upstream failure.
-fn readUpstreamHead(task: RequestTask, up_r: *std.Io.Reader, method: []const u8) !http1_head.ResponseHead {
+fn readUpstreamHead(task: RequestTask, up_r: *std.Io.Reader, method: []const u8, gate: upstream_deadline.Gate) !http1_head.ResponseHead {
     var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
 
     var interim: usize = 0;
     while (interim <= MAX_INTERIM) : (interim += 1) {
+        if (!gate.ready(up_r)) return error.UpstreamTimeout;
+
         const bytes = http1_head.readHead(up_r, &head_buf) catch return error.UpstreamDead;
         const response = http1_head.parseResponse(bytes, method) catch return error.UpstreamDead;
 
@@ -754,7 +860,7 @@ fn relayResponse(task: RequestTask, response: *const http1_head.ResponseHead, co
     var relay_failed = false;
     if (!head_only) {
         const relayed: RelayError!void = switch (response.framing) {
-            .content_length => |len| relayExact(task, up_r, len),
+            .content_length => |len| relayExact(task, up_r, len, upstreamGate(task.state, conn_up)),
             .chunked => relayChunked(task, up_r),
             .until_close => relayUntilClose(task, up_r),
             .none => unreachable,
@@ -766,7 +872,7 @@ fn relayResponse(task: RequestTask, response: *const http1_head.ResponseHead, co
     }
 
     const reusable = !relay_failed and !response.connection_close and response.framing != .until_close;
-    if (reusable) task.state.idle.?.release(io, conn_up) else conn_up.stream.close(io);
+    if (reusable) task.state.idle.?.release(io, conn_up, nowMs(io)) else conn_up.stream.close(io);
 
     finishStream(task);
 }
@@ -774,11 +880,15 @@ fn relayResponse(task: RequestTask, response: *const http1_head.ResponseHead, co
 const RelayError = error{ UpstreamDead, ClientDead, BadBody };
 
 /// Relay a body of known length.
-fn relayExact(task: RequestTask, up_r: *std.Io.Reader, len: u64) RelayError!void {
+fn relayExact(task: RequestTask, up_r: *std.Io.Reader, len: u64, gate: upstream_deadline.Gate) RelayError!void {
     var left = len;
     var buf: [RELAY_CHUNK]u8 = undefined;
 
     while (left > 0) {
+        // The head is already on the wire, so a stall here can only end the
+        // stream. The client sees it cut rather than a body that never ends.
+        if (!gate.ready(up_r)) return error.UpstreamDead;
+
         const want: usize = @intCast(@min(left, buf.len));
         const read = up_r.readSliceShort(buf[0..want]) catch return error.UpstreamDead;
         if (read == 0) return error.UpstreamDead;
@@ -954,6 +1064,11 @@ fn answerLocal(task: RequestTask, status: u16, proxy_error: ?[]const u8) void {
     if (!writeHeaders(task, block)) return;
 
     finishStream(task);
+}
+
+/// The read bound for one upstream leg of this site.
+fn upstreamGate(state: *EdgeState, conn_up: upstream_conn.UpstreamConn) upstream_deadline.Gate {
+    return .{ .stream = conn_up.stream, .budget_ms = state.upstream_timeout_ms };
 }
 
 fn nowMs(io: std.Io) i64 {
@@ -1581,13 +1696,23 @@ const FakeBackend = struct {
     seen_body: [4096]u8 = undefined,
     seen_body_len: usize = 0,
     ready: std.atomic.Value(bool) = .init(false),
+    /// Set when every bind attempt lost, so the waiter fails with the
+    /// reason instead of timing out on a thread that already gave up.
+    bind_failed: std.atomic.Value(bool) = .init(false),
     answered: std.atomic.Value(usize) = .init(0),
 
     fn serve(fake: *FakeBackend) void {
         const io = fake.io;
 
-        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
+
+        var server = bindWithRetry(io, addr) orelse {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -1721,13 +1846,39 @@ const BIG_BODY_LEN: usize = 300 * 1024;
 const FAKE_POLL_MS: u32 = 50;
 const FAKE_IDLE_SLICES: usize = 200;
 
+/// Attempts the fake backend makes at its fixed port, one per BIND_RETRY_MS.
+/// These ports sit below the ephemeral range, so the kernel never hands one
+/// out as an outbound source port. What is left is a foreign process holding
+/// the port, and retrying rides a brief hold out instead of failing the run.
+const BIND_TRIES: usize = 50;
+const BIND_RETRY_MS: u64 = 10;
+
+fn bindWithRetry(io: std.Io, addr: std.Io.net.IpAddress) ?std.Io.net.Server {
+    var tries: usize = 0;
+    while (tries < BIND_TRIES) : (tries += 1) {
+        if (addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 })) |server| return server else |_| {}
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(BIND_RETRY_MS), .awake) catch {};
+    }
+
+    return null;
+}
+
 fn waitBackend(io: std.Io, fake: *FakeBackend) !void {
     var tries: usize = 0;
-    while (tries < 200 and !fake.ready.load(.acquire)) : (tries += 1) {
+    while (tries < 200 and !fake.ready.load(.acquire) and !fake.bind_failed.load(.acquire)) : (tries += 1) {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
     }
 
-    try testing.expect(tries < 200);
+    // Told apart on purpose: a lost port is an environment problem, a quiet
+    // thread is a real one, and the old bare bound reported both the same.
+    if (fake.bind_failed.load(.acquire)) {
+        std.log.err("zix zixer: h3 edge, the fake backend could not take port {d} in {d} tries", .{ fake.port, BIND_TRIES });
+
+        return error.FakeBindFailed;
+    }
+
+    try testing.expect(fake.ready.load(.acquire));
 }
 
 /// The request fields a plain GET carries.
@@ -1768,15 +1919,15 @@ test "zix zixer: h3 edge, create starts the receive thread and shutdown frees th
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39803 }};
-    const cfg = tlsCfg(39802, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18903 }};
+    const cfg = tlsCfg(18902, &upstreams);
 
-    const socket = try bindSite(io, 39802);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39802);
+    const socket = try bindSite(io, 18902);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18902, .{});
     state.shutdown();
 
     // Udp binds strict, so a clean rebind proves the port came back.
-    const again = try bindSite(io, 39802);
+    const again = try bindSite(io, 18902);
     again.close(io);
 }
 
@@ -1790,16 +1941,16 @@ test "zix zixer: h3 edge, a cleartext cfg refuses to serve" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39803 }};
-    var cfg = tlsCfg(39804, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18903 }};
+    var cfg = tlsCfg(18904, &upstreams);
     cfg.tls = false;
     cfg.tls_cert = null;
     cfg.tls_key = null;
 
-    const socket = try bindSite(io, 39804);
+    const socket = try bindSite(io, 18904);
     defer socket.close(io);
 
-    try testing.expectError(error.TlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 39804));
+    try testing.expectError(error.TlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 18904, .{}));
 }
 
 test "zix zixer: h3 edge, a request crosses quic to the http1 upstream and back" {
@@ -1812,17 +1963,17 @@ test "zix zixer: h3 edge, a request crosses quic to the http1 upstream and back"
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39806, .request_quota = 1, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18906, .request_quota = 1, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39806 }};
-    const cfg = tlsCfg(39805, &upstreams);
-    const socket = try bindSite(io, 39805);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39805);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18906 }};
+    const cfg = tlsCfg(18905, &upstreams);
+    const socket = try bindSite(io, 18905);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18905, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39805);
+    var client = try H3Client.connect(io, 18905);
     defer client.close();
 
     const fields = getFields("localhost", "/hello");
@@ -1856,17 +2007,17 @@ test "zix zixer: h3 edge, a request body reaches the upstream" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39808, .request_quota = 1, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18908, .request_quota = 1, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39808 }};
-    const cfg = tlsCfg(39807, &upstreams);
-    const socket = try bindSite(io, 39807);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39807);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18908 }};
+    const cfg = tlsCfg(18907, &upstreams);
+    const socket = try bindSite(io, 18907);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18907, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39807);
+    var client = try H3Client.connect(io, 18907);
     defer client.close();
 
     const fields = [_]h3_qpack.Field{
@@ -1900,17 +2051,17 @@ test "zix zixer: h3 edge, a body split across data frames joins for the upstream
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39822, .request_quota = 1, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18922, .request_quota = 1, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39822 }};
-    const cfg = tlsCfg(39821, &upstreams);
-    const socket = try bindSite(io, 39821);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39821);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18922 }};
+    const cfg = tlsCfg(18921, &upstreams);
+    const socket = try bindSite(io, 18921);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18921, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39821);
+    var client = try H3Client.connect(io, 18921);
     defer client.close();
 
     const fields = [_]h3_qpack.Field{
@@ -1943,17 +2094,17 @@ test "zix zixer: h3 edge, a big response spans packets and arrives whole" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39810, .request_quota = 1, .mode = .BIG };
+    var fake = FakeBackend{ .io = io, .port = 18910, .request_quota = 1, .mode = .BIG };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39810 }};
-    const cfg = tlsCfg(39809, &upstreams);
-    const socket = try bindSite(io, 39809);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39809);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18910 }};
+    const cfg = tlsCfg(18909, &upstreams);
+    const socket = try bindSite(io, 18909);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18909, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39809);
+    var client = try H3Client.connect(io, 18909);
     defer client.close();
 
     const fields = getFields("localhost", "/big");
@@ -1982,17 +2133,17 @@ test "zix zixer: h3 edge, a chunked upstream body relays with its trailers" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39812, .request_quota = 1, .mode = .CHUNKED };
+    var fake = FakeBackend{ .io = io, .port = 18912, .request_quota = 1, .mode = .CHUNKED };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39812 }};
-    const cfg = tlsCfg(39811, &upstreams);
-    const socket = try bindSite(io, 39811);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39811);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18912 }};
+    const cfg = tlsCfg(18911, &upstreams);
+    const socket = try bindSite(io, 18911);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18911, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39811);
+    var client = try H3Client.connect(io, 18911);
     defer client.close();
 
     const fields = getFields("localhost", "/stream");
@@ -2019,13 +2170,13 @@ test "zix zixer: h3 edge, a dead upstream answers 502 with proxy status" {
     const io = threaded.io();
 
     // Nothing listens on the upstream port.
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39814 }};
-    const cfg = tlsCfg(39813, &upstreams);
-    const socket = try bindSite(io, 39813);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39813);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18914 }};
+    const cfg = tlsCfg(18913, &upstreams);
+    const socket = try bindSite(io, 18913);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18913, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39813);
+    var client = try H3Client.connect(io, 18913);
     defer client.close();
 
     const fields = getFields("localhost", "/gone");
@@ -2056,14 +2207,14 @@ test "zix zixer: h3 edge, the static plane serves a file and misses fall through
     var root_buf: [128]u8 = undefined;
     const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
 
-    var cfg = tlsCfg(39815, &.{});
+    var cfg = tlsCfg(18915, &.{});
     cfg.public_dir = root;
 
-    const socket = try bindSite(io, 39815);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39815);
+    const socket = try bindSite(io, 18915);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18915, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39815);
+    var client = try H3Client.connect(io, 18915);
     defer client.close();
 
     const fields = getFields("localhost", "/page.html");
@@ -2095,13 +2246,13 @@ test "zix zixer: h3 edge, a foreign authority is refused with 421" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39818 }};
-    const cfg = tlsCfg(39816, &upstreams);
-    const socket = try bindSite(io, 39816);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39816);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18918 }};
+    const cfg = tlsCfg(18916, &upstreams);
+    const socket = try bindSite(io, 18916);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18916, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39816);
+    var client = try H3Client.connect(io, 18916);
     defer client.close();
 
     const foreign = getFields("evil.example", "/");
@@ -2124,17 +2275,17 @@ test "zix zixer: h3 edge, two requests multiplex on one connection" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var fake = FakeBackend{ .io = io, .port = 39820, .request_quota = 2, .mode = .ECHO };
+    var fake = FakeBackend{ .io = io, .port = 18920, .request_quota = 2, .mode = .ECHO };
     const fake_thread = try std.Thread.spawn(.{}, FakeBackend.serve, .{&fake});
     try waitBackend(io, &fake);
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39820 }};
-    const cfg = tlsCfg(39819, &upstreams);
-    const socket = try bindSite(io, 39819);
-    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 39819);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18920 }};
+    const cfg = tlsCfg(18919, &upstreams);
+    const socket = try bindSite(io, 18919);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18919, .{});
     defer state.shutdown();
 
-    var client = try H3Client.connect(io, 39819);
+    var client = try H3Client.connect(io, 18919);
     defer client.close();
 
     const first = getFields("localhost", "/one");
@@ -2152,4 +2303,147 @@ test "zix zixer: h3 edge, two requests multiplex on one connection" {
     try testing.expectEqualStrings("200", second_response.status());
 
     fake_thread.join();
+}
+
+/// Test upstream that accepts and then says nothing, the stall an upstream
+/// read deadline exists for.
+const SilentBackend = struct {
+    io: std.Io,
+    port: u16,
+    ready: std.atomic.Value(bool) = .init(false),
+    release: std.atomic.Value(bool) = .init(false),
+
+    fn serve(fake: *SilentBackend) void {
+        const io = fake.io;
+
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
+        defer server.deinit(io);
+        fake.ready.store(true, .release);
+
+        const stream = server.accept(io) catch return;
+        defer stream.close(io);
+
+        while (!fake.release.load(.acquire)) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch break;
+        }
+    }
+};
+
+test "zix zixer: h3 edge, a silent upstream answers 504 with proxy status" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: h3 edge socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = SilentBackend{ .io = io, .port = 18952 };
+    const fake_thread = try std.Thread.spawn(.{}, SilentBackend.serve, .{&fake});
+    var tries: usize = 0;
+    while (tries < 100 and !fake.ready.load(.acquire)) : (tries += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+    try testing.expect(tries < 100);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18952 }};
+    var cfg = tlsCfg(18951, &upstreams);
+    cfg.upstream_timeout_ms = 200;
+
+    const socket = try bindSite(io, 18951);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18951, .{});
+    defer state.shutdown();
+
+    var client = try H3Client.connect(io, 18951);
+    defer client.close();
+
+    const fields = getFields("localhost", "/stalled");
+    try client.request(0, &fields, "");
+
+    var body_buf: [1024]u8 = undefined;
+    var scratch: [h3_qpack.SCRATCH_BYTES]u8 = undefined;
+    const response = try client.readResponse(0, &body_buf, &scratch);
+
+    try testing.expectEqualStrings("504", response.status());
+    try testing.expectEqualStrings("zixer; error=\"http_response_timeout\"", response.section.get("proxy-status").?);
+
+    // A slow backend is still a serving one, so the slot stays in rotation.
+    try testing.expectEqual(@as(usize, 1), state.pool.?.upCount());
+
+    fake.release.store(true, .release);
+    fake_thread.join();
+}
+
+test "zix zixer: h3 edge, a cached entry answers after the file leaves disk" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: h3 edge socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.writeFile(testing.io, .{ .sub_path = "page.html", .data = "<h1>h3 cached</h1>" }) catch @panic("fixture write failed");
+
+    var root_buf: [128]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var cfg = tlsCfg(18923, &.{});
+    cfg.public_dir = root;
+    cfg.public_dir_cache_ttl_ms = 60_000;
+
+    const socket = try bindSite(io, 18923);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18923, .{});
+    defer state.shutdown();
+    defer static_cached.shutdown(io);
+
+    try testing.expectEqual(@as(u32, 60_000), state.public_dir_cache_ttl_ms);
+
+    var client = try H3Client.connect(io, 18923);
+    defer client.close();
+
+    var body_buf: [4096]u8 = undefined;
+    var scratch: [h3_qpack.SCRATCH_BYTES]u8 = undefined;
+
+    const fields = getFields("localhost", "/page.html");
+    try client.request(0, &fields, "");
+    const first = try client.readResponse(0, &body_buf, &scratch);
+    try testing.expectEqualStrings("200", first.status());
+    try testing.expectEqualStrings("<h1>h3 cached</h1>", body_buf[0..first.body_len]);
+
+    // The entry holds the descriptor, so unlinking the name cannot reach it.
+    tmp.dir.deleteFile(testing.io, "page.html") catch @panic("fixture delete failed");
+
+    try client.request(4, &fields, "");
+    const second = try client.readResponse(4, &body_buf, &scratch);
+    try testing.expectEqualStrings("200", second.status());
+    try testing.expectEqualStrings("<h1>h3 cached</h1>", body_buf[0..second.body_len]);
+}
+
+test "zix zixer: h3 edge, a site with no public dir resolves the window to off" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: h3 edge socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18925 }};
+    const cfg = tlsCfg(18924, &upstreams);
+
+    const socket = try bindSite(io, 18924);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18924, .{ .public_dir_cache_ttl_ms = 5000 });
+    defer state.shutdown();
+
+    // The daemon asked for a window, but a proxy-only site has no files to
+    // cache, so no table is built and every lookup is skipped outright.
+    try testing.expectEqual(@as(u32, 0), state.public_dir_cache_ttl_ms);
+    try testing.expect(zix.utils.static_cache.instance() == null);
 }

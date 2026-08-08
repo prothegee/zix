@@ -13,7 +13,7 @@
 //!
 //! Run:
 //! zig build zixer-example-grpc
-//! ./zig-out/bin/zixer-example-grpc-<arch>-<os>
+//! ./zig-out/bin/zixer-example-grpc-<arch>-<os>-<optimize>
 //!
 //! Through the proxy, with grpcurl:
 //! grpcurl -proto examples/protobuf/helloworld.proto -plaintext \

@@ -60,8 +60,8 @@ jobs:
 
       - name: zix integration tests
         if: always()
-        timeout-minutes: 4
-        run: zig build integration-test --summary failures --test-timeout 240s
+        timeout-minutes: 5
+        run: zig build integration-test --summary failures --test-timeout 300s
 
       - name: zix behaviour tests
         if: always()

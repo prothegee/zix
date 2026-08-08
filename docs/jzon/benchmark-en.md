@@ -109,8 +109,8 @@ From the package root:
 
 ```
 zig build example-bench_serialize example-bench_deserialize -Doptimize=ReleaseFast
-./zig-out/bin/jzon-example-bench_serialize-<arch>-<os>
-./zig-out/bin/jzon-example-bench_deserialize-<arch>-<os>
+./zig-out/bin/jzon-example-bench_serialize-<arch>-<os>-releasefast
+./zig-out/bin/jzon-example-bench_deserialize-<arch>-<os>-releasefast
 ```
 
 A Debug build measures the safety checks rather than the paths and collapses the rows onto each other, so the optimize flag is not optional here.

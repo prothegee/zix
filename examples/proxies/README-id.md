@@ -19,17 +19,19 @@ Jalankan semuanya dari root repository. Path di config site (`public_dir`, `tls_
 relatif terhadap tempat daemon berjalan.
 
 ```bash
-zig build zixer                 # membangun zig-out/bin/zixer-<arch>-<os>
+zig build zixer                 # membangun zig-out/bin/zixer-<arch>-<os>-<optimize>
 zig build zixer-examples        # membangun tiap upstream demo
 mkdir -p examples/proxies/logs  # logs/ tidak ada di repository, buat sekali
 ```
 
-Perpendek path untuk sisa halaman ini (triplet-nya milik mesin ini, ganti dengan milik Anda):
+Perpendek path untuk sisa halaman ini. Triplet-nya milik mesin ini, ganti dengan milik Anda, dan
+`MODE` adalah nilai `-Doptimize` dalam huruf kecil, yaitu `debug` bila flag-nya tidak diberikan:
 
 ```bash
 BIN=./zig-out/bin
 TRIPLET=x86_64-linux
-ZIXER=$BIN/zixer-$TRIPLET
+MODE=debug
+ZIXER=$BIN/zixer-$TRIPLET-$MODE
 ```
 
 Periksa config sebelum menyalakan apa pun. Tiap file mendapat verdict dan tiap masalah
@@ -45,7 +47,7 @@ $ZIXER --dir examples/proxies list
 ## Alur harian
 
 ```bash
-$BIN/zixer-example-http1-$TRIPLET &         # upstream dulu
+$BIN/zixer-example-http1-$TRIPLET-$MODE &   # upstream dulu
 $ZIXER --dir examples/proxies start http1.cfg   # men-spawn daemon bila perlu
 curl http://127.0.0.1:9100/
 $ZIXER --dir examples/proxies stop http1.cfg
@@ -68,7 +70,7 @@ certbot setelah renewal.
 | grpc | 9108 | 9109 | h2 ujung ke ujung, trailer selamat |
 | http3 | 9110 | 9111 | edge client QUIC, upstream http1 |
 | udp | 9112 | 9113 | forward datagram per flow |
-| static | 9114 | tidak ada | site static saja, spa_fallback |
+| static | 9114 | tidak ada | site static saja, spa_fallback, cache window sendiri |
 | mixed | 9115 | 9116 | static ber-public_prefix berdampingan dengan backend yang diproxy |
 | round_robin | 9117 | 9118, 9119 | rotasi, dan retry berbatas saat satu mati |
 | tls | 9120 | 9121 | TLS diterminasi di zixer, upstream cleartext |
@@ -91,10 +93,13 @@ Tiap config site membawa perintah run dan drive-nya sendiri di header, jadi
 | `upstreams` (beberapa) | round_robin |
 | `public_dir`, `spa_fallback` | static |
 | `public_prefix` | mixed |
+| `public_dir_cache_ttl_ms` | main.cfg untuk default daemon, static untuk override site |
+| `public_dir_cache_max_entries` | main.cfg, satu cache table per daemon |
 | `kernel_backlog` | main.cfg, diwarisi tiap site di sini |
 
-`acme_webroot` dan `acme_proxy` tidak punya demo, karena challenge sungguhan butuh port 80
-dan sebuah certificate authority. Perilakunya dijelaskan di
+`acme_webroot`, `acme_proxy`, dan `upstream_timeout_ms` tidak punya demo: challenge sungguhan
+butuh port 80 dan sebuah certificate authority, dan read deadline baru terlihat pada backend
+yang sengaja stall. Perilakunya dijelaskan di
 [`docs/zixer/config-id.md`](../../docs/zixer/config-id.md).
 
 <br>

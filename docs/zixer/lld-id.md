@@ -69,11 +69,14 @@ Key dicocokkan berdasarkan nama terhadap sebuah enum, jadi key tak dikenal menja
 
 | key | pemeriksaan |
 | :- | :- |
-| workers | muat di `usize`, paling banyak sebanyak thread mesin dari `std.Thread.getCpuCount` |
+| workers | muat di `usize`, paling banyak sebanyak thread yang boleh dipakai proses ini, yang dibaca `std.Thread.getCpuCount` dari affinity mask di Linux |
 | dispatch | salah satu dari `async`, `epoll`, `uring`, dan di luar Linux hanya `async` |
 | logs_dir, sites_dir | diambil apa adanya, di-default ke `<root>/logs` dan `<root>/sites` bila tidak ada |
 | kernel_backlog | muat di `u31`, minimal 1 |
-| max_recv_buf | minimal 1 |
+| max_recv_buf | muat di `usize`, antara 1024 dan 262144 byte |
+| process_limit | muat di `usize`, maksimal 65536, 0 mematikan gate |
+| process_queue_len | muat di `usize`, maksimal 65536, dan di atas 0 ia butuh `process_limit` di atas 0 |
+| process_queue_timeout_ms | muat di `u32`, antara 1 dan 600000 ms |
 
 `zixer status` menambahkan pemeriksaan keberadaan kedua direktori setelah parse.
 
@@ -136,7 +139,7 @@ File config lebih besar dari 256 KiB ditolak alih-alih dimuat.
 
 ## Site runtime
 
-Satu site yang start memegang satu listener, dengan salah satu bentuk berikut:
+Satu site yang start memegang satu listener per accept loop, dengan salah satu bentuk berikut:
 
 | engine dan config | apa yang dipegang |
 | :- | :- |
@@ -151,6 +154,131 @@ Listener tcp bind dengan address reuse, socket datagram bind ketat.
 Address reuse itulah alasan bind tcp didahului sebuah probe. Std memasangkan flag itu dengan `SO_REUSEPORT` di posix, dan `SO_REUSEADDR` di Windows sama permisifnya, jadi listener kedua ikut bergabung di port itu alih-alih gagal, lalu kernel membagi koneksi yang datang ke keduanya. Probe connect ke alamat yang akan didengarkan site, loopback sebagai ganti wildcard karena Windows menolak connect ke `0.0.0.0`. Listener yang hidup akan menjawab dan start ditolak dengan `AddressInUse`, sedangkan socket yang tertinggal di TIME_WAIT menolak connect itu, jadi restart tepat setelah trafik nyata tetap bisa bind ulang. Socket datagram tidak butuh probe: bind-nya ketat dan melaporkan tabrakannya sendiri.
 
 Site TLS dengan key acme, di port selain 80, juga bind port 80, dan port companion itu diprobe dengan cara yang sama. Bind itu tidak opsional: bila gagal, seluruh `start` gagal dengan pesan yang menyebut port challenge-nya.
+
+<br>
+
+## Worker
+
+Site tcp yang melayani menjalankan `workers` accept loop, dari `main.cfg`.
+Daemon menyelesaikan angkanya sekali saat start, jadi dua site tidak mungkin
+berbeda pendapat soal angka itu.
+
+| dikonfigurasi | hasil resolusi |
+| :- | :- |
+| `0` | semua thread yang boleh dipakai proses ini, yang dibaca `std.Thread.getCpuCount` dari affinity mask di Linux |
+| `n` | `n`, dan `main.cfg` sudah menolak angka di atas thread yang tersedia |
+| berapa pun, di Windows | `1` |
+
+Windows menjadi pengecualian karena address reuse di sana adalah pengambilalihan,
+bukan penggabungan: bind kedua di port itu akan meninggalkan listener pertama
+tanpa trafik. Semua platform lain yang didukung memasangkan flag itu dengan
+`SO_REUSEPORT`, di mana kernel memilih satu listener untuk tiap koneksi yang
+datang.
+
+Apa yang dimiliki satu worker, dan apa yang tetap milik site:
+
+| dimiliki satu worker | dipegang site |
+| :- | :- |
+| listener-nya | string config dan plane static |
+| upstream pool-nya | context TLS, read-only setelah site start |
+| idle connection cache-nya | thread reaper, yang menyapu cache tiap worker |
+| group task koneksinya | flag stop, satu store menghentikan tiap loop |
+
+Worker pertama mengambil listener yang sudah di-bind site, dan sisanya bind
+listener sendiri di alamat yang sama. Yang belakangan tidak butuh port probe:
+site sudah memiliki port itu saat itu, dan bergabung ke sana memang tujuannya.
+
+Shutdown adalah tempat berbagi port ada harganya. Satu koneksi wake bukan satu
+worker, karena kernel yang memutuskan listener mana yang mengambilnya. Sebuah
+worker menutup listener-nya sendiri saat keluar, yang mengeluarkannya dari
+group, jadi site terus membangunkan sampai tiap worker keluar dan tiap
+percobaan ulang sampai ke worker yang masih terblokir. Batasnya 200 percobaan
+per worker, satu per milidetik, dan itu baru berarti bila sebuah worker
+tersangkut di dalam sebuah koneksi, bukan di accept.
+
+<br>
+
+## Buffer koneksi
+
+Tiap koneksi yang diterima mengalokasikan satu blok lalu membaginya menjadi
+leg yang dibutuhkan, dan melepasnya saat koneksi selesai. `conn_buffer.zig`
+memiliki ukurannya, dan `max_recv_buf` (nilai site, kalau tidak ada nilai
+main.cfg) adalah ukuran satu leg.
+
+| bentuk site | leg yang diminta | blok |
+| :- | :- | :- |
+| static saja | baca client, tulis client | 2 leg |
+| http1 yang di-proxy | pasangan client, plus pasangan upstream | 4 leg |
+| TLS | pasangan client membawa ciphertext, sisi plaintext memakai buffer milik session | 2 leg, plus 2 lagi ketika request loop mencapai pool |
+| http2 atau grpc di atas reader dan writer yang sudah diserahkan | pasangan upstream saja | 2 leg |
+| grpc | pasangan client, plus satu pasang per koneksi h2 upstream yang benar-benar dibuka | 2 leg, plus 2 per upstream yang terbuka |
+
+Heap, bukan stack, karena dua hal. Array stack diukur saat compile, jadi
+sebuah site tidak akan bisa menurunkannya. Dan array yang kebesaran tidak
+gratis: Zig menulisi local yang `undefined`, jadi mencadangkan 64 KiB untuk
+memakai 2 KiB tetap membayar 64 KiB resident memory. Terukur, dua local 64 KiB
+menggantikan dua local 8 KiB memindahkan koneksi yang ditahan dari 48,6 ke
+172,6 KiB.
+
+Alokasi yang gagal menjawab `503` lewat buffer stack kecil lalu menutup,
+bukan membuang socket tanpa status.
+
+Yang tetap di stack, karena ia batas protokol dan bukan pilihan tuning: head
+buffer request, head upstream hasil rebuild, head response (16 KiB
+masing-masing), serta record dan plaintext buffer milik TLS session.
+
+Body pump tidak memegang copy array sama sekali. `pumpExact` dan
+`pumpUntilClose` sama-sama memindahkan byte langsung dari reader ke writer,
+dan hasil nol berarti reader menaruhnya di buffer sendiri, jadi pass
+berikutnya yang menguras, bukan pump menganggapnya koneksi tertutup.
+
+<br>
+
+## Process gate
+
+`process_gate.zig` memiliki state admission satu site, `process_wait.zig`
+memiliki cara sebuah pemanggil menunggunya. Keduanya dipisah karena yang
+kedua bergantung pada dispatch model dan yang pertama tidak.
+
+Gate-nya adalah sebuah counter ditambah ruang tunggu berukuran tetap,
+semuanya di balik satu spinlock pendek:
+
+| panggilan | apa yang dilakukan |
+| :- | :- |
+| `enter` | mengambil slot saat `in_flight` di bawah limit, kalau tidak mengambil slot ruang tunggu dan mengembalikan tiket, kalau tidak menolak |
+| `poll` | melaporkan apakah sebuah tiket sudah diberi slot, dan memakai habis tiket itu bila sudah |
+| `abandon` | melepas tiket, meneruskan slot yang datang pada saat yang sama alih-alih menghilangkannya |
+| `leave` | menyerahkan slot ke penunggu terlama, atau menurunkan `in_flight` saat tidak ada yang antre |
+
+Ruang tunggunya dialokasikan sekali saat site start dan slot-slotnya
+dirangkai ke dua intrusive list: satu free list, dan satu wait list berurutan
+kedatangan dengan dua tautan supaya sebuah slot bisa keluar dari tengah dalam
+waktu konstan. Itu penting karena semua panggilan di atas berjalan di bawah
+spinlock, dan request yang menyerah di tengah jalan persis kasus yang
+dihasilkan sebuah timeout.
+
+Slot tidak pernah dilepas lalu diambil ulang saat serah terima. `leave`
+memindahkannya langsung ke kepala antrean, jadi `in_flight` tidak turun dan
+kedatangan ketiga tidak bisa menyalip request yang sudah menunggu.
+
+Tidak ada yang memblokir di sini, dan itulah intinya. `process_wait.admit`
+adalah penunggu untuk model task-per-koneksi: ia memeriksa tiketnya pada tick
+1 ms yang sama dengan yang sudah dipakai relay grpc dan h3, lalu melepas
+tiketnya saat deadline. Readiness atau completion loop akan menggerakkan
+tiket yang sama dari ready pass-nya sendiri, tanpa mengubah gate.
+
+`process_wait.admitNow` adalah bentuk yang membuang beban, untuk pemanggil
+yang thread-nya menggerakkan stream hidup lain. Hanya relay grpc yang
+memakainya.
+
+`Held` adalah yang dipasangkan sebuah pemanggil dengan admission-nya.
+Release-nya idempotent, jadi sebuah edge bisa mengembalikan slot lebih awal
+(serah terima websocket dan grpc) dan tetap memakai deferred release untuk
+tiap jalan keluar lainnya.
+
+Gate yang tidak aktif (`process_limit: 0`) tidak memiliki memory apa pun dan
+memotong tiap panggilan, jadi edge tidak pernah bercabang pada apakah
+site-nya menyetel gate.
 
 <br>
 
@@ -172,6 +300,10 @@ Parsing head dibatasi: 16 KiB head, paling banyak 64 header. Keputusan framing b
 
 Static plane berjalan sebelum pool bila site punya keduanya, dan `public_prefix` membatasinya: tanpa prefix seluruh ruang path static lebih dulu, dengan prefix hanya subtree itu. Resolusi path menolak `..` langsung alih-alih menormalkannya, menolak NUL yang tersisip, memetakan slash di akhir ke `index.html`, dan membatasi path gabungan di 512 byte. Sibling terkompresi diprobe berurutan `.br` lalu `.gz` terhadap `Accept-Encoding`, dengan identity sebagai lantai, dan `Vary: Accept-Encoding` ikut di tiap response static.
 
+Dengan `public_dir_cache_ttl_ms` di atas 0, table bersama ditanya lebih dulu, dan aturan yang sama tetap berlaku di sana: urutan sibling dan lantai identity sudah diterapkan sekali saat entry dibangun, dan slash di akhir dipetakan ke `index.html` sebelum lookup sehingga jawaban dengan dan tanpa cache menyelesaikan path yang sama. Sebuah miss langsung jatuh ke open di atas, termasuk untuk percobaan ulang `spa_fallback`.
+
+Head response dirender oleh edge di kedua kasus, bukan diputar ulang dari byte prerender milik entry, sehingga kedua jawaban identik byte per byte. Header prerender itu mengiklankan `Accept-Ranges`, yang tidak dilayani edge ini, dan mematok `Connection: keep-alive`, yang di edge ini diputuskan per request.
+
 Satu pertukaran terhadap pool mencoba paling banyak satu kali per upstream plus satu cadangan, jadi satu koneksi idle yang basi tidak pernah menghabiskan satu-satunya kesempatan sebuah slot. Begitu body request mulai di-stream, tidak ada retry: body tidak bisa diulang.
 
 `101` dari upstream mengubah koneksi menjadi tunnel mentah di kedua arah untuk sisa hidupnya, dengan pilihan upstream dipatok untuk tunnel itu.
@@ -181,6 +313,8 @@ Satu pertukaran terhadap pool mencoba paling banyak satu kali per upstream plus 
 Stream h2 dari client dilayani satu per satu dengan sisanya diantre, dan tiap stream di-re-originate sebagai request HTTP/1.1 ke pool. Translasinya mengikuti rfc 9113 bagian 8: pseudo-header menjadi request line, header khusus koneksi ditolak, status response kembali menjadi `:status`.
 
 Stream extended CONNECT (rfc 8441) menjadi bridge websocket: frame DATA menjadi byte mentah ke arah upstream websocket h1, dan byte mentah kembali menjadi frame DATA.
+
+Response yang panjangnya sudah disebut upstream keluar dalam satu write. Blok header ditahan dulu sampai frame DATA pertama menyusul, jadi response kecil memakai satu segment di wire, bukan dua, dan satu record, bukan dua, di site TLS. File static memakai jalur yang sama, ukurannya sudah diketahui sebelum pembacaan pertama. Response chunked atau yang dibatasi penutupan koneksi bisa saja sebuah live stream yang event pertamanya masih beberapa detik lagi, jadi blok header-nya keluar sendiri dan tiap burst menyusul begitu tiba.
 
 h2 prior knowledge disniff di listener cleartext, jadi client yang tidak pernah menegosiasi ALPN tetap bekerja.
 
@@ -243,9 +377,17 @@ Round-robin O(1) atas upstream yang sedang up:
 - Menandai down adalah swap-remove, menandai up adalah append.
 - Kegagalan connect menandai upstream down. Penerimaan kembali terjadi saat pemilihan setelah cooldown 3000 ms, dan sapuannya dibatasi paling sering sekali per 200 ms supaya biayanya tidak pernah jatuh di tiap pemilihan.
 - Upstream yang diterima kembali tapi masih mati ditandai down lagi oleh kegagalan berikutnya. Tidak ada thread probe.
-- Koneksi keep-alive idle di-cache per slot upstream, sampai 4 per slot. Kelebihannya ditutup alih-alih ditumbuhkan.
+- Koneksi keep-alive idle di-cache per slot upstream, sampai 4 per slot, dan sampai 32 untuk seluruh site. Kelebihannya ditutup alih-alih ditumbuhkan.
+- Koneksi yang di-cache juga kedaluwarsa setelah 5000 ms. Pengecekan umur berjalan saat sebuah koneksi diambil, dan satu thread sweep per site menjalankannya tiap 2500 ms supaya site tanpa trafik pun tetap mengembalikan koneksinya. Koneksi idle di pool adalah kapasitas yang diambil dari backend.
 
-Spinlock pendek menjaga pool dan cache, karena task koneksi berjalan bersamaan di dalam satu site.
+Tiap worker sebuah site memiliki pool dan cache-nya sendiri. Spinlock pendek
+menjaga masing-masing, karena task koneksi berjalan bersamaan di dalam satu
+worker, dan tidak ada yang dibagi antar worker. Angka 32 koneksi idle adalah
+batas milik site, jadi worker-nya membagi angka itu: 4 worker memegang 8 per
+worker, tidak pernah di bawah 1. Tiap worker belajar sendiri bahwa sebuah
+upstream mati, jadi backend yang mati berbiaya satu connect gagal per worker,
+bukan satu per site, dan tiap salinan menerima kembali dengan cooldown-nya
+sendiri.
 
 <br>
 
@@ -259,15 +401,27 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | baris control | 512 byte | request dan reply control socket |
 | nama site | 128 byte | control socket |
 | path control socket | 108 byte di Linux | seluruh string `<root>/control.sock` |
-| head request | 16 KiB | edge http1 |
+| head request | 16 KiB | edge http1, dan head upstream hasil rebuild serta head response berukuran sama |
 | header per pesan | 64 | edge http1 |
-| path static | 512 byte | `public_dir` plus path request |
-| koneksi upstream idle | 4 per upstream | per site |
-| cooldown upstream | 3000 ms | pool per site |
+| path static | 512 byte | `public_dir` plus path request, satu konstanta yang dipakai bersama cache table |
+| window static cache | 0 sampai 3600000 ms | nilai yang boleh dipakai `public_dir_cache_ttl_ms`, 0 berarti mati |
+| entry static cache | 1 sampai 1048576 file | nilai yang boleh dipakai `public_dir_cache_max_entries`, lalu dibatasi ke seperempat batas descriptor proses |
+| body terkecil yang diserahkan ke kernel | 64 KiB | hanya http1 cleartext, di bawahnya body ditulis bersama head-nya |
+| koneksi upstream idle | 4 per upstream, 32 total, dibagi di antara worker | per site |
+| umur koneksi upstream idle | 5000 ms | cache idle per worker |
+| interval sweep idle | 2500 ms | thread reaper per site, untuk tiap cache worker |
+| cooldown upstream | 3000 ms | pool per worker |
 | koneksi QUIC bersamaan | 64 | per site http3 |
 | flow udp | 64 | per site udp |
 | datagram udp | 65535 byte | per site udp |
-| kegagalan accept berturut-turut sebelum loop menyerah | 100 | control loop dan tiap accept loop site |
+| kegagalan accept berturut-turut sebelum loop menyerah | 100 | control loop dan tiap accept loop worker |
+| percobaan wake saat shutdown | 200 per worker, satu per milidetik | per site, sampai tiap accept keluar |
+| rentang stream buffer | 1024 sampai 262144 byte | nilai yang boleh dipakai `max_recv_buf` |
+| hitungan process gate | 0 sampai 65536 | nilai yang boleh dipakai `process_limit` dan `process_queue_len` |
+| tunggu antrean process | 1 sampai 600000 ms | nilai yang boleh dipakai `process_queue_timeout_ms` |
+| tick poll request yang mengantre | 1 ms | seberapa sering request yang menunggu memeriksa tiketnya |
+| byte yang boleh dipindah satu panggilan body pump | 16 KiB | edge http1, pump-nya mengulang melewatinya |
+| alternative signal stack | mati | seluruh executable, `std_options` di `zixer.zig` |
 
 <br>
 
@@ -279,6 +433,6 @@ Tiap modul membawa test-nya sendiri berdampingan dengan kodenya, dijalankan deng
 | :- | :- |
 | test scanner dan math | grammar, comment, list, dan tiap aturan aritmetika |
 | test skema | tiap default, tiap teks fault, dan tiap aturan lintas field |
-| test daemon dan runtime | bahwa nilai hasil parse benar-benar sampai ke bind, mis. backlog yang di-resolve sebuah site |
+| test daemon dan runtime | bahwa nilai hasil parse benar-benar sampai ke bind, mis. backlog yang di-resolve sebuah site, jumlah worker yang dipakai site saat start, dan ukuran buffer yang dialokasikan koneksinya |
 
 Matriks demo di bawah `examples/proxies` adalah lapisan ujung ke ujung: `zig build zixer-test-runner-all` menyalakan tiap upstream, mem-bind site demo itu di root sementara, menjalankan client native lewat edge, dan melaporkan satu baris per demo.

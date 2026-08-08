@@ -107,7 +107,11 @@ flowchart LR
 | `daemon_spawn.zig` | auto-spawn when the socket is silent |
 | `site_runtime.zig` | what one started site owns: the listener, the acme companion |
 | `port_probe.zig` | whether a listener outside this daemon already owns a port |
-| `site_serve.zig` | the accept loop for one tcp site |
+| `site_serve.zig` | what one serving tcp site owns: its workers, pools, and idle caches |
+| `site_worker.zig` | one accept loop with its own listener and upstream leg |
+| `worker_count.zig` | how many accept loops a site runs |
+| `bind_options.zig` | the main.cfg values a site needs at bind time |
+| `conn_buffer.zig` | the stream buffer block one edge connection holds |
 | `http1_proxy.zig`, `http1_head.zig` | the http1 edge and its message parsing |
 | `http2_edge.zig` and siblings | the h2 edge, frames, translation, the rfc 8441 websocket bridge |
 | `grpc_edge.zig` and siblings | the grpc edge, h2 on both legs |
@@ -116,8 +120,10 @@ flowchart LR
 | `tls_edge.zig` | TLS termination and ALPN selection |
 | `ws_tunnel.zig` | the rfc 6455 upgrade tunnel |
 | `static_files.zig` | files from `public_dir`, precompressed siblings, the spa fallback |
+| `static_cached.zig` | the shared table of already-open `public_dir` files, and taking an entry from it |
 | `acme_challenge.zig`, `acme_listener.zig` | the http-01 challenge plane and the port 80 companion |
 | `upstream_pool.zig`, `upstream_conn.zig` | round-robin picking, availability, idle keep-alive |
+| `upstream_deadline.zig`, `idle_reaper.zig` | the bound on one upstream read, the sweep that ages idle conns out |
 | `proxy_headers.zig` | hop-by-hop stripping, `Via`, `Forwarded` |
 
 <br>
@@ -174,26 +180,110 @@ zixer is thread-per-listener at the accept level and task-per-connection below i
 
 ```mermaid
 flowchart TB
-    subgraph site [one tcp site]
-        accept[accept thread]
-        t1[conn task]
-        t2[conn task]
-        tn[conn task]
-    end
-    pool[upstream pool + idle cache]
+    client[clients] --> kernel[one port, one listener per worker]
 
-    accept --> t1
-    accept --> t2
-    accept --> tn
-    t1 --> pool
-    t2 --> pool
-    tn --> pool
+    subgraph site [one tcp site]
+        subgraph w1 [worker 1]
+            a1[accept loop]
+            p1[pool + idle cache]
+        end
+        subgraph wn [worker n]
+            an[accept loop]
+            pn[pool + idle cache]
+        end
+    end
+
+    kernel --> a1
+    kernel --> an
+    a1 --> t1[conn task] --> p1
+    a1 --> t2[conn task] --> p1
+    an --> tn[conn task] --> pn
 ```
 
-- Each started tcp site owns one accept thread. Each accepted connection becomes a concurrent task in that site's group, so a slow client never blocks the accept loop.
-- A udp site is different: one up pump thread receives on the site socket, and each client flow gets its own ephemeral socket plus its own down pump, so an upstream sees one distinct peer per client. That is what ICE and DTLS state need.
-- The upstream pool and the idle connection cache are shared per site and guarded by a short spinlock. Nothing else is shared between connections.
-- `stop` and `daemon stop` set a flag and wake the loops, so teardown is bounded rather than abrupt.
+- Each started tcp site runs `workers` accept loops, one thread each, and each holds its own listener on the site's port. The kernel decides which listener takes an arriving connection, so accepting is not one thread's job. `workers: 1` is the default and gives the single loop zixer had before.
+- Each accepted connection becomes a concurrent task in that worker's group, so a slow client never blocks its accept loop.
+- A udp site is different: one up pump thread receives on the site socket, and each client flow gets its own ephemeral socket plus its own down pump, so an upstream sees one distinct peer per client. That is what ICE and DTLS state need. An http3 site is the same shape, one socket, so neither spends `workers`.
+- The upstream pool and the idle connection cache belong to one worker, not to the site, and a short spinlock guards each because connection tasks run concurrently within a worker. Nothing is shared between workers except the TLS context, which is read-only after the site starts.
+- The site's idle bound is divided between the workers, so a backend never loses more of its capacity because the edge runs more loops.
+- `stop` and `daemon stop` set one flag and wake the loops until every worker has left, so teardown is bounded rather than abrupt.
+
+<br>
+
+## The overload valve
+
+Accepting is per worker, but spending a backend is not. One site has one
+admission gate, shared by every worker, and a request passes it at the moment
+the edge decides to originate upstream. Nothing earlier reaches it: a static
+answer, an acme challenge, and an https redirect are all served before the
+gate is asked.
+
+- `process_limit` is how many requests may be running upstream at once, `process_queue_len` is how many may wait, and `process_queue_timeout_ms` bounds that wait. All three default to off, see `config-en.md`.
+- Site-wide rather than per worker on purpose. Splitting the count across workers would make one written number mean a different thing on every machine, because `workers: 0` follows the thread count, and a valve has to be sized by what the backend absorbs.
+- The gate never blocks. A request that cannot proceed is handed a ticket and its own task waits on it, which is why the same structure serves a task-per-connection loop and would serve a single-threaded readiness or completion loop, where the loop would check tickets from its own ready pass instead.
+- A full waiting room refuses in microseconds rather than holding the connection for the whole budget. Shedding early is the point: an unbounded line under a storm would pin every waiter's buffers and then fail all of them late.
+- A long-lived exchange releases its slot at handover. A websocket tunnel and a grpc stream live as long as their client, so holding the slot for their whole life would let a handful of open sockets pin the site.
+- grpc never queues. Its frame loop drives every live stream on the connection, so parking it would stall work already admitted, and a new stream is shed with a trailers-only `UNAVAILABLE` instead.
+
+<br>
+
+## The static plane
+
+A site with `public_dir` answers files itself, with no upstream involved. That
+is the point of the key: serving a built front-end needs zixer and nothing
+behind it.
+
+Two paths reach the same answer, and every site can use both:
+
+| path | what one request costs |
+| :- | :- |
+| uncached, the default | open, stat, read, close, plus one speculative open per precompressed sibling a browser asks for |
+| cached, `public_dir_cache_ttl_ms` above 0 | a hash lookup against a file already open, with the sibling choice settled when the entry was built |
+
+The table is the one `zix.utils.static_cache` builds, the same one the engines
+use. zixer keeps no table of its own, so a file costs one descriptor for the
+daemon rather than one per accept loop, which on a `workers: 0` machine is the
+difference between one and the thread count. Reads take no lock.
+
+The cache can never fail a request. A window of 0, a full table, an unreadable
+file, or a path too long to store all fall through to the uncached open, which
+is also what produces the 404 and the `spa_fallback` answer.
+
+How the body leaves depends on what the edge can promise:
+
+| site | body path | why |
+| :- | :- | :- |
+| cleartext http1, 64 KB and up | handed to the kernel, never enters zixer | nothing has to touch the bytes |
+| cleartext http1, under 64 KB | written with its own head in one go | one write beats a flush plus a syscall on its own segment |
+| TLS, any size | copied through the TLS writer | the bytes have to be encrypted |
+| http2 and http3 | copied into frames | every byte has to be framed, and http2 coalesces its writes |
+
+<br>
+
+## Memory per connection
+
+One connection is one thread and one buffer block, so both scale with how many
+clients are open rather than with how many requests they send.
+
+| what | where it comes from | size |
+| :- | :- | :- |
+| stream buffers | one allocation per connection, released when it ends | `max_recv_buf` per leg, 2 legs on a static site and 4 on a proxied one |
+| head buffers | the stack of the request loop | 16 KiB each, three of them on a proxied http1 connection |
+| TLS session | the stack of the TLS edge | about 58 KiB, of which the record buffer is a protocol limit |
+| thread stack | the operating system, on demand | 16 MiB reserved, only the pages a connection touches become resident |
+
+The buffers are the part an operator sets. The head buffers are protocol
+limits: lowering `max_recv_buf` never shrinks what a request head may be, it
+only changes how many bytes move per read.
+
+Two things do not appear in that table and used to dominate it. The alternative
+signal stack std gives every thread is off in this executable, because it was
+256 KiB of resident memory per connection for a stack-overflow trace a
+fixed-depth edge loop cannot produce. And the copy scratch the body pumps held
+is gone: the reader and the writer move bytes between themselves.
+
+Measured on this project's demo, resident memory per held connection at the
+default `max_recv_buf`: 76.7 KiB on a static site and 140.8 KiB on a proxied
+one, against 332.6 and 396.6 KiB before those two changes.
 
 <br>
 
@@ -239,6 +329,8 @@ The proxy edges follow the intermediary rules rather than passing everything thr
 | the request already streamed its body | no retry, the failure is reported as is |
 | `Host` not covered by the certificate | `421 misdirected request` |
 | static path missing and no `spa_fallback` | `404 not found` from the edge, no upstream involved |
+| the site is at `process_limit` and the waiting room is full | `504 upstream queue full` with a `Proxy-Status` reason |
+| a queued request waited out `process_queue_timeout_ms` | `504 upstream queue timeout` with the same reason |
 
 An upstream that fails a connect is marked down and skipped by the round-robin picker for a cooldown window, then re-admitted and marked down again by the next failure. There is no health check thread and no probe: availability is learned from real traffic only.
 
@@ -251,6 +343,7 @@ An upstream that fails a connect is marked down and skipped by the round-robin p
 - Fail loudly at start, never halfway. A missing certificate file, a taken port, or an unbindable challenge port fails the `start` instead of leaving a site partly up.
 - Re-originate rather than forward. The edge owns the framing of what it sends.
 - One file, one responsibility. Each edge, each translation layer, and each command lives in its own file, which is why the module list above reads as a map of the behavior.
+- Share the engines' static cache rather than build a second one. It is already one table per process and lock-free to read, so a zixer-owned table would cost the same descriptors again for the same files and would not be faster.
 
 <br>
 
@@ -259,8 +352,10 @@ An upstream that fails a connect is marked down and skipped by the round-robin p
 Being explicit about the gaps is part of the design:
 
 - No log output. `logs_dir` must exist and nothing writes into it.
-- No timeouts anywhere. A blackholed upstream waits on the operating system.
+- No connect timeout, and no idle timeout on a websocket tunnel or an SSE stream. A blackholed upstream waits on the operating system. The wait for an upstream response head and for a `Content-Length` body is bounded by `upstream_timeout_ms`, see `config-en.md`.
+- No read deadline on a grpc site. Its upstream leg is one h2 connection multiplexing every stream, which needs its own mechanism, so the key is refused there rather than accepted and ignored.
 - No health checks, only failure learned from live traffic.
 - No hot reload of `main.cfg`, and no reload of every site at once.
+- No bound on how many connections one site accepts at once. The process gate bounds requests running against the backend, not sockets held open, so the accept ceiling is still what the operating system will give the process.
 - No per-path routing, header rewriting, rate limiting, or caching.
-- `workers`, `dispatch`, and `max_recv_buf` are validated and reported, and nothing reads them. See `config-en.md`.
+- `dispatch` is validated and reported, and nothing reads it. See `config-en.md`.

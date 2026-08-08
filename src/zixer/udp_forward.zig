@@ -440,16 +440,16 @@ test "zix zixer: udp forward, one flow round trips through its own upstream sock
     defer threaded.deinit();
     const io = threaded.io();
 
-    const echo = try UdpEcho.start(io, 39834, 'A');
+    const echo = try UdpEcho.start(io, 18834, 'A');
     defer echo.shutdown();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39834 }};
-    const forward = try startForward(io, 39833, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18834 }};
+    const forward = try startForward(io, 18833, &upstreams);
     defer forward.shutdown();
 
     const client = try bindClient(io);
     defer client.close(io);
-    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 39833);
+    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 18833);
 
     var out: [128]u8 = undefined;
     const reply = try sendAndReceive(io, client, &edge, "ping", &out);
@@ -466,18 +466,18 @@ test "zix zixer: udp forward, two clients get two flows and their own replies" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const echo = try UdpEcho.start(io, 39829, 'B');
+    const echo = try UdpEcho.start(io, 18829, 'B');
     defer echo.shutdown();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39829 }};
-    const forward = try startForward(io, 39828, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18829 }};
+    const forward = try startForward(io, 18828, &upstreams);
     defer forward.shutdown();
 
     const first = try bindClient(io);
     defer first.close(io);
     const second = try bindClient(io);
     defer second.close(io);
-    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 39828);
+    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 18828);
 
     var first_out: [128]u8 = undefined;
     var second_out: [128]u8 = undefined;
@@ -498,23 +498,23 @@ test "zix zixer: udp forward, new flows round-robin and a flow stays put" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const first_echo = try UdpEcho.start(io, 39836, '1');
+    const first_echo = try UdpEcho.start(io, 18836, '1');
     defer first_echo.shutdown();
-    const second_echo = try UdpEcho.start(io, 39837, '2');
+    const second_echo = try UdpEcho.start(io, 18837, '2');
     defer second_echo.shutdown();
 
     const upstreams = [_]site_cfg.Upstream{
-        .{ .host = "127.0.0.1", .port = 39836 },
-        .{ .host = "127.0.0.1", .port = 39837 },
+        .{ .host = "127.0.0.1", .port = 18836 },
+        .{ .host = "127.0.0.1", .port = 18837 },
     };
-    const forward = try startForward(io, 39835, &upstreams);
+    const forward = try startForward(io, 18835, &upstreams);
     defer forward.shutdown();
 
     const first = try bindClient(io);
     defer first.close(io);
     const second = try bindClient(io);
     defer second.close(io);
-    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 39835);
+    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 18835);
 
     var out: [128]u8 = undefined;
     const first_reply = try sendAndReceive(io, first, &edge, "x", &out);
@@ -544,16 +544,16 @@ test "zix zixer: udp forward, a large datagram crosses intact both ways" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const echo = try UdpEcho.start(io, 39838, 'L');
+    const echo = try UdpEcho.start(io, 18838, 'L');
     defer echo.shutdown();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39838 }};
-    const forward = try startForward(io, 39827, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18838 }};
+    const forward = try startForward(io, 18827, &upstreams);
     defer forward.shutdown();
 
     const client = try bindClient(io);
     defer client.close(io);
-    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 39827);
+    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 18827);
 
     var payload: [8192]u8 = undefined;
     for (&payload, 0..) |*byte, position| byte.* = @truncate(position *% 31);
@@ -573,14 +573,14 @@ test "zix zixer: udp forward, shutdown frees the edge port" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39826 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18826 }};
 
-    const forward = try startForward(io, 39824, &upstreams);
+    const forward = try startForward(io, 18824, &upstreams);
     forward.shutdown();
 
     // Udp binds strict (no reuse flags), so a successful rebind proves the
     // shutdown released the socket.
-    const again = try startForward(io, 39824, &upstreams);
+    const again = try startForward(io, 18824, &upstreams);
     again.shutdown();
 }
 
@@ -591,7 +591,7 @@ test "zix zixer: udp forward, a bad upstream literal refuses to start" {
 
     const upstreams = [_]site_cfg.Upstream{.{ .host = "not-an-ip", .port = 9 }};
 
-    try testing.expectError(error.BadUpstreamAddress, startForward(io, 39839, &upstreams));
+    try testing.expectError(error.BadUpstreamAddress, startForward(io, 18839, &upstreams));
 }
 
 // --------------------------------------------------------- //
@@ -754,11 +754,11 @@ test "zix zixer: udp forward, a webrtc session with the zix engine crosses the f
     defer threaded.deinit();
     const io = threaded.io();
 
-    const answerer = try RtcAnswerer.start(io, 39821);
+    const answerer = try RtcAnswerer.start(io, 18821);
     defer answerer.shutdown();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39821 }};
-    const forward = try startForward(io, 39822, &upstreams);
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18821 }};
+    const forward = try startForward(io, 18822, &upstreams);
     defer forward.shutdown();
 
     // The dialing half only ever talks to the edge port, so a completed
@@ -766,10 +766,10 @@ test "zix zixer: udp forward, a webrtc session with the zix engine crosses the f
     var dialer = try zix.Webrtc.Dialer.init(testing.allocator, wireDialerOptions(), 0);
     defer dialer.deinit();
 
-    const local = try std.Io.net.IpAddress.parse("127.0.0.1", 39823);
+    const local = try std.Io.net.IpAddress.parse("127.0.0.1", 18823);
     const socket = try local.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
-    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 39822);
+    const edge = try std.Io.net.IpAddress.parse("127.0.0.1", 18822);
 
     const base_ms = wireNowMs();
     var out: [1500]u8 = undefined;
@@ -818,5 +818,5 @@ test "zix zixer: udp forward, a webrtc session with the zix engine crosses the f
     // The engine answered zixer's flow socket, never the dialer directly.
     const seen_port = answerer.peer_port.load(.acquire);
     try testing.expect(seen_port != 0);
-    try testing.expect(seen_port != 39823);
+    try testing.expect(seen_port != 18823);
 }

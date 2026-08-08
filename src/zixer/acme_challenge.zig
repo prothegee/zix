@@ -147,7 +147,7 @@ test "zix zixer: acme challenge, relay passes the standalone response through" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39891);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18891);
     var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
     defer server.deinit(io);
 
@@ -156,7 +156,7 @@ test "zix zixer: acme challenge, relay passes the standalone response through" {
 
     var out_buf: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
-    const upstream = site_cfg.Upstream{ .host = "127.0.0.1", .port = 39891 };
+    const upstream = site_cfg.Upstream{ .host = "127.0.0.1", .port = 18891 };
 
     try testing.expect(relay(io, upstream, "GET", "/.well-known/acme-challenge/tok", "example.test", &out));
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "200 OK") != null);
@@ -170,7 +170,7 @@ test "zix zixer: acme challenge, relay reports an unreachable listener" {
 
     var out_buf: [64]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
-    const upstream = site_cfg.Upstream{ .host = "127.0.0.1", .port = 39892 };
+    const upstream = site_cfg.Upstream{ .host = "127.0.0.1", .port = 18892 };
 
     try testing.expect(!relay(io, upstream, "GET", "/.well-known/acme-challenge/tok", "example.test", &out));
     try testing.expectEqual(@as(usize, 0), out.buffered().len);

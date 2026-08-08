@@ -8,8 +8,8 @@
 //!
 //! Run:
 //! zig build zixer-example-round_robin
-//! ./zig-out/bin/zixer-example-round_robin-<arch>-<os> --port 9118 &
-//! ./zig-out/bin/zixer-example-round_robin-<arch>-<os> --port 9119 &
+//! ./zig-out/bin/zixer-example-round_robin-<arch>-<os>-<optimize> --port 9118 &
+//! ./zig-out/bin/zixer-example-round_robin-<arch>-<os>-<optimize> --port 9119 &
 //!
 //! Through the proxy:
 //! curl http://127.0.0.1:9117/ http://127.0.0.1:9117/ http://127.0.0.1:9117/

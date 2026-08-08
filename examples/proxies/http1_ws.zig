@@ -12,7 +12,7 @@
 //!
 //! Run:
 //! zig build zixer-example-http1_ws
-//! ./zig-out/bin/zixer-example-http1_ws-<arch>-<os>
+//! ./zig-out/bin/zixer-example-http1_ws-<arch>-<os>-<optimize>
 //!
 //! Through the proxy:
 //! websocat ws://127.0.0.1:9104/ws

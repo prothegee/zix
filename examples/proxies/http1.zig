@@ -8,7 +8,7 @@
 //!
 //! Run:
 //! zig build zixer-example-http1
-//! ./zig-out/bin/zixer-example-http1-<arch>-<os>
+//! ./zig-out/bin/zixer-example-http1-<arch>-<os>-<optimize>
 //!
 //! Through the proxy:
 //! curl http://127.0.0.1:9100/

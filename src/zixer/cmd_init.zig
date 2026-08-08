@@ -9,14 +9,19 @@ const MAIN_CFG_TEMPLATE =
     \\# zixer main configuration
     \\# numeric values accept integer math, i.e. 16 * 1024
     \\
-    \\workers: 1                      # 0 = all available threads
+    \\workers: 0                      # accept loops per tcp site, 0 = all available threads
     \\dispatch: async                 # async | epoll | uring
     \\logs_dir: {s}/logs
     \\sites_dir: {s}/sites
     \\
     \\# per-listener defaults, site files may override
     \\kernel_backlog: 1024
-    \\max_recv_buf: 1472
+    \\max_recv_buf: 8192              # per-connection stream buffer, one leg
+    \\
+    \\# overload valve, per site, 0 = off
+    \\process_limit: 0                # requests running upstream at once
+    \\process_queue_len: 0            # requests that may wait for a slot
+    \\process_queue_timeout_ms: 6000  # wait before the edge answers 504
     \\
 ;
 
@@ -44,6 +49,11 @@ const SAMPLE_SITE_CFG =
     \\
     \\# max_recv_buf: 16 * 1024
     \\# kernel_backlog: 1024
+    \\
+    \\# overload valve for this site alone, each one falls back to main.cfg
+    \\# process_limit: 64
+    \\# process_queue_len: 256
+    \\# process_queue_timeout_ms: 6000
     \\
 ;
 
@@ -145,8 +155,16 @@ test "zix zixer: cmd init, scaffold is created and main.cfg validates clean" {
     const cfg = try main_cfg.parse(arena.allocator(), content, test_root, 1, &faults);
 
     try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
-    try std.testing.expectEqual(@as(usize, 1), cfg.workers);
+
+    // The template ships 0, which is every thread the process was given:
+    // the comment on the line is what explains it to a first reader.
+    try std.testing.expectEqual(@as(usize, 0), cfg.workers);
     try std.testing.expectEqual(main_cfg.Dispatch.ASYNC, cfg.dispatch);
+
+    // The overload valve ships off, so a fresh root behaves as it always did.
+    try std.testing.expectEqual(@as(usize, 0), cfg.process_limit);
+    try std.testing.expectEqual(@as(usize, 0), cfg.process_queue_len);
+    try std.testing.expectEqual(@as(u32, 6000), cfg.process_queue_timeout_ms);
 
     const sample_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "sites", "example.cfg.sample" });
     try std.testing.expect(fileExists(io, sample_path));

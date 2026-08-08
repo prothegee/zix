@@ -174,7 +174,7 @@ zig build examples                 # semuanya
 zig build example-serialize        # satu saja
 ```
 
-Atau dari root repo dengan `zig build jzon-examples`. Binary-nya mendarat di `src/jzon/zig-out/bin` sebagai `jzon-example-<name>-<arch>-<os>`.
+Atau dari root repo dengan `zig build jzon-examples`. Binary-nya mendarat di `src/jzon/zig-out/bin` sebagai `jzon-example-<name>-<arch>-<os>-<optimize>`, dengan mode `debug` kecuali `-Doptimize` menentukan lain.
 
 Dua contoh bench butuh `-Doptimize=ReleaseFast`. Build Debug mengukur safety check, bukan jalurnya.
 

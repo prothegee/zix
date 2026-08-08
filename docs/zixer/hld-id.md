@@ -107,7 +107,11 @@ flowchart LR
 | `daemon_spawn.zig` | auto-spawn saat socket diam |
 | `site_runtime.zig` | apa yang dimiliki satu site yang start: listener, companion acme |
 | `port_probe.zig` | apakah listener di luar daemon ini sudah memiliki sebuah port |
-| `site_serve.zig` | accept loop untuk satu site tcp |
+| `site_serve.zig` | apa yang dimiliki satu site tcp yang melayani: worker, pool, dan idle cache-nya |
+| `site_worker.zig` | satu accept loop dengan listener dan leg upstream sendiri |
+| `worker_count.zig` | berapa accept loop yang dijalankan sebuah site |
+| `bind_options.zig` | nilai main.cfg yang dibutuhkan sebuah site saat bind |
+| `conn_buffer.zig` | blok stream buffer yang dipegang satu koneksi edge |
 | `http1_proxy.zig`, `http1_head.zig` | edge http1 dan parsing pesannya |
 | `http2_edge.zig` dan kerabatnya | edge h2, frame, translasi, bridge websocket rfc 8441 |
 | `grpc_edge.zig` dan kerabatnya | edge grpc, h2 di kedua leg |
@@ -116,8 +120,10 @@ flowchart LR
 | `tls_edge.zig` | terminasi TLS dan pemilihan ALPN |
 | `ws_tunnel.zig` | tunnel upgrade rfc 6455 |
 | `static_files.zig` | file dari `public_dir`, sibling terkompresi, fallback spa |
+| `static_cached.zig` | table bersama berisi file `public_dir` yang sudah terbuka, dan cara mengambil entry dari sana |
 | `acme_challenge.zig`, `acme_listener.zig` | challenge plane http-01 dan companion port 80 |
 | `upstream_pool.zig`, `upstream_conn.zig` | pemilihan round-robin, ketersediaan, keep-alive idle |
+| `upstream_deadline.zig`, `idle_reaper.zig` | batas satu read upstream, sweep yang mengedaluwarsakan conn idle |
 | `proxy_headers.zig` | pembuangan hop-by-hop, `Via`, `Forwarded` |
 
 <br>
@@ -174,26 +180,112 @@ zixer adalah thread-per-listener di level accept dan task-per-connection di bawa
 
 ```mermaid
 flowchart TB
-    subgraph site [satu site tcp]
-        accept[accept thread]
-        t1[conn task]
-        t2[conn task]
-        tn[conn task]
-    end
-    pool[upstream pool + idle cache]
+    client[client] --> kernel[satu port, satu listener per worker]
 
-    accept --> t1
-    accept --> t2
-    accept --> tn
-    t1 --> pool
-    t2 --> pool
-    tn --> pool
+    subgraph site [satu site tcp]
+        subgraph w1 [worker 1]
+            a1[accept loop]
+            p1[pool + idle cache]
+        end
+        subgraph wn [worker n]
+            an[accept loop]
+            pn[pool + idle cache]
+        end
+    end
+
+    kernel --> a1
+    kernel --> an
+    a1 --> t1[conn task] --> p1
+    a1 --> t2[conn task] --> p1
+    an --> tn[conn task] --> pn
 ```
 
-- Tiap site tcp yang start memiliki satu accept thread. Tiap koneksi yang diterima menjadi task bersamaan di group site itu, jadi client lambat tidak pernah memblokir accept loop.
-- Site udp berbeda: satu up pump thread menerima di socket site, dan tiap flow client mendapat socket ephemeral sendiri plus down pump sendiri, jadi upstream melihat satu peer berbeda per client. Itulah yang dibutuhkan state ICE dan DTLS.
-- Upstream pool dan idle connection cache dibagi per site dan dijaga spinlock pendek. Tidak ada hal lain yang dibagi antar koneksi.
-- `stop` dan `daemon stop` menyetel flag lalu membangunkan loop, jadi pembongkaran berbatas, bukan mendadak.
+- Tiap site tcp yang start menjalankan `workers` accept loop, satu thread masing-masing, dan tiap loop memegang listener-nya sendiri di port site itu. Kernel yang memutuskan listener mana yang mengambil koneksi yang datang, jadi menerima koneksi bukan pekerjaan satu thread saja. `workers: 1` adalah default dan memberi satu loop seperti zixer sebelumnya.
+- Tiap koneksi yang diterima menjadi task bersamaan di group worker itu, jadi client lambat tidak pernah memblokir accept loop-nya.
+- Site udp berbeda: satu up pump thread menerima di socket site, dan tiap flow client mendapat socket ephemeral sendiri plus down pump sendiri, jadi upstream melihat satu peer berbeda per client. Itulah yang dibutuhkan state ICE dan DTLS. Site http3 bentuknya sama, satu socket, jadi keduanya tidak memakai `workers`.
+- Upstream pool dan idle connection cache milik satu worker, bukan milik site, dan spinlock pendek menjaga masing-masing karena task koneksi berjalan bersamaan di dalam satu worker. Tidak ada yang dibagi antar worker kecuali context TLS, yang read-only setelah site start.
+- Batas idle milik site dibagi di antara worker-nya, jadi backend tidak pernah kehilangan kapasitas lebih banyak karena edge menjalankan lebih banyak loop.
+- `stop` dan `daemon stop` menyetel satu flag lalu membangunkan loop sampai tiap worker keluar, jadi pembongkaran berbatas, bukan mendadak.
+
+<br>
+
+## Katup beban
+
+Menerima koneksi bersifat per worker, tapi memakai backend tidak. Satu site
+punya satu admission gate yang dipakai bersama oleh semua worker, dan sebuah
+request melewatinya tepat saat edge memutuskan untuk meneruskan ke upstream.
+Tidak ada yang lebih awal sampai ke sana: jawaban static, challenge acme, dan
+redirect https semuanya dilayani sebelum gate ditanya.
+
+- `process_limit` adalah berapa request yang boleh berjalan ke upstream sekaligus, `process_queue_len` berapa yang boleh menunggu, dan `process_queue_timeout_ms` membatasi lama tunggu itu. Ketiganya default mati, lihat `config-id.md`.
+- Sengaja per site, bukan per worker. Membagi hitungannya ke tiap worker akan membuat satu angka yang ditulis berarti lain di tiap mesin, karena `workers: 0` mengikuti jumlah thread, dan sebuah katup harus diukur dari apa yang sanggup diserap backend.
+- Gate tidak pernah memblokir. Request yang tidak bisa lanjut diberi tiket dan task-nya sendiri yang menunggu, sehingga struktur yang sama melayani loop task-per-koneksi dan akan melayani readiness atau completion loop satu thread, di mana loop-nya memeriksa tiket dari ready pass-nya sendiri.
+- Ruang tunggu yang penuh menolak dalam hitungan mikrodetik, bukan menahan koneksi selama seluruh jatah waktu. Membuang beban lebih awal itulah intinya: antrean tanpa batas saat badai akan mengunci buffer tiap penunggu lalu menggagalkan semuanya belakangan.
+- Pertukaran berumur panjang melepas slot-nya saat serah terima. Tunnel websocket dan stream grpc hidup selama client-nya, jadi menahan slot selama umur mereka akan membuat segelintir socket terbuka mengunci site.
+- grpc tidak pernah mengantre. Frame loop-nya menggerakkan setiap stream hidup di koneksi itu, jadi memarkirnya akan menahan pekerjaan yang sudah masuk, dan stream baru dibuang dengan `UNAVAILABLE` trailers-only.
+
+<br>
+
+## Static plane
+
+Site yang punya `public_dir` menjawab file-nya sendiri, tanpa upstream apa pun.
+Itulah maksud key ini: melayani front-end hasil build cukup butuh zixer dan
+tidak butuh apa pun di belakangnya.
+
+Dua jalur sampai ke jawaban yang sama, dan tiap site bisa memakai keduanya:
+
+| jalur | biaya satu request |
+| :- | :- |
+| tanpa cache, default | open, stat, read, close, ditambah satu open spekulatif per sibling terkompresi yang diminta browser |
+| dengan cache, `public_dir_cache_ttl_ms` di atas 0 | satu lookup hash ke file yang sudah terbuka, dengan pilihan sibling sudah diputuskan saat entry dibangun |
+
+Table-nya adalah yang dibangun `zix.utils.static_cache`, sama dengan yang
+dipakai engine. zixer tidak menyimpan table sendiri, jadi satu file memakai satu
+descriptor untuk daemon, bukan satu per accept loop, yang di mesin `workers: 0`
+adalah selisih antara satu dan jumlah thread. Pembacaannya tanpa lock.
+
+Cache tidak pernah bisa menggagalkan request. Window 0, table penuh, file tidak
+terbaca, atau path terlalu panjang untuk disimpan, semuanya jatuh ke open tanpa
+cache, yang juga jalan yang menghasilkan 404 dan jawaban `spa_fallback`.
+
+Cara body keluar bergantung pada apa yang bisa dijamin edge-nya:
+
+| site | jalur body | alasan |
+| :- | :- | :- |
+| http1 cleartext, 64 KB ke atas | diserahkan ke kernel, tidak pernah masuk zixer | tidak ada yang perlu menyentuh byte-nya |
+| http1 cleartext, di bawah 64 KB | ditulis bersama head-nya sekaligus | satu write lebih murah daripada flush plus syscall di segment sendiri |
+| TLS, ukuran berapa pun | disalin lewat writer TLS | byte-nya harus dienkripsi |
+| http2 dan http3 | disalin ke dalam frame | tiap byte harus dibingkai, dan http2 menggabungkan write-nya |
+
+<br>
+
+## Memory per koneksi
+
+Satu koneksi adalah satu thread dan satu blok buffer, jadi keduanya tumbuh
+mengikuti berapa banyak client yang terbuka, bukan berapa banyak request yang
+mereka kirim.
+
+| apa | dari mana | ukuran |
+| :- | :- | :- |
+| stream buffer | satu alokasi per koneksi, dilepas saat koneksi selesai | `max_recv_buf` per leg, 2 leg di site static dan 4 di site proxy |
+| head buffer | stack milik request loop | 16 KiB masing-masing, tiga buah di koneksi http1 yang di-proxy |
+| TLS session | stack milik TLS edge | sekitar 58 KiB, dan record buffer di dalamnya adalah batas protokol |
+| thread stack | sistem operasi, sesuai kebutuhan | 16 MiB dicadangkan, hanya page yang disentuh koneksi yang menjadi resident |
+
+Buffer adalah bagian yang diatur operator. Head buffer adalah batas protokol:
+menurunkan `max_recv_buf` tidak pernah mengecilkan head request yang boleh
+diterima, ia hanya mengubah berapa byte yang berpindah per baca.
+
+Dua hal tidak ada di tabel itu dan dulu mendominasinya. Alternative signal
+stack yang std berikan ke tiap thread dimatikan di executable ini, karena ia
+memakan 256 KiB resident memory per koneksi demi trace stack overflow yang
+tidak bisa dihasilkan oleh edge loop berkedalaman tetap. Dan copy scratch yang
+dipegang body pump sudah hilang: reader dan writer memindahkan byte di antara
+mereka sendiri.
+
+Diukur pada demo project ini, resident memory per koneksi yang ditahan pada
+`max_recv_buf` default: 76,7 KiB di site static dan 140,8 KiB di site proxy,
+dibanding 332,6 dan 396,6 KiB sebelum kedua perubahan itu.
 
 <br>
 
@@ -239,6 +331,8 @@ Edge proxy mengikuti aturan intermediary, bukan meneruskan semuanya:
 | request sudah mulai men-stream body-nya | tidak ada retry, kegagalan dilaporkan apa adanya |
 | `Host` tidak dicakup certificate | `421 misdirected request` |
 | path static hilang dan tidak ada `spa_fallback` | `404 not found` dari edge, tanpa melibatkan upstream |
+| site berada di `process_limit` dan ruang tunggunya penuh | `504 upstream queue full` dengan alasan `Proxy-Status` |
+| request yang mengantre habis `process_queue_timeout_ms` | `504 upstream queue timeout` dengan alasan yang sama |
 
 Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selama jendela cooldown, lalu diterima lagi dan ditandai down lagi oleh kegagalan berikutnya. Tidak ada thread health check dan tidak ada probe: ketersediaan hanya dipelajari dari trafik nyata.
 
@@ -251,6 +345,7 @@ Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selam
 - Gagal dengan lantang saat start, jangan setengah jalan. File certificate yang hilang, port yang terpakai, atau port challenge yang tak bisa di-bind menggagalkan `start`, bukan meninggalkan site setengah hidup.
 - Re-originate, bukan forward. Edge memiliki framing dari apa yang ia kirim.
 - Satu file, satu tanggung jawab. Tiap edge, tiap lapis translasi, dan tiap command ada di file-nya sendiri, itu sebabnya daftar modul di atas terbaca sebagai peta perilakunya.
+- Memakai static cache milik engine, bukan membangun yang kedua. Ia sudah satu table per proses dan bebas lock saat dibaca, jadi table milik zixer sendiri akan memakan descriptor yang sama lagi untuk file yang sama tanpa menjadi lebih cepat.
 
 <br>
 
@@ -259,8 +354,10 @@ Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selam
 Menyebut celahnya secara eksplisit adalah bagian dari desain:
 
 - Belum ada output log. `logs_dir` harus ada dan tidak ada yang menulis ke sana.
-- Belum ada timeout di mana pun. Upstream yang membuang trafik ditunggu sampai batas sistem operasi.
+- Belum ada timeout untuk connect, dan belum ada idle timeout untuk tunnel websocket atau stream SSE. Upstream yang membuang trafik ditunggu sampai batas sistem operasi. Menunggu head response upstream dan body `Content-Length` dibatasi oleh `upstream_timeout_ms`, lihat `config-id.md`.
+- Belum ada read deadline di site grpc. Leg upstream-nya satu koneksi h2 yang memultipleks semua stream, jadi butuh mekanisme sendiri, dan key-nya ditolak di sana alih-alih diterima lalu diabaikan.
 - Belum ada health check, hanya kegagalan yang dipelajari dari trafik nyata.
 - Belum ada hot reload `main.cfg`, dan belum ada reload semua site sekaligus.
+- Belum ada batas berapa koneksi yang diterima satu site sekaligus. Process gate membatasi request yang berjalan ke backend, bukan socket yang tetap terbuka, jadi plafon penerimaan tetap apa yang diberikan sistem operasi ke proses ini.
 - Belum ada routing per path, rewrite header, rate limit, atau caching.
-- `workers`, `dispatch`, dan `max_recv_buf` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.
+- `dispatch` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.

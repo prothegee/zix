@@ -14,7 +14,7 @@ zixer builds from the zix repository:
 zig build zixer
 ```
 
-The binary lands in `zig-out/bin/zixer-<triplet>`, i.e. `zixer-x86_64-linux`. Copy it anywhere on your path. The rest of this page writes it as `zixer`.
+The binary lands in `zig-out/bin/zixer-<triplet>-<optimize>`, i.e. `zixer-x86_64-linux-debug`. Without `-Doptimize` the mode is `debug`. Copy it anywhere on your path. The rest of this page writes it as `zixer`.
 
 ```bash
 $ zixer version
@@ -189,6 +189,48 @@ The prefix is required as soon as a site has both planes and a fallback, otherwi
 
 Note that the request path is joined onto `public_dir` as it arrives, so `public_prefix: /assets` needs a real `assets/` directory inside `public_dir`.
 
+### Making a static site fast
+
+Every recipe above re-opens the file on each request. Worse, a browser sends
+`Accept-Encoding: gzip, deflate, br`, so zixer looks for a `.br` sibling, then
+a `.gz` sibling, then the file: three opens for one response when the file has
+no sibling.
+
+One key changes that. The file is kept open, the sibling choice is made once,
+and the next request is a lookup:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+public_dir: /var/www/app/dist
+spa_fallback: index.html
+public_dir_cache_ttl_ms: 60000
+```
+
+The window doubles as the reload path. An edited file keeps serving its old
+bytes until the window passes, then the next request re-opens it. Nothing has
+to restart. So pick the window as the deploy lag you would accept:
+
+| your files change | window to set |
+| :- | :- |
+| only on deploy, a built bundle | `60000` or more, they are stable between releases |
+| by hand, while someone is watching a browser | `1000`, a reload shows the change |
+| constantly, generated per request | leave it out, an entry would be stale before it is used |
+
+Set `public_dir_cache_max_entries` in `main.cfg` when the site serves more than
+256 files. It is daemon-wide, because there is one table for the whole process
+and every site shares it. There is no site-level version of that key.
+
+A site can opt out on its own with `public_dir_cache_ttl_ms: 0` while the
+daemon leaves the cache on for everything else.
+
+Two things happen for free once this is on. Large files, 64 KB and up, go
+straight from the kernel to the socket on a cleartext http1 site and never
+enter zixer's memory. And the cache can never break a request: anything it
+cannot answer falls through to the plain open, which is also what produces the
+404 and the `spa_fallback` page.
+
 ### Several backends
 
 Requests rotate over the list. A backend that refuses a connection is skipped for a few seconds and then tried again:
@@ -320,6 +362,7 @@ There is no log output yet. `logs_dir` must exist because `status` checks it, an
 | `bind failed (BadUpstreamAddress)` | a udp site upstream is not an ip literal | write the address, not a name |
 | `502 all upstreams failed` | every backend refused or failed | check the backend, and that the upstream address is an ip literal |
 | `503 no upstream available` | every backend is in its cooldown window | check the backends, retry after a few seconds |
+| `504 upstream timeout` | the backend accepted the connection and then said nothing for `upstream_timeout_ms` | check the backend, raise the value, or set `upstream_timeout_ms: 0` if it really thinks that long |
 | `421 misdirected request` | the Host is not covered by `tls_cert` | use a name the certificate covers, or issue one that covers it |
 | `404 not found` on a static path | the file is not under `public_dir` | check the path, and remember that `public_prefix` is not stripped before the join |
 | the acme challenge 404s | the token is not under the webroot | it must be at `<acme_webroot>/.well-known/acme-challenge/<token>` |

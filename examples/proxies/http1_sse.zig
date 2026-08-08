@@ -8,7 +8,7 @@
 //!
 //! Run:
 //! zig build zixer-example-http1_sse
-//! ./zig-out/bin/zixer-example-http1_sse-<arch>-<os>
+//! ./zig-out/bin/zixer-example-http1_sse-<arch>-<os>-<optimize>
 //!
 //! Through the proxy:
 //! curl -N http://127.0.0.1:9102/events

@@ -93,11 +93,22 @@ pub fn addSteps(
         .{ "example-grpc_multi_client", "examples/grpc_multi_client.zig", "grpc" },
     };
 
-    // Installed binaries carry the zix- prefix and the target triple
-    // (zix-example-<name>-<arch>-<os>), so a zig-out/bin listing reads as zix
-    // output and building several targets in a row never overwrites a prior
-    // target's binary. Step names stay unprefixed and unsuffixed.
+    // Installed binaries carry the zix- prefix, the target triple, and the
+    // optimize mode (zix-example-<name>-<arch>-<os>-<optimize>), so a zig-out/bin
+    // listing reads as zix output and building several targets or several modes
+    // in a row never overwrites a prior binary. Step names stay unprefixed and
+    // unsuffixed.
     const triple = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
+
+    // The optimize mode, lowercased, is the last part of every installed name.
+    // No -Doptimize means Debug, so a plain build writes -debug. Spelled out
+    // rather than lowercased at runtime so a new mode is a compile error here.
+    const mode = switch (optimize) {
+        .Debug => "debug",
+        .ReleaseSafe => "releasesafe",
+        .ReleaseFast => "releasefast",
+        .ReleaseSmall => "releasesmall",
+    };
 
     const examples_step = b.step("examples", "Build all examples");
 
@@ -136,7 +147,7 @@ pub fn addSteps(
         exe_mod.addImport("zix", zix);
 
         const exe = b.addExecutable(.{
-            .name = b.fmt("zix-{s}-{s}", .{ pair[0], triple }),
+            .name = b.fmt("zix-{s}-{s}-{s}", .{ pair[0], triple, mode }),
             .root_module = exe_mod,
         });
 

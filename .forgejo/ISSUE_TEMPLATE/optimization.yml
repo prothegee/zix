@@ -23,6 +23,7 @@ body:
         - tcp
         - fix
         - tls
+        - zixer
         - channel
         - logger
         - driver

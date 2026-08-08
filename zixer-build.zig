@@ -7,9 +7,10 @@ const std = @import("std");
 /// - zixer is a standalone executable rooted at src/zixer. It links the zix
 ///   module and never joins the library surface, so its build lives in its own
 ///   zixer-build-*.zig files rather than in zix's.
-/// - The installed binary carries the target triplet (zixer-<arch>-<os>) like
-///   the examples, so building several targets in a row never overwrites a
-///   prior target's binary in zig-out/bin. The step name stays `zixer`.
+/// - The installed binary carries the target triplet and the optimize mode
+///   (zixer-<arch>-<os>-<optimize>) like the examples, so building several
+///   targets or several modes in a row never overwrites a prior binary in
+///   zig-out/bin. The step name stays `zixer`.
 ///
 /// Param:
 /// zix - *std.Build.Module (the engine module zixer links)
@@ -28,6 +29,17 @@ pub fn addSteps(
 ) void {
     const triple = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
 
+    // The optimize mode, lowercased, is the last part of every installed name.
+    // No -Doptimize means Debug, so a plain `zig build zixer` writes -debug.
+    // Spelled out rather than lowercased at runtime so a new mode is a compile
+    // error here.
+    const mode = switch (optimize) {
+        .Debug => "debug",
+        .ReleaseSafe => "releasesafe",
+        .ReleaseFast => "releasefast",
+        .ReleaseSmall => "releasesmall",
+    };
+
     const zixer_mod = b.createModule(.{
         .root_source_file = b.path("src/zixer/zixer.zig"),
         .target = target,
@@ -36,7 +48,7 @@ pub fn addSteps(
     zixer_mod.addImport("zix", zix);
 
     const exe = b.addExecutable(.{
-        .name = b.fmt("zixer-{s}", .{triple}),
+        .name = b.fmt("zixer-{s}-{s}", .{ triple, mode }),
         .root_module = zixer_mod,
     });
 

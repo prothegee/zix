@@ -3,15 +3,13 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const conn_buffer = @import("conn_buffer.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const grpc_edge = @import("grpc_edge.zig");
 const http2_edge = @import("http2_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 
 const Tls = zix.Tls;
-
-/// Stream buffer size for the ciphertext legs (matches the proxy edge).
-const STREAM_BUF_SIZE: usize = 8 * 1024;
 
 /// Handshake flight staging (server flight fits well under this).
 const FLIGHT_OUT_SIZE: usize = 8 * 1024;
@@ -181,6 +179,8 @@ fn streamDecrypt(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.
             else => return error.ReadFailed,
         }
 
+        dropConsumedPrefix(r);
+
         // deprotect needs ciphertext-length out space behind the buffered
         // plaintext. The buffer sizing guarantees it, this guard keeps a
         // shortfall an error instead of an overflow.
@@ -197,6 +197,29 @@ fn streamDecrypt(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.
 
         return 0;
     }
+}
+
+/// Move the still-unread bytes to the front of the reader buffer so the
+/// free tail can hold the next record.
+///
+/// Note:
+/// - Without this the buffer only ever grows forward: end walks to the far
+///   wall and the connection then fails on the space guard, whatever the
+///   request rate. On a keep-alive TLS connection that lands after roughly
+///   one buffer of cumulative request bytes.
+/// - The common case costs no copy: a request loop consumes its head and
+///   body before asking for more, so seek equals end and both reset to 0.
+/// - std.Io.Reader.rebase cannot stand in here. It measures free space from
+///   seek, this needs it from end, so rebase returns early on exactly the
+///   buffer state that is about to fail.
+fn dropConsumedPrefix(r: *std.Io.Reader) void {
+    if (r.seek == 0) return;
+
+    const pending = r.buffer[r.seek..r.end];
+    @memmove(r.buffer[0..pending.len], pending);
+
+    r.seek = 0;
+    r.end = pending.len;
 }
 
 /// Writer vtable: seal the staged plaintext plus the incoming slices as
@@ -420,10 +443,14 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     const io = proxy.io;
     defer client_stream.close(io);
 
-    var read_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var write_buf: [STREAM_BUF_SIZE]u8 = undefined;
-    var stream_reader = client_stream.reader(io, &read_buf);
-    var stream_writer = client_stream.writer(io, &write_buf);
+    // The wire pair only carries ciphertext to and from the socket. The
+    // plaintext side is the Session's own buffers, which stay fixed: a
+    // whole TLS record has to fit whatever the site configured.
+    const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
+    defer buffers.deinit(proxy.allocator);
+
+    var stream_reader = client_stream.reader(io, buffers.client_read);
+    var stream_writer = client_stream.writer(io, buffers.client_write);
 
     var session: Session = undefined;
     handshake(&session, io, ctx, &stream_reader.interface, &stream_writer.interface) catch return;
@@ -435,7 +462,7 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     } else if (wants_h2) {
         http2_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
     } else {
-        http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+        http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream, null);
     }
     session.sendCloseNotify();
 }
@@ -444,6 +471,10 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
 // --------------------------------------------------------- //
 
 const testing = std.testing;
+
+/// Ciphertext leg size the rigs below bind with. The serving path takes
+/// its size from the site instead, see conn_buffer.
+const STREAM_BUF_SIZE: usize = 8 * 1024;
 
 const FIXTURE_CERT = "examples/certs/ecdsa_p256_cert.pem";
 const FIXTURE_KEY = "examples/certs/ecdsa_p256_key.pem";
@@ -550,6 +581,107 @@ test "zix zixer: tls edge, reader decrypts across records and ends on close noti
     try testing.expectEqualStrings("hello world", &out);
 
     try testing.expectError(error.EndOfStream, session.reader.readSliceAll(out[0..1]));
+}
+
+test "zix zixer: tls edge, drop consumed prefix reclaims the read buffer" {
+    var buf: [16]u8 = undefined;
+    @memcpy(buf[0..8], "abcdefgh");
+
+    // Partly consumed: the unread tail moves to the front.
+    var reader = std.Io.Reader{ .vtable = &reader_vtable, .buffer = &buf, .seek = 5, .end = 8 };
+    dropConsumedPrefix(&reader);
+    try testing.expectEqual(@as(usize, 0), reader.seek);
+    try testing.expectEqual(@as(usize, 3), reader.end);
+    try testing.expectEqualStrings("fgh", reader.buffer[0..reader.end]);
+
+    // Fully consumed is the common case: both indices reset, no bytes move.
+    reader.seek = 3;
+    reader.end = 3;
+    dropConsumedPrefix(&reader);
+    try testing.expectEqual(@as(usize, 0), reader.seek);
+    try testing.expectEqual(@as(usize, 0), reader.end);
+
+    // Nothing consumed yet: the buffer is left exactly as it was.
+    @memcpy(buf[0..4], "wxyz");
+    reader.seek = 0;
+    reader.end = 4;
+    dropConsumedPrefix(&reader);
+    try testing.expectEqual(@as(usize, 0), reader.seek);
+    try testing.expectEqual(@as(usize, 4), reader.end);
+    try testing.expectEqualStrings("wxyz", reader.buffer[0..reader.end]);
+}
+
+test "zix zixer: tls edge, one session reads past a full read buffer of records" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var pair = try establishPair(io);
+    defer pair.deinit();
+
+    // Two buffers' worth of client bytes on one connection, which is what a
+    // keep-alive client sends over a few hundred requests. The reader has to
+    // reclaim what the caller already took or it walks into the far wall and
+    // the connection dies on the space guard.
+    const CHUNK: usize = 1024;
+    const rounds: usize = 2 * READ_PLAIN_SIZE / CHUNK;
+
+    const wire = try testing.allocator.alloc(u8, rounds * Tls.sealedLen(CHUNK));
+    defer testing.allocator.free(wire);
+
+    var payload: [CHUNK]u8 = undefined;
+    var wire_len: usize = 0;
+    for (0..rounds) |round| {
+        @memset(&payload, @intCast('a' + round % 26));
+        const rec = pair.client.writeAppData(&payload, wire[wire_len..]);
+        wire_len += rec.len;
+    }
+
+    var src = std.Io.Reader.fixed(wire[0..wire_len]);
+    var sink_buf: [64]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    var session: Session = undefined;
+    session.bind(.{ .tls13 = pair.server }, &src, &sink);
+
+    var out: [CHUNK]u8 = undefined;
+    for (0..rounds) |round| {
+        try session.reader.readSliceAll(&out);
+
+        const want: u8 = @intCast('a' + round % 26);
+        try testing.expect(std.mem.allEqual(u8, &out, want));
+    }
+}
+
+test "zix zixer: tls edge, a partly read record survives the next decrypt" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var pair = try establishPair(io);
+    defer pair.deinit();
+
+    // Reading fewer bytes than a record carries leaves a pending tail. The
+    // reclaim has to move that tail, not drop it.
+    var wire: [2048]u8 = undefined;
+    var wire_len: usize = 0;
+    for ([_][]const u8{ "first-record", "second-record" }) |piece| {
+        const rec = pair.client.writeAppData(piece, wire[wire_len..]);
+        wire_len += rec.len;
+    }
+
+    var src = std.Io.Reader.fixed(wire[0..wire_len]);
+    var sink_buf: [64]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    var session: Session = undefined;
+    session.bind(.{ .tls13 = pair.server }, &src, &sink);
+
+    var head: [5]u8 = undefined;
+    try session.reader.readSliceAll(&head);
+    try testing.expectEqualStrings("first", &head);
+
+    var rest: [20]u8 = undefined;
+    try session.reader.readSliceAll(&rest);
+    try testing.expectEqualStrings("-recordsecond-record", &rest);
 }
 
 test "zix zixer: tls edge, writer seals oversize writes as split records" {
@@ -680,7 +812,7 @@ test "zix zixer: tls edge, handshake terminates a tls13 client over loopback" {
     var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY, &.{.HTTP_1_1});
     defer ctx.deinit();
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39890);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18890);
     var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
     defer server.deinit(io);
 

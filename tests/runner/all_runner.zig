@@ -20,7 +20,7 @@
 // running a check alone is just `test-runner-all --only <label> <server path>`.
 //
 // A result line names the example the check runs, as its installed binary is
-// named: `PASS zix-example-http_basic-x86_64-linux`. The short `label` in the
+// named: `PASS zix-example-http_basic-x86_64-linux-debug`. The short `label` in the
 // table stays the selector, and `--only` takes either that or the reported
 // name, so rerunning one check is a copy of whatever the output said.
 //
