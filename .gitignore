@@ -59,6 +59,7 @@ orders.jsonl
 !/examples/grpc_location_req.bin
 !/examples/tls/*.pem
 !/examples/tls/**/*.pem
+!/localbench/static.zip
 
 /rnd/0.4.x/*.txt
 
