@@ -5,6 +5,7 @@ const std = @import("std");
 const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const fault = @import("fault.zig");
+const process_gate = @import("process_gate.zig");
 
 pub const Engine = enum {
     HTTP1,
@@ -40,6 +41,15 @@ pub const SiteCfg = struct {
     /// How long the edge waits on a silent upstream before it answers 504.
     /// Null takes the built-in default, 0 turns the bound off.
     upstream_timeout_ms: ?u32 = null,
+    /// Requests this site may have running upstream at once. Null takes the
+    /// main.cfg value, 0 turns the gate off for this site alone.
+    process_limit: ?usize = null,
+    /// Requests that may wait for a process slot. Null takes the main.cfg
+    /// value, 0 refuses the moment the limit is reached.
+    process_queue_len: ?usize = null,
+    /// How long a waiting request holds on before the edge answers 504.
+    /// Null takes the main.cfg value.
+    process_queue_timeout_ms: ?u32 = null,
 };
 
 /// Known site cfg keys. Field names mirror the cfg key strings exactly so
@@ -60,6 +70,9 @@ const Key = enum {
     kernel_backlog,
     max_recv_buf,
     upstream_timeout_ms,
+    process_limit,
+    process_queue_len,
+    process_queue_timeout_ms,
 };
 
 /// Parse and validate one site cfg content.
@@ -193,6 +206,48 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
 
                 cfg.upstream_timeout_ms = budget;
             },
+            .process_limit => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const limit = std.math.cast(usize, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d}, 0 turns the gate off", .{process_gate.MAX_SLOTS});
+                    continue;
+                };
+
+                if (!process_gate.limitInRange(limit)) {
+                    try faults.add(entry.key, "must be 0-{d}, 0 turns the gate off", .{process_gate.MAX_SLOTS});
+                    continue;
+                }
+
+                cfg.process_limit = limit;
+            },
+            .process_queue_len => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const queue_len = std.math.cast(usize, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d}, 0 refuses instead of queueing", .{process_gate.MAX_SLOTS});
+                    continue;
+                };
+
+                if (!process_gate.queueLenInRange(queue_len)) {
+                    try faults.add(entry.key, "must be 0-{d}, 0 refuses instead of queueing", .{process_gate.MAX_SLOTS});
+                    continue;
+                }
+
+                cfg.process_queue_len = queue_len;
+            },
+            .process_queue_timeout_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const timeout_ms = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 1-{d} ms", .{process_gate.MAX_TIMEOUT_MS});
+                    continue;
+                };
+
+                if (!process_gate.timeoutInRange(timeout_ms)) {
+                    try faults.add(entry.key, "must be 1-{d} ms", .{process_gate.MAX_TIMEOUT_MS});
+                    continue;
+                }
+
+                cfg.process_queue_timeout_ms = timeout_ms;
+            },
         }
     }
 
@@ -239,6 +294,20 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         try faults.add("upstream_timeout_ms", "needs upstreams", .{});
     }
 
+    // The gate stands in front of the upstream leg, so a site that answers
+    // from public_dir alone has nothing for it to hold back.
+    if (cfg.upstreams.len == 0) {
+        if (cfg.process_limit != null) try faults.add("process_limit", "needs upstreams", .{});
+        if (cfg.process_queue_len != null) try faults.add("process_queue_len", "needs upstreams", .{});
+        if (cfg.process_queue_timeout_ms != null) try faults.add("process_queue_timeout_ms", "needs upstreams", .{});
+    }
+
+    // Only checkable when the site names both: a null limit inherits the
+    // main.cfg value, which carries its own version of this rule.
+    if (cfg.process_limit != null and cfg.process_limit.? == 0 and cfg.process_queue_len != null and cfg.process_queue_len.? > 0) {
+        try faults.add("process_queue_len", "needs process_limit above 0, otherwise nothing ever queues", .{});
+    }
+
     const engine = cfg.engine orelse return;
 
     // A cleartext http1 site answers the challenge path on its own
@@ -268,6 +337,13 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
             if (cfg.public_dir != null) try faults.add("public_dir", "not supported on udp sites, remove it", .{});
             if (cfg.kernel_backlog != null) try faults.add("kernel_backlog", "does not apply to udp sites, remove it", .{});
             if (cfg.upstream_timeout_ms != null) try faults.add("upstream_timeout_ms", "does not apply to udp sites, remove it", .{});
+
+            // Datagram forwarding has no request to hold back and no
+            // upstream connect to bound, so the gate would count nothing.
+            if (cfg.process_limit != null) try faults.add("process_limit", "does not apply to udp sites, remove it", .{});
+            if (cfg.process_queue_len != null) try faults.add("process_queue_len", "does not apply to udp sites, remove it", .{});
+            if (cfg.process_queue_timeout_ms != null) try faults.add("process_queue_timeout_ms", "does not apply to udp sites, remove it", .{});
+
             if (cfg.acme_webroot != null) try faults.add("acme_webroot", "does not apply to udp sites, remove it", .{});
             if (cfg.acme_proxy != null) try faults.add("acme_proxy", "does not apply to udp sites, remove it", .{});
         },
@@ -702,4 +778,81 @@ test "zix zixer: site cfg, upstream_timeout_ms is refused where it cannot apply"
     _ = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 0 - 1\n", &negative_faults);
     try testing.expectEqual(@as(usize, 1), negative_faults.slice().len);
     try testing.expectEqualStrings("upstream_timeout_ms", negative_faults.slice()[0].key);
+}
+
+test "zix zixer: site cfg, the process gate keys parse and default to null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 32\nprocess_queue_len: 4 * 32\nprocess_queue_timeout_ms: 1500\n", &faults);
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expectEqual(@as(usize, 32), cfg.process_limit.?);
+    try testing.expectEqual(@as(usize, 128), cfg.process_queue_len.?);
+    try testing.expectEqual(@as(u32, 1500), cfg.process_queue_timeout_ms.?);
+
+    var bare_faults = fault.FaultList.init(arena.allocator());
+    const bare = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
+
+    try testing.expectEqual(@as(?usize, null), bare.process_limit);
+    try testing.expectEqual(@as(?usize, null), bare.process_queue_len);
+    try testing.expectEqual(@as(?u32, null), bare.process_queue_timeout_ms);
+}
+
+test "zix zixer: site cfg, a site may turn the daemon gate off for itself" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 0\n", &faults);
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expectEqual(@as(usize, 0), cfg.process_limit.?);
+}
+
+test "zix zixer: site cfg, a site queue with the limit turned off faults" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 0\nprocess_queue_len: 8\n", &faults);
+
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("process_queue_len", faults.slice()[0].key);
+    try testing.expectEqualStrings("needs process_limit above 0, otherwise nothing ever queues", faults.slice()[0].hint);
+}
+
+test "zix zixer: site cfg, the process gate keys are refused where they cannot apply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var static_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\npublic_dir: /var/www/app\nprocess_limit: 8\n", &static_faults);
+    try testing.expectEqual(@as(usize, 1), static_faults.slice().len);
+    try testing.expectEqualStrings("process_limit", static_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs upstreams", static_faults.slice()[0].hint);
+
+    var udp_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: udp\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 8\nprocess_queue_len: 8\n", &udp_faults);
+    try testing.expectEqual(@as(usize, 2), udp_faults.slice().len);
+    try testing.expectEqualStrings("process_limit", udp_faults.slice()[0].key);
+    try testing.expectEqualStrings("does not apply to udp sites, remove it", udp_faults.slice()[0].hint);
+    try testing.expectEqualStrings("process_queue_len", udp_faults.slice()[1].key);
+
+    var negative_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_queue_timeout_ms: 0 - 1\n", &negative_faults);
+    try testing.expectEqual(@as(usize, 1), negative_faults.slice().len);
+    try testing.expectEqualStrings("process_queue_timeout_ms", negative_faults.slice()[0].key);
+}
+
+test "zix zixer: site cfg, a grpc site may carry the process gate" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "engine: grpc\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 16\n", &faults);
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expectEqual(@as(usize, 16), cfg.process_limit.?);
 }
