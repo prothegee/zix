@@ -173,12 +173,12 @@ test "zix zixer: grpc upstream, open runs the client preface on the wire" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39840);
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18840);
     var server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 1 });
     defer server.deinit(io);
 
     var up_conn = UpConn{ .stream = undefined, .slot_index = 3 };
-    try openInto(&up_conn, io, testing.allocator, conn_buffer.DEFAULT_BYTES, "127.0.0.1", 39840, 3);
+    try openInto(&up_conn, io, testing.allocator, conn_buffer.DEFAULT_BYTES, "127.0.0.1", 18840, 3);
     defer close(&up_conn, io, testing.allocator);
 
     const accepted = try server.accept(io);
