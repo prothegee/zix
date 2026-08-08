@@ -8,6 +8,7 @@ const bind_options = @import("bind_options.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const idle_reaper = @import("idle_reaper.zig");
+const process_gate = @import("process_gate.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_worker = @import("site_worker.zig");
 const static_files = @import("static_files.zig");
@@ -49,6 +50,11 @@ pub const ServeState = struct {
     /// and the main.cfg default. Every connection this site accepts
     /// allocates its buffers at this size.
     stream_buf_bytes: usize,
+    /// How many requests this site may run upstream at once, and who waits.
+    /// One gate for the whole site, not one per worker: the number has to
+    /// mean what the backend absorbs, and workers follows the thread count.
+    /// Off (admits everything) unless the config asked for a limit.
+    process_gate: process_gate.Gate,
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
@@ -127,6 +133,20 @@ pub const ServeState = struct {
         const workers_slice = try allocator.alloc(site_worker.Worker, worker_total);
         errdefer allocator.free(workers_slice);
 
+        // Built even when the site has no upstreams: an unarmed gate owns
+        // nothing and admits everything, so the edges never branch on it.
+        var gate = try process_gate.Gate.init(allocator, process_gate.resolve(
+            cfg.process_limit,
+            cfg.process_queue_len,
+            cfg.process_queue_timeout_ms,
+            .{
+                .limit = options.process_limit,
+                .queue_len = options.process_queue_len,
+                .timeout_ms = options.process_queue_timeout_ms,
+            },
+        ));
+        errdefer gate.deinit(allocator);
+
         state.* = .{
             .allocator = allocator,
             .io = io,
@@ -136,6 +156,7 @@ pub const ServeState = struct {
             .idles = idles,
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
             .stream_buf_bytes = conn_buffer.resolve(cfg.max_recv_buf, options.max_recv_buf),
+            .process_gate = gate,
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
@@ -193,6 +214,7 @@ pub const ServeState = struct {
         state.reaper.stop();
 
         state.allocator.free(state.workers);
+        state.process_gate.deinit(state.allocator);
         freeIdles(state.allocator, io, state.idles);
         freePools(state.allocator, state.pools);
         if (state.tls_ctx) |*ctx| ctx.deinit();
@@ -295,6 +317,7 @@ fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
         .upstream_timeout_ms = state.upstream_timeout_ms,
         .allocator = state.allocator,
         .stream_buf_bytes = state.stream_buf_bytes,
+        .process_gate = &state.process_gate,
     };
 }
 
@@ -370,6 +393,8 @@ fn wake(io: std.Io, ip: []const u8, port: u16) void {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+const port_probe = @import("port_probe.zig");
+
 test "zix zixer: site serve, create binds a thread and shutdown frees the port" {
     if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
 
@@ -377,18 +402,20 @@ test "zix zixer: site serve, create binds a thread and shutdown frees the port" 
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39869 }};
-    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39870, .upstreams = &upstreams };
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18982 }};
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 18983, .upstreams = &upstreams };
 
-    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 39870);
-    const server = try addr.listen(io, .{ .kernel_backlog = 64 });
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18983);
+    const server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 64 });
 
-    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 39870, .{ .kernel_backlog = 64 });
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18983, .{ .kernel_backlog = 64 });
     state.shutdown();
 
-    // The port is free again: a fresh bind succeeds.
-    var rebound = try addr.listen(io, .{ .kernel_backlog = 64 });
-    rebound.deinit(io);
+    // Asked by connect, not by a strict bind. Shutdown's own wake connection
+    // leaves this address in TIME_WAIT, which fails a strict bind for a
+    // minute for a reason that has nothing to do with the listener. A
+    // connect answers the real question: is anything still accepting here.
+    try std.testing.expect(!port_probe.isTaken(io, addr));
 }
 
 test "zix zixer: site serve, static-only site runs without a pool" {
