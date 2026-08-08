@@ -2,6 +2,7 @@
 
 const conn_buffer = @import("conn_buffer.zig");
 const process_gate = @import("process_gate.zig");
+const static_cached = @import("static_cached.zig");
 
 /// The main.cfg values a site needs at bind time.
 ///
@@ -17,6 +18,9 @@ const process_gate = @import("process_gate.zig");
 /// - The three process_ values are daemon defaults the same way, resolved
 ///   against the site file by process_gate.resolve. A limit of 0 is the
 ///   gate off, which is what a daemon that never asked for one carries.
+/// - public_dir_cache_ttl_ms is a daemon default too, resolved against the
+///   site file by static_cached.resolveTtl. The entry count has no site
+///   override: the cache table is one per process, so only main.cfg sizes it.
 pub const BindOptions = struct {
     kernel_backlog: u31 = 1024,
     workers: usize = 1,
@@ -24,6 +28,8 @@ pub const BindOptions = struct {
     process_limit: usize = 0,
     process_queue_len: usize = 0,
     process_queue_timeout_ms: u32 = process_gate.DEFAULT_TIMEOUT_MS,
+    public_dir_cache_ttl_ms: u32 = static_cached.DEFAULT_TTL_MS,
+    public_dir_cache_max_entries: u32 = static_cached.DEFAULT_MAX_ENTRIES,
 };
 
 // --------------------------------------------------------- //
@@ -58,4 +64,14 @@ test "zix zixer: bind options, the process gate defaults to off" {
         .timeout_ms = options.process_queue_timeout_ms,
     };
     try std.testing.expect(!settings.armed());
+}
+
+test "zix zixer: bind options, the static cache defaults to off with room reserved" {
+    const options = BindOptions{};
+
+    try std.testing.expectEqual(@as(u32, 0), options.public_dir_cache_ttl_ms);
+    try std.testing.expectEqual(static_cached.DEFAULT_MAX_ENTRIES, options.public_dir_cache_max_entries);
+
+    // A daemon that never asked for caching resolves every site to off.
+    try std.testing.expectEqual(@as(u32, 0), static_cached.resolveTtl(null, options.public_dir_cache_ttl_ms));
 }
