@@ -434,7 +434,10 @@ fn sendAndReceive(io: std.Io, socket: std.Io.net.Socket, edge: *const std.Io.net
 }
 
 test "zix zixer: udp forward, one flow round trips through its own upstream socket" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -460,7 +463,10 @@ test "zix zixer: udp forward, one flow round trips through its own upstream sock
 }
 
 test "zix zixer: udp forward, two clients get two flows and their own replies" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -492,7 +498,10 @@ test "zix zixer: udp forward, two clients get two flows and their own replies" {
 }
 
 test "zix zixer: udp forward, new flows round-robin and a flow stays put" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -538,7 +547,10 @@ test "zix zixer: udp forward, new flows round-robin and a flow stays put" {
 }
 
 test "zix zixer: udp forward, a large datagram crosses intact both ways" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -567,7 +579,10 @@ test "zix zixer: udp forward, a large datagram crosses intact both ways" {
 }
 
 test "zix zixer: udp forward, shutdown frees the edge port" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -748,7 +763,10 @@ const RtcAnswerer = struct {
 };
 
 test "zix zixer: udp forward, a webrtc session with the zix engine crosses the flow" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();

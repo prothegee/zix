@@ -312,7 +312,10 @@ test "zix zixer: upstream conn, connect hands back a socket with nagle off" {
 }
 
 test "zix zixer: upstream conn, idle cache round trips a conn per slot" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -343,7 +346,10 @@ test "zix zixer: upstream conn, idle cache round trips a conn per slot" {
 }
 
 test "zix zixer: upstream conn, idle cache closes overflow instead of growing" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

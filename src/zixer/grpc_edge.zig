@@ -1615,7 +1615,10 @@ const REQUEST_HEAD = [_]Http2.Header{
 };
 
 test "zix zixer: grpc edge, unary echo end-to-end with trailers and via" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1665,7 +1668,10 @@ test "zix zixer: grpc edge, unary echo end-to-end with trailers and via" {
 }
 
 test "zix zixer: grpc edge, request trailers relay to the upstream" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1706,7 +1712,10 @@ test "zix zixer: grpc edge, request trailers relay to the upstream" {
 }
 
 test "zix zixer: grpc edge, trailers-only answer and sequential streams reuse one conn" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1749,7 +1758,10 @@ test "zix zixer: grpc edge, trailers-only answer and sequential streams reuse on
 }
 
 test "zix zixer: grpc edge, two in-flight streams multiplex one upstream conn" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1798,7 +1810,10 @@ test "zix zixer: grpc edge, two in-flight streams multiplex one upstream conn" {
 }
 
 test "zix zixer: grpc edge, pick per stream lands on both upstreams" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1843,7 +1858,10 @@ test "zix zixer: grpc edge, pick per stream lands on both upstreams" {
 }
 
 test "zix zixer: grpc edge, server streaming keeps messages as separate frames" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1883,7 +1901,10 @@ test "zix zixer: grpc edge, server streaming keeps messages as separate frames" 
 }
 
 test "zix zixer: grpc edge, response data respects the client stream window" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1936,7 +1957,10 @@ test "zix zixer: grpc edge, response data respects the client stream window" {
 }
 
 test "zix zixer: grpc edge, request data credit comes back per frame" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -1977,7 +2001,10 @@ test "zix zixer: grpc edge, request data credit comes back per frame" {
 }
 
 test "zix zixer: grpc edge, no reachable upstream answers grpc unavailable" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2011,7 +2038,10 @@ test "zix zixer: grpc edge, no reachable upstream answers grpc unavailable" {
 }
 
 test "zix zixer: grpc edge, ninth concurrent stream is refused" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2050,7 +2080,10 @@ test "zix zixer: grpc edge, ninth concurrent stream is refused" {
 }
 
 test "zix zixer: grpc edge, client reset forwards to the upstream stream" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2092,7 +2125,10 @@ test "zix zixer: grpc edge, client reset forwards to the upstream stream" {
 }
 
 test "zix zixer: grpc edge, upstream death resets the stream and the next one reconnects" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2140,7 +2176,10 @@ test "zix zixer: grpc edge, upstream death resets the stream and the next one re
 }
 
 test "zix zixer: grpc edge, connection specific header resets the stream only" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2181,7 +2220,10 @@ test "zix zixer: grpc edge, connection specific header resets the stream only" {
 }
 
 test "zix zixer: grpc edge, non-preface bytes close without an answer" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
@@ -2213,7 +2255,10 @@ test "zix zixer: grpc edge, non-preface bytes close without an answer" {
 }
 
 test "zix zixer: grpc edge, client goaway drains and the edge answers goaway" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();

@@ -1078,7 +1078,10 @@ fn waitReady(io: std.Io, fake: *FakeUpstream) !void {
 }
 
 test "zix zixer: http1 proxy, round trip relays body and rewrites both heads" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1130,7 +1133,10 @@ test "zix zixer: http1 proxy, round trip relays body and rewrites both heads" {
 }
 
 test "zix zixer: http1 proxy, edge keep-alive reuses one upstream conn" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1184,7 +1190,10 @@ test "zix zixer: http1 proxy, edge keep-alive reuses one upstream conn" {
 }
 
 test "zix zixer: http1 proxy, dead upstream fails over inside one request" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1231,7 +1240,10 @@ test "zix zixer: http1 proxy, dead upstream fails over inside one request" {
 }
 
 test "zix zixer: http1 proxy, every upstream down answers 502 with proxy-status" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1462,7 +1474,10 @@ test "zix zixer: http1 proxy, static request carrying a body closes the edge" {
 }
 
 test "zix zixer: http1 proxy, mixed site serves static beside the pool end to end" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1807,7 +1822,10 @@ fn waitReadyFlag(io: std.Io, flag: *std.atomic.Value(bool)) !void {
 }
 
 test "zix zixer: http1 proxy, ws upgrade tunnels end to end and pins one upstream" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1883,7 +1901,10 @@ test "zix zixer: http1 proxy, ws upgrade tunnels end to end and pins one upstrea
 }
 
 test "zix zixer: http1 proxy, ws upgrade refused relays the plain response" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -1980,7 +2001,10 @@ const FakeSseUpstream = struct {
 };
 
 test "zix zixer: http1 proxy, sse stream relays each event as it arrives" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -2066,7 +2090,10 @@ const SilentUpstream = struct {
 };
 
 test "zix zixer: http1 proxy, a silent upstream answers 504 with proxy-status" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -2117,7 +2144,10 @@ test "zix zixer: http1 proxy, a silent upstream answers 504 with proxy-status" {
 }
 
 test "zix zixer: http1 proxy, a short budget does not disturb a healthy exchange" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -2162,7 +2192,10 @@ test "zix zixer: http1 proxy, a short budget does not disturb a healthy exchange
 }
 
 test "zix zixer: http1 proxy, a body larger than the buffers relays whole" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

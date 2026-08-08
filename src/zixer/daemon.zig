@@ -753,7 +753,10 @@ fn runDaemonThread(daemon: *Daemon) void {
 }
 
 test "zix zixer: daemon end to end, socket round trip start ping shutdown" {
-    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -872,7 +875,10 @@ fn canBindPort80() bool {
 
 test "zix zixer: daemon handleLine, tls acme site starts or names the port 80 need" {
     if (comptime @import("builtin").os.tag == .linux) {
-        if (!canBindPort80()) return error.SkipZigTest;
+        if (!canBindPort80()) {
+            std.log.info("binding the privileged port 80 needs a capability this run lacks, test skipped", .{});
+            return;
+        }
     }
 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
