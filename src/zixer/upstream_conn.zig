@@ -140,7 +140,7 @@ pub const IdleCache = struct {
     /// Param:
     /// io - std.Io
     /// slot_index - u32
-    /// now_ms - i64 (same clock release stamps with)
+    /// now_ms - i64 (a monotonic_clock.nowMs stamp, the clock release uses too)
     ///
     /// Return:
     /// - ?UpstreamConn with reused = true
@@ -180,7 +180,7 @@ pub const IdleCache = struct {
     /// Param:
     /// io - std.Io
     /// conn - UpstreamConn (the caller gives ownership up either way)
-    /// now_ms - i64 (stamped on the entry, drives the age bound)
+    /// now_ms - i64 (a monotonic_clock.nowMs stamp, drives the age bound)
     pub fn release(cache: *IdleCache, io: std.Io, conn: UpstreamConn, now_ms: i64) void {
         cache.lockAcquire();
 
