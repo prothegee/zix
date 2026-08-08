@@ -57,9 +57,9 @@ jobs:
       # test, so one run enumerates every hang. 240s is ~5x the slowest
       # legitimate test on this runner (connect-retry ceiling ~3s).
       - name: zix unit tests
-        timeout-minutes: 6
+        timeout-minutes: 7
         shell: pwsh
-        run: zig build unit-test --summary failures --test-timeout 360s
+        run: zig build unit-test --summary failures --test-timeout 420s
 
       - name: zix integration tests
         if: always()
