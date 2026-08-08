@@ -232,6 +232,8 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("tcp_nodelay.zig"));
     std.testing.refAllDecls(@import("worker_count.zig"));
     std.testing.refAllDecls(@import("conn_buffer.zig"));
+    std.testing.refAllDecls(@import("process_gate.zig"));
+    std.testing.refAllDecls(@import("process_wait.zig"));
     std.testing.refAllDecls(@import("bind_options.zig"));
     std.testing.refAllDecls(@import("site_runtime.zig"));
     std.testing.refAllDecls(@import("daemon.zig"));
