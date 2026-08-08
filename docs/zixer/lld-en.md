@@ -74,6 +74,9 @@ Keys are matched by name against an enum, so an unknown key is a typo report rat
 | logs_dir, sites_dir | taken as written, defaulted to `<root>/logs` and `<root>/sites` when absent |
 | kernel_backlog | fits `u31`, at least 1 |
 | max_recv_buf | fits `usize`, between 1024 and 262144 bytes |
+| process_limit | fits `usize`, at most 65536, 0 turns the gate off |
+| process_queue_len | fits `usize`, at most 65536, and above 0 it needs `process_limit` above 0 |
+| process_queue_timeout_ms | fits `u32`, between 1 and 600000 ms |
 
 `zixer status` adds an existence check on both directories after the parse.
 
@@ -228,6 +231,50 @@ rather than the pump treating it as a closed connection.
 
 <br>
 
+## The process gate
+
+`process_gate.zig` owns one site's admission state, `process_wait.zig` owns
+how a caller waits on it. They are split because the second one is
+dispatch-specific and the first one is not.
+
+The gate is a counter plus a fixed waiting room, all behind one short
+spinlock:
+
+| call | what it does |
+| :- | :- |
+| `enter` | takes a slot when `in_flight` is below the limit, else takes a room slot and returns a ticket, else refuses |
+| `poll` | reports whether a ticket has been handed a slot, and consumes the ticket when it has |
+| `abandon` | gives a ticket up, passing on a slot that arrived in the same moment rather than losing it |
+| `leave` | hands the slot to the oldest waiter, or drops `in_flight` when nobody is in line |
+
+The room is preallocated at site start and its slots are threaded into two
+intrusive lists: a free list, and an arrival-ordered wait list with both links
+so a slot can leave from the middle in constant time. That matters because
+every one of those calls runs under the spinlock, and a request that gives up
+partway is exactly the case a timeout produces.
+
+A slot is never released and re-taken across a handover. `leave` moves it
+straight to the head of the line, so `in_flight` does not dip and a third
+arrival cannot cut ahead of a request that was already waiting.
+
+Nothing here blocks, which is the whole point. `process_wait.admit` is the
+task-per-connection waiter: it polls its ticket on the same 1 ms tick the grpc
+and h3 relays already use, and abandons on the deadline. A readiness or
+completion loop would drive the same tickets from its own ready pass instead,
+with no change to the gate.
+
+`process_wait.admitNow` is the shedding form, for a caller whose thread drives
+other live streams. Only the grpc relay uses it.
+
+`Held` is what a caller pairs with an admission. Its release is idempotent, so
+an edge can hand the slot back early (the websocket and grpc handovers) and
+still keep the deferred release for every other exit.
+
+An unarmed gate (`process_limit: 0`) owns no memory and short-circuits every
+call, so an edge never branches on whether its site configured one.
+
+<br>
+
 ## The http1 edge
 
 ```mermaid
@@ -355,6 +402,9 @@ None of these are configurable today.
 | consecutive accept failures before a loop gives up | 100 | control loop and each worker accept loop |
 | shutdown wake attempts | 200 per worker, one per millisecond | per site, until every accept has left |
 | stream buffer range | 1024 to 262144 bytes | what `max_recv_buf` may be set to |
+| process gate counts | 0 to 65536 | what `process_limit` and `process_queue_len` may be set to |
+| process queue wait | 1 to 600000 ms | what `process_queue_timeout_ms` may be set to |
+| queued request poll tick | 1 ms | how often a waiting request looks at its ticket |
 | bytes one body pump call may move | 16 KiB | http1 edge, the pump loops past it |
 | alternative signal stack | off | the whole executable, `std_options` in `zixer.zig` |
 

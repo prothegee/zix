@@ -74,6 +74,9 @@ Key dicocokkan berdasarkan nama terhadap sebuah enum, jadi key tak dikenal menja
 | logs_dir, sites_dir | diambil apa adanya, di-default ke `<root>/logs` dan `<root>/sites` bila tidak ada |
 | kernel_backlog | muat di `u31`, minimal 1 |
 | max_recv_buf | muat di `usize`, antara 1024 dan 262144 byte |
+| process_limit | muat di `usize`, maksimal 65536, 0 mematikan gate |
+| process_queue_len | muat di `usize`, maksimal 65536, dan di atas 0 ia butuh `process_limit` di atas 0 |
+| process_queue_timeout_ms | muat di `u32`, antara 1 dan 600000 ms |
 
 `zixer status` menambahkan pemeriksaan keberadaan kedua direktori setelah parse.
 
@@ -231,6 +234,54 @@ berikutnya yang menguras, bukan pump menganggapnya koneksi tertutup.
 
 <br>
 
+## Process gate
+
+`process_gate.zig` memiliki state admission satu site, `process_wait.zig`
+memiliki cara sebuah pemanggil menunggunya. Keduanya dipisah karena yang
+kedua bergantung pada dispatch model dan yang pertama tidak.
+
+Gate-nya adalah sebuah counter ditambah ruang tunggu berukuran tetap,
+semuanya di balik satu spinlock pendek:
+
+| panggilan | apa yang dilakukan |
+| :- | :- |
+| `enter` | mengambil slot saat `in_flight` di bawah limit, kalau tidak mengambil slot ruang tunggu dan mengembalikan tiket, kalau tidak menolak |
+| `poll` | melaporkan apakah sebuah tiket sudah diberi slot, dan memakai habis tiket itu bila sudah |
+| `abandon` | melepas tiket, meneruskan slot yang datang pada saat yang sama alih-alih menghilangkannya |
+| `leave` | menyerahkan slot ke penunggu terlama, atau menurunkan `in_flight` saat tidak ada yang antre |
+
+Ruang tunggunya dialokasikan sekali saat site start dan slot-slotnya
+dirangkai ke dua intrusive list: satu free list, dan satu wait list berurutan
+kedatangan dengan dua tautan supaya sebuah slot bisa keluar dari tengah dalam
+waktu konstan. Itu penting karena semua panggilan di atas berjalan di bawah
+spinlock, dan request yang menyerah di tengah jalan persis kasus yang
+dihasilkan sebuah timeout.
+
+Slot tidak pernah dilepas lalu diambil ulang saat serah terima. `leave`
+memindahkannya langsung ke kepala antrean, jadi `in_flight` tidak turun dan
+kedatangan ketiga tidak bisa menyalip request yang sudah menunggu.
+
+Tidak ada yang memblokir di sini, dan itulah intinya. `process_wait.admit`
+adalah penunggu untuk model task-per-koneksi: ia memeriksa tiketnya pada tick
+1 ms yang sama dengan yang sudah dipakai relay grpc dan h3, lalu melepas
+tiketnya saat deadline. Readiness atau completion loop akan menggerakkan
+tiket yang sama dari ready pass-nya sendiri, tanpa mengubah gate.
+
+`process_wait.admitNow` adalah bentuk yang membuang beban, untuk pemanggil
+yang thread-nya menggerakkan stream hidup lain. Hanya relay grpc yang
+memakainya.
+
+`Held` adalah yang dipasangkan sebuah pemanggil dengan admission-nya.
+Release-nya idempotent, jadi sebuah edge bisa mengembalikan slot lebih awal
+(serah terima websocket dan grpc) dan tetap memakai deferred release untuk
+tiap jalan keluar lainnya.
+
+Gate yang tidak aktif (`process_limit: 0`) tidak memiliki memory apa pun dan
+memotong tiap panggilan, jadi edge tidak pernah bercabang pada apakah
+site-nya menyetel gate.
+
+<br>
+
 ## Edge http1
 
 ```mermaid
@@ -359,6 +410,9 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | kegagalan accept berturut-turut sebelum loop menyerah | 100 | control loop dan tiap accept loop worker |
 | percobaan wake saat shutdown | 200 per worker, satu per milidetik | per site, sampai tiap accept keluar |
 | rentang stream buffer | 1024 sampai 262144 byte | nilai yang boleh dipakai `max_recv_buf` |
+| hitungan process gate | 0 sampai 65536 | nilai yang boleh dipakai `process_limit` dan `process_queue_len` |
+| tunggu antrean process | 1 sampai 600000 ms | nilai yang boleh dipakai `process_queue_timeout_ms` |
+| tick poll request yang mengantre | 1 ms | seberapa sering request yang menunggu memeriksa tiketnya |
 | byte yang boleh dipindah satu panggilan body pump | 16 KiB | edge http1, pump-nya mengulang melewatinya |
 | alternative signal stack | mati | seluruh executable, `std_options` di `zixer.zig` |
 
