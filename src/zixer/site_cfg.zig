@@ -6,6 +6,7 @@ const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const fault = @import("fault.zig");
 const process_gate = @import("process_gate.zig");
+const static_cached = @import("static_cached.zig");
 
 pub const Engine = enum {
     HTTP1,
@@ -50,6 +51,14 @@ pub const SiteCfg = struct {
     /// How long a waiting request holds on before the edge answers 504.
     /// Null takes the main.cfg value.
     process_queue_timeout_ms: ?u32 = null,
+    /// How long a cached public_dir file stays fresh for this site. Null takes
+    /// the main.cfg value, 0 serves every static request uncached.
+    ///
+    /// Note:
+    /// - There is no site-level entry count. The cache table is one per process
+    ///   and its size is fixed the first time a site needs it, so only main.cfg
+    ///   sets public_dir_cache_max_entries.
+    public_dir_cache_ttl_ms: ?u32 = null,
 };
 
 /// Known site cfg keys. Field names mirror the cfg key strings exactly so
@@ -73,6 +82,10 @@ const Key = enum {
     process_limit,
     process_queue_len,
     process_queue_timeout_ms,
+    public_dir_cache_ttl_ms,
+    /// Named here only so a site that sets it gets told where it belongs
+    /// instead of the generic unknown-key hint.
+    public_dir_cache_max_entries,
 };
 
 /// Parse and validate one site cfg content.
@@ -248,6 +261,25 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
 
                 cfg.process_queue_timeout_ms = timeout_ms;
             },
+            .public_dir_cache_ttl_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const ttl_ms = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the cache off", .{static_cached.MAX_TTL_MS});
+                    continue;
+                };
+
+                if (!static_cached.ttlInRange(ttl_ms)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the cache off", .{static_cached.MAX_TTL_MS});
+                    continue;
+                }
+
+                cfg.public_dir_cache_ttl_ms = ttl_ms;
+            },
+            .public_dir_cache_max_entries => try faults.add(
+                entry.key,
+                "set it in main.cfg, the cache table is one per daemon and every site shares it",
+                .{},
+            ),
         }
     }
 
@@ -278,6 +310,9 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
     }
     if (cfg.spa_fallback != null and cfg.public_dir == null) {
         try faults.add("spa_fallback", "needs public_dir", .{});
+    }
+    if (cfg.public_dir_cache_ttl_ms != null and cfg.public_dir == null) {
+        try faults.add("public_dir_cache_ttl_ms", "needs public_dir", .{});
     }
 
     // Without a prefix bound, every backend miss on a proxied site would
@@ -326,6 +361,7 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         },
         .GRPC => {
             if (cfg.public_dir != null) try faults.add("public_dir", "not supported on grpc sites, remove it", .{});
+            if (cfg.public_dir_cache_ttl_ms != null) try faults.add("public_dir_cache_ttl_ms", "not supported on grpc sites, remove it", .{});
 
             // The grpc upstream leg is one h2 connection multiplexing every
             // stream, so a per-request read bound needs its own mechanism
@@ -335,6 +371,7 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         .UDP => {
             if (cfg.tls) try faults.add("tls", "udp forward is blind bytes, tls does not apply", .{});
             if (cfg.public_dir != null) try faults.add("public_dir", "not supported on udp sites, remove it", .{});
+            if (cfg.public_dir_cache_ttl_ms != null) try faults.add("public_dir_cache_ttl_ms", "does not apply to udp sites, remove it", .{});
             if (cfg.kernel_backlog != null) try faults.add("kernel_backlog", "does not apply to udp sites, remove it", .{});
             if (cfg.upstream_timeout_ms != null) try faults.add("upstream_timeout_ms", "does not apply to udp sites, remove it", .{});
 
@@ -721,7 +758,7 @@ test "zix zixer: site cfg, cleartext non-http1 site rejects acme keys" {
     defer arena.deinit();
 
     var h2_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: http2\nport: 39899\nupstreams: 127.0.0.1:3000\nacme_webroot: /var/www/acme\n", &h2_faults);
+    _ = try parse(arena.allocator(), "engine: http2\nport: 18899\nupstreams: 127.0.0.1:3000\nacme_webroot: /var/www/acme\n", &h2_faults);
     try testing.expectEqual(@as(usize, 1), h2_faults.slice().len);
     try testing.expectEqualStrings("acme_webroot", h2_faults.slice()[0].key);
     try testing.expectEqualStrings("needs tls: true or an http1 site", h2_faults.slice()[0].hint);
@@ -738,18 +775,18 @@ test "zix zixer: site cfg, upstream_timeout_ms parses and zero means no bound" {
     defer arena.deinit();
 
     var faults = fault.FaultList.init(arena.allocator());
-    const cfg = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 5 * 1000\n", &faults);
+    const cfg = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 5 * 1000\n", &faults);
     try testing.expectEqual(@as(usize, 0), faults.slice().len);
     try testing.expectEqual(@as(u32, 5000), cfg.upstream_timeout_ms.?);
 
     var off_faults = fault.FaultList.init(arena.allocator());
-    const off = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 0\n", &off_faults);
+    const off = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 0\n", &off_faults);
     try testing.expectEqual(@as(usize, 0), off_faults.slice().len);
     try testing.expectEqual(@as(u32, 0), off.upstream_timeout_ms.?);
 
     // Left out entirely, the edge takes its built-in default.
     var bare_faults = fault.FaultList.init(arena.allocator());
-    const bare = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
+    const bare = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
     try testing.expectEqual(@as(usize, 0), bare_faults.slice().len);
     try testing.expectEqual(@as(?u32, null), bare.upstream_timeout_ms);
 }
@@ -759,23 +796,23 @@ test "zix zixer: site cfg, upstream_timeout_ms is refused where it cannot apply"
     defer arena.deinit();
 
     var static_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\npublic_dir: /var/www/app\nupstream_timeout_ms: 1000\n", &static_faults);
+    _ = try parse(arena.allocator(), "engine: http1\nport: 18898\npublic_dir: /var/www/app\nupstream_timeout_ms: 1000\n", &static_faults);
     try testing.expectEqual(@as(usize, 1), static_faults.slice().len);
     try testing.expectEqualStrings("upstream_timeout_ms", static_faults.slice()[0].key);
     try testing.expectEqualStrings("needs upstreams", static_faults.slice()[0].hint);
 
     var grpc_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: grpc\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 1000\n", &grpc_faults);
+    _ = try parse(arena.allocator(), "engine: grpc\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 1000\n", &grpc_faults);
     try testing.expectEqual(@as(usize, 1), grpc_faults.slice().len);
     try testing.expectEqualStrings("upstream_timeout_ms", grpc_faults.slice()[0].key);
 
     var udp_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: udp\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 1000\n", &udp_faults);
+    _ = try parse(arena.allocator(), "engine: udp\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 1000\n", &udp_faults);
     try testing.expectEqual(@as(usize, 1), udp_faults.slice().len);
     try testing.expectEqualStrings("upstream_timeout_ms", udp_faults.slice()[0].key);
 
     var negative_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 0 - 1\n", &negative_faults);
+    _ = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_timeout_ms: 0 - 1\n", &negative_faults);
     try testing.expectEqual(@as(usize, 1), negative_faults.slice().len);
     try testing.expectEqualStrings("upstream_timeout_ms", negative_faults.slice()[0].key);
 }
@@ -785,7 +822,7 @@ test "zix zixer: site cfg, the process gate keys parse and default to null" {
     defer arena.deinit();
 
     var faults = fault.FaultList.init(arena.allocator());
-    const cfg = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 32\nprocess_queue_len: 4 * 32\nprocess_queue_timeout_ms: 1500\n", &faults);
+    const cfg = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nprocess_limit: 32\nprocess_queue_len: 4 * 32\nprocess_queue_timeout_ms: 1500\n", &faults);
 
     try testing.expectEqual(@as(usize, 0), faults.slice().len);
     try testing.expectEqual(@as(usize, 32), cfg.process_limit.?);
@@ -793,7 +830,7 @@ test "zix zixer: site cfg, the process gate keys parse and default to null" {
     try testing.expectEqual(@as(u32, 1500), cfg.process_queue_timeout_ms.?);
 
     var bare_faults = fault.FaultList.init(arena.allocator());
-    const bare = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
+    const bare = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
 
     try testing.expectEqual(@as(?usize, null), bare.process_limit);
     try testing.expectEqual(@as(?usize, null), bare.process_queue_len);
@@ -805,7 +842,7 @@ test "zix zixer: site cfg, a site may turn the daemon gate off for itself" {
     defer arena.deinit();
 
     var faults = fault.FaultList.init(arena.allocator());
-    const cfg = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 0\n", &faults);
+    const cfg = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nprocess_limit: 0\n", &faults);
 
     try testing.expectEqual(@as(usize, 0), faults.slice().len);
     try testing.expectEqual(@as(usize, 0), cfg.process_limit.?);
@@ -816,7 +853,7 @@ test "zix zixer: site cfg, a site queue with the limit turned off faults" {
     defer arena.deinit();
 
     var faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 0\nprocess_queue_len: 8\n", &faults);
+    _ = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nprocess_limit: 0\nprocess_queue_len: 8\n", &faults);
 
     try testing.expectEqual(@as(usize, 1), faults.slice().len);
     try testing.expectEqualStrings("process_queue_len", faults.slice()[0].key);
@@ -828,20 +865,20 @@ test "zix zixer: site cfg, the process gate keys are refused where they cannot a
     defer arena.deinit();
 
     var static_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\npublic_dir: /var/www/app\nprocess_limit: 8\n", &static_faults);
+    _ = try parse(arena.allocator(), "engine: http1\nport: 18898\npublic_dir: /var/www/app\nprocess_limit: 8\n", &static_faults);
     try testing.expectEqual(@as(usize, 1), static_faults.slice().len);
     try testing.expectEqualStrings("process_limit", static_faults.slice()[0].key);
     try testing.expectEqualStrings("needs upstreams", static_faults.slice()[0].hint);
 
     var udp_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: udp\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 8\nprocess_queue_len: 8\n", &udp_faults);
+    _ = try parse(arena.allocator(), "engine: udp\nport: 18898\nupstreams: 127.0.0.1:3000\nprocess_limit: 8\nprocess_queue_len: 8\n", &udp_faults);
     try testing.expectEqual(@as(usize, 2), udp_faults.slice().len);
     try testing.expectEqualStrings("process_limit", udp_faults.slice()[0].key);
     try testing.expectEqualStrings("does not apply to udp sites, remove it", udp_faults.slice()[0].hint);
     try testing.expectEqualStrings("process_queue_len", udp_faults.slice()[1].key);
 
     var negative_faults = fault.FaultList.init(arena.allocator());
-    _ = try parse(arena.allocator(), "engine: http1\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_queue_timeout_ms: 0 - 1\n", &negative_faults);
+    _ = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nprocess_queue_timeout_ms: 0 - 1\n", &negative_faults);
     try testing.expectEqual(@as(usize, 1), negative_faults.slice().len);
     try testing.expectEqualStrings("process_queue_timeout_ms", negative_faults.slice()[0].key);
 }
@@ -851,8 +888,101 @@ test "zix zixer: site cfg, a grpc site may carry the process gate" {
     defer arena.deinit();
 
     var faults = fault.FaultList.init(arena.allocator());
-    const cfg = try parse(arena.allocator(), "engine: grpc\nport: 39898\nupstreams: 127.0.0.1:3000\nprocess_limit: 16\n", &faults);
+    const cfg = try parse(arena.allocator(), "engine: grpc\nport: 18898\nupstreams: 127.0.0.1:3000\nprocess_limit: 16\n", &faults);
 
     try testing.expectEqual(@as(usize, 0), faults.slice().len);
     try testing.expectEqual(@as(usize, 16), cfg.process_limit.?);
+}
+
+test "zix zixer: site cfg, the static cache window parses and defaults to null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var bare_faults = fault.FaultList.init(arena.allocator());
+    const bare = try parse(arena.allocator(), "engine: http1\nport: 18898\npublic_dir: /var/www/app\n", &bare_faults);
+    try testing.expectEqual(@as(usize, 0), bare_faults.slice().len);
+    try testing.expectEqual(@as(?u32, null), bare.public_dir_cache_ttl_ms);
+
+    var set_faults = fault.FaultList.init(arena.allocator());
+    const set = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\npublic_dir: /var/www/app\npublic_dir_cache_ttl_ms: 5 * 1000\n",
+        &set_faults,
+    );
+    try testing.expectEqual(@as(usize, 0), set_faults.slice().len);
+    try testing.expectEqual(@as(u32, 5000), set.public_dir_cache_ttl_ms.?);
+
+    // 0 is a site turning the cache off while the daemon leaves it on.
+    var off_faults = fault.FaultList.init(arena.allocator());
+    const off = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\npublic_dir: /var/www/app\npublic_dir_cache_ttl_ms: 0\n",
+        &off_faults,
+    );
+    try testing.expectEqual(@as(usize, 0), off_faults.slice().len);
+    try testing.expectEqual(@as(u32, 0), off.public_dir_cache_ttl_ms.?);
+}
+
+test "zix zixer: site cfg, the static cache window is refused where it cannot apply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var proxy_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\npublic_dir_cache_ttl_ms: 5000\n",
+        &proxy_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), proxy_faults.slice().len);
+    try testing.expectEqualStrings("public_dir_cache_ttl_ms", proxy_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs public_dir", proxy_faults.slice()[0].hint);
+
+    var grpc_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: grpc\nport: 18898\nupstreams: 127.0.0.1:3000\npublic_dir_cache_ttl_ms: 5000\n",
+        &grpc_faults,
+    );
+    try testing.expectEqual(@as(usize, 2), grpc_faults.slice().len);
+    try testing.expectEqualStrings("public_dir_cache_ttl_ms", grpc_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs public_dir", grpc_faults.slice()[0].hint);
+    try testing.expectEqualStrings("public_dir_cache_ttl_ms", grpc_faults.slice()[1].key);
+    try testing.expectEqualStrings("not supported on grpc sites, remove it", grpc_faults.slice()[1].hint);
+
+    var udp_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: udp\nport: 18898\nupstreams: 127.0.0.1:3000\npublic_dir_cache_ttl_ms: 5000\n",
+        &udp_faults,
+    );
+    try testing.expectEqual(@as(usize, 2), udp_faults.slice().len);
+    try testing.expectEqualStrings("public_dir_cache_ttl_ms", udp_faults.slice()[1].key);
+    try testing.expectEqualStrings("does not apply to udp sites, remove it", udp_faults.slice()[1].hint);
+
+    var over_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\npublic_dir: /var/www/app\npublic_dir_cache_ttl_ms: 60 * 60 * 1000 + 1\n",
+        &over_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), over_faults.slice().len);
+    try testing.expectEqualStrings("public_dir_cache_ttl_ms", over_faults.slice()[0].key);
+}
+
+test "zix zixer: site cfg, the entry count says where it belongs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // The table is one per daemon, so a site cannot resize it. The hint points
+    // at main.cfg rather than reading as a typo.
+    var faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\npublic_dir: /var/www/app\npublic_dir_cache_max_entries: 64\n",
+        &faults,
+    );
+
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("public_dir_cache_max_entries", faults.slice()[0].key);
+    try testing.expectEqualStrings("set it in main.cfg, the cache table is one per daemon and every site shares it", faults.slice()[0].hint);
 }
