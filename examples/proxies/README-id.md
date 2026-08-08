@@ -68,7 +68,7 @@ certbot setelah renewal.
 | grpc | 9108 | 9109 | h2 ujung ke ujung, trailer selamat |
 | http3 | 9110 | 9111 | edge client QUIC, upstream http1 |
 | udp | 9112 | 9113 | forward datagram per flow |
-| static | 9114 | tidak ada | site static saja, spa_fallback |
+| static | 9114 | tidak ada | site static saja, spa_fallback, cache window sendiri |
 | mixed | 9115 | 9116 | static ber-public_prefix berdampingan dengan backend yang diproxy |
 | round_robin | 9117 | 9118, 9119 | rotasi, dan retry berbatas saat satu mati |
 | tls | 9120 | 9121 | TLS diterminasi di zixer, upstream cleartext |
@@ -91,6 +91,8 @@ Tiap config site membawa perintah run dan drive-nya sendiri di header, jadi
 | `upstreams` (beberapa) | round_robin |
 | `public_dir`, `spa_fallback` | static |
 | `public_prefix` | mixed |
+| `public_dir_cache_ttl_ms` | main.cfg untuk default daemon, static untuk override site |
+| `public_dir_cache_max_entries` | main.cfg, satu cache table per daemon |
 | `kernel_backlog` | main.cfg, diwarisi tiap site di sini |
 
 `acme_webroot`, `acme_proxy`, dan `upstream_timeout_ms` tidak punya demo: challenge sungguhan

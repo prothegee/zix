@@ -67,7 +67,7 @@ calls after a renewal.
 | grpc | 9108 | 9109 | h2 end to end, trailers survive |
 | http3 | 9110 | 9111 | QUIC client edge, http1 upstream |
 | udp | 9112 | 9113 | per-flow datagram forward |
-| static | 9114 | none | static-only site, spa_fallback |
+| static | 9114 | none | static-only site, spa_fallback, its own cache window |
 | mixed | 9115 | 9116 | public_prefix static beside a proxied backend |
 | round_robin | 9117 | 9118, 9119 | rotation, and bounded retry when one dies |
 | tls | 9120 | 9121 | TLS terminated at zixer, cleartext upstream |
@@ -90,6 +90,8 @@ Every site config carries its own run and drive commands in its header, so
 | `upstreams` (several) | round_robin |
 | `public_dir`, `spa_fallback` | static |
 | `public_prefix` | mixed |
+| `public_dir_cache_ttl_ms` | main.cfg for the daemon default, static for a site override |
+| `public_dir_cache_max_entries` | main.cfg, there is one cache table per daemon |
 | `kernel_backlog` | main.cfg, inherited by every site here |
 
 `acme_webroot`, `acme_proxy`, and `upstream_timeout_ms` have no demo: a real challenge needs
