@@ -9,6 +9,7 @@ const grpc_relay = @import("grpc_relay.zig");
 const grpc_upstream = @import("grpc_upstream.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const http2_frames = @import("http2_frames.zig");
+const process_wait = @import("process_wait.zig");
 
 const Http2 = zix.Http2;
 
@@ -325,6 +326,23 @@ fn acceptStream(session: *Session, id: u31, headers: []const Http2.Header, end_s
 
     if (slot == null) return streamError(session, id, Http2.ERR_REFUSED_STREAM);
     const entry = slot.?;
+
+    // The gate sheds here instead of parking: this runs on the frame loop
+    // that pumps every live stream on the connection, so waiting would
+    // stall streams already admitted. A trailers-only UNAVAILABLE is what
+    // a grpc client retries on.
+    if (process_wait.admitNow(session.proxy.process_gate) != .ADMITTED) {
+        var busy_buf: [256]u8 = undefined;
+        const busy_block = grpc_relay.encodeUnavailableBlock(&busy_buf) catch return .OK;
+
+        return writeBlockToClient(session, id, busy_block, true);
+    }
+
+    // Released once the request block is on the upstream wire. A grpc
+    // stream lives as long as its client, so holding the slot for the whole
+    // exchange would let a few long calls pin the site's capacity.
+    var stream_slot = process_wait.hold(session.proxy.process_gate);
+    defer stream_slot.release();
 
     const up_index = findOrOpenUpstream(session) orelse {
         var local_buf: [256]u8 = undefined;
@@ -1302,6 +1320,9 @@ const FakeGrpcUpstream = struct {
     /// whole connection (upstream death mid-stream).
     die_first_conn: bool = false,
     ready: std.atomic.Value(bool) = .init(false),
+    /// Set when every bind attempt lost, so the waiter fails with the
+    /// reason instead of spinning out its whole budget on a dead thread.
+    bind_failed: std.atomic.Value(bool) = .init(false),
     conns_accepted: usize = 0,
     streams_served: std.atomic.Value(usize) = .init(0),
     rst_seen: std.atomic.Value(usize) = .init(0),
@@ -1320,8 +1341,15 @@ const FakeGrpcUpstream = struct {
     fn serve(fake: *FakeGrpcUpstream) void {
         const io = fake.io;
 
-        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 4 }) catch return;
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
+
+        var server = bindWithRetry(io, addr) orelse {
+            fake.bind_failed.store(true, .release);
+            return;
+        };
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -1544,9 +1572,35 @@ const FakeGrpcUpstream = struct {
     }
 };
 
+/// Attempts the fake upstream makes at its fixed port, one per BIND_RETRY_MS.
+/// These ports sit inside this box's ephemeral range, so the kernel can be
+/// holding one for an outbound connection the moment a test asks for it.
+/// The hold is brief, so retrying rides it out instead of failing the run.
+const BIND_TRIES: usize = 50;
+const BIND_RETRY_MS: u64 = 10;
+
+fn bindWithRetry(io: std.Io, addr: std.Io.net.IpAddress) ?std.Io.net.Server {
+    var tries: usize = 0;
+    while (tries < BIND_TRIES) : (tries += 1) {
+        if (addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 4 })) |server| return server else |_| {}
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(BIND_RETRY_MS), .awake) catch {};
+    }
+
+    return null;
+}
+
 fn waitReady(io: std.Io, fake: *FakeGrpcUpstream) !void {
     var spins: usize = 0;
     while (!fake.ready.load(.acquire)) : (spins += 1) {
+        // Told apart on purpose: a lost port is an environment problem, a
+        // quiet thread is a real one, and the old bound reported both alike.
+        if (fake.bind_failed.load(.acquire)) {
+            std.log.err("zix zixer: grpc edge, the fake upstream could not take port {d} in {d} tries", .{ fake.port, BIND_TRIES });
+
+            return error.FakeBindFailed;
+        }
+
         if (spins > 5000) return error.FakeNeverReady;
 
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
