@@ -300,6 +300,10 @@ Parsing head dibatasi: 16 KiB head, paling banyak 64 header. Keputusan framing b
 
 Static plane berjalan sebelum pool bila site punya keduanya, dan `public_prefix` membatasinya: tanpa prefix seluruh ruang path static lebih dulu, dengan prefix hanya subtree itu. Resolusi path menolak `..` langsung alih-alih menormalkannya, menolak NUL yang tersisip, memetakan slash di akhir ke `index.html`, dan membatasi path gabungan di 512 byte. Sibling terkompresi diprobe berurutan `.br` lalu `.gz` terhadap `Accept-Encoding`, dengan identity sebagai lantai, dan `Vary: Accept-Encoding` ikut di tiap response static.
 
+Dengan `public_dir_cache_ttl_ms` di atas 0, table bersama ditanya lebih dulu, dan aturan yang sama tetap berlaku di sana: urutan sibling dan lantai identity sudah diterapkan sekali saat entry dibangun, dan slash di akhir dipetakan ke `index.html` sebelum lookup sehingga jawaban dengan dan tanpa cache menyelesaikan path yang sama. Sebuah miss langsung jatuh ke open di atas, termasuk untuk percobaan ulang `spa_fallback`.
+
+Head response dirender oleh edge di kedua kasus, bukan diputar ulang dari byte prerender milik entry, sehingga kedua jawaban identik byte per byte. Header prerender itu mengiklankan `Accept-Ranges`, yang tidak dilayani edge ini, dan mematok `Connection: keep-alive`, yang di edge ini diputuskan per request.
+
 Satu pertukaran terhadap pool mencoba paling banyak satu kali per upstream plus satu cadangan, jadi satu koneksi idle yang basi tidak pernah menghabiskan satu-satunya kesempatan sebuah slot. Begitu body request mulai di-stream, tidak ada retry: body tidak bisa diulang.
 
 `101` dari upstream mengubah koneksi menjadi tunnel mentah di kedua arah untuk sisa hidupnya, dengan pilihan upstream dipatok untuk tunnel itu.
@@ -399,7 +403,10 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | path control socket | 108 byte di Linux | seluruh string `<root>/control.sock` |
 | head request | 16 KiB | edge http1, dan head upstream hasil rebuild serta head response berukuran sama |
 | header per pesan | 64 | edge http1 |
-| path static | 512 byte | `public_dir` plus path request |
+| path static | 512 byte | `public_dir` plus path request, satu konstanta yang dipakai bersama cache table |
+| window static cache | 0 sampai 3600000 ms | nilai yang boleh dipakai `public_dir_cache_ttl_ms`, 0 berarti mati |
+| entry static cache | 1 sampai 1048576 file | nilai yang boleh dipakai `public_dir_cache_max_entries`, lalu dibatasi ke seperempat batas descriptor proses |
+| body terkecil yang diserahkan ke kernel | 64 KiB | hanya http1 cleartext, di bawahnya body ditulis bersama head-nya |
 | koneksi upstream idle | 4 per upstream, 32 total, dibagi di antara worker | per site |
 | umur koneksi upstream idle | 5000 ms | cache idle per worker |
 | interval sweep idle | 2500 ms | thread reaper per site, untuk tiap cache worker |

@@ -293,6 +293,10 @@ Head parsing is bounded: 16 KiB of head, at most 64 headers. The body framing de
 
 The static plane runs before the pool when the site has one, and `public_prefix` bounds it: without a prefix the whole path space is static-first, with a prefix only that subtree is. Path resolution rejects `..` outright rather than normalizing it, rejects an embedded NUL, maps a trailing slash to `index.html`, and caps the joined path at 512 bytes. Precompressed siblings are probed in `.br` then `.gz` order against `Accept-Encoding`, with identity as the floor, and `Vary: Accept-Encoding` rides on every static response.
 
+With `public_dir_cache_ttl_ms` above 0 the shared table is asked first, and the same rules hold there: the sibling order and the identity floor were applied once when the entry was built, and the trailing slash maps to `index.html` before the lookup so a cached and an uncached answer resolve the same path. A miss falls straight through to the open above, including for the `spa_fallback` retry.
+
+The response head is rendered by the edge in both cases rather than replayed from the entry's own prerendered bytes, so the two answers are byte-identical. The prerendered header advertises `Accept-Ranges`, which this edge does not honour, and hardcodes `Connection: keep-alive`, which this edge decides per request.
+
 An exchange against the pool retries up to one attempt per upstream plus one spare, so a single stale idle connection never consumes a slot's only chance. Once a request body has started streaming, there is no retry: the body is not replayable.
 
 A `101` from the upstream turns the connection into a raw tunnel in both directions for the rest of its life, with the upstream pick pinned for the tunnel.
@@ -391,7 +395,10 @@ None of these are configurable today.
 | control socket path | 108 bytes on Linux | the whole `<root>/control.sock` string |
 | request head | 16 KiB | http1 edge, and the rebuilt upstream head and response head are the same size |
 | headers per message | 64 | http1 edge |
-| static path | 512 bytes | `public_dir` plus the request path |
+| static path | 512 bytes | `public_dir` plus the request path, one constant shared with the cache table |
+| static cache window | 0 to 3600000 ms | what `public_dir_cache_ttl_ms` may be set to, 0 is off |
+| static cache entries | 1 to 1048576 files | what `public_dir_cache_max_entries` may be set to, then clamped to a quarter of the process descriptor limit |
+| smallest body handed to the kernel | 64 KiB | cleartext http1 only, under it the body is written with its own head |
 | idle upstream connections | 4 per upstream, 32 in total, divided between the workers | per site |
 | idle upstream connection age | 5000 ms | per worker idle cache |
 | idle sweep interval | 2500 ms | per site reaper thread, one for every worker cache |
