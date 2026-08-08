@@ -182,7 +182,7 @@ test "zix zixer: site runtime, incomplete cfg refuses to bind" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const no_engine = site_cfg.SiteCfg{ .port = 39860 };
+    const no_engine = site_cfg.SiteCfg{ .port = 18860 };
     try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_engine, .{ .kernel_backlog = 64 }));
 
     const no_port = site_cfg.SiteCfg{ .engine = .HTTP1 };
@@ -194,11 +194,11 @@ test "zix zixer: site runtime, tcp bind rebinds cleanly after unbind" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39861 };
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 18861 };
 
     var first = try SiteRuntime.bind(std.testing.allocator, io, "a.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expectEqualStrings("a.cfg", first.name);
-    try std.testing.expectEqual(@as(u16, 39861), first.port);
+    try std.testing.expectEqual(@as(u16, 18861), first.port);
     try std.testing.expect(first.listener == .tcp);
 
     first.unbind(std.testing.allocator, io);
@@ -235,7 +235,7 @@ test "zix zixer: site runtime, udp engine binds a datagram socket" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg = site_cfg.SiteCfg{ .engine = .UDP, .ip = "127.0.0.1", .port = 39862 };
+    const cfg = site_cfg.SiteCfg{ .engine = .UDP, .ip = "127.0.0.1", .port = 18862 };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .udp);
@@ -252,8 +252,8 @@ test "zix zixer: site runtime, http1 with upstreams serves and unbind frees the 
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39859 }};
-    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39872, .upstreams = &upstreams };
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18859 }};
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 18872, .upstreams = &upstreams };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "proxy.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .proxy_edge);
@@ -271,7 +271,7 @@ test "zix zixer: site runtime, http1 static-only site serves without upstreams" 
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39882, .public_dir = "/var/www/pages" };
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 18882, .public_dir = "/var/www/pages" };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "static.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .proxy_edge);
@@ -286,8 +286,8 @@ test "zix zixer: site runtime, udp site with upstreams serves the forward" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39839 }};
-    const cfg = site_cfg.SiteCfg{ .engine = .UDP, .ip = "127.0.0.1", .port = 39888, .upstreams = &upstreams };
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18839 }};
+    const cfg = site_cfg.SiteCfg{ .engine = .UDP, .ip = "127.0.0.1", .port = 18888, .upstreams = &upstreams };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "media.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .udp_forward);
@@ -304,7 +304,7 @@ test "zix zixer: site runtime, http3 engine without planes only binds" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg = site_cfg.SiteCfg{ .engine = .HTTP3, .ip = "127.0.0.1", .port = 39863 };
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP3, .ip = "127.0.0.1", .port = 18863 };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "pages.cfg", cfg, .{ .kernel_backlog = 64 });
     try std.testing.expect(runtime.listener == .udp);
@@ -322,11 +322,11 @@ test "zix zixer: site runtime, http3 site with upstreams serves the quic edge" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 39801 }};
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18801 }};
     const cfg = site_cfg.SiteCfg{
         .engine = .HTTP3,
         .ip = "127.0.0.1",
-        .port = 39800,
+        .port = 18800,
         .tls = true,
         .tls_cert = "examples/certs/ecdsa_p256_cert.pem",
         .tls_key = "examples/certs/ecdsa_p256_key.pem",
@@ -365,10 +365,10 @@ test "zix zixer: site runtime, owns port covers the main listener" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 39896 };
+    const cfg = site_cfg.SiteCfg{ .engine = .HTTP1, .ip = "127.0.0.1", .port = 18896 };
 
     var runtime = try SiteRuntime.bind(std.testing.allocator, io, "own.cfg", cfg, .{ .kernel_backlog = 64 });
-    try std.testing.expect(runtime.ownsPort(39896));
+    try std.testing.expect(runtime.ownsPort(18896));
     try std.testing.expect(!runtime.ownsPort(80));
     try std.testing.expect(runtime.challenge == null);
 
@@ -406,7 +406,7 @@ test "zix zixer: site runtime, tls acme site binds the port 80 companion" {
     const cfg = site_cfg.SiteCfg{
         .engine = .HTTP1,
         .ip = "127.0.0.1",
-        .port = 39897,
+        .port = 18897,
         .tls = true,
         .tls_cert = "examples/certs/ecdsa_p256_cert.pem",
         .tls_key = "examples/certs/ecdsa_p256_key.pem",
@@ -425,7 +425,7 @@ test "zix zixer: site runtime, tls acme site binds the port 80 companion" {
     };
 
     try std.testing.expect(runtime.challenge != null);
-    try std.testing.expect(runtime.ownsPort(39897));
+    try std.testing.expect(runtime.ownsPort(18897));
     try std.testing.expect(runtime.ownsPort(80));
 
     runtime.unbind(std.testing.allocator, io);
