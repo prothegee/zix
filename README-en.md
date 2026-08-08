@@ -638,18 +638,18 @@ The real entry points are the named steps. List them any time with `zig build -l
 | `zig build` | Compile the module graph only. No artifact is emitted, because zix is a source module. |
 | `zig build test-all` | Run unit, integration, behaviour, and edge tests. |
 | `zig build unit-test` | Run unit tests only. Also `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Build every example into `zig-out/bin/`. Binaries are named `zix-example-<name>-<arch>-<os>`, so builds for several targets coexist. |
+| `zig build examples` | Build every example into `zig-out/bin/`. Binaries are named `zix-example-<name>-<arch>-<os>-<optimize>`, so builds for several targets and several optimize modes coexist. Without `-Doptimize` the mode is `debug`. |
 | `zig build example-<group>` | Build one group of examples, for example `example-http1` or `example-grpc`. |
-| `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. The installed binary carries the target triple, run it from there. |
+| `zig build example-<name>` | Build one example into `zig-out/bin/`, for example `example-http1_websocket`. The installed binary carries the target triple and the optimize mode, run it from there. |
 | `zig build test-runner-<name>` | Spawn a server plus client integration check, for example `test-runner-http1-websocket`. |
 | `zig build test-runner-all` | Run every server-plus-client integration runner. |
 
 Built example binaries land in `zig-out/bin/`. To build all examples, then run one in the background and stop it:
 
 ```sh
-zig build examples                                   # build every example into zig-out/bin/
-./zig-out/bin/zix-example-http1_websocket-x86_64-linux & # run one in the background
-kill %1                                              # stop it
+zig build examples                                             # build every example into zig-out/bin/
+./zig-out/bin/zix-example-http1_websocket-x86_64-linux-debug & # run one in the background
+kill %1                                                        # stop it
 ```
 
 Every step accepts `-Dtarget=<arch>-<os>`, covering seven targets: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd. On a foreign target the test and runner steps compile everything and skip execution with a warning. `scripts/build-all-targets.sh` sweeps every build option of zix and the drivers over all seven.
@@ -2427,7 +2427,7 @@ upstreams: 127.0.0.1:3000
 ```
 
 ```bash
-zig build zixer            # builds zig-out/bin/zixer-<arch>-<os>
+zig build zixer            # builds zig-out/bin/zixer-<arch>-<os>-<optimize>
 zixer init                 # scaffold the root dir: main.cfg, sites/, logs/
 zixer status               # validate every config, exit 1 on any fault
 zixer start example.cfg    # spawns the daemon when none is running

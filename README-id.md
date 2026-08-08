@@ -638,18 +638,18 @@ Entry point yang sebenarnya adalah step bernama. Daftarkan kapan saja dengan `zi
 | `zig build` | Hanya meng-compile module graph. Tidak ada artifact yang dihasilkan, karena zix adalah source module. |
 | `zig build test-all` | Menjalankan tes unit, integration, behaviour, dan edge. |
 | `zig build unit-test` | Menjalankan tes unit saja. Juga `integration-test`, `behaviour-test`, `edge-test`. |
-| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `zix-example-<name>-<arch>-<os>`, jadi hasil build beberapa target bisa hidup berdampingan. |
+| `zig build examples` | Membangun setiap example ke `zig-out/bin/`. Binary dinamai `zix-example-<name>-<arch>-<os>-<optimize>`, jadi hasil build beberapa target dan beberapa optimize mode bisa hidup berdampingan. Tanpa `-Doptimize`, mode-nya `debug`. |
 | `zig build example-<group>` | Membangun satu grup example, misalnya `example-http1` atau `example-grpc`. |
-| `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Binary yang terinstal membawa target triple, jalankan dari sana. |
+| `zig build example-<name>` | Membangun satu example ke `zig-out/bin/`, misalnya `example-http1_websocket`. Binary yang terinstal membawa target triple dan optimize mode, jalankan dari sana. |
 | `zig build test-runner-<name>` | Menjalankan pengecekan integrasi server plus client, misalnya `test-runner-http1-websocket`. |
 | `zig build test-runner-all` | Menjalankan setiap runner integrasi server plus client. |
 
 Binary example yang dibangun ada di `zig-out/bin/`. Untuk membangun semua example, lalu menjalankan satu di background dan menghentikannya:
 
 ```sh
-zig build examples                                   # bangun setiap example ke zig-out/bin/
-./zig-out/bin/zix-example-http1_websocket-x86_64-linux & # jalankan satu di background
-kill %1                                              # hentikan
+zig build examples                                             # bangun setiap example ke zig-out/bin/
+./zig-out/bin/zix-example-http1_websocket-x86_64-linux-debug & # jalankan satu di background
+kill %1                                                        # hentikan
 ```
 
 Setiap step menerima `-Dtarget=<arch>-<os>`, mencakup tujuh target: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd. Pada target foreign, step tes dan runner meng-compile semuanya dan melewati eksekusi dengan warning. `scripts/build-all-targets.sh` menyapu setiap opsi build zix dan para driver di ketujuh target.
@@ -2436,7 +2436,7 @@ upstreams: 127.0.0.1:3000
 ```
 
 ```bash
-zig build zixer            # membangun zig-out/bin/zixer-<arch>-<os>
+zig build zixer            # membangun zig-out/bin/zixer-<arch>-<os>-<optimize>
 zixer init                 # membuat kerangka root dir: main.cfg, sites/, logs/
 zixer status               # memvalidasi tiap config, keluar 1 bila ada fault
 zixer start example.cfg    # men-spawn daemon bila belum ada yang berjalan
