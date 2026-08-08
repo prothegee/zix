@@ -120,6 +120,7 @@ flowchart LR
 | `tls_edge.zig` | terminasi TLS dan pemilihan ALPN |
 | `ws_tunnel.zig` | tunnel upgrade rfc 6455 |
 | `static_files.zig` | file dari `public_dir`, sibling terkompresi, fallback spa |
+| `static_cached.zig` | table bersama berisi file `public_dir` yang sudah terbuka, dan cara mengambil entry dari sana |
 | `acme_challenge.zig`, `acme_listener.zig` | challenge plane http-01 dan companion port 80 |
 | `upstream_pool.zig`, `upstream_conn.zig` | pemilihan round-robin, ketersediaan, keep-alive idle |
 | `upstream_deadline.zig`, `idle_reaper.zig` | batas satu read upstream, sweep yang mengedaluwarsakan conn idle |
@@ -225,6 +226,39 @@ redirect https semuanya dilayani sebelum gate ditanya.
 
 <br>
 
+## Static plane
+
+Site yang punya `public_dir` menjawab file-nya sendiri, tanpa upstream apa pun.
+Itulah maksud key ini: melayani front-end hasil build cukup butuh zixer dan
+tidak butuh apa pun di belakangnya.
+
+Dua jalur sampai ke jawaban yang sama, dan tiap site bisa memakai keduanya:
+
+| jalur | biaya satu request |
+| :- | :- |
+| tanpa cache, default | open, stat, read, close, ditambah satu open spekulatif per sibling terkompresi yang diminta browser |
+| dengan cache, `public_dir_cache_ttl_ms` di atas 0 | satu lookup hash ke file yang sudah terbuka, dengan pilihan sibling sudah diputuskan saat entry dibangun |
+
+Table-nya adalah yang dibangun `zix.utils.static_cache`, sama dengan yang
+dipakai engine. zixer tidak menyimpan table sendiri, jadi satu file memakai satu
+descriptor untuk daemon, bukan satu per accept loop, yang di mesin `workers: 0`
+adalah selisih antara satu dan jumlah thread. Pembacaannya tanpa lock.
+
+Cache tidak pernah bisa menggagalkan request. Window 0, table penuh, file tidak
+terbaca, atau path terlalu panjang untuk disimpan, semuanya jatuh ke open tanpa
+cache, yang juga jalan yang menghasilkan 404 dan jawaban `spa_fallback`.
+
+Cara body keluar bergantung pada apa yang bisa dijamin edge-nya:
+
+| site | jalur body | alasan |
+| :- | :- | :- |
+| http1 cleartext, 64 KB ke atas | diserahkan ke kernel, tidak pernah masuk zixer | tidak ada yang perlu menyentuh byte-nya |
+| http1 cleartext, di bawah 64 KB | ditulis bersama head-nya sekaligus | satu write lebih murah daripada flush plus syscall di segment sendiri |
+| TLS, ukuran berapa pun | disalin lewat writer TLS | byte-nya harus dienkripsi |
+| http2 dan http3 | disalin ke dalam frame | tiap byte harus dibingkai, dan http2 menggabungkan write-nya |
+
+<br>
+
 ## Memory per koneksi
 
 Satu koneksi adalah satu thread dan satu blok buffer, jadi keduanya tumbuh
@@ -311,6 +345,7 @@ Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selam
 - Gagal dengan lantang saat start, jangan setengah jalan. File certificate yang hilang, port yang terpakai, atau port challenge yang tak bisa di-bind menggagalkan `start`, bukan meninggalkan site setengah hidup.
 - Re-originate, bukan forward. Edge memiliki framing dari apa yang ia kirim.
 - Satu file, satu tanggung jawab. Tiap edge, tiap lapis translasi, dan tiap command ada di file-nya sendiri, itu sebabnya daftar modul di atas terbaca sebagai peta perilakunya.
+- Memakai static cache milik engine, bukan membangun yang kedua. Ia sudah satu table per proses dan bebas lock saat dibaca, jadi table milik zixer sendiri akan memakan descriptor yang sama lagi untuk file yang sama tanpa menjadi lebih cepat.
 
 <br>
 

@@ -120,6 +120,7 @@ flowchart LR
 | `tls_edge.zig` | TLS termination and ALPN selection |
 | `ws_tunnel.zig` | the rfc 6455 upgrade tunnel |
 | `static_files.zig` | files from `public_dir`, precompressed siblings, the spa fallback |
+| `static_cached.zig` | the shared table of already-open `public_dir` files, and taking an entry from it |
 | `acme_challenge.zig`, `acme_listener.zig` | the http-01 challenge plane and the port 80 companion |
 | `upstream_pool.zig`, `upstream_conn.zig` | round-robin picking, availability, idle keep-alive |
 | `upstream_deadline.zig`, `idle_reaper.zig` | the bound on one upstream read, the sweep that ages idle conns out |
@@ -225,6 +226,39 @@ gate is asked.
 
 <br>
 
+## The static plane
+
+A site with `public_dir` answers files itself, with no upstream involved. That
+is the point of the key: serving a built front-end needs zixer and nothing
+behind it.
+
+Two paths reach the same answer, and every site can use both:
+
+| path | what one request costs |
+| :- | :- |
+| uncached, the default | open, stat, read, close, plus one speculative open per precompressed sibling a browser asks for |
+| cached, `public_dir_cache_ttl_ms` above 0 | a hash lookup against a file already open, with the sibling choice settled when the entry was built |
+
+The table is the one `zix.utils.static_cache` builds, the same one the engines
+use. zixer keeps no table of its own, so a file costs one descriptor for the
+daemon rather than one per accept loop, which on a `workers: 0` machine is the
+difference between one and the thread count. Reads take no lock.
+
+The cache can never fail a request. A window of 0, a full table, an unreadable
+file, or a path too long to store all fall through to the uncached open, which
+is also what produces the 404 and the `spa_fallback` answer.
+
+How the body leaves depends on what the edge can promise:
+
+| site | body path | why |
+| :- | :- | :- |
+| cleartext http1, 64 KB and up | handed to the kernel, never enters zixer | nothing has to touch the bytes |
+| cleartext http1, under 64 KB | written with its own head in one go | one write beats a flush plus a syscall on its own segment |
+| TLS, any size | copied through the TLS writer | the bytes have to be encrypted |
+| http2 and http3 | copied into frames | every byte has to be framed, and http2 coalesces its writes |
+
+<br>
+
 ## Memory per connection
 
 One connection is one thread and one buffer block, so both scale with how many
@@ -309,6 +343,7 @@ An upstream that fails a connect is marked down and skipped by the round-robin p
 - Fail loudly at start, never halfway. A missing certificate file, a taken port, or an unbindable challenge port fails the `start` instead of leaving a site partly up.
 - Re-originate rather than forward. The edge owns the framing of what it sends.
 - One file, one responsibility. Each edge, each translation layer, and each command lives in its own file, which is why the module list above reads as a map of the behavior.
+- Share the engines' static cache rather than build a second one. It is already one table per process and lock-free to read, so a zixer-owned table would cost the same descriptors again for the same files and would not be faster.
 
 <br>
 
