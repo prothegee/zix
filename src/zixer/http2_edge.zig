@@ -10,6 +10,7 @@ const http1_proxy = @import("http1_proxy.zig");
 const http2_frames = @import("http2_frames.zig");
 const http2_translate = @import("http2_translate.zig");
 const http2_ws_bridge = @import("http2_ws_bridge.zig");
+const process_wait = @import("process_wait.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
@@ -590,6 +591,17 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
     const upstream_head = entry.head[0..entry.head_len];
     var continue_sent = false;
 
+    // One place in the site's gate per stream, not per connection: an h2
+    // client multiplexes many requests over one socket, and each of them
+    // spends a backend on its own.
+    const admission = process_wait.admit(conn.proxy.process_gate, io);
+    if (admission != .ADMITTED) {
+        return if (localAnswer(conn, active.id, 504, process_wait.PROXY_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
+    }
+
+    var slot = process_wait.hold(conn.proxy.process_gate);
+    defer slot.release();
+
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
     while (attempts > 0) : (attempts -= 1) {
@@ -1048,6 +1060,16 @@ fn serveConnect(conn: *Conn) Outcome {
     const upstream_head = conn.connect_head[0..conn.connect_head_len];
     var active = ActiveStream{ .id = conn.connect_id, .send_window = conn.peer_initial_window, .recv_done = true };
 
+    // The tunnel setup is gated, the tunnel itself is not: it lives as long
+    // as its client, so the slot goes back once the 101 is relayed.
+    const admission = process_wait.admit(conn.proxy.process_gate, io);
+    if (admission != .ADMITTED) {
+        return if (localAnswer(conn, active.id, 504, process_wait.PROXY_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
+    }
+
+    var slot = process_wait.hold(conn.proxy.process_gate);
+    defer slot.release();
+
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
     while (attempts > 0) : (attempts -= 1) {
@@ -1117,6 +1139,10 @@ fn serveConnect(conn: *Conn) Outcome {
             conn_up.stream.close(io);
             return .CONN_DEAD;
         }
+
+        // The upgrade is live from here, so the next request may have the
+        // slot. A handful of open tunnels must not pin the site's capacity.
+        slot.release();
 
         var conn_window = std.atomic.Value(i64).init(conn.conn_send_window);
         var stream_window = std.atomic.Value(i64).init(active.send_window);
@@ -1259,6 +1285,24 @@ fn nowMs(io: std.Io) i64 {
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+/// Attempts a fake backend makes at its fixed port, one per BIND_RETRY_MS.
+/// These ports sit inside this box's ephemeral range, so the kernel can be
+/// holding one for an outbound connection the moment a test asks for it.
+/// The hold is brief, so retrying rides it out instead of failing the run.
+const BIND_TRIES: usize = 50;
+const BIND_RETRY_MS: u64 = 10;
+
+fn bindWithRetry(io: std.Io, addr: std.Io.net.IpAddress) ?std.Io.net.Server {
+    var tries: usize = 0;
+    while (tries < BIND_TRIES) : (tries += 1) {
+        if (addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 })) |server| return server else |_| {}
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(BIND_RETRY_MS), .awake) catch {};
+    }
+
+    return null;
+}
 
 const testing = std.testing;
 
@@ -1413,7 +1457,7 @@ const FakeBackend = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -2323,7 +2367,7 @@ const SilentBackend = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
@@ -2538,7 +2582,7 @@ const PausingBackend = struct {
         const io = fake.io;
 
         const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
-        var server = addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 8 }) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
         defer server.deinit(io);
         fake.ready.store(true, .release);
 
