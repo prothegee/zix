@@ -71,7 +71,7 @@
 <br>
 
 <h4 align="center">
-    <b><i>Zig Build Main Branch Status:</i></b>
+    <b><i>Zix Build Main Branch Status:</i></b>
 </h4>
 <p align="center">
     <code><i>These built are not checking native docker/podman container</i></code>

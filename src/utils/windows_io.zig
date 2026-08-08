@@ -6,8 +6,8 @@
 //! - The engine fast paths talk to sockets through raw POSIX descriptors. On
 //!   Windows a socket is an AFD handle driven through ntdll (Zig 0.16 std does
 //!   the same), so these helpers issue the AFD send, receive, poll, and
-//!   partial-disconnect ioctls plus NtClose, each completed through its own
-//!   event, for the thread dispatch models.
+//!   partial-disconnect ioctls plus NtClose and NtCancelIoFileEx, each
+//!   completed through its own event, for the thread dispatch models.
 //! - The plain NtReadFile / NtWriteFile path is NOT used: raw AFD endpoints
 //!   (opened by std, not by Winsock) fail it with connection-abort statuses.
 //!   The ioctls here are the requests std itself issues for every socket
@@ -115,8 +115,13 @@ pub fn writeAll(handle: windows.HANDLE, data: []const u8) error{BrokenPipe}!void
 /// on a per-call event when the operation goes async. A graceful peer close
 /// completes with SUCCESS and 0 bytes, same as a POSIX read.
 ///
+/// Note:
+/// - A local read-side cut (shutdownRead below) completes a parked receive as
+///   CANCELLED and fails one issued after the cut as PIPE_DISCONNECTED. Both
+///   report 0 here, matching a POSIX read on a socket after SHUT_RD.
+///
 /// Return:
-/// - usize (bytes read, 0 when the peer closed)
+/// - usize (bytes read, 0 when the peer closed or the read side was cut)
 /// - error.BrokenPipe on any failed status
 pub fn readOnce(handle: windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
     const event = try createIoEvent();
@@ -151,6 +156,7 @@ pub fn readOnce(handle: windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
         status = iosb.u.Status;
     }
     if (status == .END_OF_FILE) return 0;
+    if (status == .CANCELLED or status == .PIPE_DISCONNECTED) return 0;
     if (status != .SUCCESS) return error.BrokenPipe;
 
     return iosb.Information;
@@ -181,6 +187,56 @@ pub fn shutdown(handle: windows.HANDLE) void {
         0,
     );
     if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+}
+
+/// The ntdll cancel entry point in its documented NULL-request form, which
+/// cancels every request pending on the handle from any thread. std's own
+/// binding (zig 0.16 and 0.17 alike) types the request pointer as required,
+/// so the cut declares the optional-pointer prototype under its own name.
+const NtCancelIoFileExAll = @extern(*const fn (
+    FileHandle: windows.HANDLE,
+    IoRequestToCancel: ?*const windows.IO_STATUS_BLOCK,
+    IoStatusBlock: *windows.IO_STATUS_BLOCK,
+) callconv(.winapi) windows.NTSTATUS, .{ .name = "NtCancelIoFileEx", .library_name = "ntdll" });
+
+/// Best-effort read-side shutdown of a socket handle, so a thread parked
+/// reading it wakes with end-of-stream while the send side stays usable.
+/// Mirrors shutdown(fd, SHUT_RD).
+///
+/// Note:
+/// - The receive-only disconnect alone never completes a receive already
+///   parked in the kernel (documented winsock SD_RECEIVE behavior: it only
+///   disallows later receives), so the cut also cancels every request pending
+///   on the handle. readOnce reports that completion as end-of-stream.
+/// - A write pending at the cut instant is cancelled with it and fails as
+///   BrokenPipe. Writes issued after the cut are unaffected, matching how the
+///   cut is used: wake the reader, then write the reply.
+pub fn shutdownRead(handle: windows.HANDLE) void {
+    const event = createIoEvent() catch return;
+    defer close(event);
+
+    var iosb: windows.IO_STATUS_BLOCK = undefined;
+    const info = windows.AFD.PARTIAL_DISCONNECT_INFO{
+        .DisconnectMode = .{ .SEND = false, .RECEIVE = true },
+        .Timeout = -1,
+    };
+
+    const status = windows.ntdll.NtDeviceIoControlFile(
+        handle,
+        event,
+        null,
+        null,
+        &iosb,
+        windows.IOCTL.AFD.PARTIAL_DISCONNECT,
+        @ptrCast(&info),
+        @sizeOf(windows.AFD.PARTIAL_DISCONNECT_INFO),
+        null,
+        0,
+    );
+    if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+
+    var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+    _ = NtCancelIoFileExAll(handle, null, &cancel_iosb);
 }
 
 /// Close a socket handle. Mirrors close(fd).

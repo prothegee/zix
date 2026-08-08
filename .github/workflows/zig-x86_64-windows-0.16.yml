@@ -54,30 +54,37 @@ jobs:
       # zig waits forever on an active test and buffers the child's stderr,
       # so the workflow kill loses every log line. With it, zig prints the
       # hung test's name plus its captured stderr and continues to the next
-      # test, so one run enumerates every hang. 240s is ~5x the slowest
-      # legitimate test on this runner (connect-retry ceiling ~3s).
+      # test, so one run enumerates every hang.
+      #
+      # timeout-minutes must stay well above --test-timeout, not equal to it.
+      # The step clock starts before checkout even finishes building the test
+      # binary, the --test-timeout clock only starts once a test is actually
+      # running, so an equal pair lets the step die first every time and zig
+      # never gets to print which test hung. The 5 minute gap below covers
+      # build and link plus the time zig needs to report the hang and move
+      # on to the remaining tests.
       - name: zix unit tests
-        timeout-minutes: 4
+        timeout-minutes: 12
         shell: pwsh
-        run: zig build unit-test --summary failures --test-timeout 240s
+        run: zig build unit-test --summary failures --test-timeout 420s
 
       - name: zix integration tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build integration-test --summary failures --test-timeout 240s
+        run: zig build integration-test --summary failures --test-timeout 360s
 
       - name: zix behaviour tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build behaviour-test --summary failures --test-timeout 240s
+        run: zig build behaviour-test --summary failures --test-timeout 360s
 
       - name: zix edge tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build edge-test --summary failures --test-timeout 240s
+        run: zig build edge-test --summary failures --test-timeout 360s
 
       # jzon is a standalone package under src/jzon with its own build.zig, so
       # these steps delegate into it. Its in-file tests belong to it too, which
@@ -85,15 +92,15 @@ jobs:
       # does not reach them.
       - name: jzon tests
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
-        run: zig build jzon-test-all -Ddriver-test-timeout=240s --summary failures
+        run: zig build jzon-test-all -Ddriver-test-timeout=360s --summary failures
 
       # jzon examples used to ride `zig build examples`. They live in the jzon
       # package now, so they get a step of their own to keep the coverage.
       - name: jzon examples
         if: always()
-        timeout-minutes: 4
+        timeout-minutes: 6
         shell: pwsh
         run: zig build jzon-examples --summary failures
 

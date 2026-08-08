@@ -67,8 +67,10 @@ pub const utils = struct {
     pub const http_range = @import("utils/http_range.zig");
     pub const dispatch_support = @import("utils/dispatch_support.zig");
     pub const fd_io = @import("utils/fd_io.zig");
+    pub const ignore_sigpipe = @import("utils/ignore_sigpipe.zig");
     pub const socket_pair = @import("utils/socket_pair.zig");
     pub const socket_poll = @import("utils/socket_poll.zig");
+    pub const socket_cut = @import("utils/socket_cut.zig");
     pub const secure_random = @import("utils/secure_random.zig");
     pub const async_cache = @import("utils/async_cache.zig");
     pub const socket_path = @import("utils/socket_path.zig");
@@ -267,6 +269,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/fd_io.zig"));
     std.testing.refAllDecls(@import("utils/socket_pair.zig"));
     std.testing.refAllDecls(@import("utils/socket_poll.zig"));
+    std.testing.refAllDecls(@import("utils/socket_cut.zig"));
     std.testing.refAllDecls(@import("utils/secure_random.zig"));
     std.testing.refAllDecls(@import("utils/async_cache.zig"));
     std.testing.refAllDecls(@import("utils/socket_path.zig"));
