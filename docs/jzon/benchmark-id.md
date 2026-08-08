@@ -109,8 +109,8 @@ Dari root paketnya:
 
 ```
 zig build example-bench_serialize example-bench_deserialize -Doptimize=ReleaseFast
-./zig-out/bin/jzon-example-bench_serialize-<arch>-<os>
-./zig-out/bin/jzon-example-bench_deserialize-<arch>-<os>
+./zig-out/bin/jzon-example-bench_serialize-<arch>-<os>-releasefast
+./zig-out/bin/jzon-example-bench_deserialize-<arch>-<os>-releasefast
 ```
 
 Build Debug mengukur safety check, bukan jalurnya, dan membuat barisnya saling menempel, jadi flag optimize di sini bukan pilihan.
