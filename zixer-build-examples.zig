@@ -21,10 +21,10 @@ const demos = [_][]const u8{
 /// `zig build zixer-example-<name>` builds one.
 ///
 /// Note:
-/// - Installed binaries carry the zixer- prefix and the target triplet
-///   (zixer-example-<name>-<arch>-<os>), so they never collide with the zix
-///   example binaries and building several targets in a row never overwrites a
-///   prior target's binary.
+/// - Installed binaries carry the zixer- prefix, the target triplet, and the
+///   optimize mode (zixer-example-<name>-<arch>-<os>-<optimize>), so they never
+///   collide with the zix example binaries and building several targets or
+///   several modes in a row never overwrites a prior binary.
 /// - A step builds and installs, it never runs: building the matrix must not
 ///   block on a server that serves forever.
 ///
@@ -41,10 +41,20 @@ pub fn addSteps(
 ) void {
     const triple = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
 
+    // The optimize mode, lowercased, is the last part of every installed name.
+    // No -Doptimize means Debug, so a plain build writes -debug. Spelled out
+    // rather than lowercased at runtime so a new mode is a compile error here.
+    const mode = switch (optimize) {
+        .Debug => "debug",
+        .ReleaseSafe => "releasesafe",
+        .ReleaseFast => "releasefast",
+        .ReleaseSmall => "releasesmall",
+    };
+
     const examples_step = b.step("zixer-examples", "Build every zixer proxy demo upstream");
 
     inline for (demos) |name| {
-        const install = &addDemo(b, target, optimize, zix, triple, name).step;
+        const install = &addDemo(b, target, optimize, zix, triple, mode, name).step;
         examples_step.dependOn(install);
 
         const single_step = b.step("zixer-example-" ++ name, "Build the zixer " ++ name ++ " proxy demo upstream");
@@ -59,6 +69,7 @@ pub fn addDemo(
     optimize: std.builtin.OptimizeMode,
     zix: *std.Build.Module,
     triple: []const u8,
+    mode: []const u8,
     comptime name: []const u8,
 ) *std.Build.Step.InstallArtifact {
     const demo_mod = b.createModule(.{
@@ -69,7 +80,7 @@ pub fn addDemo(
     demo_mod.addImport("zix", zix);
 
     const exe = b.addExecutable(.{
-        .name = b.fmt("zixer-example-{s}-{s}", .{ name, triple }),
+        .name = b.fmt("zixer-example-{s}-{s}-{s}", .{ name, triple, mode }),
         .root_module = demo_mod,
     });
 
