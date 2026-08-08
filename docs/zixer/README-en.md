@@ -105,6 +105,7 @@ Flat `key: value` lines, `#` comments, comma-separated lists, and integer math o
 | `public_dir`, `public_prefix`, `spa_fallback` | serve static files from this site |
 | `kernel_backlog`, `max_recv_buf` | listener tuning |
 | `upstream_timeout_ms` | how long the edge waits on a silent upstream before answering 504 |
+| `process_limit`, `process_queue_len`, `process_queue_timeout_ms` | overload valve, how many requests may run against the backends at once |
 
 A site needs `upstreams` or `public_dir`. Everything else has a default. See `config-en.md` for the per-key rules, which engine each applies to, and every fault message.
 

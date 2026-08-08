@@ -105,6 +105,7 @@ Baris `key: value` yang flat, komentar `#`, list dipisah koma, dan matematika in
 | `public_dir`, `public_prefix`, `spa_fallback` | menyajikan file static dari site ini |
 | `kernel_backlog`, `max_recv_buf` | tuning listener |
 | `upstream_timeout_ms` | berapa lama edge menunggu upstream yang diam sebelum menjawab 504 |
+| `process_limit`, `process_queue_len`, `process_queue_timeout_ms` | katup beban, berapa request yang boleh berjalan ke backend sekaligus |
 
 Sebuah site butuh `upstreams` atau `public_dir`. Selebihnya punya default. Lihat `config-id.md` untuk aturan tiap key, engine mana yang berlaku, dan tiap pesan fault.
 
