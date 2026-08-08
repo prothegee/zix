@@ -14,6 +14,7 @@ const process_gate = @import("process_gate.zig");
 const process_wait = @import("process_wait.zig");
 const proxy_headers = @import("proxy_headers.zig");
 const site_cfg = @import("site_cfg.zig");
+const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
 const tls_edge = @import("tls_edge.zig");
 const idle_reaper = @import("idle_reaper.zig");
@@ -108,6 +109,10 @@ pub const EdgeState = struct {
     /// How many requests this site may run upstream at once. One gate for
     /// the whole edge, shared by every request task the receive loop spawns.
     process_gate: process_gate.Gate,
+    /// How long a cached public_dir file stays fresh, already resolved from
+    /// the site file and the main.cfg default. Zero serves every static
+    /// request through the uncached open.
+    public_dir_cache_ttl_ms: u32,
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
@@ -189,6 +194,11 @@ pub const EdgeState = struct {
         ));
         errdefer gate.deinit(allocator);
 
+        // The table is process-wide, so this builds one only when no site has
+        // yet. A window of 0 builds none and every lookup falls through.
+        const cache_ttl_ms = static_cached.resolveTtl(cfg.public_dir_cache_ttl_ms, options.public_dir_cache_ttl_ms);
+        if (public_dir != null) static_cached.install(cache_ttl_ms, options.public_dir_cache_max_entries);
+
         state.* = .{
             .allocator = allocator,
             .io = io,
@@ -197,6 +207,7 @@ pub const EdgeState = struct {
             .idle = idle,
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
             .process_gate = gate,
+            .public_dir_cache_ttl_ms = if (public_dir == null) 0 else cache_ttl_ms,
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
@@ -628,15 +639,35 @@ fn misdirected(task: RequestTask, request: *const h3_translate.Request) bool {
 fn serveStatic(task: RequestTask, site: *const static_files.StaticSite, request: *const h3_translate.Request, accept_encoding: ?[]const u8) bool {
     const io = task.state.io;
 
+    const ttl_ms = task.state.public_dir_cache_ttl_ms;
+
+    if (static_cached.acquire(io, site.public_dir, request.target, accept_encoding, ttl_ms)) |hit| {
+        defer static_cached.release(hit);
+
+        sendFile(task, resolvedFromHit(hit), request.is_head);
+        return true;
+    }
+
     if (static_files.open(io, site.public_dir, request.target, accept_encoding)) |resolved| {
+        defer resolved.file.close(io);
+
         sendFile(task, resolved, request.is_head);
         return true;
     }
 
     if (site.spa_fallback) |fallback| {
-        var target_buf: [static_files.MAX_PATH]u8 = undefined;
+        var target_buf: [static_files.PUBLIC_PATH_MAX]u8 = undefined;
         if (std.fmt.bufPrint(&target_buf, "/{s}", .{fallback}) catch null) |fallback_target| {
+            if (static_cached.acquire(io, site.public_dir, fallback_target, accept_encoding, ttl_ms)) |hit| {
+                defer static_cached.release(hit);
+
+                sendFile(task, resolvedFromHit(hit), request.is_head);
+                return true;
+            }
+
             if (static_files.open(io, site.public_dir, fallback_target, accept_encoding)) |resolved| {
+                defer resolved.file.close(io);
+
                 sendFile(task, resolved, request.is_head);
                 return true;
             }
@@ -646,11 +677,27 @@ fn serveStatic(task: RequestTask, site: *const static_files.StaticSite, request:
     return false;
 }
 
+/// A cache entry in the shape the file sender already takes.
+fn resolvedFromHit(hit: static_cached.Hit) static_files.Resolved {
+    return .{
+        .file = hit.file,
+        .size = hit.size,
+        .content_type = hit.content_type,
+        .encoding = hit.encoding,
+    };
+}
+
 /// Write one resolved file as the response body.
+///
+/// Note:
+/// - The caller owns the descriptor. An uncached answer closes it after, a
+///   cached one leaves it to the table.
+/// - The body is copied into this stream's send buffer as it goes, so nothing
+///   here has to outlive the call and a plain hit is enough. Asking the table
+///   for a resident snapshot would hold a second copy for no gain.
 fn sendFile(task: RequestTask, resolved: static_files.Resolved, is_head: bool) void {
     const io = task.state.io;
-    var file = resolved.file;
-    defer file.close(io);
+    const file = resolved.file;
 
     var block_buf: [1024]u8 = undefined;
     const block = h3_translate.encodeStaticBlock(&block_buf, resolved.content_type, resolved.size, resolved.encoding.contentEncoding()) catch {
@@ -1800,9 +1847,9 @@ const FAKE_POLL_MS: u32 = 50;
 const FAKE_IDLE_SLICES: usize = 200;
 
 /// Attempts the fake backend makes at its fixed port, one per BIND_RETRY_MS.
-/// These ports sit inside this box's ephemeral range, so the kernel can be
-/// holding one for an outbound connection the moment a test asks for it.
-/// The hold is brief, so retrying rides it out instead of failing the run.
+/// These ports sit below the ephemeral range, so the kernel never hands one
+/// out as an outbound source port. What is left is a foreign process holding
+/// the port, and retrying rides a brief hold out instead of failing the run.
 const BIND_TRIES: usize = 50;
 const BIND_RETRY_MS: u64 = 10;
 
@@ -2327,4 +2374,76 @@ test "zix zixer: h3 edge, a silent upstream answers 504 with proxy status" {
 
     fake.release.store(true, .release);
     fake_thread.join();
+}
+
+test "zix zixer: h3 edge, a cached entry answers after the file leaves disk" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: h3 edge socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.writeFile(testing.io, .{ .sub_path = "page.html", .data = "<h1>h3 cached</h1>" }) catch @panic("fixture write failed");
+
+    var root_buf: [128]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var cfg = tlsCfg(18923, &.{});
+    cfg.public_dir = root;
+    cfg.public_dir_cache_ttl_ms = 60_000;
+
+    const socket = try bindSite(io, 18923);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18923, .{});
+    defer state.shutdown();
+    defer static_cached.shutdown(io);
+
+    try testing.expectEqual(@as(u32, 60_000), state.public_dir_cache_ttl_ms);
+
+    var client = try H3Client.connect(io, 18923);
+    defer client.close();
+
+    var body_buf: [4096]u8 = undefined;
+    var scratch: [h3_qpack.SCRATCH_BYTES]u8 = undefined;
+
+    const fields = getFields("localhost", "/page.html");
+    try client.request(0, &fields, "");
+    const first = try client.readResponse(0, &body_buf, &scratch);
+    try testing.expectEqualStrings("200", first.status());
+    try testing.expectEqualStrings("<h1>h3 cached</h1>", body_buf[0..first.body_len]);
+
+    // The entry holds the descriptor, so unlinking the name cannot reach it.
+    tmp.dir.deleteFile(testing.io, "page.html") catch @panic("fixture delete failed");
+
+    try client.request(4, &fields, "");
+    const second = try client.readResponse(4, &body_buf, &scratch);
+    try testing.expectEqualStrings("200", second.status());
+    try testing.expectEqualStrings("<h1>h3 cached</h1>", body_buf[0..second.body_len]);
+}
+
+test "zix zixer: h3 edge, a site with no public dir resolves the window to off" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: h3 edge socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18925 }};
+    const cfg = tlsCfg(18924, &upstreams);
+
+    const socket = try bindSite(io, 18924);
+    const state = try EdgeState.create(testing.allocator, io, socket, &cfg, 18924, .{ .public_dir_cache_ttl_ms = 5000 });
+    defer state.shutdown();
+
+    // The daemon asked for a window, but a proxy-only site has no files to
+    // cache, so no table is built and every lookup is skipped outright.
+    try testing.expectEqual(@as(u32, 0), state.public_dir_cache_ttl_ms);
+    try testing.expect(zix.utils.static_cache.instance() == null);
 }
