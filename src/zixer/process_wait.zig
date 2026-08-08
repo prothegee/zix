@@ -1,8 +1,11 @@
 //! zixer process gate wait: how a task-per-connection edge waits out a ticket
 
 const std = @import("std");
+const zix = @import("zix");
 
 const process_gate = @import("process_gate.zig");
+
+const monotonic_clock = zix.utils.monotonic_clock;
 
 /// How often a queued request looks at its ticket. The grpc and h3 relays
 /// already wait on this tick, so a queued request wakes on the cadence the
@@ -125,14 +128,14 @@ pub fn admitNow(gate: ?*process_gate.Gate) Outcome {
 /// - ADMITTED, the caller holds a process slot now
 /// - EXPIRED, the gate already took the place in line back
 pub fn waitTicket(gate: *process_gate.Gate, ticket: process_gate.Ticket, io: std.Io) Outcome {
-    const deadline_ms = nowMs(io) + gate.settings.timeout_ms;
+    const deadline_ms = monotonic_clock.nowMs(io) + gate.settings.timeout_ms;
 
     while (true) {
         if (gate.poll(ticket) == .ADMITTED) return .ADMITTED;
 
         // Checked after the poll so a budget that already elapsed still
         // takes a slot that arrived in the meantime.
-        if (nowMs(io) >= deadline_ms) {
+        if (monotonic_clock.nowMs(io) >= deadline_ms) {
             gate.abandon(ticket);
 
             return .EXPIRED;
@@ -149,10 +152,6 @@ pub fn waitTicket(gate: *process_gate.Gate, ticket: process_gate.Ticket, io: std
 /// Wrap an admitted slot so it can be released early or on the way out.
 pub fn hold(gate: ?*process_gate.Gate) Held {
     return .{ .gate = gate, .live = true };
-}
-
-fn nowMs(io: std.Io) i64 {
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
 // --------------------------------------------------------- //
@@ -198,10 +197,10 @@ test "zix zixer: process wait, a full waiting room is refused not delayed" {
 
     // No room at all, so this must come back now rather than sit out the
     // 30 second budget.
-    const began_ms = nowMs(threaded.io());
+    const began_ms = monotonic_clock.nowMs(threaded.io());
     try std.testing.expectEqual(Outcome.REFUSED, admit(&gate, threaded.io()));
 
-    try std.testing.expect(nowMs(threaded.io()) - began_ms < 1000);
+    try std.testing.expect(monotonic_clock.nowMs(threaded.io()) - began_ms < 1000);
 }
 
 test "zix zixer: process wait, a budget that runs out answers expired" {
