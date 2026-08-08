@@ -189,6 +189,50 @@ Prefix-nya wajib begitu sebuah site punya kedua plane plus sebuah fallback, kala
 
 Perhatikan bahwa path request digabungkan ke `public_dir` apa adanya, jadi `public_prefix: /assets` butuh direktori `assets/` yang nyata di dalam `public_dir`.
 
+### Membuat site static jadi cepat
+
+Tiap resep di atas membuka ulang file-nya pada tiap request. Lebih berat lagi,
+browser mengirim `Accept-Encoding: gzip, deflate, br`, jadi zixer mencari
+sibling `.br`, lalu sibling `.gz`, baru file-nya: tiga kali open untuk satu
+response kalau file itu tidak punya sibling.
+
+Satu key mengubahnya. File ditahan terbuka, pilihan sibling diputuskan sekali,
+dan request berikutnya cukup satu lookup:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+public_dir: /var/www/app/dist
+spa_fallback: index.html
+public_dir_cache_ttl_ms: 60000
+```
+
+Window itu sekaligus jalur reload-nya. File yang sudah diedit tetap melayani
+byte lamanya sampai window lewat, lalu request berikutnya membukanya ulang.
+Tidak ada yang perlu restart. Jadi pilih window sebagai jeda deploy yang bisa
+diterima:
+
+| file berubah | window yang dipakai |
+| :- | :- |
+| hanya saat deploy, bundle hasil build | `60000` ke atas, file-nya stabil antar rilis |
+| manual, sementara ada yang memantau browser | `1000`, satu reload sudah memperlihatkan perubahannya |
+| terus-menerus, digenerate per request | jangan dipakai, tiap entry sudah basi sebelum terpakai |
+
+Set `public_dir_cache_max_entries` di `main.cfg` bila site melayani lebih dari
+256 file. Key itu berlaku seluruh daemon, karena hanya ada satu table untuk
+seluruh proses dan tiap site memakainya bersama. Tidak ada versi per site untuk
+key tersebut.
+
+Satu site bisa memilih keluar sendiri dengan `public_dir_cache_ttl_ms: 0`
+sementara daemon tetap menyalakan cache untuk yang lain.
+
+Dua hal ikut didapat begitu ini menyala. File besar, 64 KB ke atas, langsung
+dari kernel ke socket di site http1 cleartext dan tidak pernah masuk memori
+zixer. Dan cache tidak pernah bisa merusak request: apa pun yang tidak bisa
+dijawabnya jatuh ke open biasa, yang juga jalan yang menghasilkan 404 dan
+halaman `spa_fallback`.
+
 ### Beberapa backend
 
 Request berputar di daftar itu. Backend yang menolak koneksi dilewati beberapa detik lalu dicoba lagi:
