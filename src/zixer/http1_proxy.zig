@@ -16,6 +16,8 @@ const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
 const ws_tunnel = @import("ws_tunnel.zig");
 
+const monotonic_clock = zix.utils.monotonic_clock;
+
 /// Bytes one static-file read moves into the client writer at a time.
 const FILE_CHUNK: usize = 16 * 1024;
 
@@ -515,7 +517,7 @@ fn exchange(
     var attempts: usize = pool.slots.len + 1;
     var failed_here: bool = false;
     while (attempts > 0) : (attempts -= 1) {
-        const picked = pool.pick(nowMs(io)) orelse {
+        const picked = pool.pick(monotonic_clock.nowMs(io)) orelse {
             // Nothing left to pick. When this exchange itself emptied the
             // pool the honest answer is the failure it saw, not 503.
             if (failed_here) break;
@@ -524,9 +526,9 @@ fn exchange(
             return .CLOSE;
         };
 
-        const conn = idle.acquire(io, picked.index, nowMs(io)) orelse
+        const conn = idle.acquire(io, picked.index, monotonic_clock.nowMs(io)) orelse
             upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
-            pool.markDown(picked.index, nowMs(io));
+            pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
         };
@@ -537,7 +539,7 @@ fn exchange(
 
         up_writer.interface.writeAll(upstream_head) catch {
             conn.stream.close(io);
-            if (!conn.reused) pool.markDown(picked.index, nowMs(io));
+            if (!conn.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
         };
@@ -561,7 +563,7 @@ fn exchange(
         up_writer.interface.flush() catch {
             conn.stream.close(io);
             if (no_body) {
-                if (!conn.reused) pool.markDown(picked.index, nowMs(io));
+                if (!conn.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
                 failed_here = true;
                 continue;
             }
@@ -584,7 +586,7 @@ fn exchange(
             if (no_body) {
                 // A stale idle conn answers EOF here. Bodyless requests are
                 // safe to replay, with a body the client already spent it.
-                if (!conn.reused) pool.markDown(picked.index, nowMs(io));
+                if (!conn.reused) pool.markDown(picked.index, monotonic_clock.nowMs(io));
                 failed_here = true;
                 continue;
             }
@@ -640,7 +642,7 @@ fn exchange(
         }
 
         const reusable = !relay_failed and !response.connection_close and response.framing != .until_close;
-        if (reusable) idle.release(io, conn, nowMs(io)) else conn.stream.close(io);
+        if (reusable) idle.release(io, conn, monotonic_clock.nowMs(io)) else conn.stream.close(io);
 
         if (relay_failed or edge_close) return .CLOSE;
 
@@ -768,10 +770,6 @@ fn writeEdgeError(client_w: *std.Io.Writer, status: u16, reason: []const u8, pro
         .{ status, reason, reason.len + 1, proxy_error, reason },
     ) catch return;
     client_w.flush() catch return;
-}
-
-fn nowMs(io: std.Io) i64 {
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
 // --------------------------------------------------------- //
