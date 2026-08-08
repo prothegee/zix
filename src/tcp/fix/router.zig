@@ -62,7 +62,10 @@ pub fn FixRouter(comptime routes: []const FixRoute) type {
 // --------------------------------------------------------- //
 
 test "zix fix: dispatch calls the matching handler" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const called = struct {
         var count: u32 = 0;
@@ -96,7 +99,10 @@ test "zix fix: dispatch calls the matching handler" {
 }
 
 test "zix fix: no match leaves handler uncalled" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const called = struct {
         var count: u32 = 0;
@@ -128,7 +134,10 @@ test "zix fix: no match leaves handler uncalled" {
 }
 
 test "zix fix: route timeout sets deadline_ns" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const noop = struct {
         fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {}
@@ -157,7 +166,10 @@ test "zix fix: route timeout sets deadline_ns" {
 }
 
 test "zix fix: route timeout tightens a wider server-wide deadline, never widens it" {
-    if (comptime @import("builtin").target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
 
     const noop = struct {
         fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {}

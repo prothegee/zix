@@ -195,7 +195,11 @@ test "zix fix: FixClient.connect port zero returns PortNotConfigured" {
 }
 
 test "zix fix: FixClient.recvMessage reassembles message split across two reads" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -245,7 +249,11 @@ test "zix fix: FixClient.recvMessage reassembles message split across two reads"
 }
 
 test "zix fix: FixClient.recvMessage returns error.RecvTimeout when nothing arrives" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {
@@ -318,7 +326,11 @@ test "zix fix: FixClient.sendMessage succeeds within send_timeout_ms when the pe
 }
 
 test "zix fix: FixClient.sendMessage returns error.SendTimeout when the peer's buffer is full" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
     defer {

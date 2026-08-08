@@ -345,7 +345,11 @@ test "zix tcp: Tcp.Server.initFramed, valid config succeeds and deinit is safe" 
 }
 
 test "zix tcp: applyConnTimeout, zero ms is no-op on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -361,7 +365,11 @@ test "zix tcp: applyConnTimeout, zero ms is no-op on real socket" {
 }
 
 test "zix tcp: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);
@@ -377,7 +385,11 @@ test "zix tcp: applyConnTimeout, sets SO_RCVTIMEO on real socket" {
 }
 
 test "zix tcp: applyConnTimeout, sets SO_SNDTIMEO on real socket" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     const sock_fd: std.posix.fd_t = @intCast(linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0));
     try std.testing.expect(sock_fd > 0);

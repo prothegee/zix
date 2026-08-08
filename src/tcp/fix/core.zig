@@ -1109,7 +1109,11 @@ test "zix fix: MsgType application two-char constants" {
 }
 
 test "zix fix: fixHeartbeatTick sends TestRequest then Logout on idle" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
@@ -1189,7 +1193,11 @@ test "zix fix: FixRequest.getField finds a tag and returns null for a missing on
 }
 
 test "zix fix: FixResponse.sendMessage is byte-identical to a direct buildMessage write" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
@@ -1253,7 +1261,11 @@ test "zix fix: FixContext.setTimeout mutates the deadline in place" {
 }
 
 test "zix fix: invokeHandler builds the trio and reaches the handler" {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.SkipZigTest;
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
     const linux = std.os.linux;
     var fds: [2]i32 = undefined;
     try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
