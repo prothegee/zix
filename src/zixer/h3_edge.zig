@@ -17,7 +17,7 @@ const site_cfg = @import("site_cfg.zig");
 const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
 const tls_edge = @import("tls_edge.zig");
-const idle_reaper = @import("idle_reaper.zig");
+const site_sweep = @import("site_sweep.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
@@ -94,8 +94,10 @@ const ConnSlot = struct {
 /// Note:
 /// - pool and idle exist only when the site has upstreams, a static-only site
 ///   leaves both null.
-/// - reaper runs only on a site that has an idle cache, and hands aged
-///   upstream connections back even while the site sits quiet.
+/// - sweeper runs only on a site that has an idle cache, and hands aged
+///   upstream connections back even while the site sits quiet. The client
+///   bound is not on it: a quic connection is not a socket the table can
+///   cut, so an h3 site carries no deadline table.
 /// - The QUIC handshake takes its ALPN ("h3") and its transport parameters
 ///   from the engine's flight builder, so the TLS context here supplies only
 ///   the certificate and its signing key.
@@ -105,7 +107,7 @@ pub const EdgeState = struct {
     socket: std.Io.net.Socket,
     pool: ?upstream_pool.Pool,
     idle: ?upstream_conn.IdleCache,
-    reaper: idle_reaper.Reaper = .{},
+    sweeper: site_sweep.Sweeper = .{},
     upstream_timeout_ms: u32,
     /// How many requests this site may run upstream at once. One gate for
     /// the whole edge, shared by every request task the receive loop spawns.
@@ -158,13 +160,15 @@ pub const EdgeState = struct {
         const state = try allocator.create(EdgeState);
         errdefer allocator.destroy(state);
 
+        const idle_ttl_ms = upstream_conn.resolveIdleTtl(cfg.upstream_idle_ttl_ms, options.upstream_idle_ttl_ms);
+
         var pool: ?upstream_pool.Pool = null;
         errdefer if (pool) |*inner| inner.deinit(allocator);
         var idle: ?upstream_conn.IdleCache = null;
         errdefer if (idle) |*inner| inner.deinit(allocator, io);
         if (cfg.upstreams.len > 0) {
             pool = try upstream_pool.Pool.init(allocator, cfg.upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
-            idle = try upstream_conn.IdleCache.init(allocator, cfg.upstreams.len);
+            idle = try upstream_conn.IdleCache.initShare(allocator, cfg.upstreams.len, 1, idle_ttl_ms);
         }
 
         const wake_ip = try allocator.dupe(u8, cfg.ip);
@@ -220,8 +224,8 @@ pub const EdgeState = struct {
 
         // One cache: a quic edge owns a single socket, so it has no workers
         // to divide the idle bound between.
-        if (state.idle) |*cache| try state.reaper.start(io, cache[0..1]);
-        errdefer state.reaper.stop();
+        if (state.idle) |*cache| try state.sweeper.start(io, cache[0..1], null, idle_ttl_ms);
+        errdefer state.sweeper.stop();
 
         state.thread = try std.Thread.spawn(.{}, receiveLoop, .{state});
 
@@ -240,7 +244,7 @@ pub const EdgeState = struct {
         wakeDatagram(io, state.wake_ip, state.port);
         if (state.thread) |thread| thread.join();
         state.tasks.cancel(io);
-        state.reaper.stop();
+        state.sweeper.stop();
 
         for (state.slots) |maybe_slot| {
             const slot = maybe_slot orelse continue;
