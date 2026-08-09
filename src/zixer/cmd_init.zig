@@ -23,6 +23,14 @@ const MAIN_CFG_TEMPLATE =
     \\process_queue_len: 0            # requests that may wait for a slot
     \\process_queue_timeout_ms: 6000  # wait before the edge answers 504
     \\
+    \\# client bound, per site, 0 = off
+    \\client_timeout_ms: 0            # whole client exchange before the edge cuts it
+    \\client_conn_limit: 4096         # connections tracked while the bound is on
+    \\
+    \\# upstream leg, site files may override
+    \\upstream_connect_timeout_ms: 5000   # connect wait before the edge answers 504
+    \\upstream_idle_ttl_ms: 5000          # unused backend conn kept for reuse, 0 = none
+    \\
 ;
 
 /// Fully commented site sample. The loader only reads files ending .cfg, so
@@ -54,6 +62,14 @@ const SAMPLE_SITE_CFG =
     \\# process_limit: 64
     \\# process_queue_len: 256
     \\# process_queue_timeout_ms: 6000
+    \\
+    \\# client bound for this site alone, 0 = off
+    \\# client_timeout_ms: 30 * 1000
+    \\# client_conn_limit: 4096
+    \\
+    \\# upstream leg for this site alone, needs upstreams
+    \\# upstream_connect_timeout_ms: 5000
+    \\# upstream_idle_ttl_ms: 5000
     \\
 ;
 
@@ -165,6 +181,14 @@ test "zix zixer: cmd init, scaffold is created and main.cfg validates clean" {
     try std.testing.expectEqual(@as(usize, 0), cfg.process_limit);
     try std.testing.expectEqual(@as(usize, 0), cfg.process_queue_len);
     try std.testing.expectEqual(@as(u32, 6000), cfg.process_queue_timeout_ms);
+
+    // The client bound ships off for the same reason: a fresh root must not
+    // start cutting connections a site has always been allowed to hold. The
+    // upstream leg ships with its bounds on, which is what it already ran.
+    try std.testing.expectEqual(@as(u32, 0), cfg.client_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 4096), cfg.client_conn_limit);
+    try std.testing.expectEqual(@as(u32, 5000), cfg.upstream_connect_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 5000), cfg.upstream_idle_ttl_ms);
 
     const sample_path = try std.fs.path.join(arena.allocator(), &.{ test_root, "sites", "example.cfg.sample" });
     try std.testing.expect(fileExists(io, sample_path));
