@@ -21,14 +21,15 @@ pub const ACME_HTTP_PORT: u16 = 80;
 ///   udp site with upstreams serves the per-flow forward (phases 3, 4, 7,
 ///   8, 9, and 10). Anything else binds and holds its socket, so the port
 ///   is owned and a collision surfaces at start time.
-/// - A TLS site with acme keys also owns the port 80 companion listener,
-///   see companionPort.
+/// - A TLS site with acme keys or force_https also owns the port 80
+///   companion listener, see companionPort.
 pub const SiteRuntime = struct {
     name: []const u8,
     engine: site_cfg.Engine,
     port: u16,
     listener: Listener,
-    /// The bound acme companion, held only by a TLS site with acme keys.
+    /// The bound cleartext companion, held by a TLS site with acme keys,
+    /// force_https, or both.
     challenge: ?*acme_listener.State = null,
 
     /// What the site holds: a serving proxy edge, a serving udp forward,
@@ -115,9 +116,10 @@ pub const SiteRuntime = struct {
         };
         errdefer closeListener(&listener, io);
 
-        // A TLS site with acme keys answers the CA on port 80 beside its
-        // main listener. A bind failure (port taken, no privilege) fails
-        // the whole start: a silent half-start would break renewal.
+        // A TLS site that asked for acme, force_https, or both answers on
+        // port 80 beside its main listener. A bind failure (port taken, no
+        // privilege) fails the whole start: a silent half-start would break
+        // renewal, and would leave cleartext clients with no answer at all.
         var challenge: ?*acme_listener.State = null;
         if (companionPort(&cfg)) |challenge_port| {
             const challenge_addr = std.Io.net.IpAddress.parse(cfg.ip, challenge_port) catch return error.SiteCfgIncomplete;
@@ -125,7 +127,7 @@ pub const SiteRuntime = struct {
 
             const challenge_server = try challenge_addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
-            challenge = acme_listener.State.create(allocator, io, challenge_server, cfg.acme_webroot, cfg.acme_proxy, cfg.ip, challenge_port, port) catch |err| {
+            challenge = acme_listener.State.create(allocator, io, challenge_server, cfg.acme_webroot, cfg.acme_proxy, cfg.ip, challenge_port, port, cfg.redirect_host) catch |err| {
                 var orphan = challenge_server;
                 orphan.deinit(io);
                 return err;
@@ -163,12 +165,30 @@ fn closeListener(listener: *SiteRuntime.Listener, io: std.Io) void {
     }
 }
 
-/// The companion challenge port a validated cfg calls for: port 80 on a
-/// TLS site with acme keys. A cleartext site answers the challenge path on
-/// its own listener, and a site already on 80 needs no companion.
+/// The cleartext companion port a validated cfg calls for: port 80 on a TLS
+/// site that has acme keys, force_https, or both.
+///
+/// Note:
+/// - Two jobs share one listener because both need the same thing, a
+///   cleartext ear on the port a CA and a browser each reach first. acme
+///   needs it to answer the challenge path (rfc 8555 8.3 allows port 80
+///   only), force_https needs it to redirect. A site that asks for both gets
+///   one listener doing both.
+/// - A cleartext site never gets one: it answers the challenge path on its
+///   own listener, and it has no https origin to redirect to.
+/// - A site already on port 80 needs no companion either, it is the port.
+///
+/// Param:
+/// cfg - *const site_cfg.SiteCfg (already validated)
+///
+/// Return:
+/// - u16 the companion port to bind
+/// - null when this site needs none
 pub fn companionPort(cfg: *const site_cfg.SiteCfg) ?u16 {
     if (!cfg.tls) return null;
-    if (cfg.acme_webroot == null and cfg.acme_proxy == null) return null;
+
+    const wants_acme = cfg.acme_webroot != null or cfg.acme_proxy != null;
+    if (!wants_acme and !cfg.force_https) return null;
     if ((cfg.port orelse 0) == ACME_HTTP_PORT) return null;
 
     return ACME_HTTP_PORT;
@@ -367,6 +387,29 @@ test "zix zixer: site runtime, companion port only for tls acme sites off 80" {
 
     const tls_on_80 = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 80, .tls = true, .acme_webroot = "/var/www/acme" };
     try std.testing.expectEqual(@as(?u16, null), companionPort(&tls_on_80));
+}
+
+test "zix zixer: site runtime, force_https earns the companion port on its own" {
+    // No acme anywhere, so the companion can only be the redirect asking for
+    // it.
+    const forced = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 443, .tls = true, .force_https = true };
+    try std.testing.expectEqual(@as(?u16, 80), companionPort(&forced));
+
+    // Both jobs asked for, still one listener.
+    const forced_with_acme = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 443, .tls = true, .force_https = true, .acme_webroot = "/var/www/acme" };
+    try std.testing.expectEqual(@as(?u16, 80), companionPort(&forced_with_acme));
+
+    // A quic site reaches its clients over tcp first, so it earns one too.
+    const quic = site_cfg.SiteCfg{ .engine = .HTTP3, .port = 443, .tls = true, .force_https = true };
+    try std.testing.expectEqual(@as(?u16, 80), companionPort(&quic));
+
+    // Nothing to redirect to, so nothing to bind.
+    const cleartext = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 8080, .force_https = true };
+    try std.testing.expectEqual(@as(?u16, null), companionPort(&cleartext));
+
+    // Already the port a browser reaches first.
+    const on_80 = site_cfg.SiteCfg{ .engine = .HTTP1, .port = 80, .tls = true, .force_https = true };
+    try std.testing.expectEqual(@as(?u16, null), companionPort(&on_80));
 }
 
 test "zix zixer: site runtime, owns port covers the main listener" {
