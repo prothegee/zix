@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Important:
-# - Sourced by build-all-targets.sh, build-all-targets-no_runner.sh, and
-#   trigger-github-ci.sh, not meant to run directly.
+# - Sourced by build-all-targets.sh, build-all-targets-no_runner.sh,
+#   trigger-ci-cross_compile.sh, and zixer-package.sh, not meant to run
+#   directly.
 # - Holds the shared platform list and array-membership check, plus (for the
 #   build-all-targets family) the ZIG_BIN/target-filter parsing, the sweep
 #   confirmation, one-leg build, and fan-out matrix runner.
+# - zixer-package.sh reads the platform list and the membership check only, it
+#   parses and confirms its own arguments because it takes a release too.
 set -euo pipefail
 
 targets=(
