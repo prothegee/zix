@@ -1,4 +1,4 @@
-//! zixer site runtime: the bound listener a started site owns
+//! zixer site runtime: the bound listener a started site owns, and the cleartext companion beside it
 
 const std = @import("std");
 
