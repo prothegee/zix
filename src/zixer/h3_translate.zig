@@ -2,6 +2,9 @@
 
 const std = @import("std");
 
+const cfg_headers = @import("cfg_headers.zig");
+const cfg_scanner = @import("cfg_scanner.zig");
+const fault = @import("fault.zig");
 const h3_qpack = @import("h3_qpack.zig");
 const http1_head = @import("http1_head.zig");
 const proxy_headers = @import("proxy_headers.zig");
@@ -140,12 +143,12 @@ fn validateRegularName(name: []const u8) Error!void {
 
 /// Build the h1 upstream head for one h3 request: filtered fields plus Host,
 /// Via, Forwarded, and zixer's own framing.
-pub fn buildUpstreamHead(buf: []u8, request: *const Request, fields: []const h3_qpack.Field, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme) Error![]const u8 {
+pub fn buildUpstreamHead(buf: []u8, request: *const Request, fields: []const h3_qpack.Field, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme, extra: cfg_headers.Block) Error![]const u8 {
     var fixed = std.Io.Writer.fixed(buf);
 
     fixed.print("{s} {s} HTTP/1.1\r\n", .{ request.method, request.target }) catch return error.BufferFull;
     fixed.print("Host: {s}\r\n", .{request.authority}) catch return error.BufferFull;
-    writeFilteredFields(&fixed, fields) catch return error.BufferFull;
+    writeFilteredFields(&fixed, fields, extra) catch return error.BufferFull;
     fixed.print("Via: {s}\r\n", .{VIA_H3}) catch return error.BufferFull;
     proxy_headers.writeForwarded(&fixed, client_addr, request.authority, scheme) catch return error.BufferFull;
 
@@ -157,6 +160,7 @@ pub fn buildUpstreamHead(buf: []u8, request: *const Request, fields: []const h3_
         }
     }
 
+    extra.write(&fixed) catch return error.BufferFull;
     fixed.writeAll("\r\n") catch return error.BufferFull;
 
     return fixed.buffered();
@@ -165,13 +169,16 @@ pub fn buildUpstreamHead(buf: []u8, request: *const Request, fields: []const h3_
 /// Write the end-to-end request headers: pseudo, host, and expect are zixer's
 /// own, the hop-by-hop set drops, and cookie fields coalesce into one h1 line
 /// (rfc 9114 4.2.1).
-fn writeFilteredFields(out: *std.Io.Writer, fields: []const h3_qpack.Field) !void {
+fn writeFilteredFields(out: *std.Io.Writer, fields: []const h3_qpack.Field, extra: cfg_headers.Block) !void {
     for (fields) |field| {
         if (field.name.len == 0 or field.name[0] == ':') continue;
         if (std.mem.eql(u8, field.name, "host")) continue;
         if (std.mem.eql(u8, field.name, "expect")) continue;
         if (std.mem.eql(u8, field.name, "cookie")) continue;
         if (proxy_headers.isStripped(field.name)) continue;
+
+        // The site's own line replaces the client's rather than joining it.
+        if (extra.owns(field.name)) continue;
 
         try out.print("{s}: {s}\r\n", .{ field.name, field.value });
     }
@@ -190,7 +197,7 @@ fn writeFilteredFields(out: *std.Io.Writer, fields: []const h3_qpack.Field) !voi
 /// Encode an upstream h1 response head as an h3 field section: names
 /// lowercase, hop-by-hop dropped, via appended, content-length re-emitted from
 /// zixer's own framing when it knows the length.
-pub fn encodeResponseBlock(block_buf: []u8, response: *const http1_head.ResponseHead, content_length: ?u64) Error![]const u8 {
+pub fn encodeResponseBlock(block_buf: []u8, response: *const http1_head.ResponseHead, content_length: ?u64, extra: cfg_headers.Block) Error![]const u8 {
     var encoder = h3_qpack.Encoder.init(block_buf);
 
     var status_text: [8]u8 = undefined;
@@ -200,6 +207,7 @@ pub fn encodeResponseBlock(block_buf: []u8, response: *const http1_head.Response
         if (proxy_headers.isStripped(header.name)) continue;
         if (proxy_headers.namedInConnection(header.name, response.connection_value)) continue;
         if (content_length != null and std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;
+        if (extra.owns(header.name)) continue;
 
         try writeLowerField(&encoder, header.name, header.value);
     }
@@ -210,11 +218,13 @@ pub fn encodeResponseBlock(block_buf: []u8, response: *const http1_head.Response
         try encoder.field("content-length", std.fmt.bufPrint(&len_text, "{d}", .{len}) catch unreachable);
     }
 
+    try writeExtraFields(&encoder, extra);
+
     return encoder.encoded();
 }
 
 /// Encode a local edge answer: bodyless, optional rfc 9209 Proxy-Status.
-pub fn encodeLocalBlock(block_buf: []u8, status: u16, proxy_error: ?[]const u8) Error![]const u8 {
+pub fn encodeLocalBlock(block_buf: []u8, status: u16, proxy_error: ?[]const u8, extra: cfg_headers.Block) Error![]const u8 {
     var encoder = h3_qpack.Encoder.init(block_buf);
 
     var status_text: [8]u8 = undefined;
@@ -229,22 +239,30 @@ pub fn encodeLocalBlock(block_buf: []u8, status: u16, proxy_error: ?[]const u8) 
 
     try encoder.field("via", VIA_H3);
 
+    try writeExtraFields(&encoder, extra);
+
     return encoder.encoded();
 }
 
 /// Encode the head for a resolved static file, mirroring the h1 static plane:
 /// content type from the identity name, Vary always, the content-encoding of a
 /// negotiated sibling.
-pub fn encodeStaticBlock(block_buf: []u8, content_type: []const u8, size: u64, content_encoding: ?[]const u8) Error![]const u8 {
+pub fn encodeStaticBlock(block_buf: []u8, content_type: []const u8, size: u64, content_encoding: ?[]const u8, extra: cfg_headers.Block) Error![]const u8 {
     var encoder = h3_qpack.Encoder.init(block_buf);
 
     try encoder.field(":status", "200");
-    try encoder.field("content-type", content_type);
+    if (!extra.owns("content-type")) try encoder.field("content-type", content_type);
+
     var len_text: [24]u8 = undefined;
     try encoder.field("content-length", std.fmt.bufPrint(&len_text, "{d}", .{size}) catch unreachable);
-    if (content_encoding) |token| try encoder.field("content-encoding", token);
-    try encoder.field("vary", "Accept-Encoding");
+    if (content_encoding) |token| {
+        if (!extra.owns("content-encoding")) try encoder.field("content-encoding", token);
+    }
+
+    if (!extra.owns("vary")) try encoder.field("vary", "Accept-Encoding");
     try encoder.field("via", VIA_H3);
+
+    try writeExtraFields(&encoder, extra);
 
     return encoder.encoded();
 }
@@ -260,6 +278,23 @@ pub fn encodeTrailerBlock(block_buf: []u8, trailers: []const http1_head.Header) 
     }
 
     return encoder.encoded();
+}
+
+/// Encode the site's [response_headers] into this section, one field each with
+/// its tokens filled in.
+///
+/// Note:
+/// - h3 carries every field on its own, so the compiled block's h1 byte view
+///   is unusable here and the per-line view is walked instead.
+fn writeExtraFields(encoder: *h3_qpack.Encoder, extra: cfg_headers.Block) Error!void {
+    if (extra.isEmpty()) return;
+
+    var value_buf: [cfg_headers.MAX_VALUE_BYTES]u8 = undefined;
+    for (extra.lines()) |line| {
+        const value = line.renderValue(&value_buf, extra.values) catch return error.BufferFull;
+
+        try writeLowerField(encoder, line.name, value);
+    }
 }
 
 /// h3 field names travel lowercase (rfc 9114 4.2). Names past the bound drop
@@ -381,7 +416,7 @@ test "zix zixer: h3 translate, a body without content length frames as chunked" 
     try testing.expect(request.content_length == null);
 
     var buf: [512]u8 = undefined;
-    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress(), .HTTPS);
+    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress(), .HTTPS, .{});
     try testing.expect(std.mem.indexOf(u8, head, "Transfer-Encoding: chunked\r\n") != null);
 
     const sized = [_]h3_qpack.Field{
@@ -392,7 +427,7 @@ test "zix zixer: h3 translate, a body without content length frames as chunked" 
         .{ .name = "content-length", .value = "7" },
     };
     const sized_request = try assemble(&sized, false);
-    const sized_head = try buildUpstreamHead(&buf, &sized_request, &sized, testAddress(), .HTTPS);
+    const sized_head = try buildUpstreamHead(&buf, &sized_request, &sized, testAddress(), .HTTPS, .{});
     try testing.expect(std.mem.indexOf(u8, sized_head, "Content-Length: 7\r\n") != null);
 
     // A promised body on an already ended stream is malformed.
@@ -412,7 +447,7 @@ test "zix zixer: h3 translate, the upstream head carries via, forwarded, and coa
 
     const request = try assemble(&fields, true);
     var buf: [512]u8 = undefined;
-    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress(), .HTTPS);
+    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress(), .HTTPS, .{});
 
     try testing.expect(std.mem.startsWith(u8, head, "GET /cart HTTP/1.1\r\n"));
     try testing.expect(std.mem.indexOf(u8, head, "Host: shop.test\r\n") != null);
@@ -428,7 +463,7 @@ test "zix zixer: h3 translate, a response head encodes back as a field section" 
     const response = try http1_head.parseResponse(raw, "POST");
 
     var block_buf: [512]u8 = undefined;
-    const block = try encodeResponseBlock(&block_buf, &response, 17);
+    const block = try encodeResponseBlock(&block_buf, &response, 17, .{});
 
     var scratch: [512]u8 = undefined;
     const section = try h3_qpack.decodeSection(block, &scratch);
@@ -443,7 +478,7 @@ test "zix zixer: h3 translate, a response head encodes back as a field section" 
 
 test "zix zixer: h3 translate, a local answer carries proxy status" {
     var block_buf: [256]u8 = undefined;
-    const block = try encodeLocalBlock(&block_buf, 502, "connection_refused");
+    const block = try encodeLocalBlock(&block_buf, 502, "connection_refused", .{});
 
     var scratch: [256]u8 = undefined;
     const section = try h3_qpack.decodeSection(block, &scratch);
@@ -452,7 +487,7 @@ test "zix zixer: h3 translate, a local answer carries proxy status" {
     try testing.expectEqualStrings("0", section.get("content-length").?);
     try testing.expectEqualStrings("zixer; error=\"connection_refused\"", section.get("proxy-status").?);
 
-    const plain = try encodeLocalBlock(&block_buf, 404, null);
+    const plain = try encodeLocalBlock(&block_buf, 404, null, .{});
     const plain_section = try h3_qpack.decodeSection(plain, &scratch);
     try testing.expectEqualStrings("404", plain_section.get(":status").?);
     try testing.expect(plain_section.get("proxy-status") == null);
@@ -460,7 +495,7 @@ test "zix zixer: h3 translate, a local answer carries proxy status" {
 
 test "zix zixer: h3 translate, a static answer carries type, length, and vary" {
     var block_buf: [256]u8 = undefined;
-    const block = try encodeStaticBlock(&block_buf, "text/css", 240, "br");
+    const block = try encodeStaticBlock(&block_buf, "text/css", 240, "br", .{});
 
     var scratch: [256]u8 = undefined;
     const section = try h3_qpack.decodeSection(block, &scratch);
@@ -487,4 +522,85 @@ test "zix zixer: h3 translate, trailers encode lowercase and drop hop by hop" {
     try testing.expectEqual(@as(usize, 1), section.len);
     try testing.expectEqualStrings("grpc-status", section.entries[0].name);
     try testing.expectEqualStrings("0", section.entries[0].value);
+}
+
+/// Compile one header section the way a site cfg would, for the h3 tests.
+fn testTable(arena: std.mem.Allocator, direction: cfg_headers.Direction, lines: []const cfg_scanner.Entry) !cfg_headers.Table {
+    var faults = fault.FaultList.init(arena);
+    const table = try cfg_headers.compile(arena, lines, direction, true, &faults);
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+
+    return table;
+}
+
+test "zix zixer: h3 translate, the field sections carry the site's response headers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const table = try testTable(arena.allocator(), .RESPONSE, &.{
+        .{ .key = "strict-transport-security", .value = "max-age=31536000", .line_no = 2 },
+        .{ .key = "X-Origin", .value = "$scheme://$host", .line_no = 3 },
+        .{ .key = "x-custom", .value = "site-wins", .line_no = 4 },
+    });
+    const extra = cfg_headers.Block{
+        .table = table,
+        .values = .{ .client_ip = "203.0.113.9", .scheme = "https", .host = "app.example" },
+    };
+
+    var scratch: [h3_qpack.SCRATCH_BYTES]u8 = undefined;
+    var block_buf: [2048]u8 = undefined;
+
+    const response = try http1_head.parseResponse(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Custom: origin-value\r\n\r\n",
+        "GET",
+    );
+    const head = try encodeResponseBlock(&block_buf, &response, 4, extra);
+    const head_section = try h3_qpack.decodeSection(head, &scratch);
+
+    try testing.expectEqualStrings("max-age=31536000", head_section.get("strict-transport-security").?);
+
+    // The name travels lowercase whatever the operator typed (rfc 9114 4.2).
+    try testing.expectEqualStrings("https://app.example", head_section.get("x-origin").?);
+    try testing.expectEqualStrings("site-wins", head_section.get("x-custom").?);
+
+    const local = try encodeLocalBlock(&block_buf, 504, "http_response_timeout", extra);
+    const local_section = try h3_qpack.decodeSection(local, &scratch);
+    try testing.expectEqualStrings("max-age=31536000", local_section.get("strict-transport-security").?);
+
+    const static = try encodeStaticBlock(&block_buf, "text/html", 12, null, extra);
+    const static_section = try h3_qpack.decodeSection(static, &scratch);
+    try testing.expectEqualStrings("max-age=31536000", static_section.get("strict-transport-security").?);
+    try testing.expectEqualStrings("text/html", static_section.get("content-type").?);
+}
+
+test "zix zixer: h3 translate, the upstream head carries the site's request headers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const table = try testTable(arena.allocator(), .REQUEST, &.{
+        .{ .key = "x-real-ip", .value = "$client_ip", .line_no = 2 },
+        .{ .key = "x-tenant", .value = "acme", .line_no = 3 },
+    });
+    const extra = cfg_headers.Block{
+        .table = table,
+        .values = .{ .client_ip = "203.0.113.9", .scheme = "https", .host = "app.example" },
+    };
+
+    const fields = [_]h3_qpack.Field{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "app.example" },
+        .{ .name = ":path", .value = "/api" },
+        .{ .name = "x-tenant", .value = "spoofed" },
+    };
+    const request = try assemble(&fields, true);
+
+    var head_buf: [http1_head.MAX_HEAD_BYTES + 512 + cfg_headers.MAX_BLOCK_BYTES]u8 = undefined;
+    const head = try buildUpstreamHead(&head_buf, &request, &fields, testAddress(), .HTTPS, extra);
+
+    try testing.expect(std.mem.indexOf(u8, head, "x-real-ip: 203.0.113.9\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "x-tenant: acme\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, head, "spoofed") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, head, "\r\n\r\n"));
 }

@@ -48,6 +48,8 @@ pub fn addBadLine(faults: *FaultList, bad: cfg_scanner.BadLine) !void {
         .MISSING_COLON => try faults.add(bad.text, "line {d} has no ':', write key: value", .{bad.line_no}),
         .EMPTY_KEY => try faults.add(bad.text, "line {d} has no key before ':'", .{bad.line_no}),
         .EMPTY_VALUE => try faults.add(bad.text, "line {d} has no value after ':'", .{bad.line_no}),
+        .UNCLOSED_SECTION => try faults.add(bad.text, "line {d} opens '[' without closing ']' at the end, write [section_name]", .{bad.line_no}),
+        .EMPTY_SECTION => try faults.add(bad.text, "line {d} has no name between the brackets, write [section_name]", .{bad.line_no}),
     }
 }
 
@@ -92,6 +94,18 @@ test "zix zixer: fault list, bad lines carry their line number" {
 
     try std.testing.expectEqualStrings("no colon", faults.slice()[0].key);
     try std.testing.expectEqualStrings("line 7 has no ':', write key: value", faults.slice()[0].hint);
+}
+
+test "zix zixer: fault list, a broken section line says how to write one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = FaultList.init(arena.allocator());
+    try addBadLine(&faults, .{ .text = "[response_headers", .line_no = 3, .reason = .UNCLOSED_SECTION });
+    try addBadLine(&faults, .{ .text = "[]", .line_no = 4, .reason = .EMPTY_SECTION });
+
+    try std.testing.expectEqualStrings("line 3 opens '[' without closing ']' at the end, write [section_name]", faults.slice()[0].hint);
+    try std.testing.expectEqualStrings("line 4 has no name between the brackets, write [section_name]", faults.slice()[1].hint);
 }
 
 test "zix zixer: fault list, evalNumber faults instead of failing" {

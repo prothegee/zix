@@ -2,6 +2,7 @@
 
 const std = @import("std");
 
+const cfg_headers = @import("cfg_headers.zig");
 const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const deadline_table = @import("deadline_table.zig");
@@ -84,6 +85,12 @@ pub const SiteCfg = struct {
     ///   and its size is fixed the first time a site needs it, so only main.cfg
     ///   sets public_dir_cache_max_entries.
     public_dir_cache_ttl_ms: ?u32 = null,
+    /// Headers this site adds to every answer it sends a client, compiled from
+    /// the [response_headers] section. Empty when the file has no such section.
+    response_headers: cfg_headers.Table = .{},
+    /// Headers this site adds to every request it sends an upstream, compiled
+    /// from the [request_headers] section. Empty when the file has none.
+    request_headers: cfg_headers.Table = .{},
 };
 
 /// Known site cfg keys. Field names mirror the cfg key strings exactly so
@@ -119,6 +126,25 @@ const Key = enum {
     public_dir_cache_max_entries,
 };
 
+/// Known site cfg sections. Field names mirror the cfg section spelling
+/// exactly so stringToEnum does the lookup, hence lower_case here.
+const Section = enum {
+    response_headers,
+    request_headers,
+};
+
+/// Which part of the file the scan is standing in.
+///
+/// Note:
+/// - unknown is not an error state to recover from: the section line already
+///   faulted, and every line under it is skipped so one bad header does not
+///   also read as a pile of unknown keys.
+const Cursor = union(enum) {
+    flat,
+    section: Section,
+    unknown,
+};
+
 /// Parse and validate one site cfg content.
 ///
 /// Note:
@@ -136,6 +162,10 @@ const Key = enum {
 pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.FaultList) !SiteCfg {
     var cfg = SiteCfg{};
     var seen: std.EnumSet(Key) = .empty;
+    var seen_sections: std.EnumSet(Section) = .empty;
+    var cursor: Cursor = .flat;
+    var response_lines: std.ArrayList(cfg_scanner.Entry) = .empty;
+    var request_lines: std.ArrayList(cfg_scanner.Entry) = .empty;
 
     var scanner = cfg_scanner.Scanner.init(content);
     while (scanner.next()) |line| {
@@ -144,8 +174,46 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
                 try fault.addBadLine(faults, bad);
                 continue;
             },
+            .section => |header| {
+                cursor = .unknown;
+
+                const section = std.meta.stringToEnum(Section, header.name) orelse {
+                    try faults.add(header.name, "unknown section, remove it or fix the typo", .{});
+                    continue;
+                };
+
+                if (seen_sections.contains(section)) {
+                    try faults.add(header.name, "duplicate section on line {d}, keep one block", .{header.line_no});
+                    continue;
+                }
+                seen_sections.insert(section);
+
+                cursor = .{ .section = section };
+                continue;
+            },
             .entry => |entry| entry,
         };
+
+        switch (cursor) {
+            .flat => {},
+            .unknown => continue,
+            .section => |section| {
+                // A site key written below a section line would otherwise
+                // become a header of that name, and the port the operator
+                // meant to set would never take.
+                if (std.meta.stringToEnum(Key, entry.key) != null) {
+                    try faults.add(entry.key, "is a site key, move it above the first [section] line", .{});
+                    continue;
+                }
+
+                switch (section) {
+                    .response_headers => try response_lines.append(arena, entry),
+                    .request_headers => try request_lines.append(arena, entry),
+                }
+
+                continue;
+            },
+        }
 
         const key = std.meta.stringToEnum(Key, entry.key) orelse {
             try faults.add(entry.key, "unknown key, remove it or fix the typo", .{});
@@ -384,13 +452,38 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
         }
     }
 
-    try validate(&cfg, seen, faults);
+    try validate(&cfg, seen, seen_sections, faults);
+
+    // Compiled last, for two reasons: the tls flag HSTS needs is only settled
+    // once the whole file is scanned, and a site that may not carry a section
+    // at all has already been told once by validate, so its lines are not
+    // walked again to say the same thing per line.
+    if (headersApply(&cfg, .RESPONSE)) {
+        cfg.response_headers = try cfg_headers.compile(arena, response_lines.items, .RESPONSE, cfg.tls, faults);
+    }
+    if (headersApply(&cfg, .REQUEST)) {
+        cfg.request_headers = try cfg_headers.compile(arena, request_lines.items, .REQUEST, cfg.tls, faults);
+    }
 
     return cfg;
 }
 
+/// Whether this site has the leg a header section is written on.
+///
+/// Note:
+/// - A udp site forwards blind datagrams, so neither leg carries headers.
+/// - The request leg only exists where there is an upstream to send to.
+fn headersApply(cfg: *const SiteCfg, direction: cfg_headers.Direction) bool {
+    if (cfg.engine == .UDP) return false;
+
+    return switch (direction) {
+        .RESPONSE => true,
+        .REQUEST => cfg.upstreams.len != 0,
+    };
+}
+
 /// Cross-field rules, run after the scan so every field is in place.
-fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultList) !void {
+fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), seen_sections: std.EnumSet(Section), faults: *fault.FaultList) !void {
     if (!seen.contains(.engine)) try faults.add("engine", "missing, set one of http1, http2, grpc, http3, udp", .{});
     if (!seen.contains(.port)) try faults.add("port", "missing, set 1-65535", .{});
 
@@ -443,6 +536,12 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
     if (cfg.upstreams.len == 0) {
         if (cfg.upstream_connect_timeout_ms != null) try faults.add("upstream_connect_timeout_ms", "needs upstreams", .{});
         if (cfg.upstream_idle_ttl_ms != null) try faults.add("upstream_idle_ttl_ms", "needs upstreams", .{});
+
+        // The response section still applies: a static site answers a client
+        // too. There is just no request leg to write anything on.
+        if (seen_sections.contains(.request_headers)) {
+            try faults.add("request_headers", "needs upstreams, a site answering from public_dir has no upstream leg", .{});
+        }
     }
 
     // Only checkable when the site names both: a null bound inherits the
@@ -526,6 +625,11 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
 
             if (cfg.acme_webroot != null) try faults.add("acme_webroot", "does not apply to udp sites, remove it", .{});
             if (cfg.acme_proxy != null) try faults.add("acme_proxy", "does not apply to udp sites, remove it", .{});
+
+            // Blind datagrams carry no header on either leg, so a section
+            // here would be accepted and never written.
+            if (seen_sections.contains(.response_headers)) try faults.add("response_headers", "does not apply to udp sites, remove it", .{});
+            if (seen_sections.contains(.request_headers)) try faults.add("request_headers", "does not apply to udp sites, remove it", .{});
         },
     }
 }
@@ -1439,4 +1543,239 @@ test "zix zixer: site cfg, the upstream connect and idle keys are refused where 
     try testing.expectEqual(@as(usize, 2), over_faults.slice().len);
     try testing.expectEqual(@as(?u32, null), over.upstream_connect_timeout_ms);
     try testing.expectEqual(@as(?u32, null), over.upstream_idle_ttl_ms);
+}
+
+test "zix zixer: site cfg, both header sections compile and keep the flat keys above them" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: http1\n" ++
+        "port: 8443\n" ++
+        "tls: true\n" ++
+        "tls_cert: /certs/fullchain.pem\n" ++
+        "tls_key: /certs/privkey.pem\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "\n" ++
+        "[response_headers]\n" ++
+        "x-frame-options: DENY\n" ++
+        "strict-transport-security: max-age=31536000\n" ++
+        "\n" ++
+        "[request_headers]\n" ++
+        "x-real-ip: $client_ip\n" ++
+        "x-forwarded-proto: $scheme\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expectEqual(@as(u16, 8443), cfg.port.?);
+    try testing.expectEqual(@as(usize, 1), cfg.upstreams.len);
+
+    var response_buf: [128]u8 = undefined;
+    var response_out = std.Io.Writer.fixed(&response_buf);
+    try cfg.response_headers.write(&response_out, .{});
+    try testing.expectEqualStrings(
+        "x-frame-options: DENY\r\nstrict-transport-security: max-age=31536000\r\n",
+        response_out.buffered(),
+    );
+
+    var request_buf: [128]u8 = undefined;
+    var request_out = std.Io.Writer.fixed(&request_buf);
+    try cfg.request_headers.write(&request_out, .{ .client_ip = "192.0.2.60", .scheme = "https" });
+    try testing.expectEqualStrings(
+        "x-real-ip: 192.0.2.60\r\nx-forwarded-proto: https\r\n",
+        request_out.buffered(),
+    );
+}
+
+test "zix zixer: site cfg, a site with no section carries two empty tables" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "engine: http1\nport: 8080\nupstreams: 127.0.0.1:3000\n", &faults);
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expect(cfg.response_headers.isEmpty());
+    try testing.expect(cfg.request_headers.isEmpty());
+}
+
+test "zix zixer: site cfg, a section runs to the end of the file so the flat keys come first" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // Nothing closes a section, so a file that opens one at the top has put
+    // every site key inside it. Each is refused by name rather than silently
+    // becoming a header, and the site is then told what is missing.
+    const content =
+        "[response_headers]\n" ++
+        "x-frame-options: DENY\n" ++
+        "engine: http1\n" ++
+        "port: 8443\n" ++
+        "tls: true\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    var misplaced: usize = 0;
+    var missing_engine = false;
+    var missing_port = false;
+    for (faults.slice()) |item| {
+        if (std.mem.eql(u8, item.hint, "is a site key, move it above the first [section] line")) misplaced += 1;
+        if (std.mem.eql(u8, item.key, "engine") and std.mem.eql(u8, item.hint, "missing, set one of http1, http2, grpc, http3, udp")) missing_engine = true;
+        if (std.mem.eql(u8, item.key, "port") and std.mem.eql(u8, item.hint, "missing, set 1-65535")) missing_port = true;
+    }
+
+    try testing.expectEqual(@as(usize, 3), misplaced);
+    try testing.expect(missing_engine);
+    try testing.expect(missing_port);
+
+    // The one real header line still compiled, and the site keys stayed out
+    // of the table.
+    try testing.expect(cfg.response_headers.owns("x-frame-options"));
+    try testing.expect(!cfg.response_headers.owns("port"));
+}
+
+test "zix zixer: site cfg, a site key written below a section is refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: http1\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "[response_headers]\n" ++
+        "x-frame-options: DENY\n" ++
+        "port: 8080\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    // Two faults, and the second is the point: the port never took, so the
+    // site is told it is missing rather than starting on a port nobody set.
+    try testing.expectEqual(@as(usize, 2), faults.slice().len);
+    try testing.expectEqualStrings("port", faults.slice()[0].key);
+    try testing.expectEqualStrings("is a site key, move it above the first [section] line", faults.slice()[0].hint);
+    try testing.expectEqualStrings("port", faults.slice()[1].key);
+    try testing.expectEqualStrings("missing, set 1-65535", faults.slice()[1].hint);
+    try testing.expectEqual(@as(?u16, null), cfg.port);
+    try testing.expect(!cfg.response_headers.owns("port"));
+}
+
+test "zix zixer: site cfg, an unknown section faults once and swallows its lines" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: http1\n" ++
+        "port: 8080\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "[headers]\n" ++
+        "x-frame-options: DENY\n" ++
+        "x-content-type-options: nosniff\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    // One fault, not three: the two lines under it are not also reported as
+    // unknown keys, which would bury the one problem worth fixing.
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("headers", faults.slice()[0].key);
+    try testing.expectEqualStrings("unknown section, remove it or fix the typo", faults.slice()[0].hint);
+    try testing.expect(cfg.response_headers.isEmpty());
+}
+
+test "zix zixer: site cfg, the same section twice is refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: http1\n" ++
+        "port: 8080\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "[response_headers]\n" ++
+        "x-frame-options: DENY\n" ++
+        "[response_headers]\n" ++
+        "x-content-type-options: nosniff\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("duplicate section on line 6, keep one block", faults.slice()[0].hint);
+
+    // The first block still compiled, the second was dropped whole.
+    try testing.expect(cfg.response_headers.owns("x-frame-options"));
+    try testing.expect(!cfg.response_headers.owns("x-content-type-options"));
+}
+
+test "zix zixer: site cfg, a static site keeps the response section and loses the request one" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: http1\n" ++
+        "port: 8080\n" ++
+        "public_dir: /var/www/app\n" ++
+        "[response_headers]\n" ++
+        "x-frame-options: DENY\n" ++
+        "[request_headers]\n" ++
+        "x-real-ip: $client_ip\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("request_headers", faults.slice()[0].key);
+    try testing.expectEqualStrings("needs upstreams, a site answering from public_dir has no upstream leg", faults.slice()[0].hint);
+
+    try testing.expect(cfg.response_headers.owns("x-frame-options"));
+    try testing.expect(cfg.request_headers.isEmpty());
+}
+
+test "zix zixer: site cfg, a udp site refuses both header sections" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: udp\n" ++
+        "port: 50000\n" ++
+        "upstreams: 127.0.0.1:50001\n" ++
+        "[response_headers]\n" ++
+        "x-frame-options: DENY\n" ++
+        "[request_headers]\n" ++
+        "x-real-ip: $client_ip\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    try testing.expectEqual(@as(usize, 2), faults.slice().len);
+    try testing.expectEqualStrings("response_headers", faults.slice()[0].key);
+    try testing.expectEqualStrings("does not apply to udp sites, remove it", faults.slice()[0].hint);
+    try testing.expectEqualStrings("request_headers", faults.slice()[1].key);
+
+    // Told once, not once per line, and neither table was built.
+    try testing.expect(cfg.response_headers.isEmpty());
+    try testing.expect(cfg.request_headers.isEmpty());
+}
+
+test "zix zixer: site cfg, a header line that breaks a rule faults inside its own section" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const content =
+        "engine: http1\n" ++
+        "port: 8080\n" ++
+        "upstreams: 127.0.0.1:3000\n" ++
+        "[response_headers]\n" ++
+        "strict-transport-security: max-age=1\n" ++
+        "x-frame-options: DENY\n";
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, &faults);
+
+    try testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try testing.expectEqualStrings("strict-transport-security", faults.slice()[0].key);
+    try testing.expectEqualStrings("needs tls: true, a cleartext answer must not carry HSTS (rfc 6797 7.2)", faults.slice()[0].hint);
+    try testing.expect(cfg.response_headers.owns("x-frame-options"));
 }

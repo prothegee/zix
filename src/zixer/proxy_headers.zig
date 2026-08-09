@@ -62,6 +62,31 @@ pub fn stripHostPort(host: []const u8) []const u8 {
     return host;
 }
 
+/// Widest address text a client can produce: a full ipv6 literal in brackets
+/// with its port.
+pub const CLIENT_IP_MAX: usize = 64;
+
+/// The client's address with no port, which is what a header naming one
+/// address is expected to carry.
+///
+/// Note:
+/// - An ipv6 client comes back bare, without its brackets, because the
+///   brackets exist to separate the address from a port that is not here.
+///
+/// Param:
+/// buf - []u8 (scratch, CLIENT_IP_MAX bytes, must outlive the returned slice)
+/// addr - std.Io.net.IpAddress (the accepted connection's peer)
+///
+/// Return:
+/// - []const u8, a slice into buf
+/// - "" when the address does not fit, which no real address does
+pub fn clientIp(buf: []u8, addr: std.Io.net.IpAddress) []const u8 {
+    var out = std.Io.Writer.fixed(buf);
+    out.print("{f}", .{addr}) catch return "";
+
+    return stripHostPort(out.buffered());
+}
+
 /// Write the Forwarded header line for one client (rfc 7239).
 ///
 /// Note:
@@ -124,6 +149,24 @@ test "zix zixer: proxy headers, host port strip keeps every literal shape" {
     try std.testing.expectEqualStrings("::1", stripHostPort("[::1]"));
     try std.testing.expectEqualStrings("fe80::1:2", stripHostPort("fe80::1:2"));
     try std.testing.expectEqualStrings("", stripHostPort(""));
+}
+
+test "zix zixer: proxy headers, the client ip token drops the port and the brackets" {
+    var buf: [CLIENT_IP_MAX]u8 = undefined;
+
+    const ip4 = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 60 }, .port = 51000 } };
+    try std.testing.expectEqualStrings("192.0.2.60", clientIp(&buf, ip4));
+
+    const loopback = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 8080 } };
+    try std.testing.expectEqualStrings("127.0.0.1", clientIp(&buf, loopback));
+
+    const ip6 = try std.Io.net.IpAddress.parse("2001:db8::1", 443);
+    try std.testing.expectEqualStrings("2001:db8::1", clientIp(&buf, ip6));
+
+    // A buffer too small for the address answers empty rather than a cut-off
+    // address, which would name a different client.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("", clientIp(&tiny, ip4));
 }
 
 test "zix zixer: proxy headers, forwarded line quotes the node and carries host" {

@@ -106,6 +106,13 @@ pub fn parse(
                 try fault.addBadLine(faults, bad);
                 continue;
             },
+            // main.cfg is flat on purpose. A section here would need a rule
+            // for how it merges into every site, and there is none, so the
+            // operator is sent to the file that does own sections.
+            .section => |section| {
+                try faults.add(section.name, "sections belong in a site cfg, main.cfg takes plain key: value lines only", .{});
+                continue;
+            },
             .entry => |entry| entry,
         };
 
