@@ -6,10 +6,11 @@ const zix = @import("zix");
 const acme_challenge = @import("acme_challenge.zig");
 const bind_options = @import("bind_options.zig");
 const conn_buffer = @import("conn_buffer.zig");
+const deadline_table = @import("deadline_table.zig");
 const http1_proxy = @import("http1_proxy.zig");
-const idle_reaper = @import("idle_reaper.zig");
 const process_gate = @import("process_gate.zig");
 const site_cfg = @import("site_cfg.zig");
+const site_sweep = @import("site_sweep.zig");
 const site_worker = @import("site_worker.zig");
 const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
@@ -35,9 +36,13 @@ const WAKE_ROUNDS_PER_WORKER: usize = 200;
 /// - tls_ctx exists only when the site terminates TLS: built from the cfg
 ///   cert / key paths at create, so a restart re-reads renewed cert files
 ///   (the certbot deploy-hook path). Every worker reads the same one.
-/// - reaper runs only on a site that has idle caches, and hands aged
-///   upstream connections back even while the site sits quiet. One thread
-///   sweeps every worker's cache.
+/// - sweeper runs on a site that has idle caches, a client bound, or both.
+///   One thread hands aged upstream connections back even while the site
+///   sits quiet, and cuts client connections past their budget. A site with
+///   neither never starts it.
+/// - client_table is the whole site's, not one per worker: the limit has to
+///   mean connections into this site, and workers follows the thread count.
+///   Empty (and allocating nothing) unless the site configured a bound.
 pub const ServeState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -45,7 +50,14 @@ pub const ServeState = struct {
     workers: []site_worker.Worker,
     pools: []upstream_pool.Pool,
     idles: []upstream_conn.IdleCache,
-    reaper: idle_reaper.Reaper = .{},
+    sweeper: site_sweep.Sweeper = .{},
+    /// The site's client bound: how long one exchange may take, and the
+    /// slots that track them.
+    client_bound: deadline_table.Settings,
+    client_table: deadline_table.Table,
+    /// How long a connect to an upstream may take, already resolved. Zero
+    /// waits on whatever the operating system decides.
+    upstream_connect_timeout_ms: u32,
     upstream_timeout_ms: u32,
     /// One leg's stream buffer size, already resolved from the site file
     /// and the main.cfg default. Every connection this site accepts
@@ -103,13 +115,15 @@ pub const ServeState = struct {
         const state = try allocator.create(ServeState);
         errdefer allocator.destroy(state);
 
+        const idle_ttl_ms = upstream_conn.resolveIdleTtl(cfg.upstream_idle_ttl_ms, options.upstream_idle_ttl_ms);
+
         var pools: []upstream_pool.Pool = &.{};
         errdefer freePools(allocator, pools);
         var idles: []upstream_conn.IdleCache = &.{};
         errdefer freeIdles(allocator, io, idles);
         if (cfg.upstreams.len > 0) {
             pools = try buildPools(allocator, cfg.upstreams, worker_total);
-            idles = try buildIdles(allocator, io, cfg.upstreams.len, worker_total);
+            idles = try buildIdles(allocator, io, cfg.upstreams.len, worker_total, idle_ttl_ms);
         }
 
         const wake_ip = try allocator.dupe(u8, cfg.ip);
@@ -152,6 +166,16 @@ pub const ServeState = struct {
         ));
         errdefer gate.deinit(allocator);
 
+        // A site with no client bound builds no table and allocates nothing
+        // for one, so the edges never pay for a bound the site did not ask
+        // for.
+        const client_bound = deadline_table.resolve(cfg.client_timeout_ms, cfg.client_conn_limit, .{
+            .timeout_ms = options.client_timeout_ms,
+            .conn_limit = options.client_conn_limit,
+        });
+        var client_table = try deadline_table.Table.init(allocator, client_bound.capacity());
+        errdefer client_table.deinit(allocator);
+
         // The table is process-wide and shared by every site, so this only
         // builds one the first time any site asks. A window of 0 builds none.
         const cache_ttl_ms = static_cached.resolveTtl(cfg.public_dir_cache_ttl_ms, options.public_dir_cache_ttl_ms);
@@ -164,6 +188,9 @@ pub const ServeState = struct {
             .workers = workers_slice,
             .pools = pools,
             .idles = idles,
+            .client_bound = client_bound,
+            .client_table = client_table,
+            .upstream_connect_timeout_ms = upstream_conn.resolveConnectTimeout(cfg.upstream_connect_timeout_ms, options.upstream_connect_timeout_ms),
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
             .stream_buf_bytes = conn_buffer.resolve(cfg.max_recv_buf, options.max_recv_buf),
             .process_gate = gate,
@@ -198,8 +225,13 @@ pub const ServeState = struct {
             };
         }
 
-        if (state.idles.len > 0) try state.reaper.start(io, state.idles);
-        errdefer state.reaper.stop();
+        // One thread for both sweeps, and none at all for a site with
+        // nothing to sweep: a static site with no client bound holds no
+        // state that ages.
+        if (state.idles.len > 0 or state.client_table.armed()) {
+            try state.sweeper.start(io, state.idles, &state.client_table, idle_ttl_ms);
+        }
+        errdefer state.sweeper.stop();
 
         try startWorkers(state);
 
@@ -222,9 +254,10 @@ pub const ServeState = struct {
         for (state.workers) |*worker| worker.join();
         for (state.workers) |*worker| worker.cancelConns();
         for (state.workers) |*worker| worker.closeIdleListener();
-        state.reaper.stop();
+        state.sweeper.stop();
 
         state.allocator.free(state.workers);
+        state.client_table.deinit(state.allocator);
         state.process_gate.deinit(state.allocator);
         freeIdles(state.allocator, io, state.idles);
         freePools(state.allocator, state.pools);
@@ -272,15 +305,16 @@ fn buildPools(allocator: std.mem.Allocator, upstreams: []const site_cfg.Upstream
     return pools;
 }
 
-/// One idle cache per worker, each holding its share of the site's bound.
-fn buildIdles(allocator: std.mem.Allocator, io: std.Io, slot_count: usize, worker_total: usize) ![]upstream_conn.IdleCache {
+/// One idle cache per worker, each holding its share of the site's bound and
+/// all of them keeping a connection for the same configured age.
+fn buildIdles(allocator: std.mem.Allocator, io: std.Io, slot_count: usize, worker_total: usize, idle_ttl_ms: i64) ![]upstream_conn.IdleCache {
     const idles = try allocator.alloc(upstream_conn.IdleCache, worker_total);
     errdefer allocator.free(idles);
 
     var built: usize = 0;
     errdefer for (idles[0..built]) |*idle| idle.deinit(allocator, io);
     while (built < worker_total) : (built += 1) {
-        idles[built] = try upstream_conn.IdleCache.initShare(allocator, slot_count, worker_total);
+        idles[built] = try upstream_conn.IdleCache.initShare(allocator, slot_count, worker_total, idle_ttl_ms);
     }
 
     return idles;
@@ -326,9 +360,12 @@ fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
         .acme = acme,
         .tls_cert_der = if (state.tls_ctx) |ctx| ctx.cert_der else null,
         .upstream_timeout_ms = state.upstream_timeout_ms,
+        .upstream_connect_timeout_ms = state.upstream_connect_timeout_ms,
         .allocator = state.allocator,
         .stream_buf_bytes = state.stream_buf_bytes,
         .process_gate = &state.process_gate,
+        .client_table = &state.client_table,
+        .client_timeout_ms = state.client_bound.timeout_ms,
         .public_dir_cache_ttl_ms = state.public_dir_cache_ttl_ms,
     };
 }
@@ -602,7 +639,7 @@ test "zix zixer: site serve, tls site terminates and serves the static plane" {
     rebound.deinit(io);
 }
 
-test "zix zixer: site serve, the cfg read bound reaches the state and starts a reaper" {
+test "zix zixer: site serve, the cfg read bound reaches the state and starts a sweeper" {
     if (comptime @import("builtin").os.tag != .linux) {
         std.log.info("this test drives a Linux socket wire, test skipped", .{});
         return;
@@ -626,14 +663,14 @@ test "zix zixer: site serve, the cfg read bound reaches the state and starts a r
 
     const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18953, .{ .kernel_backlog = 8 });
     try std.testing.expectEqual(@as(u32, 1234), state.upstream_timeout_ms);
-    try std.testing.expect(state.reaper.thread != null);
+    try std.testing.expect(state.sweeper.thread != null);
     state.shutdown();
 
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
     rebound.deinit(io);
 }
 
-test "zix zixer: site serve, a site without upstreams takes the default and no reaper" {
+test "zix zixer: site serve, a site without upstreams takes the default and no sweeper" {
     if (comptime @import("builtin").os.tag != .linux) {
         std.log.info("this test drives a Linux socket wire, test skipped", .{});
         return;
@@ -655,7 +692,7 @@ test "zix zixer: site serve, a site without upstreams takes the default and no r
 
     const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18955, .{ .kernel_backlog = 8 });
     try std.testing.expectEqual(upstream_deadline.DEFAULT_MS, state.upstream_timeout_ms);
-    try std.testing.expect(state.reaper.thread == null);
+    try std.testing.expect(state.sweeper.thread == null);
     state.shutdown();
 
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
@@ -782,9 +819,9 @@ test "zix zixer: site serve, every worker owns its own pool and idle cache" {
     for (state.idles) |idle| site_total += idle.total_cap;
     try std.testing.expect(site_total <= upstream_conn.TOTAL_IDLE_CAP);
 
-    // One reaper thread covers all three caches.
-    try std.testing.expect(state.reaper.thread != null);
-    try std.testing.expectEqual(@as(usize, 3), state.reaper.caches.len);
+    // One sweep thread covers all three caches.
+    try std.testing.expect(state.sweeper.thread != null);
+    try std.testing.expectEqual(@as(usize, 3), state.sweeper.caches.len);
 
     state.shutdown();
 
@@ -1010,4 +1047,142 @@ test "zix zixer: site serve, a site with no public dir builds no cache table" {
 
     state.shutdown();
     try std.testing.expect(!port_probe.isTaken(io, addr));
+}
+
+test "zix zixer: site serve, a bounded site sizes its table and reaches every worker" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve client bound test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18926,
+        .public_dir = "/var/www/static-test",
+        .client_timeout_ms = 20_000,
+        .client_conn_limit = 128,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18926);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    // The site names both, so neither daemon default is what runs.
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18926, .{
+        .workers = 2,
+        .kernel_backlog = 8,
+        .client_timeout_ms = 5_000,
+        .client_conn_limit = 4096,
+    });
+
+    try std.testing.expectEqual(@as(u32, 20_000), state.client_bound.timeout_ms);
+    try std.testing.expectEqual(@as(usize, 128), state.client_table.slots.len);
+    try std.testing.expect(state.client_table.armed());
+
+    // One table for the site, and every worker holds the same one: a limit
+    // split per worker would mean a different number on every box.
+    for (state.workers) |*worker| {
+        try std.testing.expectEqual(&state.client_table, worker.proxy.client_table.?);
+        try std.testing.expectEqual(@as(u32, 20_000), worker.proxy.client_timeout_ms);
+    }
+
+    // A static site has no idle cache, so this thread exists for the client
+    // bound alone.
+    try std.testing.expectEqual(@as(usize, 0), state.idles.len);
+    try std.testing.expect(state.sweeper.thread != null);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, a site with no bound allocates no table" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve unbounded site test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18927,
+        .public_dir = "/var/www/static-test",
+        .client_timeout_ms = 0,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18927);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    // The site turned the bound off for itself while the daemon runs one, so
+    // no slot is allocated and no connection can be refused for lack of one.
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18927, .{
+        .kernel_backlog = 8,
+        .client_timeout_ms = 30_000,
+        .client_conn_limit = 4096,
+    });
+
+    try std.testing.expect(!state.client_table.armed());
+    try std.testing.expectEqual(@as(usize, 0), state.client_table.slots.len);
+    try std.testing.expect(state.sweeper.thread == null);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, the idle age resolves the site over the daemon" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve idle age test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18929 }};
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18928,
+        .upstreams = &upstreams,
+        .upstream_idle_ttl_ms = 45_000,
+        .upstream_connect_timeout_ms = 250,
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18928);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18928, .{
+        .workers = 3,
+        .kernel_backlog = 8,
+        .upstream_idle_ttl_ms = 5_000,
+        .upstream_connect_timeout_ms = 9_000,
+    });
+
+    // The age is a site value, so every worker's cache holds a connection
+    // for the same wait, and the sweep interval follows it.
+    for (state.idles) |cache| try std.testing.expectEqual(@as(i64, 45_000), cache.ttl_ms);
+    try std.testing.expectEqual(@as(i64, 22_500), state.sweeper.idle_interval_ms);
+    try std.testing.expectEqual(@as(u32, 250), state.upstream_connect_timeout_ms);
+
+    for (state.workers) |*worker| try std.testing.expectEqual(@as(u32, 250), worker.proxy.upstream_connect_timeout_ms);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
 }
