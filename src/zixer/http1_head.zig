@@ -11,7 +11,12 @@ pub const MAX_HEADERS: usize = 64;
 
 pub const Error = error{
     HeadTooLarge,
+    /// The peer went away between messages, before a single byte of the next
+    /// head. Nothing was asked, so nothing is owed.
     ConnectionClosed,
+    /// The peer went away part way through a head. A request was started and
+    /// never finished, which is the one end the sender is owed a status for.
+    PartialHead,
     BadHead,
     TooManyHeaders,
     BadContentLength,
@@ -74,19 +79,25 @@ pub const ResponseHead = struct {
 ///
 /// Return:
 /// - []const u8 the head bytes including the final CRLFCRLF
-/// - error.ConnectionClosed when the peer closes before a full head
+/// - error.ConnectionClosed when the peer closes with no head started
+/// - error.PartialHead when the peer closes part way through one
 /// - error.HeadTooLarge when buf fills without a blank line
 pub fn readHead(reader: *std.Io.Reader, buf: []u8) Error![]const u8 {
     var len: usize = 0;
     while (len < buf.len) {
-        const got = reader.readSliceShort(buf[len .. len + 1]) catch return error.ConnectionClosed;
-        if (got == 0) return error.ConnectionClosed;
+        const got = reader.readSliceShort(buf[len .. len + 1]) catch return endedAt(len);
+        if (got == 0) return endedAt(len);
 
         len += 1;
         if (len >= 4 and std.mem.eql(u8, buf[len - 4 .. len], "\r\n\r\n")) return buf[0..len];
     }
 
     return error.HeadTooLarge;
+}
+
+/// Which end a stopped read was, told by how much of the head had arrived.
+fn endedAt(len: usize) Error {
+    return if (len == 0) error.ConnectionClosed else error.PartialHead;
 }
 
 /// Parse one request head as read by readHead.
@@ -318,5 +329,24 @@ test "zix zixer: http1 head, readHead stops at the blank line and bounds the hea
 
     var cut = std.Io.Reader.fixed("GET / HT");
     var cut_buf: [128]u8 = undefined;
-    try std.testing.expectError(error.ConnectionClosed, readHead(&cut, &cut_buf));
+    try std.testing.expectError(error.PartialHead, readHead(&cut, &cut_buf));
+}
+
+test "zix zixer: http1 head, a started head and a silent connection end apart" {
+    // Nothing was ever asked, which is what a kept-alive connection looks like
+    // when the client is finished with it.
+    var silent = std.Io.Reader.fixed("");
+    var silent_buf: [128]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, readHead(&silent, &silent_buf));
+
+    // One byte is enough to be a request in progress.
+    var started = std.Io.Reader.fixed("G");
+    var started_buf: [128]u8 = undefined;
+    try std.testing.expectError(error.PartialHead, readHead(&started, &started_buf));
+
+    // A head three bytes short of its blank line is the shape a dribbling
+    // client leaves behind.
+    var nearly = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: a\r\n\r");
+    var nearly_buf: [128]u8 = undefined;
+    try std.testing.expectError(error.PartialHead, readHead(&nearly, &nearly_buf));
 }
