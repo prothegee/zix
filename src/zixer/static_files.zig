@@ -4,6 +4,8 @@ const std = @import("std");
 
 const zix = @import("zix");
 
+const cfg_headers = @import("cfg_headers.zig");
+
 const compression = zix.utils.compression;
 
 /// Longest joined path (public_dir plus the request path) this resolver serves,
@@ -115,12 +117,34 @@ pub fn open(io: std.Io, public_dir: []const u8, target: []const u8, accept_encod
 /// Write the 200 head for a resolved file. Vary rides on every response so
 /// an intermediary never hands a compressed body to a client that did not
 /// ask for one.
-pub fn writeResolvedHead(out: *std.Io.Writer, resolved: *const Resolved, edge_close: bool) !void {
-    try out.print("HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n", .{ resolved.content_type, resolved.size });
-    if (resolved.encoding.contentEncoding()) |token| try out.print("Content-Encoding: {s}\r\n", .{token});
+///
+/// Note:
+/// - A name the site's cfg sets is left out here, so the configured line
+///   replaces this one instead of standing beside it. Two lines of the same
+///   name read as one comma-joined value (rfc 9110 5.2), which would make a
+///   Content-Type unusable.
+///
+/// Param:
+/// out - *std.Io.Writer (the client leg)
+/// resolved - *const Resolved (the file this head describes)
+/// edge_close - bool (whether this exchange ends the connection)
+/// extra - cfg_headers.Block (the site's [response_headers], empty when none)
+///
+/// Return:
+/// - void
+pub fn writeResolvedHead(out: *std.Io.Writer, resolved: *const Resolved, edge_close: bool, extra: cfg_headers.Block) !void {
+    try out.writeAll("HTTP/1.1 200 OK\r\n");
+    if (!extra.owns("content-type")) try out.print("Content-Type: {s}\r\n", .{resolved.content_type});
 
-    try out.writeAll("Vary: Accept-Encoding\r\n");
+    try out.print("Content-Length: {d}\r\n", .{resolved.size});
+    if (resolved.encoding.contentEncoding()) |token| {
+        if (!extra.owns("content-encoding")) try out.print("Content-Encoding: {s}\r\n", .{token});
+    }
+
+    if (!extra.owns("vary")) try out.writeAll("Vary: Accept-Encoding\r\n");
     if (edge_close) try out.writeAll("Connection: close\r\n");
+
+    try extra.write(out);
     try out.writeAll("\r\n");
 }
 
@@ -330,7 +354,7 @@ test "zix zixer: static files, resolved head carries vary and encoding" {
 
     var head_buf: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&head_buf);
-    try writeResolvedHead(&out, &brotli, false);
+    try writeResolvedHead(&out, &brotli, false, .{});
     const head = out.buffered();
 
     try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 200 OK\r\n"));
@@ -346,7 +370,7 @@ test "zix zixer: static files, resolved head carries vary and encoding" {
 
     var close_buf: [512]u8 = undefined;
     var close_out = std.Io.Writer.fixed(&close_buf);
-    try writeResolvedHead(&close_out, &plain, true);
+    try writeResolvedHead(&close_out, &plain, true, .{});
     const close_head = close_out.buffered();
 
     try testing.expect(std.mem.indexOf(u8, close_head, "Content-Encoding") == null);
