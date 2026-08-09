@@ -41,6 +41,15 @@ orders.jsonl
 /tests/public
 /tests/logs
 /tests/runner/public
+/*.a
+/*.so
+/*.pdb
+/*.exe
+/*.exec
+/docs/index.html
+/docs/main.js
+/docs/main.wasm
+/docs/sources.tar
 
 ##
 ## extension
