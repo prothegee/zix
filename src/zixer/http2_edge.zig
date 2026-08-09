@@ -4,6 +4,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const http1_head = @import("http1_head.zig");
 const http1_proxy = @import("http1_proxy.zig");
@@ -88,6 +89,9 @@ const Conn = struct {
     client_w: *std.Io.Writer,
     client_addr: std.Io.net.IpAddress,
     client_stream: ?std.Io.net.Stream,
+    /// This connection's slot in the site's client bound, taken by whoever
+    /// accepted it.
+    lease: *client_lease.Lease,
     /// The upstream leg's buffers. One stream is served at a time, so the
     /// whole connection shares one pair.
     buffers: conn_buffer.Set,
@@ -125,9 +129,22 @@ pub fn prefersH2(client_r: *std.Io.Reader) bool {
 /// Serve one accepted cleartext connection of an http2 site: the h2
 /// preface picks the h2 loop, anything else falls back to the h1 edge
 /// (rfc 9113 3.3, prior knowledge only, the h1 Upgrade path is gone).
+///
+/// Note:
+/// - The site's client bound is taken before anything is read, so a refused
+///   connection never parks a thread waiting for a preface that may never
+///   arrive. That leaves the refusal with no way to know which dialect the
+///   client speaks, so it answers h2, the one this site exists for.
 pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stream) void {
     const io = proxy.io;
     defer client_stream.close(io);
+
+    var lease = client_lease.Lease.open(proxy.client_table, io, client_stream.socket.handle, proxy.client_timeout_ms) orelse {
+        refuseFull(io, client_stream);
+
+        return;
+    };
+    defer lease.release();
 
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
     defer buffers.deinit(proxy.allocator);
@@ -136,11 +153,25 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
     var client_writer = client_stream.writer(io, buffers.client_write);
 
     if (prefersH2(&client_reader.interface)) {
-        serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream);
+        serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, &lease);
         return;
     }
 
-    http1_proxy.serveLoop(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, client_stream.socket.handle);
+    http1_proxy.serveLoop(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, client_stream.socket.handle, &lease);
+}
+
+/// Answer a connection the site had no slot for: the h2 way to say a connection
+/// is over before a single stream opens on it.
+///
+/// Note:
+/// - Written off the stack, and every failure is swallowed: the site is at its
+///   ceiling, so a refusal that cannot be delivered is not worth a retry.
+fn refuseFull(io: std.Io, client_stream: std.Io.net.Stream) void {
+    var refusal_buf: [64]u8 = undefined;
+    var refusal_writer = client_stream.writer(io, &refusal_buf);
+
+    http2_frames.writeImmediateGoaway(&refusal_writer.interface, Http2.ERR_ENHANCE_YOUR_CALM) catch return;
+    refusal_writer.interface.flush() catch {};
 }
 
 /// The h2 request loop over reader / writer interfaces (plain stream or a
@@ -154,7 +185,10 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
 ///   DATA cannot wait, and the client retries safely.
 /// - client_stream is the raw socket behind the interfaces, the rfc 8441
 ///   tunnel needs it to unblock a waiting frame read.
-pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream) void {
+/// - lease is the connection's slot in the site's client bound, already taken
+///   by whoever accepted the connection. A caller with no bound to enforce
+///   passes a lease over nothing.
+pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, lease: *client_lease.Lease) void {
     var preface: [Http2.PREFACE.len]u8 = undefined;
     client_r.readSliceAll(&preface) catch return;
     if (!std.mem.eql(u8, &preface, Http2.PREFACE)) return;
@@ -175,6 +209,7 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
         .client_w = client_w,
         .client_addr = client_addr,
         .client_stream = client_stream,
+        .lease = lease,
         .buffers = buffers,
         .decoder = Http2.HpackDecoder.init(),
     };
@@ -182,8 +217,18 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
     mainLoop(&conn);
 }
 
+/// The connection frame loop.
+///
+/// Note:
+/// - The client bound means something different here than on an h1 connection:
+///   one budget cannot cover several streams at once, so it covers the quiet
+///   instead. The connection is held while it has work and armed again only
+///   while it waits for the next client frame, which is the shape a connection
+///   opened and then left idle takes.
 fn mainLoop(conn: *Conn) void {
     while (true) {
+        conn.lease.holdStream();
+
         while (conn.queue_len != 0) {
             const entry = &conn.queue[conn.queue_head];
             const outcome = if (entry.dead) Outcome.DONE else serveEntry(conn, entry);
@@ -208,6 +253,7 @@ fn mainLoop(conn: *Conn) void {
             return;
         }
 
+        conn.lease.armRequest();
         if (processFrame(conn, null) == .CLOSED) return;
     }
 }
@@ -2542,7 +2588,8 @@ test "zix zixer: http2 edge, the proxied head and body leave in one write" {
     var probe: SegmentProbe = .{ .writer = undefined };
     probe.bind();
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18956);
-    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+    var lease = client_lease.Lease.none;
+    serveSession(&proxy, &client_r, &probe.writer, addr, null, &lease);
 
     fake_thread.join();
 
@@ -2599,7 +2646,8 @@ test "zix zixer: http2 edge, the static head and body leave in one write" {
     var probe: SegmentProbe = .{ .writer = undefined };
     probe.bind();
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18957);
-    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+    var lease = client_lease.Lease.none;
+    serveSession(&proxy, &client_r, &probe.writer, addr, null, &lease);
 
     try testing.expectEqual(@as(usize, 3), probe.segment_count);
 
@@ -2638,7 +2686,8 @@ test "zix zixer: http2 edge, a bodyless answer still leaves on its own" {
     var probe: SegmentProbe = .{ .writer = undefined };
     probe.bind();
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18958);
-    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+    var lease = client_lease.Lease.none;
+    serveSession(&proxy, &client_r, &probe.writer, addr, null, &lease);
 
     try testing.expectEqual(@as(usize, 3), probe.segment_count);
 
@@ -2721,7 +2770,8 @@ test "zix zixer: http2 edge, a streaming head leaves before its first chunk" {
     var probe: SegmentProbe = .{ .writer = undefined };
     probe.bind();
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18959);
-    serveSession(&proxy, &client_r, &probe.writer, addr, null);
+    var lease = client_lease.Lease.none;
+    serveSession(&proxy, &client_r, &probe.writer, addr, null, &lease);
 
     fake_thread.join();
 
@@ -2859,4 +2909,205 @@ test "zix zixer: http2 edge, a resident entry frames a body larger than one payl
 
     client.stream.close(io);
     edge_thread.join();
+}
+
+// --------------------------------------------------------- //
+
+const deadline_sweep = @import("deadline_sweep.zig");
+const deadline_table = @import("deadline_table.zig");
+
+/// One served h2 connection plus a flag its thread sets on the way out, so a
+/// test can tell the edge let go instead of waiting on a join that may hang.
+const ServeProbe = struct {
+    proxy: *const http1_proxy.Proxy,
+    stream: std.Io.net.Stream,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(probe: *ServeProbe) void {
+        serveConn(probe.proxy, probe.stream);
+        probe.done.store(true, .release);
+    }
+};
+
+test "zix zixer: http2 edge, a site at its connection limit goes away at once" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    const proxy = http1_proxy.Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&fds);
+    const holder = edgeStream(fds[0]);
+
+    // The site's only slot is already spoken for, so the connection under test
+    // arrives at a full table.
+    try testing.expect(table.claim(holder.socket.handle, deadline_table.NEVER_MS) == .TAKEN);
+
+    var refused_fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&refused_fds);
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(refused_fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(refused_fds[1]);
+
+    // The answer is h2 even though the client has not said a word: reading the
+    // preface first is what a refused connection must never be made to wait
+    // for.
+    var read_buf: [512]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var payload_buf: [64]u8 = undefined;
+
+    const settings = try http2_frames.readFrame(&reader.interface, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_SETTINGS), settings.head.frame_type);
+
+    const goaway = try http2_frames.readFrame(&reader.interface, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_GOAWAY), goaway.head.frame_type);
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, goaway.payload[0..4], .big));
+    try testing.expectEqual(Http2.ERR_ENHANCE_YOUR_CALM, std.mem.readInt(u32, goaway.payload[4..8], .big));
+
+    thread.join();
+    try testing.expect(probe.done.load(.acquire));
+    client.close(io);
+    holder.close(io);
+    edgeStream(fds[1]).close(io);
+
+    // The refused connection never took a slot of its own.
+    try testing.expectEqual(@as(usize, 1), table.liveCount());
+}
+
+test "zix zixer: http2 edge, a quiet connection re-arms per frame and is cut in the end" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    const proxy = http1_proxy.Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&fds);
+
+    // Stamped before the connection exists, so the deadline the accept armed
+    // is at most a few milliseconds past base plus the budget.
+    const base = monotonic_clock.nowMs(io);
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+
+    var client = TestClient{ .io = io, .stream = edgeStream(fds[1]) };
+    try client.start();
+
+    // Far enough after the accept that a connection still carrying the accept
+    // deadline reads as past due at the stamp swept below.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(400), .awake) catch {};
+
+    try client.sendPing();
+    const ack = try client.nextFrame();
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_PING), ack.head.frame_type);
+    try testing.expectEqual(Http2.FLAG_ACK, ack.head.flags & Http2.FLAG_ACK);
+
+    // The frame the client just sent was read under a budget armed after the
+    // sleep, so this stamp is still inside it. A loop that armed once at
+    // accept would be cut here instead.
+    const early = deadline_sweep.sweepOnce(&table, base + 60_200);
+    try testing.expectEqual(@as(usize, 0), early.cut);
+    try testing.expectEqual(@as(usize, 0), early.dropped);
+
+    // Past every budget: the client asked for nothing more, which is the shape
+    // the bound over a multiplexed connection exists to reach.
+    var cut: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 500 and !probe.done.load(.acquire)) : (rounds += 1) {
+        cut += deadline_sweep.sweepOnce(&table, std.math.maxInt(i64)).cut;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+
+    try testing.expect(probe.done.load(.acquire));
+    try testing.expect(cut > 0);
+
+    thread.join();
+    client.stream.close(io);
+
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+test "zix zixer: http2 edge, a stream in flight is never cut" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = PausingBackend{ .io = io, .port = 18917, .pause_ms = 700 };
+    const fake_thread = try std.Thread.spawn(.{}, PausingBackend.serve, .{&fake});
+    var tries: usize = 0;
+    while (tries < 100 and !fake.ready.load(.acquire)) : (tries += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+    try testing.expect(tries < 100);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18917 }};
+    var pool = try upstream_pool.Pool.init(testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(testing.allocator, 1);
+    defer idle.deinit(testing.allocator, io);
+
+    var table = try deadline_table.Table.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    // One millisecond of budget, so a connection still alive a moment later is
+    // held rather than merely lucky.
+    const proxy = http1_proxy.Proxy{ .io = io, .pool = &pool, .idle = &idle, .client_table = &table, .client_timeout_ms = 1 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&fds);
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const edge_thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+
+    var client = TestClient{ .io = io, .stream = edgeStream(fds[1]) };
+    try client.start();
+
+    const get_headers = [_]Http2.Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/events" },
+        .{ .name = ":authority", .value = "app.example" },
+    };
+    try client.sendHeaders(1, &get_headers, true);
+
+    // The head arriving means the relay is running and the upstream is inside
+    // its pause, which is what a live stream looks like between events.
+    const count = try client.readHead(1);
+    try testing.expectEqualStrings("200", client.headerValue(count, ":status").?);
+
+    const swept = deadline_sweep.sweepOnce(&table, std.math.maxInt(i64));
+    try testing.expectEqual(@as(usize, 0), swept.cut);
+    try testing.expectEqual(@as(usize, 0), swept.dropped);
+    try testing.expectEqual(@as(usize, 1), table.liveCount());
+
+    // The stream ends on its own terms, and its last chunk still reaches the
+    // client the sweep did not cut.
+    var body: [64]u8 = undefined;
+    const got = try client.collectBody(1, &body);
+    try testing.expectEqualStrings("first", body[0..got]);
+
+    client.stream.close(io);
+    edge_thread.join();
+    fake_thread.join();
 }
