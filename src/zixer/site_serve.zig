@@ -5,8 +5,10 @@ const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
 const bind_options = @import("bind_options.zig");
+const cfg_headers = @import("cfg_headers.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const deadline_table = @import("deadline_table.zig");
+const fault = @import("fault.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const process_gate = @import("process_gate.zig");
 const request_scheme = @import("request_scheme.zig");
@@ -77,6 +79,10 @@ pub const ServeState = struct {
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
     tls_ctx: ?zix.Tls.Context,
+    /// The site's compiled header sections. Both point into the cfg arena, so
+    /// they live as long as the parsed site config does.
+    response_headers: cfg_headers.Table,
+    request_headers: cfg_headers.Table,
     acme_webroot: ?[]const u8,
     acme_relay: ?site_cfg.Upstream,
     stop: std.atomic.Value(bool) = .init(false),
@@ -136,6 +142,13 @@ pub const ServeState = struct {
         const spa_fallback = try dupeOptional(allocator, cfg.spa_fallback);
         errdefer freeOptional(allocator, spa_fallback);
         const acme_webroot = try dupeOptional(allocator, cfg.acme_webroot);
+
+        // Both tables point into the cfg arena, which does not outlive this
+        // state, so the site owns its own copy like every other cfg string.
+        const response_headers = try cfg.response_headers.dupe(allocator);
+        errdefer response_headers.deinit(allocator);
+        const request_headers = try cfg.request_headers.dupe(allocator);
+        errdefer request_headers.deinit(allocator);
         errdefer freeOptional(allocator, acme_webroot);
         var acme_relay = cfg.acme_proxy;
         if (cfg.acme_proxy) |relay| acme_relay.?.host = try allocator.dupe(u8, relay.host);
@@ -200,6 +213,8 @@ pub const ServeState = struct {
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
             .tls_ctx = tls_ctx,
+            .response_headers = response_headers,
+            .request_headers = request_headers,
             .acme_webroot = acme_webroot,
             .acme_relay = acme_relay,
             .wake_ip = wake_ip,
@@ -268,6 +283,8 @@ pub const ServeState = struct {
         freeOptional(state.allocator, state.public_prefix);
         freeOptional(state.allocator, state.spa_fallback);
         freeOptional(state.allocator, state.acme_webroot);
+        state.response_headers.deinit(state.allocator);
+        state.request_headers.deinit(state.allocator);
         if (state.acme_relay) |relay| state.allocator.free(relay.host);
 
         const allocator = state.allocator;
@@ -372,6 +389,8 @@ fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
         .client_table = &state.client_table,
         .client_timeout_ms = state.client_bound.timeout_ms,
         .public_dir_cache_ttl_ms = state.public_dir_cache_ttl_ms,
+        .response_headers = state.response_headers,
+        .request_headers = state.request_headers,
     };
 }
 
@@ -1234,4 +1253,53 @@ test "zix zixer: site serve, every worker carries the site's own scheme" {
     // worker reports a different scheme than its neighbour.
     for (secure.workers) |*worker| try std.testing.expectEqual(request_scheme.Scheme.HTTPS, worker.proxy.client_scheme);
     secure.shutdown();
+}
+
+test "zix zixer: site serve, the header tables reach every worker and outlive the cfg arena" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18985);
+    const server = try addr.listen(io, .{ .kernel_backlog = 64, .reuse_address = true });
+
+    const state = built: {
+        // The cfg arena is released before the state is used, which is what
+        // the serving daemon does too.
+        var cfg_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer cfg_arena.deinit();
+
+        const content =
+            "engine: http1\n" ++
+            "ip: 127.0.0.1\n" ++
+            "port: 18985\n" ++
+            "upstreams: 127.0.0.1:18986\n" ++
+            "[response_headers]\n" ++
+            "x-frame-options: DENY\n" ++
+            "[request_headers]\n" ++
+            "x-real-ip: $client_ip\n";
+
+        var faults = fault.FaultList.init(cfg_arena.allocator());
+        var cfg = try site_cfg.parse(cfg_arena.allocator(), content, &faults);
+        try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+
+        break :built try ServeState.create(std.testing.allocator, io, server, &cfg, 18985, .{ .kernel_backlog = 64 });
+    };
+
+    const proxy = buildProxy(state, 0);
+    try std.testing.expect(proxy.response_headers.owns("x-frame-options"));
+    try std.testing.expect(proxy.request_headers.owns("x-real-ip"));
+
+    var buf: [64]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buf);
+    try proxy.response_headers.write(&out, .{});
+    try std.testing.expectEqualStrings("x-frame-options: DENY\r\n", out.buffered());
+
+    state.shutdown();
+    try std.testing.expect(!port_probe.isTaken(io, addr));
 }
