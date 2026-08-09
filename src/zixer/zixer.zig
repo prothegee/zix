@@ -246,6 +246,7 @@ test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("upstream_pool.zig"));
     std.testing.refAllDecls(@import("upstream_conn.zig"));
     std.testing.refAllDecls(@import("upstream_deadline.zig"));
+    std.testing.refAllDecls(@import("deadline_table.zig"));
     std.testing.refAllDecls(@import("idle_reaper.zig"));
     std.testing.refAllDecls(@import("proxy_headers.zig"));
     std.testing.refAllDecls(@import("http1_head.zig"));
