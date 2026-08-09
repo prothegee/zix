@@ -4,11 +4,13 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const cfg_headers = @import("cfg_headers.zig");
 const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const grpc_relay = @import("grpc_relay.zig");
 const grpc_upstream = @import("grpc_upstream.zig");
 const http1_proxy = @import("http1_proxy.zig");
+const proxy_headers = @import("proxy_headers.zig");
 const http2_frames = @import("http2_frames.zig");
 const process_wait = @import("process_wait.zig");
 
@@ -55,7 +57,50 @@ const StreamEntry = struct {
     client_window: i64 = 0,
     /// Our send credit toward the upstream on this stream.
     up_window: i64 = 0,
+    /// The authority this stream named, for the $host token. Streams run
+    /// concurrently here, so it is kept per stream rather than per session.
+    authority_len: usize = 0,
+    authority: [AUTHORITY_MAX]u8 = undefined,
+
+    /// The authority this stream named, empty when it named none.
+    fn authorityText(entry: *const StreamEntry) []const u8 {
+        return entry.authority[0..entry.authority_len];
+    }
 };
+
+/// Longest authority a stream carries into the $host token: a hostname at its
+/// rfc 1035 ceiling plus a port.
+const AUTHORITY_MAX: usize = 264;
+
+/// The site's answer headers with one stream's token values filled in.
+///
+/// Param:
+/// host - []const u8 (the stream's authority, empty when none is known)
+///
+/// Return:
+/// - cfg_headers.Block, empty when the site configured no section
+fn clientBlock(session: *const Session, host: []const u8) cfg_headers.Block {
+    return .{
+        .table = session.proxy.response_headers,
+        .values = .{
+            .client_ip = session.client_ip[0..session.client_ip_len],
+            .scheme = session.proxy.client_scheme.token(),
+            .host = host,
+        },
+    };
+}
+
+/// The same, for the leg out to the upstream.
+fn upstreamBlock(session: *const Session, host: []const u8) cfg_headers.Block {
+    return .{
+        .table = session.proxy.request_headers,
+        .values = .{
+            .client_ip = session.client_ip[0..session.client_ip_len],
+            .scheme = session.proxy.client_scheme.token(),
+            .host = host,
+        },
+    };
+}
 
 /// One grpc edge connection: the client frame loop (up pump) plus one
 /// down pump per upstream connection, sharing the stream table.
@@ -88,6 +133,10 @@ const Session = struct {
     client_conn_window: i64 = Http2.DEFAULT_INITIAL_WINDOW,
     client_initial_window: i64 = Http2.DEFAULT_INITIAL_WINDOW,
     client_max_frame: u32 = Http2.DEFAULT_MAX_FRAME_SIZE,
+    /// The peer address as the $client_ip token writes it, formatted once
+    /// because it never changes over the connection.
+    client_ip_len: usize = 0,
+    client_ip: [proxy_headers.CLIENT_IP_MAX]u8 = undefined,
     up_conns: [UP_CONN_CAP]grpc_upstream.UpConn = undefined,
     up_used: [UP_CONN_CAP]bool = @splat(false),
     up_done: [UP_CONN_CAP]std.atomic.Value(bool) = @splat(.init(false)),
@@ -176,6 +225,7 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
         .lease = lease,
         .decoder = Http2.HpackDecoder.init(),
     };
+    session.client_ip_len = proxy_headers.clientIp(&session.client_ip, client_addr).len;
 
     mainLoop(&session);
 
@@ -388,7 +438,7 @@ fn acceptStream(session: *Session, id: u31, headers: []const Http2.Header, end_s
     // a grpc client retries on.
     if (process_wait.admitNow(session.proxy.process_gate) != .ADMITTED) {
         var busy_buf: [256]u8 = undefined;
-        const busy_block = grpc_relay.encodeUnavailableBlock(&busy_buf) catch return .OK;
+        const busy_block = grpc_relay.encodeUnavailableBlock(&busy_buf, clientBlock(session, "")) catch return .OK;
 
         return writeBlockToClient(session, id, busy_block, true);
     }
@@ -401,13 +451,13 @@ fn acceptStream(session: *Session, id: u31, headers: []const Http2.Header, end_s
 
     const up_index = findOrOpenUpstream(session) orelse {
         var local_buf: [256]u8 = undefined;
-        const block = grpc_relay.encodeUnavailableBlock(&local_buf) catch return .OK;
+        const block = grpc_relay.encodeUnavailableBlock(&local_buf, clientBlock(session, info.authority)) catch return .OK;
 
         return writeBlockToClient(session, id, block, true);
     };
     const up_conn = &session.up_conns[up_index];
 
-    const block = grpc_relay.encodeRequestBlock(&session.out_block_buf, headers, &info, session.client_addr, session.proxy.client_scheme) catch {
+    const block = grpc_relay.encodeRequestBlock(&session.out_block_buf, headers, &info, session.client_addr, session.proxy.client_scheme, upstreamBlock(session, info.authority)) catch {
         return streamError(session, id, Http2.ERR_INTERNAL_ERROR);
     };
 
@@ -421,7 +471,9 @@ fn acceptStream(session: *Session, id: u31, headers: []const Http2.Header, end_s
         .client_done = end_stream,
         .client_window = session.client_initial_window,
         .up_window = up_conn.initial_window,
+        .authority_len = @min(info.authority.len, AUTHORITY_MAX),
     };
+    @memcpy(entry.authority[0..entry.authority_len], info.authority[0..entry.authority_len]);
     const max_frame = upstreamMaxFrameLocked(up_conn);
     unlockState(session);
 
@@ -844,19 +896,24 @@ fn relayUpstreamHeaders(session: *Session, up_index: usize, first: *const http2_
     const count = decoder.decode(block_buf[0..block_len], decoded, decode_scratch) catch return false;
     const headers = decoded[0..count];
 
+    // The authority is copied out under the same lock as the rest of the
+    // snapshot: the entry can be cleared the moment the lock is dropped.
+    var host_buf: [AUTHORITY_MAX]u8 = undefined;
+
     lockState(session);
     const found = findEntryByUpLocked(session, up_index, up_id);
-    const route: ?struct { client_id: u31, saw_head: bool } = if (found) |entry|
-        .{ .client_id = entry.client_id, .saw_head = entry.saw_head }
-    else
-        null;
+    const route: ?struct { client_id: u31, saw_head: bool, host_len: usize } = if (found) |entry| taken: {
+        @memcpy(host_buf[0..entry.authority_len], entry.authority[0..entry.authority_len]);
+
+        break :taken .{ .client_id = entry.client_id, .saw_head = entry.saw_head, .host_len = entry.authority_len };
+    } else null;
     unlockState(session);
 
     // Decoded for hpack sync, but nobody claims it: the stream was reset.
     const target = route orelse return true;
 
     if (!target.saw_head) {
-        const block = grpc_relay.encodeResponseBlock(out_block_buf, headers) catch {
+        const block = grpc_relay.encodeResponseBlock(out_block_buf, headers, clientBlock(session, host_buf[0..target.host_len])) catch {
             clearEntryByUp(session, up_index, up_id);
             grpc_upstream.writeRst(up_conn, up_id, Http2.ERR_PROTOCOL_ERROR) catch {};
             _ = streamError(session, target.client_id, Http2.ERR_PROTOCOL_ERROR);
