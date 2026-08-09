@@ -10,11 +10,14 @@ Satu scanner membaca `main.cfg` maupun tiap file site. Ia tidak mengalokasi apa 
 
 Per baris:
 
-1. Potong di `#` pertama, jadi comment di ekor lenyap dan baris yang isinya hanya comment menjadi kosong.
+1. Potong di `#` yang membuka comment, yaitu yang ada di awal baris atau setelah spasi atau tab. Memotong di setiap `#` akan memenggal nilai yang membawanya, seperti `link: </app.css#v2>; rel=preload`.
 2. Pangkas spasi, tab, dan `\r`, jadi file CRLF terbaca sama dengan file LF.
 3. Lewati baris kosong.
-4. Pisah hanya di `:` pertama. Nilainya menyimpan titik dua berikutnya, dan itulah yang membuat `C:/certs/full.pem` dan `::1:9000` bekerja.
-5. Pangkas kedua sisi. Key kosong atau value kosong adalah fault, bukan lewatan.
+4. Ambil baris `[name]` sebagai section, bukan sebagai pasangan. `[name` yang tidak ditutup dan `[]` yang kosong keduanya fault.
+5. Pisah hanya di `:` pertama. Nilainya menyimpan titik dua berikutnya, dan itulah yang membuat `C:/certs/full.pem` dan `::1:9000` bekerja.
+6. Pangkas kedua sisi. Key kosong atau value kosong adalah fault, bukan lewatan.
+
+Baris section tidak punya penutup: ia memiliki setiap baris di bawahnya sampai section berikutnya atau akhir file. Itulah yang membuat key flat harus datang lebih dulu, dan key site yang ditulis di bawah baris section dilaporkan berdasarkan namanya alih-alih dilayani sebagai header.
 
 Nilai berupa list koma diiterasi dengan aturan tanpa alokasi yang sama, dan item kosong (`a,,b`, atau koma di ujung) kembali sebagai string kosong supaya skema bisa mem-fault-kannya alih-alih diam-diam membuang salah ketik.
 
@@ -74,9 +77,15 @@ Key dicocokkan berdasarkan nama terhadap sebuah enum, jadi key tak dikenal menja
 | logs_dir, sites_dir | diambil apa adanya, di-default ke `<root>/logs` dan `<root>/sites` bila tidak ada |
 | kernel_backlog | muat di `u31`, minimal 1 |
 | max_recv_buf | muat di `usize`, antara 1024 dan 262144 byte |
+| client_timeout_ms | muat di `u32`, maksimal 3600000 ms, 0 mematikan batasnya |
+| client_conn_limit | muat di `usize`, antara 1 dan 65536 |
+| upstream_connect_timeout_ms | muat di `u32`, maksimal 600000 ms, 0 menunggu sistem operasi |
+| upstream_idle_ttl_ms | muat di `u32`, maksimal 600000 ms, 0 tidak menyimpan koneksi |
 | process_limit | muat di `usize`, maksimal 65536, 0 mematikan gate |
 | process_queue_len | muat di `usize`, maksimal 65536, dan di atas 0 ia butuh `process_limit` di atas 0 |
 | process_queue_timeout_ms | muat di `u32`, antara 1 dan 600000 ms |
+| public_dir_cache_ttl_ms | muat di `u32`, maksimal 3600000 ms, 0 mematikan cache |
+| public_dir_cache_max_entries | muat di `u32`, antara 1 dan 1048576 |
 
 `zixer status` menambahkan pemeriksaan keberadaan kedua direktori setelah parse.
 
@@ -130,7 +139,7 @@ Daemon menyimpan satu array site yang sudah start. Tiap mutasi berjalan serial, 
 | `restart` pada site yang berhenti akan menyalakannya | hook renewal tidak boleh gagal hanya karena site kebetulan sedang mati |
 | port yang sudah dimiliki site lain yang start ditolak | site tcp bind dengan address reuse, jadi kernel akan berbagi port alih-alih melaporkan tabrakan |
 | port yang dijawab listener di luar daemon ini ditolak | registry hanya melihat site di proses ini, probe connect yang menemukan pemilik di proses lain |
-| port companion acme dihitung sebagai dimiliki | tabrakan yang sama berlaku untuk port 80, baik dari registry maupun dari probe |
+| port companion cleartext dihitung sebagai dimiliki | tabrakan yang sama berlaku untuk port 80, baik dari registry maupun dari probe |
 | listen backlog adalah nilai site, kalau tidak nilai main.cfg | satu default, satu override per site |
 
 File config lebih besar dari 256 KiB ditolak alih-alih dimuat.
@@ -153,7 +162,17 @@ Listener tcp bind dengan address reuse, socket datagram bind ketat.
 
 Address reuse itulah alasan bind tcp didahului sebuah probe. Std memasangkan flag itu dengan `SO_REUSEPORT` di posix, dan `SO_REUSEADDR` di Windows sama permisifnya, jadi listener kedua ikut bergabung di port itu alih-alih gagal, lalu kernel membagi koneksi yang datang ke keduanya. Probe connect ke alamat yang akan didengarkan site, loopback sebagai ganti wildcard karena Windows menolak connect ke `0.0.0.0`. Listener yang hidup akan menjawab dan start ditolak dengan `AddressInUse`, sedangkan socket yang tertinggal di TIME_WAIT menolak connect itu, jadi restart tepat setelah trafik nyata tetap bisa bind ulang. Socket datagram tidak butuh probe: bind-nya ketat dan melaporkan tabrakannya sendiri.
 
-Site TLS dengan key acme, di port selain 80, juga bind port 80, dan port companion itu diprobe dengan cara yang sama. Bind itu tidak opsional: bila gagal, seluruh `start` gagal dengan pesan yang menyebut port challenge-nya.
+Site TLS di port selain 80 juga bind port 80 ketika ia meminta sesuatu yang membutuhkannya, dan port companion itu diprobe dengan cara yang sama. Bind itu tidak opsional: bila gagal, seluruh `start` gagal dengan pesan yang menyebut portnya.
+
+Dua key yang membuahkan companion, dan salah satunya saja sudah cukup:
+
+| yang diisi site | yang dilayani companion |
+| :- | :- |
+| `acme_webroot` atau `acme_proxy` | path challenge, dan redirect untuk sisanya |
+| `force_https` | redirect untuk semuanya, tidak ada path challenge yang perlu dilayani |
+| keduanya | path challenge dari config acme, redirect untuk sisanya |
+
+Site yang memang sudah listen di port 80 tidak butuh companion, ia adalah portnya. Site cleartext juga tidak butuh, karena tidak ada origin https yang menjadi tujuan pemindahan request.
 
 <br>
 
@@ -282,6 +301,114 @@ site-nya menyetel gate.
 
 <br>
 
+## Batas client
+
+Tiga file, dipecah dengan cara yang sama seperti gate di atas.
+`deadline_table.zig` adalah slot table yang menyebut koneksi mana yang lewat
+jatahnya, `deadline_sweep.zig` adalah satu pass atasnya dan seberapa keras pass
+itu memotong, dan `client_admit.zig` adalah mengambil slot untuk koneksi yang
+diterima atau menolaknya. `client_lease.zig` adalah yang dipegang satu koneksi
+selama sebuah edge melayaninya.
+
+Table-nya adalah array tetap, diukur sekali saat site start dari
+`client_conn_limit`. Tidak ada yang mengalokasi per koneksi, dan pass yang tidak
+menemukan apa pun yang lewat jatah tidak menulis apa pun sama sekali.
+
+| state slot | artinya |
+| :- | :- |
+| FREE | ada di free list, tanpa koneksi dan tanpa deadline |
+| ARMING | sebuah owner sedang mengubahnya, sweeper melewatinya |
+| ARMED | koneksi hidup dengan deadline yang boleh ditindak sweeper |
+| SWEEPING | sweeper sedang menindaknya, sebuah release menunggu pass itu selesai |
+
+Setiap pergantian owner melewati ARMING dan sweeper tidak menindak apa pun
+selain ARMED, dan itulah yang menjauhkan keduanya dari slot yang sama tanpa
+salah satunya memegang lock melintasi syscall. SWEEPING adalah penjaga terhadap
+descriptor yang didaur ulang: tanpanya sebuah sweeper bisa memilih sebuah
+descriptor, kehilangan prosesor, lalu bangun dan mendapati owner-nya sudah
+menutup descriptor itu dan kernel memberikan nomor yang sama ke koneksi lain.
+Tiap slot juga membawa sebuah generation, jadi tiket yang disimpan melewati
+release-nya menyebut slot yang sudah berpindah, dan perubahan yang terlambat
+ditolak alih-alih mendarat pada siapa pun yang memegang slot itu sekarang.
+
+Deadline adalah stamp absolut dari `utils.monotonic_clock`. Stamp wall-clock
+akan menggeser setiap batas hidup di dalam proses ini begitu waktu sistem
+melompat.
+
+Satu pass berjalan tiap 100 ms di thread background milik site, dan apa yang ia
+lakukan bergantung pada berapa pass yang sudah dilihat koneksi itu:
+
+| pass | tindakan | alasan |
+| :- | :- | :- |
+| pertama | tutup sisi read | membangunkan handler dan tetap membiarkannya menulis 408 yang menjadi hak client |
+| tiap pass berikutnya | tutup kedua sisi | satu bentuk yang tidak pernah dijangkau cut sisi read adalah client yang berhenti membaca, yang memarkir handler di sebuah write |
+
+Tidak ada satu pun di dalam sweep yang menutup descriptor atau mengembalikan
+slot. Handler memiliki keduanya, mengetahuinya lewat read atau write-nya sendiri
+yang gagal, lalu membereskan diri seperti yang ia lakukan untuk client mana pun
+yang menghilang. Itulah yang menjaga logika timeout tetap di luar tiap dispatch
+loop.
+
+Sebuah cut harus mencapai thread yang terparkir di dalam kernel, dan itu bukan
+panggilan yang sama di tiap platform. Di POSIX half-close sudah cukup dan tiap
+reader sudah melaporkannya sebagai end of stream. Di Windows receive yang sudah
+terparkir harus dibatalkan, dan socket reader milik std sendiri menjawab receive
+yang dibatalkan dengan `unreachable`, jadi keempat edge yang menghadap client
+membaca dan menulis lewat `zix.utils.socket_cut_reader` dan
+`zix.utils.socket_cut_writer`, tempat receive yang dibatalkan bernilai 0 byte
+dan send yang dibatalkan menjadi sebuah error.
+
+Lease adalah yang benar-benar dipanggil sebuah edge:
+
+| panggilan | yang dilakukannya |
+| :- | :- |
+| `open` | mengambil slot untuk koneksi yang diterima, atau melaporkan site penuh |
+| `armRequest` | memulai jatah satu pertukaran, dipanggil per request, bukan per koneksi |
+| `holdStream` | memarkir slot di deadline yang tidak pernah terlewati, untuk websocket, stream SSE, atau stream grpc |
+| `release` | mengembalikan slot, idempotent jadi deferred release selalu aman |
+
+Site dengan `client_timeout_ms: 0` tidak me-lease apa pun. Tiap panggilan di
+atas kembali sebelum menyentuh table, dan tidak ada table yang dialokasikan,
+jadi site tanpa batas tidak membayar apa pun untuk mesin ini.
+
+<br>
+
+## Header section milik site
+
+`cfg_headers.zig` mengompilasi dua blok `[section]` sekali, saat file site
+dibaca. `header_syntax.zig` adalah kumpulan aturan rfc 9110 yang dipakainya
+memeriksa sebuah nama dan sebuah nilai, dipisah karena ia sebuah grammar,
+bukan urusan config.
+
+Blok yang sudah dikompilasi disimpan dua kali, karena edge membutuhkannya dalam
+dua bentuk:
+
+| bentuk | wujud | dipakai oleh |
+| :- | :- | :- |
+| `pieces` | seluruh blok sebagai satu rangkaian literal dan slot token | http1, yang menulis head sebagai byte |
+| `lines` | header yang sama tapi terpisah, nama dan potongan nilai | http2, grpc, dan http3, yang meng-encode tiap field ke header table-nya sendiri |
+
+Baris tanpa token di dalamnya menyatu dengan literal di sebelahnya, jadi table
+yang tidak menyebut apa pun yang dinamis menjadi satu piece dan satu copy per
+request. Baris yang memang menyebut token dirender ke buffer scratch per
+request, dan itulah alasan plafon nilainya adalah plafon blok ditambah ruang
+bagi sebuah alamat dan sebuah authority untuk mengembang.
+
+Plafonnya 1024 byte untuk satu blok terkompilasi dan 1536 byte untuk satu nilai
+terrender. Sebuah edge menyiapkan head di buffer tetap, jadi table-nya harus
+muat di samping request yang ia tumpangi. Menolak section yang kebesaran saat
+file dibaca lebih baik daripada site yang start lalu menjawab tiap request 400.
+
+Nama yang dikonfigurasi mengganti nama yang direlay, bukan menggabungkannya.
+rfc 9110 5.2 menggabungkan baris field ganda dengan koma, yang benar untuk
+header berbentuk list dan diam-diam salah untuk yang bernilai tunggal, jadi
+salinan origin atas nama yang disetel section dibuang dan baris milik site yang
+dikirim. Nama yang dimiliki edge justru ditolak saat load: daftar hop-by-hop,
+`Content-Length`, `Transfer-Encoding`, `Via`, `Date`, dan `Forwarded`. Daftar
+penolakan lengkap beserta teks fault-nya ada di `config-id.md`.
+
+<br>
+
 ## Edge http1
 
 ```mermaid
@@ -378,7 +505,8 @@ Round-robin O(1) atas upstream yang sedang up:
 - Kegagalan connect menandai upstream down. Penerimaan kembali terjadi saat pemilihan setelah cooldown 3000 ms, dan sapuannya dibatasi paling sering sekali per 200 ms supaya biayanya tidak pernah jatuh di tiap pemilihan.
 - Upstream yang diterima kembali tapi masih mati ditandai down lagi oleh kegagalan berikutnya. Tidak ada thread probe.
 - Koneksi keep-alive idle di-cache per slot upstream, sampai 4 per slot, dan sampai 32 untuk seluruh site. Kelebihannya ditutup alih-alih ditumbuhkan.
-- Koneksi yang di-cache juga kedaluwarsa setelah 5000 ms. Pengecekan umur berjalan saat sebuah koneksi diambil, dan satu thread sweep per site menjalankannya tiap 2500 ms supaya site tanpa trafik pun tetap mengembalikan koneksinya. Koneksi idle di pool adalah kapasitas yang diambil dari backend.
+- Koneksi yang di-cache juga kedaluwarsa, setelah `upstream_idle_ttl_ms` (5000 ms secara default, 0 tidak menyimpan sama sekali). Pengecekan umur berjalan saat sebuah koneksi diambil, dan thread background milik site menjalankannya sendiri supaya site tanpa trafik pun tetap mengembalikan koneksinya. Koneksi idle di pool adalah kapasitas yang diambil dari backend.
+- Pass background itu berjalan pada setengah umurnya, dengan lantai di tick sweep 100 ms, jadi umur default 5000 ms disapu tiap 2500 ms dan umur yang lebih pendek disapu lebih cepat secara proporsional.
 
 Tiap worker sebuah site memiliki pool dan cache-nya sendiri. Spinlock pendek
 menjaga masing-masing, karena task koneksi berjalan bersamaan di dalam satu
@@ -393,7 +521,7 @@ sendiri.
 
 ## Batas tetap
 
-Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
+Satu baris di sini bisa berupa konstanta keras, yang tidak bisa digeser key config mana pun, atau rentang yang boleh dipakai sebuah key. Kolom `di mana` menyebut yang mana.
 
 | batas | nilai | di mana |
 | :- | :- | :- |
@@ -408,9 +536,16 @@ Tidak satu pun dari ini yang bisa dikonfigurasi hari ini.
 | entry static cache | 1 sampai 1048576 file | nilai yang boleh dipakai `public_dir_cache_max_entries`, lalu dibatasi ke seperempat batas descriptor proses |
 | body terkecil yang diserahkan ke kernel | 64 KiB | hanya http1 cleartext, di bawahnya body ditulis bersama head-nya |
 | koneksi upstream idle | 4 per upstream, 32 total, dibagi di antara worker | per site |
-| umur koneksi upstream idle | 5000 ms | cache idle per worker |
-| interval sweep idle | 2500 ms | thread reaper per site, untuk tiap cache worker |
+| umur koneksi upstream idle | 0 sampai 600000 ms, 5000 secara default | nilai yang boleh dipakai `upstream_idle_ttl_ms` |
+| interval sweep idle | setengah umurnya, dengan lantai 100 ms | turunan, satu pass di thread background site |
+| jatah connect upstream | 0 sampai 600000 ms, 5000 secara default | nilai yang boleh dipakai `upstream_connect_timeout_ms`, 0 menunggu sistem operasi |
 | cooldown upstream | 3000 ms | pool per worker |
+| jatah pertukaran client | 0 sampai 3600000 ms | nilai yang boleh dipakai `client_timeout_ms`, 0 berarti mati |
+| koneksi client yang dilacak | 1 sampai 65536, 4096 secara default | nilai yang boleh dipakai `client_conn_limit` |
+| tick sweep client | 100 ms | thread background site, satu pass atas deadline table |
+| blok header | 1024 byte setelah dikompilasi | tiap `[section]`, diperiksa saat file dibaca |
+| nilai header | 1536 byte setelah dirender | satu baris setelah token-nya diselesaikan |
+| authority redirect | 255 byte | yang boleh ditaruh `redirect_host`, atau `Host` yang digemakan, di sebuah `Location` |
 | koneksi QUIC bersamaan | 64 | per site http3 |
 | flow udp | 64 | per site udp |
 | datagram udp | 65535 byte | per site udp |
