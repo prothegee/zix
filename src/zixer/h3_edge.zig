@@ -12,7 +12,10 @@ const bind_options = @import("bind_options.zig");
 const http1_head = @import("http1_head.zig");
 const process_gate = @import("process_gate.zig");
 const process_wait = @import("process_wait.zig");
+const cfg_headers = @import("cfg_headers.zig");
+const fault = @import("fault.zig");
 const proxy_headers = @import("proxy_headers.zig");
+const request_scheme = @import("request_scheme.zig");
 const site_cfg = @import("site_cfg.zig");
 const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
@@ -124,6 +127,11 @@ pub const EdgeState = struct {
     public_dir: ?[]const u8,
     public_prefix: ?[]const u8,
     spa_fallback: ?[]const u8,
+    /// Headers this site adds to every answer it sends a client, and to every
+    /// request it sends an upstream. Copied out of the cfg arena, which does
+    /// not outlive this state.
+    response_headers: cfg_headers.Table,
+    request_headers: cfg_headers.Table,
     tls_ctx: zix.Tls.Context,
     slots: []?*ConnSlot,
     table_lock: std.atomic.Value(bool) = .init(false),
@@ -183,6 +191,11 @@ pub const EdgeState = struct {
         const public_prefix = try dupeOptional(allocator, cfg.public_prefix);
         errdefer freeOptional(allocator, public_prefix);
         const spa_fallback = try dupeOptional(allocator, cfg.spa_fallback);
+
+        const response_headers = try cfg.response_headers.dupe(allocator);
+        errdefer response_headers.deinit(allocator);
+        const request_headers = try cfg.request_headers.dupe(allocator);
+        errdefer request_headers.deinit(allocator);
         errdefer freeOptional(allocator, spa_fallback);
 
         const slots = try allocator.alloc(?*ConnSlot, MAX_CONNS);
@@ -222,6 +235,8 @@ pub const EdgeState = struct {
             .public_dir = public_dir,
             .public_prefix = public_prefix,
             .spa_fallback = spa_fallback,
+            .response_headers = response_headers,
+            .request_headers = request_headers,
             .tls_ctx = tls_ctx,
             .slots = slots,
             .wake_ip = wake_ip,
@@ -268,6 +283,8 @@ pub const EdgeState = struct {
         freeOptional(state.allocator, state.public_dir);
         freeOptional(state.allocator, state.public_prefix);
         freeOptional(state.allocator, state.spa_fallback);
+        state.response_headers.deinit(state.allocator);
+        state.request_headers.deinit(state.allocator);
 
         const allocator = state.allocator;
         allocator.destroy(state);
@@ -339,7 +356,51 @@ const RequestTask = struct {
     stream_id: u64,
     bytes: []u8,
     client: std.Io.net.IpAddress,
+    /// The authority this request named, for the $host token. Empty until the
+    /// field section has been read, which is the whole of what an answer to an
+    /// unreadable request can know.
+    host: []const u8 = "",
 };
+
+/// The site's answer headers with this request's token values filled in.
+///
+/// Note:
+/// - Quic carries no cleartext transport, so an h3 site is https by
+///   construction and the site cfg already refuses tls: false.
+///
+/// Param:
+/// ip_buf - []u8 (scratch for the address text, must outlive the block)
+///
+/// Return:
+/// - cfg_headers.Block, empty when the site configured no section
+fn clientBlock(task: RequestTask, ip_buf: []u8) cfg_headers.Block {
+    const table = task.state.response_headers;
+    if (table.isEmpty()) return .{};
+
+    return .{
+        .table = table,
+        .values = .{
+            .client_ip = proxy_headers.clientIp(ip_buf, task.client),
+            .scheme = request_scheme.Scheme.HTTPS.token(),
+            .host = task.host,
+        },
+    };
+}
+
+/// The same, for the leg out to the upstream.
+fn upstreamBlock(task: RequestTask, ip_buf: []u8) cfg_headers.Block {
+    const table = task.state.request_headers;
+    if (table.isEmpty()) return .{};
+
+    return .{
+        .table = table,
+        .values = .{
+            .client_ip = proxy_headers.clientIp(ip_buf, task.client),
+            .scheme = request_scheme.Scheme.HTTPS.token(),
+            .host = task.host,
+        },
+    };
+}
 
 /// Route one received datagram to its connection, then hand every request it
 /// completed to a task.
@@ -534,7 +595,9 @@ fn unlockSlot(slot: *ConnSlot) void {
 
 /// Serve one request: decode it, answer from the static plane or the pool, and
 /// close the stream behind it.
-fn serveRequest(task: RequestTask) void {
+fn serveRequest(incoming: RequestTask) void {
+    var task = incoming;
+
     defer {
         lockSlot(task.slot);
         task.slot.tasks -= 1;
@@ -567,6 +630,10 @@ fn serveRequest(task: RequestTask) void {
     }
     request.has_body = body_len > 0;
     request.content_length = if (body_len > 0) body_len else null;
+
+    // Every answer below this line names the authority the request carried.
+    // The section lives on this frame, so the slice outlives every call here.
+    task.host = request.authority;
 
     if (misdirected(task, &request)) {
         answerLocal(task, 421, null);
@@ -711,7 +778,8 @@ fn sendFile(task: RequestTask, resolved: static_files.Resolved, is_head: bool) v
     const file = resolved.file;
 
     var block_buf: [1024]u8 = undefined;
-    const block = h3_translate.encodeStaticBlock(&block_buf, resolved.content_type, resolved.size, resolved.encoding.contentEncoding()) catch {
+    var ip_buf: [proxy_headers.CLIENT_IP_MAX]u8 = undefined;
+    const block = h3_translate.encodeStaticBlock(&block_buf, resolved.content_type, resolved.size, resolved.encoding.contentEncoding(), clientBlock(task, &ip_buf)) catch {
         answerLocal(task, 500, null);
         return;
     };
@@ -745,7 +813,8 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
     var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
     // Quic carries no cleartext transport, so an h3 site is https by
     // construction and the site cfg already refuses tls: false.
-    const upstream_head = h3_translate.buildUpstreamHead(&head_buf, request, fields, task.client, .HTTPS) catch {
+    var up_ip_buf: [proxy_headers.CLIENT_IP_MAX]u8 = undefined;
+    const upstream_head = h3_translate.buildUpstreamHead(&head_buf, request, fields, task.client, .HTTPS, upstreamBlock(task, &up_ip_buf)) catch {
         answerLocal(task, 431, null);
         return;
     };
@@ -843,7 +912,8 @@ fn readUpstreamHead(task: RequestTask, up_r: *std.Io.Reader, method: []const u8,
         if (response.status / 100 != 1) return response;
 
         var block_buf: [4096]u8 = undefined;
-        const block = h3_translate.encodeResponseBlock(&block_buf, &response, null) catch return error.UpstreamDead;
+        var ip_buf: [proxy_headers.CLIENT_IP_MAX]u8 = undefined;
+        const block = h3_translate.encodeResponseBlock(&block_buf, &response, null, clientBlock(task, &ip_buf)) catch return error.UpstreamDead;
         if (!writeHeaders(task, block)) return error.ClientDead;
     }
 
@@ -863,7 +933,8 @@ fn relayResponse(task: RequestTask, response: *const http1_head.ResponseHead, co
     const head_only = response.framing == .none;
 
     var block_buf: [8192]u8 = undefined;
-    const block = h3_translate.encodeResponseBlock(&block_buf, response, block_length) catch {
+    var ip_buf: [proxy_headers.CLIENT_IP_MAX]u8 = undefined;
+    const block = h3_translate.encodeResponseBlock(&block_buf, response, block_length, clientBlock(task, &ip_buf)) catch {
         conn_up.stream.close(io);
         answerLocal(task, 500, null);
         return;
@@ -1076,7 +1147,8 @@ fn awaitQueueRoom(task: RequestTask) bool {
 /// Answer the client from the edge itself, with an optional rfc 9209 reason.
 fn answerLocal(task: RequestTask, status: u16, proxy_error: ?[]const u8) void {
     var block_buf: [512]u8 = undefined;
-    const block = h3_translate.encodeLocalBlock(&block_buf, status, proxy_error) catch return;
+    var ip_buf: [proxy_headers.CLIENT_IP_MAX]u8 = undefined;
+    const block = h3_translate.encodeLocalBlock(&block_buf, status, proxy_error, clientBlock(task, &ip_buf)) catch return;
 
     if (!writeHeaders(task, block)) return;
 
@@ -2459,4 +2531,70 @@ test "zix zixer: h3 edge, a site with no public dir resolves the window to off" 
     // cache, so no table is built and every lookup is skipped outright.
     try testing.expectEqual(@as(u32, 0), state.public_dir_cache_ttl_ms);
     try testing.expect(zix.utils.static_cache.instance() == null);
+}
+
+test "zix zixer: h3 edge, a served request carries the site's headers end to end" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: h3 edge socket tests need linux, skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    tmp.dir.writeFile(testing.io, .{ .sub_path = "page.html", .data = "h3-static" }) catch @panic("fixture write failed");
+
+    var root_buf: [128]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    const socket = try bindSite(io, 18988);
+    const state = built: {
+        // The cfg arena is released before a single request is served, which
+        // is what the daemon does too.
+        var cfg_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer cfg_arena.deinit();
+
+        var content_buf: [768]u8 = undefined;
+        const content = try std.fmt.bufPrint(&content_buf,
+            \\engine: http3
+            \\ip: 127.0.0.1
+            \\port: 18988
+            \\tls: true
+            \\tls_cert: {s}
+            \\tls_key: {s}
+            \\public_dir: {s}
+            \\[response_headers]
+            \\strict-transport-security: max-age=31536000
+            \\x-served-to: $client_ip over $scheme
+            \\
+        , .{ FIXTURE_CERT, FIXTURE_KEY, root });
+
+        var faults = fault.FaultList.init(cfg_arena.allocator());
+        const cfg = try site_cfg.parse(cfg_arena.allocator(), content, &faults);
+        try testing.expectEqual(@as(usize, 0), faults.slice().len);
+
+        break :built try EdgeState.create(testing.allocator, io, socket, &cfg, 18988, .{});
+    };
+    defer state.shutdown();
+
+    var client = try H3Client.connect(io, 18988);
+    defer client.close();
+
+    const fields = getFields("localhost", "/page.html");
+    try client.request(0, &fields, "");
+
+    var body_buf: [4096]u8 = undefined;
+    var scratch: [h3_qpack.SCRATCH_BYTES]u8 = undefined;
+    const response = try client.readResponse(0, &body_buf, &scratch);
+
+    try testing.expectEqualStrings("200", response.status());
+    try testing.expectEqualStrings("max-age=31536000", response.section.get("strict-transport-security").?);
+
+    // The peer address reached the token, over a table the cfg arena no
+    // longer backs.
+    const served_to = response.section.get("x-served-to").?;
+    try testing.expect(std.mem.startsWith(u8, served_to, "127.0.0.1 over https"));
 }
