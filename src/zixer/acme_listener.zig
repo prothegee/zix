@@ -130,6 +130,10 @@ fn acceptLoop(state: *State) void {
     else
         .{ .webroot = state.webroot, .relay = state.relay };
 
+    // The site's [response_headers] are deliberately left off: this listener
+    // moves a client to the https origin rather than answering for the site,
+    // and that table can carry HSTS, which a client must ignore when it
+    // arrives over cleartext anyway (rfc 6797 7.2).
     const proxy = http1_proxy.Proxy{
         .io = io,
         .allocator = state.allocator,
