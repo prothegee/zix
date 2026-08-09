@@ -4,6 +4,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const cfg_headers = @import("cfg_headers.zig");
 const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const http1_head = @import("http1_head.zig");
@@ -68,7 +69,13 @@ const Pending = struct {
     accept_len: usize,
     has_accept: bool,
     accept: [256]u8,
+    authority_len: usize,
+    authority: [AUTHORITY_MAX]u8,
 };
+
+/// Longest authority a stream carries into the $host token: a hostname at its
+/// rfc 1035 ceiling plus a port.
+const AUTHORITY_MAX: usize = 264;
 
 /// The stream currently being served. send_window spends against the
 /// client's grants, the pump reads request DATA through took_data.
@@ -117,6 +124,50 @@ const Conn = struct {
     resp_block_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined,
     decoded: [Http2.MAX_HEADERS]Http2.Header = undefined,
     decode_scratch: [http1_head.MAX_HEAD_BYTES]u8 = undefined,
+    /// The peer address as the $client_ip token writes it, formatted once
+    /// because it never changes over the connection.
+    client_ip_len: usize = 0,
+    client_ip: [proxy_headers.CLIENT_IP_MAX]u8 = undefined,
+    /// The authority of the stream being answered right now. Set the moment a
+    /// request's headers are read and again when a queued one is picked up,
+    /// so every answer names the authority its own request carried.
+    host_len: usize = 0,
+    host: [AUTHORITY_MAX]u8 = undefined,
+
+    /// The authority of the request being answered, empty when none is known.
+    fn currentHost(conn: *const Conn) []const u8 {
+        return conn.host[0..conn.host_len];
+    }
+
+    /// Remember this request's authority for the answers it produces.
+    fn takeHost(conn: *Conn, authority: []const u8) void {
+        conn.host_len = @min(authority.len, AUTHORITY_MAX);
+        @memcpy(conn.host[0..conn.host_len], authority[0..conn.host_len]);
+    }
+
+    /// The site's answer headers with this stream's token values filled in.
+    fn clientBlock(conn: *const Conn) cfg_headers.Block {
+        return .{
+            .table = conn.proxy.response_headers,
+            .values = .{
+                .client_ip = conn.client_ip[0..conn.client_ip_len],
+                .scheme = conn.proxy.client_scheme.token(),
+                .host = conn.currentHost(),
+            },
+        };
+    }
+
+    /// The same, for the leg out to the upstream.
+    fn upstreamBlock(conn: *const Conn) cfg_headers.Block {
+        return .{
+            .table = conn.proxy.request_headers,
+            .values = .{
+                .client_ip = conn.client_ip[0..conn.client_ip_len],
+                .scheme = conn.proxy.client_scheme.token(),
+                .host = conn.currentHost(),
+            },
+        };
+    }
 };
 
 /// True when the buffered stream opens with the h2 client preface. Peeks
@@ -214,6 +265,7 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
         .buffers = buffers,
         .decoder = Http2.HpackDecoder.init(),
     };
+    conn.client_ip_len = proxy_headers.clientIp(&conn.client_ip, client_addr).len;
 
     mainLoop(&conn);
 }
@@ -232,6 +284,8 @@ fn mainLoop(conn: *Conn) void {
 
         while (conn.queue_len != 0) {
             const entry = &conn.queue[conn.queue_head];
+            conn.takeHost(entry.authority[0..entry.authority_len]);
+
             const outcome = if (entry.dead) Outcome.DONE else serveEntry(conn, entry);
 
             conn.queue_head = (conn.queue_head + 1) % QUEUE_CAP;
@@ -445,7 +499,10 @@ fn acceptStream(conn: *Conn, active: ?*ActiveStream, id: u31, request: *const ht
         .accept_len = 0,
         .has_accept = false,
         .accept = undefined,
+        .authority_len = @min(request.authority.len, AUTHORITY_MAX),
+        .authority = undefined,
     };
+    @memcpy(entry.authority[0..entry.authority_len], request.authority[0..entry.authority_len]);
 
     if (wants_static) {
         @memcpy(entry.target[0..request.target.len], request.target);
@@ -463,7 +520,7 @@ fn acceptStream(conn: *Conn, active: ?*ActiveStream, id: u31, request: *const ht
     }
 
     if (has_pool) {
-        const head = http2_translate.buildUpstreamHead(&entry.head, request, headers, conn.client_addr, conn.proxy.client_scheme) catch {
+        const head = http2_translate.buildUpstreamHead(&entry.head, request, headers, conn.client_addr, conn.proxy.client_scheme, conn.upstreamBlock()) catch {
             return localAnswer(conn, id, 400, "http_request_error");
         };
         entry.head_len = head.len;
@@ -486,7 +543,7 @@ fn acceptConnect(conn: *Conn, active: ?*ActiveStream, id: u31, request: *const h
     conn.io.randomSecure(&key_raw) catch return streamError(conn, id, Http2.ERR_INTERNAL_ERROR);
     _ = std.base64.standard.Encoder.encode(&conn.connect_key, &key_raw);
 
-    const head = http2_translate.buildConnectHead(&conn.connect_head, request, headers, conn.client_addr, &conn.connect_key, conn.proxy.client_scheme) catch {
+    const head = http2_translate.buildConnectHead(&conn.connect_head, request, headers, conn.client_addr, &conn.connect_key, conn.proxy.client_scheme, conn.upstreamBlock()) catch {
         return localAnswer(conn, id, 400, "http_request_error");
     };
     conn.connect_head_len = head.len;
@@ -778,7 +835,7 @@ fn readUpstreamHead(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, he
         if (response.status == 101) return error.UpstreamDead;
         if (response.status / 100 != 1) return response;
 
-        const block = http2_translate.encodeResponseBlock(&conn.resp_block_buf, &response, null) catch return error.UpstreamDead;
+        const block = http2_translate.encodeResponseBlock(&conn.resp_block_buf, &response, null, conn.clientBlock()) catch return error.UpstreamDead;
         if (writeBlock(conn, active.id, block, false) == .CLOSED) return error.ClientDead;
     }
 
@@ -797,7 +854,7 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
     };
     const head_only = response.framing == .none;
 
-    const block = http2_translate.encodeResponseBlock(&conn.resp_block_buf, response, block_length) catch {
+    const block = http2_translate.encodeResponseBlock(&conn.resp_block_buf, response, block_length, conn.clientBlock()) catch {
         conn_up.stream.close(io);
         return if (streamError(conn, active.id, Http2.ERR_INTERNAL_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
     };
@@ -1096,7 +1153,7 @@ fn serveStaticFile(conn: *Conn, active: *ActiveStream, resolved: static_files.Re
     const io = conn.io;
 
     var block_buf: [1024]u8 = undefined;
-    const block = http2_translate.encodeStaticBlock(&block_buf, resolved.content_type, resolved.size, resolved.encoding.contentEncoding()) catch {
+    const block = http2_translate.encodeStaticBlock(&block_buf, resolved.content_type, resolved.size, resolved.encoding.contentEncoding(), conn.clientBlock()) catch {
         return if (streamError(conn, active.id, Http2.ERR_INTERNAL_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
     };
 
@@ -1232,7 +1289,7 @@ fn serveConnect(conn: *Conn) Outcome {
             return if (localAnswer(conn, active.id, 502, "connection_terminated") == .CLOSED) .CONN_DEAD else .DONE;
         }
 
-        const block = http2_translate.encodeConnectResponseBlock(&conn.resp_block_buf, &response) catch {
+        const block = http2_translate.encodeConnectResponseBlock(&conn.resp_block_buf, &response, conn.clientBlock()) catch {
             conn_up.stream.close(io);
             return if (streamError(conn, active.id, Http2.ERR_INTERNAL_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
         };
@@ -1309,7 +1366,7 @@ fn localAnswer(conn: *Conn, stream_id: u31, status: u16, proxy_error: ?[]const u
 
 fn sendLocalHead(conn: *Conn, stream_id: u31, status: u16, proxy_error: ?[]const u8, end_stream: bool) ProcessResult {
     var block_buf: [256]u8 = undefined;
-    const block = http2_translate.encodeLocalBlock(&block_buf, status, proxy_error) catch return .OK;
+    const block = http2_translate.encodeLocalBlock(&block_buf, status, proxy_error, conn.clientBlock()) catch return .OK;
 
     return writeBlock(conn, stream_id, block, end_stream);
 }
