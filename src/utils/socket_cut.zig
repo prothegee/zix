@@ -23,7 +23,9 @@
 //!   is windows_io's partial-disconnect ioctl plus a cancel of every request pending on the handle.
 //!   windows_io.readOnce reports both completions as end-of-stream. A std reader cannot (zig 0.16
 //!   and 0.17 both treat a cancelled receive as unreachable), so a read that must survive a cut on
-//!   Windows goes through windows_io.
+//!   Windows goes through windows_io: directly on a bare descriptor, or through socket_cut_reader
+//!   where the caller needs a std.Io.Reader. The escalation cancels a parked send the same way, and
+//!   std's socket writer calls that unreachable too, so the send side has socket_cut_writer.
 
 const std = @import("std");
 const builtin = @import("builtin");
