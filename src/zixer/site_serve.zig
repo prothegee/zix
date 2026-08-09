@@ -9,6 +9,7 @@ const conn_buffer = @import("conn_buffer.zig");
 const deadline_table = @import("deadline_table.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const process_gate = @import("process_gate.zig");
+const request_scheme = @import("request_scheme.zig");
 const site_cfg = @import("site_cfg.zig");
 const site_sweep = @import("site_sweep.zig");
 const site_worker = @import("site_worker.zig");
@@ -359,6 +360,10 @@ fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
         .static = static_site,
         .acme = acme,
         .tls_cert_der = if (state.tls_ctx) |ctx| ctx.cert_der else null,
+
+        // A terminated TLS edge is the one thing that makes this site https,
+        // and the upstream is told that rather than whatever a client claimed.
+        .client_scheme = request_scheme.Scheme.ofSite(state.tls_ctx != null),
         .upstream_timeout_ms = state.upstream_timeout_ms,
         .upstream_connect_timeout_ms = state.upstream_connect_timeout_ms,
         .allocator = state.allocator,
@@ -1185,4 +1190,48 @@ test "zix zixer: site serve, the idle age resolves the site over the daemon" {
 
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
     rebound.deinit(io);
+}
+
+test "zix zixer: site serve, every worker carries the site's own scheme" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18995 }};
+
+    const cleartext_cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18997,
+        .upstreams = &upstreams,
+    };
+    const cleartext_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18997);
+    const cleartext_server = try cleartext_addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    const cleartext = try ServeState.create(std.testing.allocator, io, cleartext_server, &cleartext_cfg, 18997, .{ .workers = 2, .kernel_backlog = 8 });
+
+    for (cleartext.workers) |*worker| try std.testing.expectEqual(request_scheme.Scheme.HTTP, worker.proxy.client_scheme);
+    cleartext.shutdown();
+
+    const tls_cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18998,
+        .upstreams = &upstreams,
+        .tls = true,
+        .tls_cert = "examples/certs/ecdsa_p256_cert.pem",
+        .tls_key = "examples/certs/ecdsa_p256_key.pem",
+    };
+    const tls_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18998);
+    const tls_server = try tls_addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    const secure = try ServeState.create(std.testing.allocator, io, tls_server, &tls_cfg, 18998, .{ .workers = 2, .kernel_backlog = 8 });
+
+    // The one setting that decides it, reaching every accept loop, so no
+    // worker reports a different scheme than its neighbour.
+    for (secure.workers) |*worker| try std.testing.expectEqual(request_scheme.Scheme.HTTPS, worker.proxy.client_scheme);
+    secure.shutdown();
 }
