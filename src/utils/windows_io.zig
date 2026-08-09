@@ -162,15 +162,15 @@ pub fn readOnce(handle: windows.HANDLE, buf: []u8) error{BrokenPipe}!usize {
     return iosb.Information;
 }
 
-/// Best-effort full shutdown (send + receive) of a socket handle, so a thread
-/// blocked reading it wakes with end-of-stream. Mirrors shutdown(fd, SHUT_RDWR).
-pub fn shutdown(handle: windows.HANDLE) void {
+/// Best-effort disconnect of one or both directions of a socket handle. The
+/// AFD ioctl behind every shutdown below.
+fn partialDisconnect(handle: windows.HANDLE, send: bool, receive: bool) void {
     const event = createIoEvent() catch return;
     defer close(event);
 
     var iosb: windows.IO_STATUS_BLOCK = undefined;
     const info = windows.AFD.PARTIAL_DISCONNECT_INFO{
-        .DisconnectMode = .{ .SEND = true, .RECEIVE = true },
+        .DisconnectMode = .{ .SEND = send, .RECEIVE = receive },
         .Timeout = -1,
     };
 
@@ -187,6 +187,12 @@ pub fn shutdown(handle: windows.HANDLE) void {
         0,
     );
     if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+}
+
+/// Best-effort full shutdown (send + receive) of a socket handle, so a thread
+/// blocked reading it wakes with end-of-stream. Mirrors shutdown(fd, SHUT_RDWR).
+pub fn shutdown(handle: windows.HANDLE) void {
+    partialDisconnect(handle, true, true);
 }
 
 /// The ntdll cancel entry point in its documented NULL-request form, which
@@ -212,28 +218,24 @@ const NtCancelIoFileExAll = @extern(*const fn (
 ///   BrokenPipe. Writes issued after the cut are unaffected, matching how the
 ///   cut is used: wake the reader, then write the reply.
 pub fn shutdownRead(handle: windows.HANDLE) void {
-    const event = createIoEvent() catch return;
-    defer close(event);
+    partialDisconnect(handle, false, true);
 
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
-    const info = windows.AFD.PARTIAL_DISCONNECT_INFO{
-        .DisconnectMode = .{ .SEND = false, .RECEIVE = true },
-        .Timeout = -1,
-    };
+    var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
+    _ = NtCancelIoFileExAll(handle, null, &cancel_iosb);
+}
 
-    const status = windows.ntdll.NtDeviceIoControlFile(
-        handle,
-        event,
-        null,
-        null,
-        &iosb,
-        windows.IOCTL.AFD.PARTIAL_DISCONNECT,
-        @ptrCast(&info),
-        @sizeOf(windows.AFD.PARTIAL_DISCONNECT_INFO),
-        null,
-        0,
-    );
-    if (status == .PENDING) _ = windows.ntdll.NtWaitForSingleObject(event, .FALSE, null);
+/// Best-effort shutdown of both directions that also wakes whatever is parked
+/// on the handle, reader or writer. Mirrors shutdown(fd, SHUT_RDWR) as the
+/// escalation after a read-side cut did not free the thread.
+///
+/// Note:
+/// - The cancel is the difference from shutdown above. A disconnect alone
+///   never completes a send already parked in the kernel, and a client that
+///   stopped reading is exactly what parks one.
+/// - Nothing can be written on the handle after this, so the caller has
+///   already given up on answering this connection.
+pub fn shutdownBoth(handle: windows.HANDLE) void {
+    partialDisconnect(handle, true, true);
 
     var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
     _ = NtCancelIoFileExAll(handle, null, &cancel_iosb);
