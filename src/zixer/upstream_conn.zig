@@ -1,8 +1,11 @@
 //! zixer upstream leg: tcp connect to one upstream and the idle keep-alive cache
 
 const std = @import("std");
+const zix = @import("zix");
 
 const tcp_nodelay = @import("tcp_nodelay.zig");
+
+const socket_connect = zix.utils.socket_connect;
 
 /// Idle connections kept per upstream slot. More than this closes on release.
 pub const IDLE_CAP: usize = 4;
@@ -83,13 +86,19 @@ pub const UpstreamConn = struct {
     reused: bool,
 };
 
-/// Connect to one upstream. Only literal ip addresses are supported, name
-/// resolution is not part of the phase 3 upstream leg.
+/// What a connect to one upstream can end as.
+pub const ConnectError = error{
+    /// host is not a literal ip address, so there was nothing to reach.
+    BadUpstreamAddress,
+} || socket_connect.Error;
+
+/// Connect to one upstream, giving up after budget_ms. Only literal ip
+/// addresses are supported, name resolution is not part of the upstream leg.
 ///
 /// Note:
-/// - No connect timeout: the std.Io.Threaded backend panics on one (TODO in
-///   std). A refused port fails fast, a blackholed address waits on the
-///   operating system's own limit.
+/// - A budget that runs out and a connect that fails are told apart, because
+///   the two are different answers to the client: an upstream that never
+///   answered the handshake is a 504, one that refused it is a 502.
 /// - Nagle is turned off here rather than at each caller: the request head
 ///   and the request body leave as separate writes, and the option rides
 ///   the socket into the idle cache, so a reused conn keeps it.
@@ -99,15 +108,18 @@ pub const UpstreamConn = struct {
 /// host - []const u8 (literal ipv4 or ipv6 address)
 /// port - u16
 /// slot_index - u32 (pool slot this conn belongs to)
+/// budget_ms - u32 (how long the handshake may take, 0 waits on the operating
+///   system's own limit)
 ///
 /// Return:
 /// - UpstreamConn with reused = false
 /// - error.BadUpstreamAddress when host is not a literal ip
-/// - any connect error (refused, unreachable)
-pub fn connect(io: std.Io, host: []const u8, port: u16, slot_index: u32) !UpstreamConn {
+/// - error.ConnectTimeout when the budget ran out with no answer
+/// - error.ConnectFailed when the upstream refused or was unreachable
+pub fn connect(io: std.Io, host: []const u8, port: u16, slot_index: u32, budget_ms: u32) ConnectError!UpstreamConn {
     const addr = std.Io.net.IpAddress.parse(host, port) catch return error.BadUpstreamAddress;
 
-    const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    const stream = try socket_connect.withinBudget(io, &addr, budget_ms);
     tcp_nodelay.apply(stream);
 
     return .{ .stream = stream, .slot_index = slot_index, .reused = false };
@@ -352,7 +364,22 @@ test "zix zixer: upstream conn, non-literal host is refused before any socket" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    try std.testing.expectError(error.BadUpstreamAddress, connect(io, "backend.local", 3000, 0));
+    try std.testing.expectError(error.BadUpstreamAddress, connect(io, "backend.local", 3000, 0, 0));
+}
+
+test "zix zixer: upstream conn, a refused port is a failure and not an elapsed budget" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Bound and dropped, so the port is known to have nobody behind it.
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18948);
+    var server = try addr.listen(io, .{ .kernel_backlog = 1, .reuse_address = true });
+    server.deinit(io);
+
+    // A generous budget, so an answer of ConnectFailed can only have come from
+    // the refusal itself.
+    try std.testing.expectError(error.ConnectFailed, connect(io, "127.0.0.1", 18948, 0, 10_000));
 }
 
 test "zix zixer: upstream conn, connect hands back a socket with nagle off" {
@@ -372,7 +399,7 @@ test "zix zixer: upstream conn, connect hands back a socket with nagle off" {
     var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
     defer server.deinit(io);
 
-    const conn = try connect(io, "127.0.0.1", 18942, 0);
+    const conn = try connect(io, "127.0.0.1", 18942, 0, 3_000);
     defer conn.stream.close(io);
     const accepted = try server.accept(io);
     defer accepted.close(io);
