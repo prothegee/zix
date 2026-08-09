@@ -275,11 +275,116 @@ certbot certonly --webroot -w /var/www/acme -d example.com \
 
 A TLS site on a port other than 80 also binds port 80 for the challenge, so the process needs that privilege. Port 80 has to be free for it: a program already holding it fails the start with `challenge port 80 is already in use`.
 
+That port 80 listener is called the cleartext companion, and the next recipe uses it for something else.
+
 `acme_proxy` is the other way to answer the challenge, not a way around port 80. The companion still holds the port and relays the challenge path to the address you name, which is what `certbot certonly --standalone --http-01-port 9080` expects:
 
 ```
 acme_proxy: 127.0.0.1:9080
 ```
+
+### Moving every request to https
+
+A browser typing a bare host name goes to port 80 in cleartext. One key sends it
+on to the https origin instead of leaving it unanswered:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+
+force_https: true
+```
+
+This binds port 80 the same way the challenge does, so the same privilege and
+the same free-port rule apply, and a site that also has acme keys serves both
+from the one listener. The redirect is `301` for GET and HEAD and `308` for
+every other method, so a POST is repeated with its body rather than turned into
+a GET.
+
+Add `redirect_host` when the `Location` should name something other than the
+`Host` the client sent, i.e. moving `www.example.com` onto the bare name:
+
+```
+force_https: true
+redirect_host: example.com
+```
+
+### Bounding a slow client
+
+Nothing above stops a client from opening a connection, sending half a request
+head, and holding it. Two keys do:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+upstreams: 127.0.0.1:3000
+
+client_timeout_ms: 30 * 1000
+client_conn_limit: 4096
+```
+
+`client_timeout_ms` is how long one exchange may take. Past it the site cuts the
+connection and answers `408 request timeout`. `client_conn_limit` is how many
+connections the site tracks at once, and one arriving with every slot taken is
+answered `503 too many connections` before it has sent a byte.
+
+Both are off by default, and the limit only means anything while the budget is
+set. Pick the budget as the slowest ordinary request the site should tolerate,
+because an upload from a phone on a bad connection is a slow client too:
+
+| the site serves | budget to set |
+| :- | :- |
+| ordinary api requests | `30 * 1000` or less |
+| file uploads from browsers | `300 * 1000`, or leave it out |
+| a public edge facing the internet | set one, an unbounded edge is what a slow-request flood needs |
+
+A websocket, an SSE stream, and a grpc stream are not cut. Each one holds its
+slot at handover instead of running a budget, so a long-lived stream keeps
+working while ordinary exchanges stay bounded. An http3 site refuses both keys,
+because the cut works on a socket and every QUIC connection there shares one.
+
+### Adding headers on either leg
+
+Two optional blocks at the end of a site file, one per leg:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+
+[response_headers]
+strict-transport-security: max-age=31536000
+x-frame-options: DENY
+
+[request_headers]
+x-real-ip: $client_ip
+x-forwarded-proto: $scheme
+```
+
+`[response_headers]` goes on what the site answers a client, `[request_headers]`
+on what it sends the backend. A value may name `$client_ip`, `$scheme`, or
+`$host`, which is how a backend behind a terminating edge learns the real client
+address and the scheme the request arrived on. `$scheme` is the site's own `tls`
+setting and never anything the client claimed.
+
+A section runs to the end of the file, so every flat key has to come above the
+first `[` line. A site key written below one is reported by name rather than
+quietly served as a header.
+
+A name already on the message is replaced, not joined, so `x-frame-options` here
+overrides whatever the backend sent. Names the edge owns are refused when the
+file is read, i.e. `content-length`, `via`, `date`, and the hop-by-hop list, and
+`config-en.md` has the full list with each fault text.
 
 ### HTTP/2
 
@@ -357,12 +462,15 @@ There is no log output yet. `logs_dir` must exist because `status` checks it, an
 | `api.cfg has config errors` | the site did not validate | `zixer status api`, fix each listed key |
 | `port 8080 is already used by other.cfg` | another started site owns it | change the port, or stop the other site |
 | `port 8080 is already in use` | a listener outside this daemon owns it | find it with `ss -ltnp`, then stop it or change the port |
-| `challenge port 80 is already used by other.cfg` | another started site owns the acme companion port | keep the acme keys on one site, the others renew from its webroot |
+| `challenge port 80 is already used by other.cfg` | another started site already owns the port 80 companion, which acme keys and `force_https` both ask for | keep those keys on one site, and let the others renew from its webroot |
 | `challenge port 80 is already in use` | a listener outside this daemon owns port 80 | find it with `ss -ltnp` and stop it, the companion has to hold port 80 |
 | `bind failed (BadUpstreamAddress)` | a udp site upstream is not an ip literal | write the address, not a name |
 | `502 all upstreams failed` | every backend refused or failed | check the backend, and that the upstream address is an ip literal |
 | `503 no upstream available` | every backend is in its cooldown window | check the backends, retry after a few seconds |
 | `504 upstream timeout` | the backend accepted the connection and then said nothing for `upstream_timeout_ms` | check the backend, raise the value, or set `upstream_timeout_ms: 0` if it really thinks that long |
+| `504 upstream connect timeout` | the connect itself ran past `upstream_connect_timeout_ms`, so the backend never accepted | check that the address is reachable, then raise the value or set it to `0` |
+| `408 request timeout` | one client exchange ran past `client_timeout_ms` and the site cut it | raise the value for a site serving slow uploads, or leave it if the client really is stuck |
+| `503 too many connections` | every `client_conn_limit` slot is taken | raise the limit, or find out why connections are not being released |
 | `421 misdirected request` | the Host is not covered by `tls_cert` | use a name the certificate covers, or issue one that covers it |
 | `404 not found` on a static path | the file is not under `public_dir` | check the path, and remember that `public_prefix` is not stripped before the join |
 | the acme challenge 404s | the token is not under the webroot | it must be at `<acme_webroot>/.well-known/acme-challenge/<token>` |
