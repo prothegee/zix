@@ -4,6 +4,8 @@ const std = @import("std");
 const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
+const client_admit = @import("client_admit.zig");
+const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const deadline_table = @import("deadline_table.zig");
 const http1_head = @import("http1_head.zig");
@@ -94,9 +96,21 @@ const EdgeResult = enum {
 
 /// Serve one accepted cleartext client connection until it closes. A TLS
 /// site reaches the same loop through tls_edge.serveConn instead.
+///
+/// Note:
+/// - The site's client bound is taken first, ahead of the buffers. A site at
+///   its ceiling answers 503 off the stack and spends nothing else on a
+///   connection it is not going to serve.
 pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     const io = proxy.io;
     defer client_stream.close(io);
+
+    var lease = client_lease.Lease.open(proxy.client_table, io, client_stream.socket.handle, proxy.client_timeout_ms) orelse {
+        client_admit.refuse(io, client_stream);
+
+        return;
+    };
+    defer lease.release();
 
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, legsFor(proxy)) catch {
         writeRefusal(io, client_stream);
@@ -107,7 +121,7 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     var client_reader = client_stream.reader(io, buffers.client_read);
     var client_writer = client_stream.writer(io, buffers.client_write);
 
-    serveLoopBuffered(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, buffers, client_stream.socket.handle);
+    serveLoopBuffered(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, buffers, client_stream.socket.handle, &lease);
 }
 
 /// Which legs this site's connections need buffers for. A static-only
@@ -145,7 +159,10 @@ fn writeRefusal(io: std.Io, client_stream: std.Io.net.Stream) void {
 ///   only softens tunnel teardown when the upstream ends first.
 /// - The caller already owns the client pair here, so this allocates the
 ///   upstream pair alone, and nothing at all on a site with no pool.
-pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, zero_copy_fd: ?std.posix.fd_t) void {
+/// - lease is the connection's slot in the site's client bound, already taken
+///   by whoever accepted the connection. A caller with no bound to enforce
+///   passes a lease over nothing.
+pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, zero_copy_fd: ?std.posix.fd_t, lease: *client_lease.Lease) void {
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = false, .upstream = proxy.pool != null }) catch {
         writeEdgeError(client_w, 503, "edge out of buffers", "connection_limit_reached");
         client_w.flush() catch {};
@@ -153,12 +170,18 @@ pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.I
     };
     defer buffers.deinit(proxy.allocator);
 
-    serveLoopBuffered(proxy, client_r, client_w, client_addr, client_stream, buffers, zero_copy_fd);
+    serveLoopBuffered(proxy, client_r, client_w, client_addr, client_stream, buffers, zero_copy_fd, lease);
 }
 
 /// The request loop proper, over buffers the caller already allocated.
-fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, buffers: conn_buffer.Set, zero_copy_fd: ?std.posix.fd_t) void {
+fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, buffers: conn_buffer.Set, zero_copy_fd: ?std.posix.fd_t, lease: *client_lease.Lease) void {
     while (true) {
+        // The budget covers one whole exchange, head read included: a client
+        // that never finishes sending its request is exactly what the bound
+        // exists to reach. A kept-alive connection arms a fresh one here for
+        // every request it sends.
+        lease.armRequest();
+
         var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
         const head_bytes = http1_head.readHead(client_r, &head_buf) catch |err| {
             if (err == error.HeadTooLarge) writeEdgeError(client_w, 431, "head too large", "http_request_error");
@@ -221,7 +244,7 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
             client_w.flush() catch return;
         }
 
-        const outcome = exchange(proxy, client_r, client_w, client_stream, &request, upstream_head, upgrade, buffers);
+        const outcome = exchange(proxy, client_r, client_w, client_stream, &request, upstream_head, upgrade, buffers, lease);
 
         client_w.flush() catch return;
         if (outcome == .CLOSE) return;
@@ -497,6 +520,7 @@ fn exchange(
     upstream_head: []const u8,
     upgrade: bool,
     buffers: conn_buffer.Set,
+    lease: *client_lease.Lease,
 ) EdgeResult {
     const io = proxy.io;
     const no_body = request.framing == .none;
@@ -619,6 +643,11 @@ fn exchange(
             // site's whole capacity with the backend sitting idle.
             slot.release();
 
+            // A tunnel is silent for as long as its protocol wants, so the
+            // budget comes off it. The connection stays counted, and it ends
+            // with the tunnel.
+            lease.holdStream();
+
             if (switched) ws_tunnel.run(.{
                 .io = io,
                 .client_r = client_r,
@@ -638,6 +667,11 @@ fn exchange(
             conn.stream.close(io);
             return .CLOSE;
         };
+
+        // A stream ends when its source says so, not when a budget does, so
+        // the deadline comes off for the relay. The next request over this
+        // connection arms its own.
+        if (runsAsStream(&response)) lease.holdStream();
 
         var relay_failed = false;
         switch (response.framing) {
@@ -762,6 +796,36 @@ fn writeResponseHead(client_w: *std.Io.Writer, response: *const http1_head.Respo
     if (edge_close) try client_w.writeAll("Connection: close\r\n");
 
     try client_w.writeAll("\r\n");
+}
+
+/// Whether relaying this response is a stream rather than a body of a known
+/// size, which is what decides if the client bound may cut it.
+///
+/// Note:
+/// - until_close has no length to end on at all: it runs until the upstream
+///   hangs up, and a budget over it would cut a working download.
+/// - A chunked body is otherwise an ordinary answer, and a client that stops
+///   reading one is exactly the shape the bound is meant to reach. The one
+///   exception is a server-sent-event stream, which is silent between events
+///   by design and names itself in its content type.
+///
+/// Param:
+/// response - *const http1_head.ResponseHead (the upstream head, already parsed)
+///
+/// Return:
+/// - true when the relay may sit silent for as long as its source wants
+/// - false for a body that ends at a length the edge already knows
+fn runsAsStream(response: *const http1_head.ResponseHead) bool {
+    if (response.framing == .until_close) return true;
+    if (response.framing != .chunked) return false;
+
+    for (response.headerSlice()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "content-type")) continue;
+
+        return std.ascii.startsWithIgnoreCase(header.value, "text/event-stream");
+    }
+
+    return false;
 }
 
 fn expectsContinue(request: *const http1_head.RequestHead) bool {
@@ -1584,7 +1648,8 @@ test "zix zixer: http1 proxy, acme webroot answers ahead of the static plane" {
     var out = std.Io.Writer.fixed(&out_buf);
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40001 } };
 
-    serveLoop(&proxy, &src, &out, addr, null, null);
+    var lease = client_lease.Lease.none;
+    serveLoop(&proxy, &src, &out, addr, null, null, &lease);
     const reply = out.buffered();
 
     const first = std.mem.indexOf(u8, reply, "acme-answer") orelse return error.TestUnexpectedResult;
@@ -1633,7 +1698,8 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
     var foreign = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     var foreign_buf: [512]u8 = undefined;
     var foreign_out = std.Io.Writer.fixed(&foreign_buf);
-    serveLoop(&proxy, &foreign, &foreign_out, addr, null, null);
+    var foreign_lease = client_lease.Lease.none;
+    serveLoop(&proxy, &foreign, &foreign_out, addr, null, null, &foreign_lease);
 
     try testing.expect(std.mem.startsWith(u8, foreign_out.buffered(), "HTTP/1.1 421 misdirected request\r\n"));
     try testing.expect(std.mem.indexOf(u8, foreign_out.buffered(), "Connection: close\r\n") != null);
@@ -1643,7 +1709,8 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
     var own = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
     var own_buf: [512]u8 = undefined;
     var own_out = std.Io.Writer.fixed(&own_buf);
-    serveLoop(&proxy, &own, &own_out, addr, null, null);
+    var own_lease = client_lease.Lease.none;
+    serveLoop(&proxy, &own, &own_out, addr, null, null, &own_lease);
 
     try testing.expect(std.mem.startsWith(u8, own_out.buffered(), "HTTP/1.1 404 "));
 }
@@ -1655,7 +1722,8 @@ test "zix zixer: http1 proxy, https redirect carries the site port" {
     var src = std.Io.Reader.fixed("GET /app/page HTTP/1.1\r\nHost: site.test:80\r\n\r\n");
     var out_buf: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
-    serveLoop(&proxy, &src, &out, addr, null, null);
+    var lease = client_lease.Lease.none;
+    serveLoop(&proxy, &src, &out, addr, null, null, &lease);
 
     try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 301 Moved Permanently\r\n"));
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Location: https://site.test:8443/app/page\r\n") != null);
@@ -2556,4 +2624,334 @@ test "zix zixer: http1 proxy, a cached hit negotiates the precompressed sibling"
     try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&proxy, &plain, &plain_out, null).?);
     try testing.expect(std.mem.indexOf(u8, plain_out.buffered(), "Content-Encoding") == null);
     try testing.expect(std.mem.endsWith(u8, plain_out.buffered(), "identity-body"));
+}
+
+// --------------------------------------------------------- //
+
+const deadline_sweep = @import("deadline_sweep.zig");
+
+/// One served connection plus a flag its thread sets on the way out, so a test
+/// can tell that the edge let go instead of waiting on a join that may hang.
+const ServeProbe = struct {
+    proxy: *const Proxy,
+    stream: std.Io.net.Stream,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(probe: *ServeProbe) void {
+        serveConn(probe.proxy, probe.stream);
+        probe.done.store(true, .release);
+    }
+};
+
+/// Wait until the site's table shows the expected number of tracked
+/// connections, so a test never races the thread that takes the slot.
+fn waitLive(io: std.Io, table: *deadline_table.Table, want: usize) !void {
+    var rounds: usize = 0;
+    while (rounds < 500 and table.liveCount() != want) : (rounds += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+
+    try std.testing.expectEqual(want, table.liveCount());
+}
+
+test "zix zixer: http1 proxy, a streamed response is told apart from a sized one" {
+    const sized = try http1_head.parseResponse("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\n", "GET");
+    try std.testing.expect(!runsAsStream(&sized));
+
+    // An ordinary chunked answer still ends on its own, so the bound may reach
+    // a client that stopped reading one.
+    const chunked = try http1_head.parseResponse("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n", "GET");
+    try std.testing.expect(!runsAsStream(&chunked));
+
+    // An event stream is silent between events by design.
+    const events = try http1_head.parseResponse("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n", "GET");
+    try std.testing.expect(runsAsStream(&events));
+
+    const with_charset = try http1_head.parseResponse("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n", "GET");
+    try std.testing.expect(runsAsStream(&with_charset));
+
+    // No length and no chunk framing: the body ends when the upstream hangs
+    // up, which no budget can predict.
+    const until_close = try http1_head.parseResponse("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n", "GET");
+    try std.testing.expect(runsAsStream(&until_close));
+}
+
+test "zix zixer: http1 proxy, a site at its connection limit refuses the next one" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(std.testing.allocator, 1);
+    defer table.deinit(std.testing.allocator);
+
+    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+
+    var held_fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &held_fds));
+    var held = ServeProbe{ .proxy = &proxy, .stream = edgeStream(held_fds[0]) };
+    const held_thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&held});
+    const held_client = edgeStream(held_fds[1]);
+
+    // The one slot has to be taken before the second connection arrives, or the
+    // test would prove nothing about a full table.
+    try waitLive(io, &table, 1);
+
+    // A bound does not change what a served connection gets back.
+    var held_write_buf: [256]u8 = undefined;
+    var held_writer = held_client.writer(io, &held_write_buf);
+    try held_writer.interface.writeAll("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+    try held_writer.interface.flush();
+
+    var held_read_buf: [1024]u8 = undefined;
+    var held_reader = held_client.reader(io, &held_read_buf);
+    var head_buf: [1024]u8 = undefined;
+    const served_head = try http1_head.readHead(&held_reader.interface, &head_buf);
+    try std.testing.expect(std.mem.startsWith(u8, served_head, "HTTP/1.1 404 "));
+
+    var full_fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &full_fds));
+    var full = ServeProbe{ .proxy = &proxy, .stream = edgeStream(full_fds[0]) };
+    const full_thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&full});
+    const full_client = edgeStream(full_fds[1]);
+
+    // Refused before it sent a byte, and told why.
+    var refusal: [client_admit.REFUSAL.len]u8 = undefined;
+    var full_read_buf: [512]u8 = undefined;
+    var full_reader = full_client.reader(io, &full_read_buf);
+    try full_reader.interface.readSliceAll(&refusal);
+    try std.testing.expectEqualStrings(client_admit.REFUSAL, &refusal);
+
+    full_thread.join();
+    full_client.close(io);
+
+    held_client.close(io);
+    held_thread.join();
+
+    // The served connection gave its slot back, so the next one would be
+    // admitted rather than refused for good.
+    try std.testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+test "zix zixer: http1 proxy, a client past its budget is cut and the edge lets go" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(std.testing.allocator, 1);
+    defer table.deinit(std.testing.allocator);
+
+    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 1 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(fds[1]);
+
+    try waitLive(io, &table, 1);
+
+    // The client sends nothing at all, which is the shape a head read waits on
+    // forever without a bound over it.
+    var cut: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 500 and !probe.done.load(.acquire)) : (rounds += 1) {
+        cut += deadline_sweep.sweepOnce(&table, std.math.maxInt(i64)).cut;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+
+    try std.testing.expect(probe.done.load(.acquire));
+    try std.testing.expect(cut > 0);
+
+    thread.join();
+    client.close(io);
+
+    try std.testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+/// Test upstream that answers one request with an event stream and holds it
+/// open until the test says otherwise, which is the shape no bound may cut.
+const FakeStreamUpstream = struct {
+    io: std.Io,
+    port: u16,
+    ready: std.atomic.Value(bool) = .init(false),
+    finish: std.atomic.Value(bool) = .init(false),
+
+    fn serve(fake: *FakeStreamUpstream) void {
+        const io = fake.io;
+
+        const addr = std.Io.net.IpAddress.parse("127.0.0.1", fake.port) catch return;
+        var server = bindWithRetry(io, addr) orelse return;
+        defer server.deinit(io);
+        fake.ready.store(true, .release);
+
+        const stream = server.accept(io) catch return;
+        defer stream.close(io);
+
+        var read_buf: [4096]u8 = undefined;
+        var write_buf: [4096]u8 = undefined;
+        var reader = stream.reader(io, &read_buf);
+        var writer = stream.writer(io, &write_buf);
+
+        var head_buf: [4096]u8 = undefined;
+        _ = http1_head.readHead(&reader.interface, &head_buf) catch return;
+
+        writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n7\r\ndata: 1\r\n") catch return;
+        writer.interface.flush() catch return;
+
+        while (!fake.finish.load(.acquire)) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(5), .awake) catch return;
+        }
+
+        writer.interface.writeAll("0\r\n\r\n") catch return;
+        writer.interface.flush() catch return;
+    }
+};
+
+test "zix zixer: http1 proxy, an event stream keeps its connection past the budget" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fake = FakeStreamUpstream{ .io = io, .port = 18900 };
+    const fake_thread = try std.Thread.spawn(.{}, FakeStreamUpstream.serve, .{&fake});
+    var waits: usize = 0;
+    while (waits < 100 and !fake.ready.load(.acquire)) : (waits += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+    try std.testing.expect(waits < 100);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 18900 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+
+    var table = try deadline_table.Table.init(std.testing.allocator, 1);
+    defer table.deinit(std.testing.allocator);
+
+    // One millisecond of budget: anything still under it a moment later is
+    // held, not merely lucky.
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .client_table = &table, .client_timeout_ms = 1 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const edge_thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(fds[1]);
+
+    var write_buf: [256]u8 = undefined;
+    var writer = client.writer(io, &write_buf);
+    try writer.interface.writeAll("GET /events HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+    try writer.interface.flush();
+
+    var read_buf: [2048]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var head_buf: [2048]u8 = undefined;
+    const head = try http1_head.readHead(&reader.interface, &head_buf);
+    try std.testing.expect(std.mem.indexOf(u8, head, "Content-Type: text/event-stream\r\n") != null);
+
+    // The first event arriving is what proves the relay is running, so the
+    // hold has already been taken by the time the sweep looks.
+    var first_event: [12]u8 = undefined;
+    try reader.interface.readSliceAll(&first_event);
+    try std.testing.expectEqualStrings("7\r\ndata: 1\r\n", &first_event);
+
+    // The largest stamp the clock can hold is far past a one millisecond
+    // budget, so a connection this sweep leaves alone can only be a held one.
+    const swept = deadline_sweep.sweepOnce(&table, std.math.maxInt(i64));
+    try std.testing.expectEqual(@as(usize, 0), swept.cut);
+    try std.testing.expectEqual(@as(usize, 0), swept.dropped);
+    try std.testing.expectEqual(@as(usize, 1), table.liveCount());
+
+    // The stream ends on its own terms, and the last chunk still reaches the
+    // client the sweep did not cut.
+    fake.finish.store(true, .release);
+
+    var tail: [5]u8 = undefined;
+    try reader.interface.readSliceAll(&tail);
+    try std.testing.expectEqualStrings("0\r\n\r\n", &tail);
+
+    edge_thread.join();
+    client.close(io);
+    fake_thread.join();
+
+    try std.testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+test "zix zixer: http1 proxy, a kept-alive connection arms a fresh budget per request" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(std.testing.allocator, 1);
+    defer table.deinit(std.testing.allocator);
+
+    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+
+    // Stamped before the connection exists, so the deadline the accept armed
+    // is at most a few milliseconds past base plus the budget.
+    const base = monotonic_clock.nowMs(io);
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(fds[1]);
+
+    var write_buf: [256]u8 = undefined;
+    var writer = client.writer(io, &write_buf);
+    var read_buf: [1024]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+
+    try writer.interface.writeAll("GET /one HTTP/1.1\r\nHost: t\r\n\r\n");
+    try writer.interface.flush();
+
+    var first_buf: [1024]u8 = undefined;
+    const first = try http1_head.readHead(&reader.interface, &first_buf);
+    try std.testing.expect(std.mem.startsWith(u8, first, "HTTP/1.1 404 "));
+    var first_body: [16]u8 = undefined;
+    try reader.interface.readSliceAll(first_body[0..10]);
+
+    // Far enough after the accept that a connection still carrying the accept
+    // deadline reads as past due at the stamp swept below.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(400), .awake) catch {};
+
+    try writer.interface.writeAll("GET /two HTTP/1.1\r\nHost: t\r\n\r\n");
+    try writer.interface.flush();
+
+    var second_buf: [1024]u8 = undefined;
+    const second = try http1_head.readHead(&reader.interface, &second_buf);
+    try std.testing.expect(std.mem.startsWith(u8, second, "HTTP/1.1 404 "));
+    try reader.interface.readSliceAll(first_body[0..10]);
+
+    // The second request ran under a budget armed after the sleep, so this
+    // stamp is still inside it. A loop that armed once at accept would be cut
+    // here instead.
+    const swept = deadline_sweep.sweepOnce(&table, base + 60_200);
+    try std.testing.expectEqual(@as(usize, 0), swept.cut);
+    try std.testing.expectEqual(@as(usize, 0), swept.dropped);
+
+    client.close(io);
+    thread.join();
+    try std.testing.expect(probe.done.load(.acquire));
 }

@@ -116,6 +116,28 @@ pub fn writeGoaway(dst: *std.Io.Writer, last_stream: u31, error_code: u32) !void
     try writeFrame(dst, Http2.FRAME_TYPE_GOAWAY, 0, 0, &payload);
 }
 
+/// Write the server preface followed straight by a GOAWAY, for a connection
+/// closed before it ever serves a stream.
+///
+/// Note:
+/// - An h2 client reads the connection preface first whatever comes after it
+///   (rfc 9113 3.4), so the empty SETTINGS is what makes the GOAWAY land as a
+///   refusal instead of as a protocol fault.
+/// - The last stream id is 0 because none was ever opened, which tells the
+///   client every request it had in flight is safe to send elsewhere.
+///
+/// Param:
+/// dst - *std.Io.Writer (the client leg, the caller flushes)
+/// error_code - u32 (why the connection is going away)
+///
+/// Return:
+/// - void
+/// - the writer's own errors
+pub fn writeImmediateGoaway(dst: *std.Io.Writer, error_code: u32) !void {
+    try writeSettings(dst, &.{});
+    try writeGoaway(dst, 0, error_code);
+}
+
 pub fn writeWindowUpdate(dst: *std.Io.Writer, stream_id: u31, increment: u31) !void {
     var payload: [4]u8 = undefined;
     std.mem.writeInt(u32, &payload, increment, .big);
@@ -316,6 +338,27 @@ test "zix zixer: http2 frames, goaway carries last stream and error code" {
     try testing.expectEqual(@as(u31, 0), frame.head.stream_id);
     try testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, frame.payload[0..4], .big));
     try testing.expectEqual(Http2.ERR_PROTOCOL_ERROR, std.mem.readInt(u32, frame.payload[4..8], .big));
+}
+
+test "zix zixer: http2 frames, an immediate goaway leads with the server preface" {
+    var wire_buf: [64]u8 = undefined;
+    var out = std.Io.Writer.fixed(&wire_buf);
+    try writeImmediateGoaway(&out, Http2.ERR_ENHANCE_YOUR_CALM);
+
+    var src = std.Io.Reader.fixed(out.buffered());
+    var payload_buf: [32]u8 = undefined;
+
+    // SETTINGS first, and empty: nothing is being advertised on a connection
+    // that is about to end.
+    const settings = try readFrame(&src, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_SETTINGS), settings.head.frame_type);
+    try testing.expectEqual(@as(u8, 0), settings.head.flags);
+    try testing.expectEqual(@as(usize, 0), settings.payload.len);
+
+    const goaway = try readFrame(&src, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_GOAWAY), goaway.head.frame_type);
+    try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, goaway.payload[0..4], .big));
+    try testing.expectEqual(Http2.ERR_ENHANCE_YOUR_CALM, std.mem.readInt(u32, goaway.payload[4..8], .big));
 }
 
 test "zix zixer: http2 frames, header block splits into continuation frames" {

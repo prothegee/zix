@@ -3,6 +3,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const http1_proxy = @import("http1_proxy.zig");
 const grpc_edge = @import("grpc_edge.zig");
@@ -439,9 +440,17 @@ fn sendAlertFor(stream_w: *std.Io.Writer, err: anyerror) void {
 ///   the prior-knowledge preface when the client offered no ALPN.
 /// - A grpc site always runs the grpc relay: only h2 was offered, and the
 ///   relay itself requires the preface. Everything else runs the h1 loop.
+/// - The site's client bound is taken ahead of the handshake, and a site with
+///   no slot left closes the connection unanswered. Nothing has been
+///   negotiated at that point, so there is no session to write a status over,
+///   and a key exchange is the last thing to spend on a connection that is
+///   already being refused.
 pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, client_stream: std.Io.net.Stream, engine: site_cfg.Engine) void {
     const io = proxy.io;
     defer client_stream.close(io);
+
+    var lease = client_lease.Lease.open(proxy.client_table, io, client_stream.socket.handle, proxy.client_timeout_ms) orelse return;
+    defer lease.release();
 
     // The wire pair only carries ciphertext to and from the socket. The
     // plaintext side is the Session's own buffers, which stay fixed: a
@@ -458,11 +467,11 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     const wants_h2 = engine == .HTTP2 and
         (session.alpn == .H2 or (session.alpn == null and http2_edge.prefersH2(&session.reader)));
     if (engine == .GRPC) {
-        grpc_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+        grpc_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream, &lease);
     } else if (wants_h2) {
-        http2_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream);
+        http2_edge.serveSession(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream, &lease);
     } else {
-        http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream, null);
+        http1_proxy.serveLoop(proxy, &session.reader, &session.writer, client_stream.socket.address, client_stream, null, &lease);
     }
     session.sendCloseNotify();
 }
@@ -869,4 +878,75 @@ test "zix zixer: tls edge, handshake terminates a tls13 client over loopback" {
     var reply_plain: [64]u8 = undefined;
     const reply = try client_conn.readAppData(reply_rec, &reply_plain);
     try testing.expectEqualStrings("pong", reply);
+}
+
+// --------------------------------------------------------- //
+
+const deadline_table = @import("deadline_table.zig");
+
+const socket_poll = zix.utils.socket_poll;
+
+/// Serve one TLS connection on its own thread, flagging the way out, so a test
+/// can tell the edge let go instead of waiting on a join that may hang.
+const TlsServeProbe = struct {
+    proxy: *const http1_proxy.Proxy,
+    ctx: *const Tls.Context,
+    stream: std.Io.net.Stream,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(probe: *TlsServeProbe) void {
+        serveConn(probe.proxy, probe.ctx, probe.stream, .HTTP1);
+        probe.done.store(true, .release);
+    }
+};
+
+test "zix zixer: tls edge, a site at its connection limit closes before the handshake" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try buildContext(testing.allocator, io, FIXTURE_CERT, FIXTURE_KEY, &.{.HTTP_1_1});
+    defer ctx.deinit();
+
+    var table = try deadline_table.Table.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18901);
+    var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
+    defer server.deinit(io);
+
+    const client = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(io);
+    const accepted = try server.accept(io);
+
+    // The site's only slot is already spoken for, so the connection under test
+    // arrives at a full table.
+    try testing.expect(table.claim(client.socket.handle, deadline_table.NEVER_MS) == .TAKEN);
+
+    const proxy = http1_proxy.Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+    var probe = TlsServeProbe{ .proxy = &proxy, .ctx = &ctx, .stream = accepted };
+    const thread = try std.Thread.spawn(.{}, TlsServeProbe.run, .{&probe});
+
+    // A refused connection is closed, so the socket becomes readable at once.
+    // An edge that went into the handshake instead would leave it silent, and
+    // the wait is what turns that into a failure rather than a hang.
+    try testing.expect(socket_poll.readableWithin(client.socket.handle, 5_000));
+
+    // Nothing was written at all: there is no session to carry a status over
+    // before a handshake, so the close is the whole answer.
+    var read_buf: [64]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var byte: [1]u8 = undefined;
+    try testing.expectError(error.EndOfStream, reader.interface.readSliceAll(&byte));
+
+    thread.join();
+    try testing.expect(probe.done.load(.acquire));
+
+    // The refused connection never took a slot of its own.
+    try testing.expectEqual(@as(usize, 1), table.liveCount());
 }
