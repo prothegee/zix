@@ -6,9 +6,11 @@ const zix = @import("zix");
 
 const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
+const deadline_table = @import("deadline_table.zig");
 const fault = @import("fault.zig");
 const process_gate = @import("process_gate.zig");
 const static_cached = @import("static_cached.zig");
+const upstream_conn = @import("upstream_conn.zig");
 
 /// Dispatch enum is the zix one, so the daemon hands it straight to the engines.
 pub const Dispatch = zix.Http1.DispatchModel;
@@ -21,6 +23,20 @@ pub const MainCfg = struct {
     sites_dir: []const u8 = "",
     kernel_backlog: u31 = 1024,
     max_recv_buf: usize = conn_buffer.DEFAULT_BYTES,
+    /// How long one client exchange may take before the edge cuts it. 0 is
+    /// the bound off, which is what a daemon that never asked for one runs
+    /// with: a site that serves long uploads or its own slow clients keeps
+    /// working untouched until the value is set deliberately.
+    client_timeout_ms: u32 = 0,
+    /// Client connections one site tracks at once while the bound is on.
+    /// Nothing is tracked and nothing is refused while the bound is off.
+    client_conn_limit: usize = deadline_table.DEFAULT_CONN_LIMIT,
+    /// How long a connect to an upstream may take before the edge answers
+    /// 504. 0 waits on whatever the operating system decides.
+    upstream_connect_timeout_ms: u32 = upstream_conn.DEFAULT_CONNECT_TIMEOUT_MS,
+    /// How long an unused upstream connection is kept for the next request.
+    /// 0 keeps none, so every exchange opens its own.
+    upstream_idle_ttl_ms: u32 = upstream_conn.DEFAULT_IDLE_TTL_MS,
     /// Requests one site may have running upstream at once. 0 is the gate
     /// off, which is what a daemon that never asked for one runs with.
     process_limit: usize = 0,
@@ -46,6 +62,10 @@ const Key = enum {
     sites_dir,
     kernel_backlog,
     max_recv_buf,
+    client_timeout_ms,
+    client_conn_limit,
+    upstream_connect_timeout_ms,
+    upstream_idle_ttl_ms,
     process_limit,
     process_queue_len,
     process_queue_timeout_ms,
@@ -159,6 +179,62 @@ pub fn parse(
                 }
 
                 cfg.max_recv_buf = bytes;
+            },
+            .client_timeout_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const budget = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the bound off", .{deadline_table.MAX_TIMEOUT_MS});
+                    continue;
+                };
+
+                if (!deadline_table.timeoutInRange(budget)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the bound off", .{deadline_table.MAX_TIMEOUT_MS});
+                    continue;
+                }
+
+                cfg.client_timeout_ms = budget;
+            },
+            .client_conn_limit => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const conn_limit = std.math.cast(usize, value) orelse {
+                    try faults.add(entry.key, "must be 1-{d}, set client_timeout_ms: 0 to track nothing", .{deadline_table.MAX_SLOTS});
+                    continue;
+                };
+
+                if (!deadline_table.connLimitInRange(conn_limit)) {
+                    try faults.add(entry.key, "must be 1-{d}, set client_timeout_ms: 0 to track nothing", .{deadline_table.MAX_SLOTS});
+                    continue;
+                }
+
+                cfg.client_conn_limit = conn_limit;
+            },
+            .upstream_connect_timeout_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const budget = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 waits on the operating system", .{upstream_conn.MAX_CONNECT_TIMEOUT_MS});
+                    continue;
+                };
+
+                if (!upstream_conn.connectTimeoutInRange(budget)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 waits on the operating system", .{upstream_conn.MAX_CONNECT_TIMEOUT_MS});
+                    continue;
+                }
+
+                cfg.upstream_connect_timeout_ms = budget;
+            },
+            .upstream_idle_ttl_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const ttl_ms = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 keeps no connection", .{upstream_conn.MAX_IDLE_TTL_MS});
+                    continue;
+                };
+
+                if (!upstream_conn.idleTtlInRange(ttl_ms)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 keeps no connection", .{upstream_conn.MAX_IDLE_TTL_MS});
+                    continue;
+                }
+
+                cfg.upstream_idle_ttl_ms = ttl_ms;
             },
             .process_limit => {
                 const value = try fault.evalNumber(faults, entry) orelse continue;
@@ -629,4 +705,108 @@ test "zix zixer: main cfg, dispatch names round trip" {
     try std.testing.expectEqualStrings("async", dispatchName(.ASYNC));
     try std.testing.expectEqualStrings("epoll", dispatchName(.EPOLL));
     try std.testing.expectEqualStrings("uring", dispatchName(.URING));
+}
+
+test "zix zixer: main cfg, the client bound defaults to off with a limit reserved" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "", "/srv/zixer", 8, &faults);
+
+    // Off by default: an upgrade must not start cutting connections a site
+    // has always been allowed to hold.
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 0), cfg.client_timeout_ms);
+    try std.testing.expectEqual(deadline_table.DEFAULT_CONN_LIMIT, cfg.client_conn_limit);
+}
+
+test "zix zixer: main cfg, the client bound keys parse with math values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "client_timeout_ms: 30 * 1000\nclient_conn_limit: 8 * 1024\n", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 30_000), cfg.client_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 8192), cfg.client_conn_limit);
+}
+
+test "zix zixer: main cfg, a limit stays meaningful while the bound is off" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Unlike a process queue with no limit, this pair is not dead config: a
+    // site may switch its own bound on and this is the limit it inherits.
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "client_conn_limit: 64\n", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 0), cfg.client_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 64), cfg.client_conn_limit);
+}
+
+test "zix zixer: main cfg, client bound values outside their range fault" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var content_buf: [160]u8 = undefined;
+    const content = try std.fmt.bufPrint(&content_buf, "client_timeout_ms: {d}\nclient_conn_limit: 0\n", .{deadline_table.MAX_TIMEOUT_MS + 1});
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 2), faults.slice().len);
+    try std.testing.expectEqualStrings("client_timeout_ms", faults.slice()[0].key);
+    try std.testing.expectEqualStrings("client_conn_limit", faults.slice()[1].key);
+    try std.testing.expectEqual(@as(u32, 0), cfg.client_timeout_ms);
+    try std.testing.expectEqual(deadline_table.DEFAULT_CONN_LIMIT, cfg.client_conn_limit);
+}
+
+test "zix zixer: main cfg, the upstream connect and idle keys default to the built-in values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(upstream_conn.DEFAULT_CONNECT_TIMEOUT_MS, cfg.upstream_connect_timeout_ms);
+    try std.testing.expectEqual(upstream_conn.DEFAULT_IDLE_TTL_MS, cfg.upstream_idle_ttl_ms);
+}
+
+test "zix zixer: main cfg, the upstream connect and idle keys parse and accept zero" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "upstream_connect_timeout_ms: 2 * 1000\nupstream_idle_ttl_ms: 60 * 1000\n", "/srv/zixer", 8, &faults);
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 2000), cfg.upstream_connect_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 60_000), cfg.upstream_idle_ttl_ms);
+
+    var off_faults = fault.FaultList.init(arena.allocator());
+    const off = try parse(arena.allocator(), "upstream_connect_timeout_ms: 0\nupstream_idle_ttl_ms: 0\n", "/srv/zixer", 8, &off_faults);
+    try std.testing.expectEqual(@as(usize, 0), off_faults.slice().len);
+    try std.testing.expectEqual(@as(u32, 0), off.upstream_connect_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), off.upstream_idle_ttl_ms);
+}
+
+test "zix zixer: main cfg, upstream connect and idle values above their ceilings fault" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var content_buf: [160]u8 = undefined;
+    const content = try std.fmt.bufPrint(&content_buf, "upstream_connect_timeout_ms: {d}\nupstream_idle_ttl_ms: {d}\n", .{
+        upstream_conn.MAX_CONNECT_TIMEOUT_MS + 1,
+        upstream_conn.MAX_IDLE_TTL_MS + 1,
+    });
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), content, "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 2), faults.slice().len);
+    try std.testing.expectEqual(upstream_conn.DEFAULT_CONNECT_TIMEOUT_MS, cfg.upstream_connect_timeout_ms);
+    try std.testing.expectEqual(upstream_conn.DEFAULT_IDLE_TTL_MS, cfg.upstream_idle_ttl_ms);
 }
