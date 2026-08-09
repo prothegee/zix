@@ -21,6 +21,7 @@ const site_sweep = @import("site_sweep.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
+const upstream_status = @import("upstream_status.zig");
 
 const monotonic_clock = zix.utils.monotonic_clock;
 const socket_poll = zix.utils.socket_poll;
@@ -110,6 +111,9 @@ pub const EdgeState = struct {
     idle: ?upstream_conn.IdleCache,
     sweeper: site_sweep.Sweeper = .{},
     upstream_timeout_ms: u32,
+    /// How long a connect to an upstream may take before the request answers
+    /// 504. Zero waits on whatever the operating system decides.
+    upstream_connect_timeout_ms: u32,
     /// How many requests this site may run upstream at once. One gate for
     /// the whole edge, shared by every request task the receive loop spawns.
     process_gate: process_gate.Gate,
@@ -212,6 +216,7 @@ pub const EdgeState = struct {
             .pool = pool,
             .idle = idle,
             .upstream_timeout_ms = cfg.upstream_timeout_ms orelse upstream_deadline.DEFAULT_MS,
+            .upstream_connect_timeout_ms = upstream_conn.resolveConnectTimeout(cfg.upstream_connect_timeout_ms, options.upstream_connect_timeout_ms),
             .process_gate = gate,
             .public_dir_cache_ttl_ms = if (public_dir == null) 0 else cache_ttl_ms,
             .public_dir = public_dir,
@@ -738,7 +743,9 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
     const idle = &state.idle.?;
 
     var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
-    const upstream_head = h3_translate.buildUpstreamHead(&head_buf, request, fields, task.client) catch {
+    // Quic carries no cleartext transport, so an h3 site is https by
+    // construction and the site cfg already refuses tls: false.
+    const upstream_head = h3_translate.buildUpstreamHead(&head_buf, request, fields, task.client, .HTTPS) catch {
         answerLocal(task, 431, null);
         return;
     };
@@ -757,6 +764,7 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
 
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
+    var connect_timed_out = false;
     while (attempts > 0) : (attempts -= 1) {
         const picked = pool.pick(monotonic_clock.nowMs(io)) orelse {
             if (failed_here) break;
@@ -766,7 +774,9 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
         };
 
         const conn_up = idle.acquire(io, picked.index, monotonic_clock.nowMs(io)) orelse
-            upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
+            upstream_conn.connect(io, picked.host, picked.port, picked.index, state.upstream_connect_timeout_ms) catch |err| {
+            if (upstream_status.ranOutOfTime(err)) connect_timed_out = true;
+
             pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
@@ -813,7 +823,8 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
         return;
     }
 
-    answerLocal(task, 502, "connection_refused");
+    const answer = upstream_status.afterAttempts(connect_timed_out);
+    answerLocal(task, answer.status, answer.proxy_error);
 }
 
 /// Read the upstream response head, relaying interim 1xx heads as informational
