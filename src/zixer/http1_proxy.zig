@@ -5,6 +5,7 @@ const zix = @import("zix");
 
 const acme_challenge = @import("acme_challenge.zig");
 const conn_buffer = @import("conn_buffer.zig");
+const deadline_table = @import("deadline_table.zig");
 const http1_head = @import("http1_head.zig");
 const process_gate = @import("process_gate.zig");
 const process_wait = @import("process_wait.zig");
@@ -67,9 +68,18 @@ pub const Proxy = struct {
     /// Zero waits forever, which is what a site with a deliberately slow
     /// backend asks for.
     upstream_timeout_ms: u32 = upstream_deadline.DEFAULT_MS,
+    /// How long a connect to an upstream may take before the edge answers
+    /// 504. Zero waits on whatever the operating system decides.
+    upstream_connect_timeout_ms: u32 = 0,
     /// The site's admission gate, shared with every other worker. Null is a
     /// site that configured no limit, and so is a gate that is off.
     process_gate: ?*process_gate.Gate = null,
+    /// The site's client bound, shared with every other worker. Null is a
+    /// site that configured none, and so is a table that tracks nothing.
+    client_table: ?*deadline_table.Table = null,
+    /// How long one client exchange may take, already resolved. Zero is the
+    /// bound off, and then the table tracks nothing either.
+    client_timeout_ms: u32 = 0,
     /// How long a cached public_dir file stays fresh, already resolved from
     /// the site file and the main.cfg default. Zero serves every static
     /// request through the uncached open.
