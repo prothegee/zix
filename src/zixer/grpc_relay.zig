@@ -4,6 +4,9 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const cfg_headers = @import("cfg_headers.zig");
+const cfg_scanner = @import("cfg_scanner.zig");
+const fault = @import("fault.zig");
 const request_scheme = @import("request_scheme.zig");
 
 const Http2 = zix.Http2;
@@ -108,7 +111,7 @@ pub fn validateRequest(headers: []const Http2.Header) Error!RequestInfo {
 /// headers first in received order, regular headers lowercased, then
 /// zixer's own via and forwarded elements appended (existing chains pass
 /// through untouched).
-pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: *const RequestInfo, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme) ![]const u8 {
+pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: *const RequestInfo, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme, extra: cfg_headers.Block) ![]const u8 {
     var encoder = Http2.HpackEncoder.init(block_buf);
 
     for (headers) |header| {
@@ -116,6 +119,9 @@ pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: 
             try encoder.writeHeader(header.name, header.value);
             continue;
         }
+
+        // The site's own line replaces the client's rather than joining it.
+        if (extra.owns(header.name)) continue;
 
         try writeLowerHeader(&encoder, header.name, header.value);
     }
@@ -127,6 +133,8 @@ pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: 
         try encoder.writeHeader("forwarded", value);
     }
 
+    try writeExtraHeaders(&encoder, extra);
+
     return encoder.encoded();
 }
 
@@ -136,7 +144,7 @@ pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: 
 /// Return:
 /// - the encoded block
 /// - error.Malformed when :status is missing or another pseudo appears
-pub fn encodeResponseBlock(block_buf: []u8, headers: []const Http2.Header) ![]const u8 {
+pub fn encodeResponseBlock(block_buf: []u8, headers: []const Http2.Header, extra: cfg_headers.Block) ![]const u8 {
     var encoder = Http2.HpackEncoder.init(block_buf);
 
     var seen_status = false;
@@ -151,11 +159,15 @@ pub fn encodeResponseBlock(block_buf: []u8, headers: []const Http2.Header) ![]co
             continue;
         }
 
+        if (extra.owns(header.name)) continue;
+
         try writeLowerHeader(&encoder, header.name, header.value);
     }
     if (!seen_status) return error.Malformed;
 
     try encoder.writeHeader("via", VIA_H2);
+
+    try writeExtraHeaders(&encoder, extra);
 
     return encoder.encoded();
 }
@@ -178,7 +190,7 @@ pub fn encodeTrailerBlock(block_buf: []u8, headers: []const Http2.Header) ![]con
 /// The local trailers-only answer when no upstream is reachable: a valid
 /// grpc response carrying UNAVAILABLE, so the client retries instead of
 /// surfacing a transport error.
-pub fn encodeUnavailableBlock(block_buf: []u8) ![]const u8 {
+pub fn encodeUnavailableBlock(block_buf: []u8, extra: cfg_headers.Block) ![]const u8 {
     var encoder = Http2.HpackEncoder.init(block_buf);
 
     try encoder.writeHeader(":status", "200");
@@ -186,7 +198,25 @@ pub fn encodeUnavailableBlock(block_buf: []u8) ![]const u8 {
     try encoder.writeHeader("grpc-status", GRPC_STATUS_UNAVAILABLE);
     try encoder.writeHeader("grpc-message", "upstream unavailable");
 
+    try writeExtraHeaders(&encoder, extra);
+
     return encoder.encoded();
+}
+
+/// Encode the site's configured headers into this block, one field each with
+/// its tokens filled in.
+///
+/// Note:
+/// - A trailer block never carries them. grpc puts its status in the trailers
+///   and nothing else belongs there, and a client reads that block as the end
+///   of the call rather than as headers.
+fn writeExtraHeaders(encoder: *Http2.HpackEncoder, extra: cfg_headers.Block) !void {
+    if (extra.isEmpty()) return;
+
+    var value_buf: [cfg_headers.MAX_VALUE_BYTES]u8 = undefined;
+    for (extra.lines()) |line| {
+        try writeLowerHeader(encoder, line.name, try line.renderValue(&value_buf, extra.values));
+    }
 }
 
 /// rfc 9113 8.2: field names travel lowercase, and connection-specific
@@ -346,7 +376,7 @@ test "zix zixer: grpc relay, request block keeps order and appends via and forwa
     const addr = try std.Io.net.IpAddress.parse("10.1.2.3", 41000);
 
     var block_buf: [1024]u8 = undefined;
-    const block = try encodeRequestBlock(&block_buf, &VALID_REQUEST, &info, addr, .HTTP);
+    const block = try encodeRequestBlock(&block_buf, &VALID_REQUEST, &info, addr, .HTTP, .{});
 
     var out: [16]Http2.Header = undefined;
     var scratch: [1024]u8 = undefined;
@@ -372,7 +402,7 @@ test "zix zixer: grpc relay, response block requires status and appends via" {
     };
 
     var block_buf: [512]u8 = undefined;
-    const block = try encodeResponseBlock(&block_buf, &head);
+    const block = try encodeResponseBlock(&block_buf, &head, .{});
 
     var out: [16]Http2.Header = undefined;
     var scratch: [512]u8 = undefined;
@@ -383,13 +413,13 @@ test "zix zixer: grpc relay, response block requires status and appends via" {
     try testing.expectEqualStrings(VIA_H2, findValue(&out, count, "via").?);
 
     const no_status = [_]Http2.Header{makeHeader("content-type", "application/grpc")};
-    try testing.expectError(error.Malformed, encodeResponseBlock(&block_buf, &no_status));
+    try testing.expectError(error.Malformed, encodeResponseBlock(&block_buf, &no_status, .{}));
 
     const bad_pseudo = [_]Http2.Header{
         makeHeader(":status", "200"),
         makeHeader(":path", "/x"),
     };
-    try testing.expectError(error.Malformed, encodeResponseBlock(&block_buf, &bad_pseudo));
+    try testing.expectError(error.Malformed, encodeResponseBlock(&block_buf, &bad_pseudo, .{}));
 }
 
 test "zix zixer: grpc relay, trailer block passes through and refuses pseudo" {
@@ -416,7 +446,7 @@ test "zix zixer: grpc relay, trailer block passes through and refuses pseudo" {
 
 test "zix zixer: grpc relay, unavailable block is a trailers-only grpc answer" {
     var block_buf: [512]u8 = undefined;
-    const block = try encodeUnavailableBlock(&block_buf);
+    const block = try encodeUnavailableBlock(&block_buf, .{});
 
     var out: [8]Http2.Header = undefined;
     var scratch: [512]u8 = undefined;
@@ -435,7 +465,7 @@ test "zix zixer: grpc relay, the forwarded proto is the site's and not the clien
     const addr = try std.Io.net.IpAddress.parse("10.1.2.3", 41000);
 
     var block_buf: [1024]u8 = undefined;
-    const block = try encodeRequestBlock(&block_buf, &VALID_REQUEST, &info, addr, .HTTPS);
+    const block = try encodeRequestBlock(&block_buf, &VALID_REQUEST, &info, addr, .HTTPS, .{});
 
     var out: [16]Http2.Header = undefined;
     var scratch: [1024]u8 = undefined;
@@ -443,4 +473,107 @@ test "zix zixer: grpc relay, the forwarded proto is the site's and not the clien
 
     const forwarded = findValue(&out, count, "forwarded").?;
     try testing.expect(std.mem.indexOf(u8, forwarded, "proto=https") != null);
+}
+
+/// Compile one header section the way a site cfg would, for the relay tests.
+fn testTable(arena: std.mem.Allocator, direction: cfg_headers.Direction, lines: []const cfg_scanner.Entry) !cfg_headers.Table {
+    var faults = fault.FaultList.init(arena);
+    const table = try cfg_headers.compile(arena, lines, direction, true, &faults);
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+
+    return table;
+}
+
+test "zix zixer: grpc relay, the request block carries the site's request headers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const table = try testTable(arena.allocator(), .REQUEST, &.{
+        .{ .key = "x-real-ip", .value = "$client_ip", .line_no = 2 },
+        .{ .key = "X-Tenant", .value = "acme", .line_no = 3 },
+    });
+    const extra = cfg_headers.Block{
+        .table = table,
+        .values = .{ .client_ip = "192.0.2.7", .scheme = "https", .host = "zixer-grpc" },
+    };
+
+    const headers = [_]Http2.Header{
+        makeHeader(":method", "POST"),
+        makeHeader(":scheme", "https"),
+        makeHeader(":path", "/pkg.Svc/Call"),
+        makeHeader(":authority", "zixer-grpc"),
+        makeHeader("content-type", "application/grpc"),
+        makeHeader("x-tenant", "spoofed"),
+    };
+    const info = try validateRequest(&headers);
+
+    var block_buf: [1024]u8 = undefined;
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 7 }, .port = 55000 } };
+    const block = try encodeRequestBlock(&block_buf, &headers, &info, addr, .HTTPS, extra);
+
+    var decoded: [32]Http2.Header = undefined;
+    var scratch: [2048]u8 = undefined;
+    const count = try decodeBlock(block, &decoded, &scratch);
+
+    try testing.expectEqualStrings("192.0.2.7", findValue(&decoded, count, "x-real-ip").?);
+    try testing.expectEqualStrings("acme", findValue(&decoded, count, "x-tenant").?);
+    try testing.expectEqualStrings("application/grpc", findValue(&decoded, count, "content-type").?);
+
+    // The client's own x-tenant is gone, not sitting beside the site's.
+    var tenants: usize = 0;
+    for (decoded[0..count]) |header| {
+        if (std.mem.eql(u8, header.name, "x-tenant")) tenants += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), tenants);
+}
+
+test "zix zixer: grpc relay, the response and unavailable blocks carry them too" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const table = try testTable(arena.allocator(), .RESPONSE, &.{
+        .{ .key = "x-origin", .value = "$host", .line_no = 2 },
+    });
+    const extra = cfg_headers.Block{ .table = table, .values = .{ .host = "zixer-grpc" } };
+
+    var block_buf: [512]u8 = undefined;
+    var decoded: [16]Http2.Header = undefined;
+    var scratch: [1024]u8 = undefined;
+
+    const response = [_]Http2.Header{
+        makeHeader(":status", "200"),
+        makeHeader("content-type", "application/grpc"),
+    };
+    const head = try encodeResponseBlock(&block_buf, &response, extra);
+    const head_count = try decodeBlock(head, &decoded, &scratch);
+    try testing.expectEqualStrings("zixer-grpc", findValue(&decoded, head_count, "x-origin").?);
+
+    const unavailable = try encodeUnavailableBlock(&block_buf, extra);
+    const unavailable_count = try decodeBlock(unavailable, &decoded, &scratch);
+    try testing.expectEqualStrings("zixer-grpc", findValue(&decoded, unavailable_count, "x-origin").?);
+    try testing.expectEqualStrings("14", findValue(&decoded, unavailable_count, "grpc-status").?);
+}
+
+test "zix zixer: grpc relay, a trailer block never carries them" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    _ = try testTable(arena.allocator(), .RESPONSE, &.{
+        .{ .key = "x-origin", .value = "$host", .line_no = 2 },
+    });
+
+    // The trailers close the call and carry the grpc status, nothing else
+    // belongs there, so the encoder takes no block at all.
+    const trailers = [_]Http2.Header{makeHeader("grpc-status", "0")};
+
+    var block_buf: [256]u8 = undefined;
+    const block = try encodeTrailerBlock(&block_buf, &trailers);
+
+    var decoded: [8]Http2.Header = undefined;
+    var scratch: [512]u8 = undefined;
+    const count = try decodeBlock(block, &decoded, &scratch);
+
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqualStrings("grpc-status", decoded[0].name);
 }
