@@ -138,8 +138,8 @@ test "zix zixer: deadline sweep, the first pass cuts the read side and leaves th
     try testing.expectEqual(@as(usize, 0), swept.dropped);
 
     // The handler's next read ends, which is how it learns the exchange is over. On Windows only
-    // windows_io.readOnce reports a cancelled receive that way, so the read check is the engines'
-    // own path there, see utils/socket_cut.
+    // windows_io.readOnce reports a cancelled receive that way, so the check below stays off that
+    // platform and the edges read through utils/socket_cut_reader instead.
     if (comptime @import("builtin").os.tag != .windows) {
         var read_buf: [1]u8 = undefined;
         var reader = pair.accepted.reader(io, &read_buf);

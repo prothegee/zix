@@ -2462,7 +2462,7 @@ Key `engine` memilih edge, dan tiap engine kecuali `udp` melakukan re-originatio
 | [`docs/zixer/hld-id.md`](docs/zixer/hld-id.md) | zixer: process model, komponen, siklus hidup site, engine, concurrency model, TLS dan ACME |
 | [`docs/zixer/lld-id.md`](docs/zixer/lld-id.md) | zixer: grammar config, wire control, aturan registry, internal per edge, batas tetap |
 
-Demo yang bisa dijalankan untuk tiap bentuk ada di [`examples/proxies/`](examples/proxies/README-id.md), masing-masing satu upstream plus satu config site, dan `zig build zixer-test-runner-all` menjalankan ke-13-nya, masing-masing di root sementara sendiri dan child process sendiri yang dibatasi waktu.
+Demo yang bisa dijalankan untuk tiap bentuk ada di [`examples/proxies/`](examples/proxies/README-id.md), masing-masing satu upstream plus satu config site, dan `zig build zixer-test-runner-all` menjalankan ke-15-nya, masing-masing di root sementara sendiri dan child process sendiri yang dibatasi waktu.
 
 **Kapan digunakan:** taruh di depan service yang sudah kamu jalankan saat kamu ingin terminasi TLS, file static, upstream round-robin, atau perubahan protocol di edge, dan kamu ingin itu dijelaskan di sebuah file alih-alih ditulis sebagai kode. Pakai engine-nya langsung bila perilakunya memang milik program kamu sendiri.
 
