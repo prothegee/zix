@@ -277,11 +277,120 @@ certbot certonly --webroot -w /var/www/acme -d example.com \
 
 Site TLS di port selain 80 juga bind port 80 untuk challenge, jadi prosesnya butuh hak itu. Port 80 harus bebas untuknya: program lain yang sudah memegangnya membuat start gagal dengan `challenge port 80 is already in use`.
 
+Listener port 80 itu disebut companion cleartext, dan resep berikutnya memakainya untuk hal lain.
+
 `acme_proxy` adalah cara lain menjawab challenge, bukan cara menghindari port 80. Companion tetap memegang port itu dan merelay path challenge ke alamat yang Anda tulis, yang persis dibutuhkan `certbot certonly --standalone --http-01-port 9080`:
 
 ```
 acme_proxy: 127.0.0.1:9080
 ```
+
+### Memindahkan setiap request ke https
+
+Browser yang mengetik nama host polos menuju port 80 dalam cleartext. Satu key
+mengirimnya ke origin https alih-alih membiarkannya tak terjawab:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+
+force_https: true
+```
+
+Ini bind port 80 dengan cara yang sama seperti challenge, jadi hak akses dan
+aturan port bebas yang sama berlaku, dan site yang juga punya key acme melayani
+keduanya dari satu listener itu. Redirect-nya `301` untuk GET dan HEAD dan `308`
+untuk metode lain, jadi sebuah POST diulang bersama body-nya alih-alih berubah
+menjadi GET.
+
+Tambahkan `redirect_host` ketika `Location` harus menyebut sesuatu selain `Host`
+yang dikirim client, misalnya memindahkan `www.example.com` ke nama polosnya:
+
+```
+force_https: true
+redirect_host: example.com
+```
+
+### Membatasi client yang lambat
+
+Tidak ada satu pun di atas yang mencegah client membuka koneksi, mengirim
+setengah head request, lalu menahannya. Dua key melakukannya:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+upstreams: 127.0.0.1:3000
+
+client_timeout_ms: 30 * 1000
+client_conn_limit: 4096
+```
+
+`client_timeout_ms` adalah berapa lama satu pertukaran boleh berjalan. Lewat
+dari itu site memotong koneksinya dan menjawab `408 request timeout`.
+`client_conn_limit` adalah berapa koneksi yang dilacak site sekaligus, dan
+koneksi yang datang saat semua slot terpakai dijawab `503 too many connections`
+sebelum ia mengirim satu byte pun.
+
+Keduanya mati secara default, dan limitnya hanya berarti selama jatah waktunya
+diisi. Pilih jatahnya sebesar request biasa paling lambat yang masih pantas
+ditoleransi site, karena upload dari ponsel di jaringan buruk juga termasuk
+client yang lambat:
+
+| yang dilayani site | jatah yang dipakai |
+| :- | :- |
+| request api biasa | `30 * 1000` atau kurang |
+| upload berkas dari browser | `300 * 1000`, atau biarkan kosong |
+| edge publik yang menghadap internet | isi salah satu, edge tanpa batas adalah yang dibutuhkan banjir slow-request |
+
+Websocket, stream SSE, dan stream grpc tidak dipotong. Masing-masing menahan
+slot-nya saat serah terima alih-alih menjalankan jatah waktu, jadi stream
+berumur panjang tetap bekerja sementara pertukaran biasa tetap dibatasi. Site
+http3 menolak kedua key itu, karena cut bekerja pada socket dan setiap koneksi
+QUIC di sana memakai satu socket yang sama.
+
+### Menambahkan header di salah satu leg
+
+Dua blok opsional di akhir file site, satu per leg:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+upstreams: 127.0.0.1:3000
+
+[response_headers]
+strict-transport-security: max-age=31536000
+x-frame-options: DENY
+
+[request_headers]
+x-real-ip: $client_ip
+x-forwarded-proto: $scheme
+```
+
+`[response_headers]` menempel pada apa yang dijawab site ke client,
+`[request_headers]` pada apa yang dikirimnya ke backend. Sebuah nilai boleh
+menyebut `$client_ip`, `$scheme`, atau `$host`, dan itulah cara backend di
+belakang edge yang menerminasi mengetahui alamat client yang sebenarnya dan
+scheme tempat request itu datang. `$scheme` adalah setting `tls` milik site itu
+sendiri dan tidak pernah apa pun yang diklaim client.
+
+Sebuah section berjalan sampai akhir file, jadi setiap key flat harus ada di
+atas baris `[` pertama. Key site yang ditulis di bawahnya dilaporkan berdasarkan
+namanya alih-alih diam-diam dilayani sebagai header.
+
+Nama yang sudah ada di pesan diganti, bukan digabung, jadi `x-frame-options` di
+sini menimpa apa pun yang dikirim backend. Nama yang dimiliki edge ditolak saat
+file dibaca, misalnya `content-length`, `via`, `date`, dan daftar hop-by-hop,
+dan `config-id.md` memuat daftar lengkapnya beserta tiap teks fault.
 
 ### HTTP/2
 
@@ -359,12 +468,15 @@ Belum ada output log. `logs_dir` harus ada karena `status` memeriksanya, dan tid
 | `api.cfg has config errors` | site tidak lolos validasi | `zixer status api`, perbaiki tiap key yang disebut |
 | `port 8080 is already used by other.cfg` | site lain yang start memilikinya | ganti port, atau hentikan site itu |
 | `port 8080 is already in use` | listener di luar daemon ini memilikinya | cari dengan `ss -ltnp`, lalu hentikan atau ganti port |
-| `challenge port 80 is already used by other.cfg` | site lain yang start memiliki port companion acme | simpan key acme di satu site saja, sisanya renew dari webroot site itu |
+| `challenge port 80 is already used by other.cfg` | site lain yang start sudah memiliki companion port 80, yang diminta baik oleh key acme maupun oleh `force_https` | simpan key itu di satu site saja, dan biarkan sisanya renew dari webroot site itu |
 | `challenge port 80 is already in use` | listener di luar daemon ini memiliki port 80 | cari dengan `ss -ltnp` lalu hentikan, companion harus memegang port 80 |
 | `bind failed (BadUpstreamAddress)` | upstream site udp bukan literal ip | tulis alamatnya, bukan nama |
 | `502 all upstreams failed` | tiap backend menolak atau gagal | periksa backend, dan pastikan alamat upstream adalah literal ip |
 | `503 no upstream available` | tiap backend sedang di jendela cooldown-nya | periksa backend, coba lagi beberapa detik kemudian |
 | `504 upstream timeout` | backend menerima koneksi lalu diam selama `upstream_timeout_ms` | periksa backend, naikkan nilainya, atau set `upstream_timeout_ms: 0` kalau memang berpikir selama itu |
+| `504 upstream connect timeout` | connect-nya sendiri berjalan lewat `upstream_connect_timeout_ms`, jadi backend tidak pernah menerima | pastikan alamatnya terjangkau, lalu naikkan nilainya atau set ke `0` |
+| `408 request timeout` | satu pertukaran client berjalan lewat `client_timeout_ms` dan site memotongnya | naikkan nilainya untuk site yang melayani upload lambat, atau biarkan kalau client-nya memang macet |
+| `503 too many connections` | semua slot `client_conn_limit` terpakai | naikkan limitnya, atau cari tahu kenapa koneksi tidak dilepas |
 | `421 misdirected request` | Host tidak dicakup `tls_cert` | pakai nama yang dicakup certificate, atau terbitkan certificate yang mencakupnya |
 | `404 not found` di path static | file-nya tidak ada di bawah `public_dir` | periksa path-nya, dan ingat `public_prefix` tidak dipotong sebelum digabungkan |
 | challenge acme menjawab 404 | token tidak ada di bawah webroot | ia harus ada di `<acme_webroot>/.well-known/acme-challenge/<token>` |
