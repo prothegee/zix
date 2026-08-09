@@ -98,6 +98,8 @@ flowchart LR
 | `root_dir.zig` | resolusi root dir dan sumbernya |
 | `cfg_scanner.zig` | grammar flat `key: value`, comment, list koma |
 | `cfg_math.zig` | ekspresi integer di nilai numerik |
+| `cfg_headers.zig` | dua blok header `[section]`, dikompilasi sekali menjadi satu table per leg |
+| `header_syntax.zig` | apa yang diizinkan rfc 9110 di nama field dan nilai field |
 | `fault.zig` | pengumpulan fault, tiap entri membawa fix hint |
 | `main_cfg.zig` | skema main.cfg, default, validasi |
 | `site_cfg.zig` | skema site, aturan engine, validasi lintas field |
@@ -105,13 +107,14 @@ flowchart LR
 | `control.zig`, `control_client.zig` | lokasi socket, format request satu baris, sisi client |
 | `daemon.zig` | control loop dan registry site yang sudah start |
 | `daemon_spawn.zig` | auto-spawn saat socket diam |
-| `site_runtime.zig` | apa yang dimiliki satu site yang start: listener, companion acme |
+| `site_runtime.zig` | apa yang dimiliki satu site yang start: listener, dan companion cleartext di sampingnya |
 | `port_probe.zig` | apakah listener di luar daemon ini sudah memiliki sebuah port |
 | `site_serve.zig` | apa yang dimiliki satu site tcp yang melayani: worker, pool, dan idle cache-nya |
 | `site_worker.zig` | satu accept loop dengan listener dan leg upstream sendiri |
 | `worker_count.zig` | berapa accept loop yang dijalankan sebuah site |
 | `bind_options.zig` | nilai main.cfg yang dibutuhkan sebuah site saat bind |
 | `conn_buffer.zig` | blok stream buffer yang dipegang satu koneksi edge |
+| `tcp_nodelay.zig` | mematikan Nagle pada satu koneksi yang diterima |
 | `http1_proxy.zig`, `http1_head.zig` | edge http1 dan parsing pesannya |
 | `http2_edge.zig` dan kerabatnya | edge h2, frame, translasi, bridge websocket rfc 8441 |
 | `grpc_edge.zig` dan kerabatnya | edge grpc, h2 di kedua leg |
@@ -126,6 +129,8 @@ flowchart LR
 | `upstream_pool.zig`, `upstream_conn.zig` | pemilihan round-robin, ketersediaan, keep-alive idle |
 | `upstream_deadline.zig` | batas satu read upstream |
 | `upstream_status.zig` | yang disampaikan ke client ketika tidak ada percobaan yang menghasilkan koneksi: 504 untuk yang diam, 502 untuk yang menolak |
+| `process_gate.zig` | state admission satu site: pencacahnya dan ruang tunggunya |
+| `process_wait.zig` | cara edge task-per-connection menunggu tiket, dan cara relay grpc membuang beban alih-alih menunggu |
 | `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | batas client: slot-nya, cut-nya, dan mengambil slot atau menolak koneksi |
 | `client_lease.zig` | yang dipegang satu koneksi yang diterima: arm per exchange, hold saat stream, dan mengembalikan slot |
 | `site_sweep.zig` | satu thread background per site, menjalankan cut client dan sweep idle sekaligus |
@@ -223,12 +228,47 @@ request melewatinya tepat saat edge memutuskan untuk meneruskan ke upstream.
 Tidak ada yang lebih awal sampai ke sana: jawaban static, challenge acme, dan
 redirect https semuanya dilayani sebelum gate ditanya.
 
-- `process_limit` adalah berapa request yang boleh berjalan ke upstream sekaligus, `process_queue_len` berapa yang boleh menunggu, dan `process_queue_timeout_ms` membatasi lama tunggu itu. Ketiganya default mati, lihat `config-id.md`.
+- `process_limit` adalah berapa request yang boleh berjalan ke upstream sekaligus, `process_queue_len` berapa yang boleh menunggu, dan `process_queue_timeout_ms` membatasi lama tunggu itu. Dua yang pertama default 0, yang berarti gate mati, jadi yang ketiga tidak pernah berperan sampai salah satunya diisi. Lihat `config-id.md`.
 - Sengaja per site, bukan per worker. Membagi hitungannya ke tiap worker akan membuat satu angka yang ditulis berarti lain di tiap mesin, karena `workers: 0` mengikuti jumlah thread, dan sebuah katup harus diukur dari apa yang sanggup diserap backend.
 - Gate tidak pernah memblokir. Request yang tidak bisa lanjut diberi tiket dan task-nya sendiri yang menunggu, sehingga struktur yang sama melayani loop task-per-koneksi dan akan melayani readiness atau completion loop satu thread, di mana loop-nya memeriksa tiket dari ready pass-nya sendiri.
 - Ruang tunggu yang penuh menolak dalam hitungan mikrodetik, bukan menahan koneksi selama seluruh jatah waktu. Membuang beban lebih awal itulah intinya: antrean tanpa batas saat badai akan mengunci buffer tiap penunggu lalu menggagalkan semuanya belakangan.
 - Pertukaran berumur panjang melepas slot-nya saat serah terima. Tunnel websocket dan stream grpc hidup selama client-nya, jadi menahan slot selama umur mereka akan membuat segelintir socket terbuka mengunci site.
 - grpc tidak pernah mengantre. Frame loop-nya menggerakkan setiap stream hidup di koneksi itu, jadi memarkirnya akan menahan pekerjaan yang sudah masuk, dan stream baru dibuang dengan `UNAVAILABLE` trailers-only.
+
+<br>
+
+## Batas client
+
+Katup di atas membatasi apa yang dipakai sebuah site pada backend-nya. Batas
+client adalah sisi satunya: apa yang dipakai sebuah site pada client yang
+lambat, diam, atau yang memang tidak pernah pergi. `client_timeout_ms` default
+0, yang berarti batasnya mati, jadi sebuah site memilihnya sendiri dan
+`client_conn_limit` tidak berarti apa pun sampai ia melakukannya.
+
+- `client_timeout_ms` adalah berapa lama satu pertukaran boleh berjalan. Koneksi
+  yang lewat jatahnya dipotong oleh thread background milik site, bukan oleh
+  edge, jadi tidak ada logika timeout yang hidup di dalam dispatch loop dan
+  handler yang tertahan di sebuah read mengetahuinya dengan cara yang sama
+  seperti saat client menghilang.
+- Cut-nya mendarat dalam dua tahap. Pass pertama hanya mengambil sisi read,
+  yang membangunkan handler dan masih membiarkannya menulis `408` yang menjadi
+  hak client. Pass berikutnya, satu tick setelahnya, mengambil sisi kirim juga,
+  untuk satu bentuk yang tidak pernah dijangkau cut sisi read: client yang
+  berhenti membaca memarkir handler di sebuah write.
+- `client_conn_limit` adalah berapa koneksi yang dilacak site sekaligus. Table-nya
+  dialokasikan sekali saat site start dan tidak ada yang mengalokasi per
+  koneksi, jadi koneksi yang datang saat semua slot terpakai ditolak `503` dari
+  balasan tetap sebelum ia mengirim satu byte pun.
+- Pertukaran berumur panjang menahan slot-nya alih-alih menghitung waktunya.
+  Tunnel websocket, stream SSE, dan stream grpc hidup selama client-nya, jadi
+  batasnya berhenti menghitung mereka saat serah terima ketimbang memotong
+  stream yang sedang bekerja.
+- Hanya empat edge yang menghadap client yang mengambil slot, dan hanya di leg
+  yang menghadap client. Leg upstream dibatasi key-nya sendiri, yang menjawab
+  sebuah status alih-alih memotong socket.
+- Site http3 tidak punya batas ini. Cut bekerja pada socket, dan setiap koneksi
+  QUIC di satu site memakai satu datagram socket yang sama, jadi kedua key-nya
+  ditolak saat file dibaca.
 
 <br>
 
@@ -313,7 +353,9 @@ flowchart LR
     relay --> backend[(challenge backend)]
 ```
 
-Site http1 cleartext menjawab path challenge di listener-nya sendiri. Site TLS di port selain 80 juga bind port 80 untuk challenge, dan bind itu harus berhasil atau seluruh `start` gagal, karena site yang setengah start akan diam-diam merusak renewal.
+Site http1 cleartext menjawab path challenge di listener-nya sendiri. Site TLS di port selain 80 juga bind port 80, dan bind itu harus berhasil atau seluruh `start` gagal, karena site yang setengah start akan diam-diam merusak renewal.
+
+Listener port 80 itu adalah companion cleartext, dan acme hanyalah satu dari dua alasan memilikinya. `force_https` mendapatkannya sendiri: site tanpa key acme sama sekali tetap bind port 80 supaya browser yang mengetik nama host polos dipindahkan ke origin https, `301` untuk GET dan HEAD dan `308` untuk metode lain supaya pengulangannya tidak pernah membuang body. `redirect_host` menyebut authority yang dibawa `Location`, dan tanpa itu `Host` milik client sendiri yang digemakan. Site yang meminta keduanya melayani path challenge dari listener yang sama lalu me-redirect sisanya.
 
 <br>
 
@@ -326,6 +368,19 @@ Edge proxy mengikuti aturan intermediary, bukan meneruskan semuanya:
 - `Forwarded` membawa alamat client, scheme, dan host asli (rfc 7239). Scheme-nya berasal dari setting `tls` site itu sendiri, tidak pernah dari apa pun yang dikirim client, jadi backend yang memercayainya bisa membedakan request https yang diterminasi dari request cleartext.
 - Kegagalan yang dihasilkan zixer sendiri membawa `Proxy-Status: zixer; error="..."`, jadi 502 dari gateway bisa dibedakan dari 502 yang dikirim upstream.
 
+Di atas kontrak itu, sebuah site menambahkan header-nya sendiri, ditulis sebagai dua blok opsional di akhir file config-nya:
+
+| blok | leg | menjangkau |
+| :- | :- | :- |
+| `[response_headers]` | client | response yang direlay, file dari `public_dir`, dan error lokal yang dibangun edge |
+| `[request_headers]` | upstream | setiap pesan yang di-re-originate edge |
+
+Sebuah nilai boleh menyebut `$client_ip`, `$scheme`, atau `$host`, dan itulah cara backend di belakang edge yang menerminasi mengetahui alamat client yang sebenarnya dan scheme tempat request itu benar-benar datang. Token-nya diselesaikan per request, dan `$scheme` berasal dari setting `tls` milik site itu sendiri, bukan dari apa pun yang diklaim client.
+
+Blok ini menambah dan mengganti, ia tidak pernah menulis ulang. Nama yang sudah ada di pesan diganti nilai site, nama yang belum ada ditambahkan, dan tidak ada aturan yang membaca nilai yang direlay lalu menyuntingnya. Nama yang sudah dimiliki aturan intermediary ditolak saat file dibaca alih-alih dibuang belakangan: daftar hop-by-hop di atas, `Via`, `Date`, dan `Forwarded` semuanya milik edge.
+
+Kedua blok dikompilasi sekali saat load, jadi satu request hanya membayar sebuah copy, dan site dengan baris header yang salah tidak akan start. `config-id.md` memuat daftar penolakan lengkapnya beserta beberapa jawaban yang sengaja tidak membawa section, seperti 503 tetap yang diberikan edge ketika ia sudah memutuskan untuk tidak memakai apa pun pada koneksi itu.
+
 <br>
 
 ## Model kegagalan
@@ -334,11 +389,15 @@ Edge proxy mengikuti aturan intermediary, bukan meneruskan semuanya:
 | :- | :- |
 | tidak ada upstream yang sedang up | `503 no upstream available` |
 | semua percobaan gagal | `502 all upstreams failed` dengan alasan `Proxy-Status` |
+| connect berjalan lewat `upstream_connect_timeout_ms` | `504 upstream connect timeout` dengan alasan `Proxy-Status` |
 | request sudah mulai men-stream body-nya | tidak ada retry, kegagalan dilaporkan apa adanya |
 | `Host` tidak dicakup certificate | `421 misdirected request` |
 | path static hilang dan tidak ada `spa_fallback` | `404 not found` dari edge, tanpa melibatkan upstream |
 | site berada di `process_limit` dan ruang tunggunya penuh | `504 upstream queue full` dengan alasan `Proxy-Status` |
 | request yang mengantre habis `process_queue_timeout_ms` | `504 upstream queue timeout` dengan alasan yang sama |
+| pertukaran client berjalan lewat `client_timeout_ms` | `408 request timeout`, ditulis setelah sweep memotong sisi read |
+| koneksi datang saat semua slot `client_conn_limit` terpakai | `503 too many connections`, balasan tetap sebelum client mengirim satu byte |
+| request cleartext sampai ke companion `force_https` | `301` untuk GET dan HEAD, `308` untuk metode lain |
 
 Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selama jendela cooldown, lalu diterima lagi dan ditandai down lagi oleh kegagalan berikutnya. Tidak ada thread health check dan tidak ada probe: ketersediaan hanya dipelajari dari trafik nyata.
 
@@ -360,10 +419,11 @@ Upstream yang gagal connect ditandai down dan dilewati pemilih round-robin selam
 Menyebut celahnya secara eksplisit adalah bagian dari desain:
 
 - Belum ada output log. `logs_dir` harus ada dan tidak ada yang menulis ke sana.
-- Belum ada timeout untuk connect, dan belum ada idle timeout untuk tunnel websocket atau stream SSE. Upstream yang membuang trafik ditunggu sampai batas sistem operasi. Menunggu head response upstream dan body `Content-Length` dibatasi oleh `upstream_timeout_ms`, lihat `config-id.md`.
+- Belum ada idle timeout untuk tunnel websocket atau stream SSE. Keduanya menahan slot client-nya alih-alih memakainya, jadi stream yang mendadak diam tidak pernah dipotong. `client_timeout_ms` membatasi pertukaran biasa, `upstream_timeout_ms` membatasi tunggu untuk head response atau body `Content-Length`, dan `upstream_connect_timeout_ms` membatasi satu percobaan connect, lihat `config-id.md`.
 - Belum ada read deadline di site grpc. Leg upstream-nya satu koneksi h2 yang memultipleks semua stream, jadi butuh mekanisme sendiri, dan key-nya ditolak di sana alih-alih diterima lalu diabaikan.
+- Belum ada batas client di site http3. Batas itu memotong socket, dan setiap koneksi QUIC di satu site memakai satu datagram socket yang sama, jadi `client_timeout_ms` dan `client_conn_limit` ditolak di sana alih-alih diterima lalu diabaikan.
 - Belum ada health check, hanya kegagalan yang dipelajari dari trafik nyata.
 - Belum ada hot reload `main.cfg`, dan belum ada reload semua site sekaligus.
-- Belum ada batas berapa koneksi yang diterima satu site sekaligus. Process gate membatasi request yang berjalan ke backend, bukan socket yang tetap terbuka, jadi plafon penerimaan tetap apa yang diberikan sistem operasi ke proses ini.
-- Belum ada routing per path, rewrite header, rate limit, atau caching.
+- Belum ada plafon penerimaan yang terpisah dari `client_conn_limit`. Batas itu menolak koneksi yang lewat limitnya, tapi hanya selama `client_timeout_ms` diisi, jadi site tanpa batas client tetap menerima sebanyak yang diberikan sistem operasi ke proses ini.
+- Belum ada routing per path, rate limit, atau cache response. Header section menambah dan mengganti, ia tidak pernah membaca nilai yang direlay lalu menyuntingnya, dan tidak ada cara membuang header yang dikirim origin tanpa menyetel satu dengan nama yang sama.
 - `dispatch` divalidasi dan dilaporkan, dan tidak ada yang membacanya. Lihat `config-id.md`.
