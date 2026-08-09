@@ -76,6 +76,8 @@ certbot setelah renewal.
 | tls | 9120 | 9121 | TLS diterminasi di zixer, upstream cleartext |
 | rtc_signal | 9122 | 9105 | signaling webrtc: edge wss di atas backend websocket |
 | rtc_media | 9123 | 9083 | satu sesi webrtc utuh melintasi forward per flow |
+| bounds | 9124 | 9125 | budget client, 408 pada head yang tidak selesai, 503 di atas batas koneksi |
+| headers | 9128 | 9129 | dua header section di cfg, token-nya, dan aturan penggantian |
 
 Tiap config site membawa perintah run dan drive-nya sendiri di header, jadi
 `sites/<demo>.cfg` adalah rujukan untuk demo itu.
@@ -96,11 +98,19 @@ Tiap config site membawa perintah run dan drive-nya sendiri di header, jadi
 | `public_dir_cache_ttl_ms` | main.cfg untuk default daemon, static untuk override site |
 | `public_dir_cache_max_entries` | main.cfg, satu cache table per daemon |
 | `kernel_backlog` | main.cfg, diwarisi tiap site di sini |
+| `client_timeout_ms`, `client_conn_limit` | bounds |
+| `upstream_connect_timeout_ms`, `upstream_idle_ttl_ms` | bounds |
+| `[response_headers]`, `[request_headers]` | headers |
 
-`acme_webroot`, `acme_proxy`, dan `upstream_timeout_ms` tidak punya demo: challenge sungguhan
-butuh port 80 dan sebuah certificate authority, dan read deadline baru terlihat pada backend
-yang sengaja stall. Perilakunya dijelaskan di
+`acme_webroot`, `acme_proxy`, `upstream_timeout_ms`, `force_https`, dan `redirect_host` tidak
+punya demo: challenge sungguhan butuh port 80 dan sebuah certificate authority, read deadline
+baru terlihat pada backend yang sengaja stall, dan redirect butuh port 80 istimewa yang sama
+seperti challenge. Perilakunya dijelaskan di
 [`docs/zixer/config-id.md`](../../docs/zixer/config-id.md).
+
+Demo bounds memasang `upstream_connect_timeout_ms` pada backend yang benar-benar ada, jadi
+key-nya terlihat di file tanpa memperlambat demo. Ia hanya memperpendek penantian terhadap
+alamat yang tidak menjawab apa pun.
 
 <br>
 
@@ -122,8 +132,8 @@ tidak pernah mengganggu daemon yang sudah berjalan di `examples/proxies`.
 
 ## Catatan
 
-- Port 9100 sampai 9123 milik demo-demo ini. Upstream yang dipakai ulang pasangan rtc adalah
-  demo websocket (9105) dan `examples/webrtc/webrtc_datachannel_echo.zig` (9083).
+- Port 9100 sampai 9129 milik demo-demo ini, kecuali 9126 dan 9127 yang di-bind runner di sisinya sendiri untuk dua baris udp. Upstream yang dipakai ulang pasangan rtc adalah demo websocket (9105) dan `examples/webrtc/webrtc_datachannel_echo.zig` (9083).
+- Demo bounds memutus client setelah dua detik, jadi koneksi yang ditahan terbuka dengan tangan memang akan diambil. Itu demo yang bekerja, bukan daemon yang salah.
 - Demo TLS dan http3 memakai `examples/certs/ecdsa_p256_cert.pem`, self-signed untuk
   `localhost` dan `127.0.0.1`, jadi client butuh `-k`. Akses sebagai `https://localhost:<port>`:
   Host yang tidak cocok dengan nama mana pun di certificate dijawab 421 oleh edge.
