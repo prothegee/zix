@@ -97,7 +97,8 @@ const ConnSlot = struct {
 /// - sweeper runs only on a site that has an idle cache, and hands aged
 ///   upstream connections back even while the site sits quiet. The client
 ///   bound is not on it: a quic connection is not a socket the table can
-///   cut, so an h3 site carries no deadline table.
+///   cut, so an h3 site carries no deadline table, and its site cfg refuses
+///   both client keys rather than accepting a bound nothing would act on.
 /// - The QUIC handshake takes its ALPN ("h3") and its transport parameters
 ///   from the engine's flight builder, so the TLS context here supplies only
 ///   the certificate and its signing key.
