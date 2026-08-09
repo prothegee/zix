@@ -26,12 +26,15 @@
 //!     zig build zixer-test-runner-all
 //!     ./zig-out/bin/zixer-test-runner-all --only http3 <zixer> <upstreams...>
 //!
-//! The check bodies live in sibling files, grouped by protocol family:
-//!   checks_http1.zig  plain proxy, sse, websocket, static, mixed, round robin
-//!   checks_http2.zig  the h2 edge and the grpc relay
-//!   checks_http3.zig  the QUIC edge
-//!   checks_udp.zig    the flow forward and the webrtc media pair
-//!   checks_tls.zig    TLS terminate and the webrtc signaling site
+//! The check bodies live in sibling files, grouped by protocol family, plus one
+//! per capability that is not a protocol:
+//!   checks_http1.zig    plain proxy, sse, websocket, static, mixed, round robin
+//!   checks_http2.zig    the h2 edge and the grpc relay
+//!   checks_http3.zig    the QUIC edge
+//!   checks_udp.zig      the flow forward and the webrtc media pair
+//!   checks_tls.zig      TLS terminate and the webrtc signaling site
+//!   checks_bounds.zig   the client budget and the connection limit
+//!   checks_headers.zig  the two cfg header sections
 
 const std = @import("std");
 
@@ -43,6 +46,8 @@ const root_setup = @import("root_setup.zig");
 const row_isolate = @import("row_isolate.zig");
 const upstreams = @import("upstreams.zig");
 
+const checks_bounds = @import("checks_bounds.zig");
+const checks_headers = @import("checks_headers.zig");
 const checks_http1 = @import("checks_http1.zig");
 const checks_http2 = @import("checks_http2.zig");
 const checks_http3 = @import("checks_http3.zig");
@@ -63,9 +68,11 @@ const UPSTREAM = struct {
     const MIXED: usize = 7;
     const ROUND_ROBIN: usize = 8;
     const TLS: usize = 9;
-    const WEBRTC: usize = 10;
+    const BOUNDS: usize = 10;
+    const HEADERS: usize = 11;
+    const WEBRTC: usize = 12;
 
-    const COUNT: usize = 11;
+    const COUNT: usize = 13;
 };
 
 comptime {
@@ -87,6 +94,8 @@ const EDGE = struct {
     const TLS: u16 = 9120;
     const RTC_SIGNAL: u16 = 9122;
     const RTC_MEDIA: u16 = 9123;
+    const BOUNDS: u16 = 9124;
+    const HEADERS: u16 = 9128;
 };
 
 /// Upstream ports the runner polls before handing a site to the daemon.
@@ -101,6 +110,8 @@ const BACKEND = struct {
     const ROUND_ROBIN_FIRST: u16 = 9118;
     const ROUND_ROBIN_SECOND: u16 = 9119;
     const TLS: u16 = 9121;
+    const BOUNDS: u16 = 9125;
+    const HEADERS: u16 = 9129;
 };
 
 /// One demo: its site config, the upstreams it needs, and the client that
@@ -223,6 +234,26 @@ const checks = [_]Check{
         .run = &struct {
             fn call(io: std.Io) anyerror!void {
                 return checks_tls.runTls(io, EDGE.TLS);
+            }
+        }.call,
+    },
+    .{
+        .label = "bounds",
+        .site = "bounds.cfg",
+        .needs = &.{.{ .binary = UPSTREAM.BOUNDS, .tcp_port = BACKEND.BOUNDS }},
+        .run = &struct {
+            fn call(io: std.Io) anyerror!void {
+                return checks_bounds.runBounds(io, EDGE.BOUNDS);
+            }
+        }.call,
+    },
+    .{
+        .label = "headers",
+        .site = "headers.cfg",
+        .needs = &.{.{ .binary = UPSTREAM.HEADERS, .tcp_port = BACKEND.HEADERS }},
+        .run = &struct {
+            fn call(io: std.Io) anyerror!void {
+                return checks_headers.runHeaders(io, EDGE.HEADERS);
             }
         }.call,
     },
