@@ -125,6 +125,7 @@ flowchart LR
 | `upstream_pool.zig`, `upstream_conn.zig` | pemilihan round-robin, ketersediaan, keep-alive idle |
 | `upstream_deadline.zig` | batas satu read upstream |
 | `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | batas client: slot-nya, cut-nya, dan mengambil slot atau menolak koneksi |
+| `client_lease.zig` | yang dipegang satu koneksi yang diterima: arm per exchange, hold saat stream, dan mengembalikan slot |
 | `site_sweep.zig` | satu thread background per site, menjalankan cut client dan sweep idle sekaligus |
 | `proxy_headers.zig` | pembuangan hop-by-hop, `Via`, `Forwarded` |
 

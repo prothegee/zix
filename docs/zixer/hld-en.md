@@ -125,6 +125,7 @@ flowchart LR
 | `upstream_pool.zig`, `upstream_conn.zig` | round-robin picking, availability, idle keep-alive |
 | `upstream_deadline.zig` | the bound on one upstream read |
 | `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | the client bound: the slots, the cut, and taking a slot or refusing the connection |
+| `client_lease.zig` | what one accepted connection holds: arm per exchange, hold a stream, give the slot back |
 | `site_sweep.zig` | the one background thread per site, running both the client cut and the idle sweep |
 | `proxy_headers.zig` | hop-by-hop stripping, `Via`, `Forwarded` |
 
