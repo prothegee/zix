@@ -446,6 +446,13 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         .HTTP1, .HTTP2 => {},
         .HTTP3 => {
             if (!cfg.tls) try faults.add("tls", "http3 requires tls: true", .{});
+
+            // The client bound cuts a socket to reach a connection that ran
+            // out of time. A quic connection is not one: the whole site shares
+            // a single datagram socket, so these keys would be accepted and
+            // never acted on.
+            if (cfg.client_timeout_ms != null) try faults.add("client_timeout_ms", "not supported on http3 sites, remove it", .{});
+            if (cfg.client_conn_limit != null) try faults.add("client_conn_limit", "not supported on http3 sites, remove it", .{});
         },
         .GRPC => {
             if (cfg.public_dir != null) try faults.add("public_dir", "not supported on grpc sites, remove it", .{});
@@ -1140,6 +1147,20 @@ test "zix zixer: site cfg, the client bound keys are refused where they cannot a
     try testing.expectEqualStrings("client_timeout_ms", udp_faults.slice()[0].key);
     try testing.expectEqualStrings("does not apply to udp sites, remove it", udp_faults.slice()[0].hint);
     try testing.expectEqualStrings("client_conn_limit", udp_faults.slice()[1].key);
+
+    // A quic connection has no socket of its own for the sweep to cut, so an
+    // http3 site refuses both keys rather than accepting a bound it can never
+    // act on.
+    var h3_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http3\nport: 18898\ntls: true\ntls_cert: /tmp/c.pem\ntls_key: /tmp/k.pem\nupstreams: 127.0.0.1:3000\nclient_timeout_ms: 1000\nclient_conn_limit: 64\n",
+        &h3_faults,
+    );
+    try testing.expectEqual(@as(usize, 2), h3_faults.slice().len);
+    try testing.expectEqualStrings("client_timeout_ms", h3_faults.slice()[0].key);
+    try testing.expectEqualStrings("not supported on http3 sites, remove it", h3_faults.slice()[0].hint);
+    try testing.expectEqualStrings("client_conn_limit", h3_faults.slice()[1].key);
 
     // A table with no slot would refuse every connection, which is not what
     // turning the bound off means.
