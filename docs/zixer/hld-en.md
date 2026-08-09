@@ -123,7 +123,9 @@ flowchart LR
 | `static_cached.zig` | the shared table of already-open `public_dir` files, and taking an entry from it |
 | `acme_challenge.zig`, `acme_listener.zig` | the http-01 challenge plane and the port 80 companion |
 | `upstream_pool.zig`, `upstream_conn.zig` | round-robin picking, availability, idle keep-alive |
-| `upstream_deadline.zig`, `idle_reaper.zig` | the bound on one upstream read, the sweep that ages idle conns out |
+| `upstream_deadline.zig` | the bound on one upstream read |
+| `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | the client bound: the slots, the cut, and taking a slot or refusing the connection |
+| `site_sweep.zig` | the one background thread per site, running both the client cut and the idle sweep |
 | `proxy_headers.zig` | hop-by-hop stripping, `Via`, `Forwarded` |
 
 <br>

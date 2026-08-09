@@ -123,7 +123,9 @@ flowchart LR
 | `static_cached.zig` | table bersama berisi file `public_dir` yang sudah terbuka, dan cara mengambil entry dari sana |
 | `acme_challenge.zig`, `acme_listener.zig` | challenge plane http-01 dan companion port 80 |
 | `upstream_pool.zig`, `upstream_conn.zig` | pemilihan round-robin, ketersediaan, keep-alive idle |
-| `upstream_deadline.zig`, `idle_reaper.zig` | batas satu read upstream, sweep yang mengedaluwarsakan conn idle |
+| `upstream_deadline.zig` | batas satu read upstream |
+| `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | batas client: slot-nya, cut-nya, dan mengambil slot atau menolak koneksi |
+| `site_sweep.zig` | satu thread background per site, menjalankan cut client dan sweep idle sekaligus |
 | `proxy_headers.zig` | pembuangan hop-by-hop, `Via`, `Forwarded` |
 
 <br>
