@@ -219,6 +219,8 @@ test "zix zixer: std options, the alternative signal stack is off" {
 test "zix zixer: test discovery, every zixer file is referenced" {
     std.testing.refAllDecls(@import("cfg_math.zig"));
     std.testing.refAllDecls(@import("cfg_scanner.zig"));
+    std.testing.refAllDecls(@import("header_syntax.zig"));
+    std.testing.refAllDecls(@import("cfg_headers.zig"));
     std.testing.refAllDecls(@import("fault.zig"));
     std.testing.refAllDecls(@import("root_dir.zig"));
     std.testing.refAllDecls(@import("main_cfg.zig"));
