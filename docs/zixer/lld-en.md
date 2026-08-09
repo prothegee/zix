@@ -10,11 +10,14 @@ One scanner reads both `main.cfg` and every site file. It allocates nothing: eve
 
 Per line:
 
-1. Cut at the first `#`, so a trailing comment disappears and a comment-only line becomes empty.
+1. Cut at a `#` that opens a comment, which is one at the start of the line or after a space or tab. Cutting at every `#` would truncate a value that carries one, such as `link: </app.css#v2>; rel=preload`.
 2. Trim spaces, tabs, and `\r`, so CRLF files read the same as LF files.
 3. Skip empty lines.
-4. Split at the first `:` only. The value keeps any further colons, which is what makes `C:/certs/full.pem` and `::1:9000` work.
-5. Trim both sides. An empty key or an empty value is a fault, not a skip.
+4. Take a `[name]` line as a section rather than a pair. An unclosed `[name` and an empty `[]` are both faults.
+5. Split at the first `:` only. The value keeps any further colons, which is what makes `C:/certs/full.pem` and `::1:9000` work.
+6. Trim both sides. An empty key or an empty value is a fault, not a skip.
+
+A section line has no terminator: it owns every line below it until the next section or the end of the file. That is what makes the flat keys come first, and a site key written below a section line is reported by name rather than served as a header.
 
 A comma list value is iterated with the same no-allocation rule, and an empty item (`a,,b`, or a trailing comma) comes back as an empty string so the schema can fault it rather than quietly dropping a typo.
 
@@ -74,9 +77,15 @@ Keys are matched by name against an enum, so an unknown key is a typo report rat
 | logs_dir, sites_dir | taken as written, defaulted to `<root>/logs` and `<root>/sites` when absent |
 | kernel_backlog | fits `u31`, at least 1 |
 | max_recv_buf | fits `usize`, between 1024 and 262144 bytes |
+| client_timeout_ms | fits `u32`, at most 3600000 ms, 0 turns the bound off |
+| client_conn_limit | fits `usize`, between 1 and 65536 |
+| upstream_connect_timeout_ms | fits `u32`, at most 600000 ms, 0 waits on the operating system |
+| upstream_idle_ttl_ms | fits `u32`, at most 600000 ms, 0 keeps no connection |
 | process_limit | fits `usize`, at most 65536, 0 turns the gate off |
 | process_queue_len | fits `usize`, at most 65536, and above 0 it needs `process_limit` above 0 |
 | process_queue_timeout_ms | fits `u32`, between 1 and 600000 ms |
+| public_dir_cache_ttl_ms | fits `u32`, at most 3600000 ms, 0 turns the cache off |
+| public_dir_cache_max_entries | fits `u32`, between 1 and 1048576 |
 
 `zixer status` adds an existence check on both directories after the parse.
 
@@ -130,7 +139,7 @@ The daemon keeps one array of started sites. Every mutation is serial, so no loc
 | `restart` on a stopped site starts it | a renewal hook must not fail because a site happened to be down |
 | a port already owned by another started site is refused | tcp sites bind with address reuse, so the kernel would share the port instead of reporting the collision |
 | a port a listener outside this daemon answers on is refused | the registry only sees sites in this process, a connect probe is what finds an owner in another one |
-| the acme companion port counts as owned | the same collision applies to port 80, from the registry and from the probe alike |
+| the cleartext companion port counts as owned | the same collision applies to port 80, from the registry and from the probe alike |
 | the listen backlog is the site value, else the main.cfg value | one default, per site override |
 
 A config file larger than 256 KiB is refused rather than loaded.
@@ -153,7 +162,17 @@ Tcp listeners bind with address reuse, datagram sockets bind strict.
 
 Address reuse is why a tcp bind is preceded by a probe. Std pairs the flag with `SO_REUSEPORT` on posix, and the Windows `SO_REUSEADDR` is permissive in the same way, so a second listener joins the port rather than failing and the kernel then splits arriving connections between the two. The probe connects to the address the site is about to listen on, loopback in place of a wildcard because Windows refuses a connect to `0.0.0.0`. A live listener answers and the start is refused with `AddressInUse`, while a socket left in TIME_WAIT refuses the connect, so a restart right after live traffic still rebinds. A datagram socket needs no probe: its bind is strict and reports the collision itself.
 
-A TLS site with acme keys, on any port other than 80, also binds port 80, and the companion port is probed the same way. That bind is not optional: if it fails, the whole `start` fails with a message naming the challenge port.
+A TLS site on any port other than 80 also binds port 80 when it asked for something that needs it, and the companion port is probed the same way. That bind is not optional: if it fails, the whole `start` fails with a message naming the port.
+
+Two keys earn the companion, and either one on its own is enough:
+
+| the site set | the companion serves |
+| :- | :- |
+| `acme_webroot` or `acme_proxy` | the challenge path, and a redirect for everything else |
+| `force_https` | a redirect for everything, there is no challenge path to serve |
+| both | the challenge path from the acme config, a redirect for the rest |
+
+A site already listening on port 80 needs no companion, it is the port. A cleartext site needs none either, since there is no https origin to move a request to.
 
 <br>
 
@@ -275,6 +294,107 @@ call, so an edge never branches on whether its site configured one.
 
 <br>
 
+## The client bound
+
+Three files, split the same way the gate is. `deadline_table.zig` is the slot
+table that says which connection is over its budget, `deadline_sweep.zig` is one
+pass over it and how hard that pass cuts, and `client_admit.zig` is taking a
+slot for an accepted connection or refusing it. `client_lease.zig` is what one
+connection holds while an edge serves it.
+
+The table is a fixed array, sized once at site start from `client_conn_limit`.
+Nothing allocates per connection, and a pass that finds nothing past due writes
+nothing at all.
+
+| slot state | meaning |
+| :- | :- |
+| FREE | on the free list, no connection and no deadline |
+| ARMING | an owner is changing it, a sweeper skips it |
+| ARMED | a live connection with a deadline a sweeper may act on |
+| SWEEPING | a sweeper is acting on it, a release waits the pass out |
+
+Every owner change goes through ARMING and a sweeper acts on nothing but ARMED,
+which is what keeps the two off the same slot without either holding a lock
+across a syscall. SWEEPING is the guard against a recycled descriptor: without
+it a sweeper could pick a descriptor, lose the processor, and wake to find the
+owner closed it and the kernel handed the same number to a different
+connection. Each slot also carries a generation, so a ticket kept past its
+release names a slot that has moved on and a late change is refused rather than
+landing on whoever holds the slot now.
+
+Deadlines are absolute stamps from `utils.monotonic_clock`. A wall-clock stamp
+would move every live bound in the process the moment the system time steps.
+
+A pass runs every 100 ms on the site's background thread, and what it does
+depends on how many passes that connection has already seen:
+
+| pass | act | why |
+| :- | :- | :- |
+| first | shut the read side | wakes the handler and still leaves it able to write the 408 the client is owed |
+| every later one | shut both sides | the one shape a read-side cut never reaches is a client that stopped reading, which parks the handler in a write |
+
+Nothing in the sweep closes a descriptor or gives a slot back. The handler owns
+both, finds out through its own failed read or write, and unwinds the way it
+does for any client that vanished. That is what keeps timeout logic out of every
+dispatch loop.
+
+A cut has to reach a thread parked in the kernel, which is not the same call on
+every platform. On POSIX a half-close is enough and every reader already reports
+it as end of stream. On Windows a receive already parked has to be cancelled,
+and std's own socket reader answers a cancelled receive with `unreachable`, so
+the four client-facing edges read and write through
+`zix.utils.socket_cut_reader` and `zix.utils.socket_cut_writer`, where a
+cancelled receive is 0 bytes and a cancelled send is an error.
+
+The lease is what an edge actually calls:
+
+| call | what it does |
+| :- | :- |
+| `open` | takes a slot for the accepted connection, or reports the site full |
+| `armRequest` | starts one exchange's budget, called per request rather than per connection |
+| `holdStream` | parks the slot at a deadline nothing is ever past, for a websocket, an SSE stream, or a grpc stream |
+| `release` | gives the slot back, idempotent so a deferred release is always safe |
+
+A site with `client_timeout_ms: 0` leases nothing. Every call above returns
+before it touches a table, and no table is allocated, so an unbounded site pays
+nothing for the machinery.
+
+<br>
+
+## The site header sections
+
+`cfg_headers.zig` compiles the two `[section]` blocks once, when the site file
+is read. `header_syntax.zig` is the rfc 9110 rule set it checks a name and a
+value against, kept apart because it is a grammar rather than a config concern.
+
+A compiled block is held twice, because the edges need it two ways:
+
+| view | shape | used by |
+| :- | :- | :- |
+| `pieces` | the whole block as one run of literals and token slots | http1, which writes a head as bytes |
+| `lines` | the same headers apart, name and value pieces | http2, grpc, and http3, which encode each field into their own header table |
+
+A line with no token in it merges into the neighbouring literal, so a table that
+names nothing dynamic is one piece and one copy per request. A line that does
+name a token is rendered into a scratch buffer per request, which is why the
+value ceiling is the block ceiling plus room for an address and an authority to
+expand into.
+
+The ceilings are 1024 bytes for one compiled block and 1536 bytes for one
+rendered value. An edge stages a head in a fixed buffer, so the table has to fit
+beside the request it rides with. Refusing an oversized section when the file is
+read beats a site that starts and then answers every request 400.
+
+A configured name replaces the relayed one rather than joining it. rfc 9110 5.2
+comma-joins duplicate field lines, which is right for a list header and silently
+wrong for a single-value one, so the origin's copy of a name the section sets is
+dropped and the site's line is what goes out. Names the edge owns are refused at
+load instead: the hop-by-hop list, `Content-Length`, `Transfer-Encoding`, `Via`,
+`Date`, and `Forwarded`. The full refusal list with its exact fault text is in
+`config-en.md`.
+
+<br>
+
 ## The http1 edge
 
 ```mermaid
@@ -371,7 +491,8 @@ An O(1) round-robin over the upstreams currently up:
 - A connect failure marks the upstream down. Re-admission happens at pick time after a 3000 ms cooldown, and the sweep is gated to at most once per 200 ms so its cost never lands on every pick.
 - A re-admitted upstream that is still dead is marked down again by the next failure. There is no probe thread.
 - Idle keep-alive connections are cached per upstream slot, up to 4 each, and up to 32 across the whole site. Overflow is closed instead of grown.
-- A cached connection also ages out after 5000 ms. Expiry runs when one is taken, and a sweep thread per site runs it every 2500 ms so a site with no traffic still hands its connections back. An idle pooled connection is capacity taken from the backend.
+- A cached connection also ages out, after `upstream_idle_ttl_ms` (5000 ms by default, 0 keeps none at all). Expiry runs when one is taken, and the site's background thread runs it on its own so a site with no traffic still hands its connections back. An idle pooled connection is capacity taken from the backend.
+- That background pass runs at half the age, floored at the 100 ms sweep tick, so the default 5000 ms age sweeps every 2500 ms and a shorter age sweeps proportionally sooner.
 
 Each worker of a site owns its own pool and its own cache. A short spinlock
 guards each, because connection tasks run concurrently within a worker, and
@@ -385,7 +506,7 @@ cooldown.
 
 ## Fixed limits
 
-None of these are configurable today.
+A row is either a hard constant, which no config key can move, or the range a key may be set to. The `where` column says which.
 
 | limit | value | where |
 | :- | :- | :- |
@@ -400,9 +521,16 @@ None of these are configurable today.
 | static cache entries | 1 to 1048576 files | what `public_dir_cache_max_entries` may be set to, then clamped to a quarter of the process descriptor limit |
 | smallest body handed to the kernel | 64 KiB | cleartext http1 only, under it the body is written with its own head |
 | idle upstream connections | 4 per upstream, 32 in total, divided between the workers | per site |
-| idle upstream connection age | 5000 ms | per worker idle cache |
-| idle sweep interval | 2500 ms | per site reaper thread, one for every worker cache |
+| idle upstream connection age | 0 to 600000 ms, 5000 by default | what `upstream_idle_ttl_ms` may be set to |
+| idle sweep interval | half the age, floored at 100 ms | derived, one pass on the site background thread |
+| upstream connect budget | 0 to 600000 ms, 5000 by default | what `upstream_connect_timeout_ms` may be set to, 0 waits on the operating system |
 | upstream cooldown | 3000 ms | per worker pool |
+| client exchange budget | 0 to 3600000 ms | what `client_timeout_ms` may be set to, 0 is off |
+| tracked client connections | 1 to 65536, 4096 by default | what `client_conn_limit` may be set to |
+| client sweep tick | 100 ms | the site background thread, one pass over the deadline table |
+| header block | 1024 bytes compiled | each `[section]`, checked when the file is read |
+| header value | 1536 bytes rendered | one line after its tokens resolve |
+| redirect authority | 255 bytes | what `redirect_host`, or an echoed `Host`, may put in a `Location` |
 | concurrent QUIC connections | 64 | per http3 site |
 | udp flows | 64 | per udp site |
 | udp datagram | 65535 bytes | per udp site |
