@@ -18,6 +18,7 @@ const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
+const upstream_status = @import("upstream_status.zig");
 
 const monotonic_clock = zix.utils.monotonic_clock;
 
@@ -462,7 +463,7 @@ fn acceptStream(conn: *Conn, active: ?*ActiveStream, id: u31, request: *const ht
     }
 
     if (has_pool) {
-        const head = http2_translate.buildUpstreamHead(&entry.head, request, headers, conn.client_addr) catch {
+        const head = http2_translate.buildUpstreamHead(&entry.head, request, headers, conn.client_addr, conn.proxy.client_scheme) catch {
             return localAnswer(conn, id, 400, "http_request_error");
         };
         entry.head_len = head.len;
@@ -485,7 +486,7 @@ fn acceptConnect(conn: *Conn, active: ?*ActiveStream, id: u31, request: *const h
     conn.io.randomSecure(&key_raw) catch return streamError(conn, id, Http2.ERR_INTERNAL_ERROR);
     _ = std.base64.standard.Encoder.encode(&conn.connect_key, &key_raw);
 
-    const head = http2_translate.buildConnectHead(&conn.connect_head, request, headers, conn.client_addr, &conn.connect_key) catch {
+    const head = http2_translate.buildConnectHead(&conn.connect_head, request, headers, conn.client_addr, &conn.connect_key, conn.proxy.client_scheme) catch {
         return localAnswer(conn, id, 400, "http_request_error");
     };
     conn.connect_head_len = head.len;
@@ -671,6 +672,7 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
 
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
+    var connect_timed_out = false;
     while (attempts > 0) : (attempts -= 1) {
         const picked = pool.pick(monotonic_clock.nowMs(io)) orelse {
             if (failed_here) break;
@@ -679,7 +681,9 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
         };
 
         const conn_up = idle.acquire(io, picked.index, monotonic_clock.nowMs(io)) orelse
-            upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
+            upstream_conn.connect(io, picked.host, picked.port, picked.index, conn.proxy.upstream_connect_timeout_ms) catch |err| {
+            if (upstream_status.ranOutOfTime(err)) connect_timed_out = true;
+
             pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
@@ -755,7 +759,9 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
         return relayResponse(conn, active, &response, conn_up, &up_reader.interface);
     }
 
-    return if (localAnswer(conn, active.id, 502, "connection_refused") == .CLOSED) .CONN_DEAD else .DONE;
+    const answer = upstream_status.afterAttempts(connect_timed_out);
+
+    return if (localAnswer(conn, active.id, answer.status, answer.proxy_error) == .CLOSED) .CONN_DEAD else .DONE;
 }
 
 /// Read the upstream response head, relaying interim 1xx heads as h2
@@ -1164,6 +1170,7 @@ fn serveConnect(conn: *Conn) Outcome {
 
     var attempts: usize = pool.slots.len + 1;
     var failed_here = false;
+    var connect_timed_out = false;
     while (attempts > 0) : (attempts -= 1) {
         const picked = pool.pick(monotonic_clock.nowMs(io)) orelse {
             if (failed_here) break;
@@ -1172,7 +1179,9 @@ fn serveConnect(conn: *Conn) Outcome {
         };
 
         const conn_up = idle.acquire(io, picked.index, monotonic_clock.nowMs(io)) orelse
-            upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
+            upstream_conn.connect(io, picked.host, picked.port, picked.index, conn.proxy.upstream_connect_timeout_ms) catch |err| {
+            if (upstream_status.ranOutOfTime(err)) connect_timed_out = true;
+
             pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
@@ -1264,7 +1273,9 @@ fn serveConnect(conn: *Conn) Outcome {
         return .CONN_DEAD;
     }
 
-    return if (localAnswer(conn, active.id, 502, "connection_refused") == .CLOSED) .CONN_DEAD else .DONE;
+    const answer = upstream_status.afterAttempts(connect_timed_out);
+
+    return if (localAnswer(conn, active.id, answer.status, answer.proxy_error) == .CLOSED) .CONN_DEAD else .DONE;
 }
 
 /// Validate the upstream's Sec-WebSocket-Accept against zixer's own key
