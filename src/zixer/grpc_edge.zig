@@ -4,6 +4,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const grpc_relay = @import("grpc_relay.zig");
 const grpc_upstream = @import("grpc_upstream.zig");
@@ -72,6 +73,9 @@ const Session = struct {
     client_w: *std.Io.Writer,
     client_addr: std.Io.net.IpAddress,
     client_stream: ?std.Io.net.Stream,
+    /// This connection's slot in the site's client bound, taken by whoever
+    /// accepted it.
+    lease: *client_lease.Lease,
     decoder: Http2.HpackDecoder,
     write_lock: std.atomic.Value(bool) = .init(false),
     state_lock: std.atomic.Value(bool) = .init(false),
@@ -99,9 +103,21 @@ const Session = struct {
 /// Serve one accepted cleartext connection of a grpc site. grpc clients
 /// speak h2 with prior knowledge, so the preface is required: anything
 /// else closes without an answer (no h1 fallback on a grpc site).
+///
+/// Note:
+/// - The site's client bound is taken before anything is read, so a refused
+///   connection never parks a thread waiting for a preface. Every client here
+///   speaks h2, so the refusal is an h2 one.
 pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stream) void {
     const io = proxy.io;
     defer client_stream.close(io);
+
+    var lease = client_lease.Lease.open(proxy.client_table, io, client_stream.socket.handle, proxy.client_timeout_ms) orelse {
+        refuseFull(io, client_stream);
+
+        return;
+    };
+    defer lease.release();
 
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
     defer buffers.deinit(proxy.allocator);
@@ -109,7 +125,21 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
     var client_reader = client_stream.reader(io, buffers.client_read);
     var client_writer = client_stream.writer(io, buffers.client_write);
 
-    serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream);
+    serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, &lease);
+}
+
+/// Answer a connection the site had no slot for: the h2 way to say a connection
+/// is over before a single stream opens on it.
+///
+/// Note:
+/// - Written off the stack, and every failure is swallowed: the site is at its
+///   ceiling, so a refusal that cannot be delivered is not worth a retry.
+fn refuseFull(io: std.Io, client_stream: std.Io.net.Stream) void {
+    var refusal_buf: [64]u8 = undefined;
+    var refusal_writer = client_stream.writer(io, &refusal_buf);
+
+    http2_frames.writeImmediateGoaway(&refusal_writer.interface, Http2.ERR_ENHANCE_YOUR_CALM) catch return;
+    refusal_writer.interface.flush() catch {};
 }
 
 /// The grpc relay loop over reader / writer interfaces (plain stream or a
@@ -123,7 +153,10 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
 /// - An upstream END_STREAM finishes the relay entry: late client DATA
 ///   for that stream drops with its credit refunded (a grpc client stops
 ///   sending once the status arrives).
-pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream) void {
+/// - lease is the connection's slot in the site's client bound, already taken
+///   by whoever accepted the connection. A caller with no bound to enforce
+///   passes a lease over nothing.
+pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, lease: *client_lease.Lease) void {
     var preface: [Http2.PREFACE.len]u8 = undefined;
     client_r.readSliceAll(&preface) catch return;
     if (!std.mem.eql(u8, &preface, Http2.PREFACE)) return;
@@ -140,6 +173,7 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
         .client_w = client_w,
         .client_addr = client_addr,
         .client_stream = client_stream,
+        .lease = lease,
         .decoder = Http2.HpackDecoder.init(),
     };
 
@@ -163,9 +197,28 @@ pub fn serveSession(proxy: *const http1_proxy.Proxy, client_r: *std.Io.Reader, c
 fn mainLoop(session: *Session) void {
     while (true) {
         maybeCloseAfterDrain(session);
+        boundWhenQuiet(session);
 
         if (processFrame(session) == .CLOSED) return;
     }
+}
+
+/// Put the client bound back over the connection while it relays nothing, and
+/// take it off while it does.
+///
+/// Note:
+/// - An RPC stays open for as long as its own exchange runs, and a server
+///   -streaming one is silent between messages by design, so one client budget
+///   here can only mean the wait between RPCs. A connection opened and then
+///   left idle is exactly what it reaches.
+/// - The slot stays taken either way, so a held connection still counts
+///   against the site's connection limit.
+fn boundWhenQuiet(session: *Session) void {
+    lockState(session);
+    const relaying = activeCountLocked(session) != 0;
+    unlockState(session);
+
+    if (relaying) session.lease.holdStream() else session.lease.armRequest();
 }
 
 /// After the client's GOAWAY, once no stream is active: answer GOAWAY and
@@ -2294,4 +2347,195 @@ test "zix zixer: grpc edge, client goaway drains and the edge answers goaway" {
     client.stream.close(io);
     edge_thread.join();
     fake_thread.join();
+}
+
+// --------------------------------------------------------- //
+
+const deadline_sweep = @import("deadline_sweep.zig");
+const deadline_table = @import("deadline_table.zig");
+
+/// A stand-in socket for the table tests below. The table stores the handle and
+/// never acts on it there, so no real socket has to exist.
+fn testHandle(seed: usize) std.posix.socket_t {
+    if (comptime @typeInfo(std.posix.socket_t) == .pointer) return @ptrFromInt(seed + 1);
+
+    return @intCast(seed + 1);
+}
+
+/// One served grpc connection plus a flag its thread sets on the way out, so a
+/// test can tell the edge let go instead of waiting on a join that may hang.
+const ServeProbe = struct {
+    proxy: *const http1_proxy.Proxy,
+    stream: std.Io.net.Stream,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(probe: *ServeProbe) void {
+        serveConn(probe.proxy, probe.stream);
+        probe.done.store(true, .release);
+    }
+};
+
+test "zix zixer: grpc edge, a site at its connection limit goes away at once" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    const proxy = http1_proxy.Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&fds);
+    const holder = edgeStream(fds[0]);
+
+    // The site's only slot is already spoken for, so the connection under test
+    // arrives at a full table.
+    try testing.expect(table.claim(holder.socket.handle, deadline_table.NEVER_MS) == .TAKEN);
+
+    var refused_fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&refused_fds);
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(refused_fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(refused_fds[1]);
+
+    // Answered before the preface is read: a refused connection must never be
+    // made to wait on a client that may send nothing.
+    var read_buf: [512]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var payload_buf: [64]u8 = undefined;
+
+    const settings = try http2_frames.readFrame(&reader.interface, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_SETTINGS), settings.head.frame_type);
+
+    const goaway = try http2_frames.readFrame(&reader.interface, &payload_buf);
+    try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_GOAWAY), goaway.head.frame_type);
+    try testing.expectEqual(Http2.ERR_ENHANCE_YOUR_CALM, std.mem.readInt(u32, goaway.payload[4..8], .big));
+
+    thread.join();
+    try testing.expect(probe.done.load(.acquire));
+    client.close(io);
+    holder.close(io);
+    edgeStream(fds[1]).close(io);
+
+    try testing.expectEqual(@as(usize, 1), table.liveCount());
+}
+
+test "zix zixer: grpc edge, a quiet connection re-arms per frame and is cut in the end" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    const proxy = http1_proxy.Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try openEdgePair(&fds);
+
+    // Stamped before the connection exists, so the deadline the accept armed
+    // is at most a few milliseconds past base plus the budget.
+    const base = monotonic_clock.nowMs(io);
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+
+    var client = TestClient{ .io = io, .stream = edgeStream(fds[1]) };
+    try client.start();
+
+    // Far enough after the accept that a connection still carrying the accept
+    // deadline reads as past due at the stamp swept below.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(400), .awake) catch {};
+
+    try client.sendPing();
+    const ack = try client.nextEvent();
+    try testing.expectEqual(.PING_ACK, ack.kind);
+
+    // The frame the client just sent was read under a budget armed after the
+    // sleep, so this stamp is still inside it. A loop that armed once at
+    // accept would be cut here instead.
+    const early = deadline_sweep.sweepOnce(&table, base + 60_200);
+    try testing.expectEqual(@as(usize, 0), early.cut);
+    try testing.expectEqual(@as(usize, 0), early.dropped);
+
+    // Past every budget, and nothing is relaying, so nothing holds the bound
+    // off this connection.
+    var cut: usize = 0;
+    var rounds: usize = 0;
+    while (rounds < 500 and !probe.done.load(.acquire)) : (rounds += 1) {
+        cut += deadline_sweep.sweepOnce(&table, std.math.maxInt(i64)).cut;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+
+    try testing.expect(probe.done.load(.acquire));
+    try testing.expect(cut > 0);
+
+    thread.join();
+    client.stream.close(io);
+
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+test "zix zixer: grpc edge, the bound comes off a connection that is relaying" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(testing.allocator, 1);
+    defer table.deinit(testing.allocator);
+
+    var src = std.Io.Reader.fixed("");
+    var sink_buf: [64]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40013 } };
+    const proxy = http1_proxy.Proxy{ .io = io };
+
+    var lease = client_lease.Lease.open(&table, io, testHandle(1), 1).?;
+    defer lease.release();
+
+    var session = Session{
+        .proxy = &proxy,
+        .io = io,
+        .client_r = &src,
+        .client_w = &sink,
+        .client_addr = addr,
+        .client_stream = null,
+        .lease = &lease,
+        .decoder = Http2.HpackDecoder.init(),
+    };
+
+    // Nothing relaying: the connection goes back under its budget, and a one
+    // millisecond one is already spent.
+    boundWhenQuiet(&session);
+
+    var quiet: u32 = 0;
+    const past_due = table.borrowExpired(std.math.maxInt(i64), &quiet).?;
+    table.endBorrow(past_due.ticket);
+
+    // One live RPC: the budget comes off, because an RPC ends when its own
+    // exchange does and no client budget can name that.
+    session.entries[0] = .{ .active = true, .client_id = 1 };
+    boundWhenQuiet(&session);
+
+    var relaying: u32 = 0;
+    try testing.expect(table.borrowExpired(std.math.maxInt(i64), &relaying) == null);
+    try testing.expectEqual(@as(usize, 1), table.liveCount());
+
+    // The RPC finished, so the next quiet pass puts the bound back.
+    session.entries[0] = .{};
+    boundWhenQuiet(&session);
+
+    var after: u32 = 0;
+    const cut_again = table.borrowExpired(std.math.maxInt(i64), &after).?;
+    table.endBorrow(cut_again.ticket);
 }
