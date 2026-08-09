@@ -5,6 +5,7 @@ const zix = @import("zix");
 
 const http1_head = @import("http1_head.zig");
 const proxy_headers = @import("proxy_headers.zig");
+const request_scheme = @import("request_scheme.zig");
 const ws_tunnel = @import("ws_tunnel.zig");
 
 const Http2 = zix.Http2;
@@ -157,14 +158,14 @@ fn validateRegularName(name: []const u8) Error!void {
 
 /// Build the h1 upstream head for a plain (non CONNECT) h2 request:
 /// filtered headers plus Host, Via, Forwarded, and zixer's own framing.
-pub fn buildUpstreamHead(buf: []u8, request: *const Request, headers: []const Http2.Header, client_addr: std.Io.net.IpAddress) ![]const u8 {
+pub fn buildUpstreamHead(buf: []u8, request: *const Request, headers: []const Http2.Header, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme) ![]const u8 {
     var fixed = std.Io.Writer.fixed(buf);
 
     try fixed.print("{s} {s} HTTP/1.1\r\n", .{ request.method, request.target });
     try fixed.print("Host: {s}\r\n", .{request.authority});
     try writeFilteredHeaders(&fixed, headers, false);
     try fixed.print("Via: {s}\r\n", .{proxy_headers.VIA});
-    try proxy_headers.writeForwarded(&fixed, client_addr, request.authority);
+    try proxy_headers.writeForwarded(&fixed, client_addr, request.authority, scheme);
 
     if (request.has_body) {
         if (request.content_length) |len| {
@@ -182,7 +183,7 @@ pub fn buildUpstreamHead(buf: []u8, request: *const Request, headers: []const Ht
 /// Build the h1 upgrade head that bridges an extended CONNECT to a
 /// websocket upstream (rfc 8441 to rfc 6455): the h1 leg needs the
 /// Sec-WebSocket-Key the h2 leg never carries, key_b64 is zixer's own.
-pub fn buildConnectHead(buf: []u8, request: *const Request, headers: []const Http2.Header, client_addr: std.Io.net.IpAddress, key_b64: []const u8) ![]const u8 {
+pub fn buildConnectHead(buf: []u8, request: *const Request, headers: []const Http2.Header, client_addr: std.Io.net.IpAddress, key_b64: []const u8, scheme: request_scheme.Scheme) ![]const u8 {
     var fixed = std.Io.Writer.fixed(buf);
 
     try fixed.print("GET {s} HTTP/1.1\r\n", .{request.target});
@@ -191,7 +192,7 @@ pub fn buildConnectHead(buf: []u8, request: *const Request, headers: []const Htt
     if (!hasName(headers, "sec-websocket-version")) try fixed.writeAll("Sec-WebSocket-Version: 13\r\n");
     try fixed.print("Sec-WebSocket-Key: {s}\r\n", .{key_b64});
     try fixed.print("Via: {s}\r\n", .{proxy_headers.VIA});
-    try proxy_headers.writeForwarded(&fixed, client_addr, request.authority);
+    try proxy_headers.writeForwarded(&fixed, client_addr, request.authority, scheme);
     try ws_tunnel.writeUpgradeHeaders(&fixed);
 
     try fixed.writeAll("\r\n");
@@ -513,7 +514,7 @@ test "zix zixer: http2 translate, upstream head carries host via forwarded and f
 
     var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 7 }, .port = 55000 } };
-    const head = try buildUpstreamHead(&build_buf, &request, &list, addr);
+    const head = try buildUpstreamHead(&build_buf, &request, &list, addr, .HTTP);
 
     try testing.expect(std.mem.startsWith(u8, head, "POST /api HTTP/1.1\r\n"));
     try testing.expect(std.mem.indexOf(u8, head, "Host: app.example\r\n") != null);
@@ -541,7 +542,7 @@ test "zix zixer: http2 translate, bodied request without length re-frames chunke
 
     var build_buf: [1024]u8 = undefined;
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 4000 } };
-    const head = try buildUpstreamHead(&build_buf, &request, &list, addr);
+    const head = try buildUpstreamHead(&build_buf, &request, &list, addr, .HTTP);
 
     try testing.expect(std.mem.indexOf(u8, head, "Transfer-Encoding: chunked\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, head, "Content-Length") == null);
@@ -562,7 +563,7 @@ test "zix zixer: http2 translate, connect head bridges to an h1 upgrade" {
 
     var build_buf: [2048]u8 = undefined;
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 4200 } };
-    const head = try buildConnectHead(&build_buf, &request, &list, addr, "zixer-generated-key==");
+    const head = try buildConnectHead(&build_buf, &request, &list, addr, "zixer-generated-key==", .HTTP);
 
     try testing.expect(std.mem.startsWith(u8, head, "GET /chat HTTP/1.1\r\n"));
     try testing.expect(std.mem.indexOf(u8, head, "Host: app.example\r\n") != null);
@@ -587,7 +588,7 @@ test "zix zixer: http2 translate, connect head adds a missing version" {
 
     var build_buf: [1024]u8 = undefined;
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 4200 } };
-    const head = try buildConnectHead(&build_buf, &request, &list, addr, "key==");
+    const head = try buildConnectHead(&build_buf, &request, &list, addr, "key==", .HTTP);
 
     try testing.expect(std.mem.indexOf(u8, head, "Sec-WebSocket-Version: 13\r\n") != null);
 }
