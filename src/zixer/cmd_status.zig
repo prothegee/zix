@@ -156,6 +156,8 @@ pub fn renderSite(out: *std.Io.Writer, path: []const u8, name: []const u8, cfg: 
     try out.print("tls: {}\n", .{cfg.tls});
     if (cfg.tls_cert) |tls_cert| try out.print("tls_cert: {s}\n", .{tls_cert});
     if (cfg.tls_key) |tls_key| try out.print("tls_key: {s}\n", .{tls_key});
+    if (cfg.force_https) try out.print("force_https: {}\n", .{cfg.force_https});
+    if (cfg.redirect_host) |redirect_host| try out.print("redirect_host: {s}\n", .{redirect_host});
     if (cfg.acme_webroot) |acme_webroot| try out.print("acme_webroot: {s}\n", .{acme_webroot});
     if (cfg.acme_proxy) |acme_proxy| try out.print("acme_proxy: {s}:{d}\n", .{ acme_proxy.host, acme_proxy.port });
 

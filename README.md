@@ -68,23 +68,23 @@
     <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 </div>
 
-<br>
-
-<h4 align="center">
-    <b><i>Zix Build Main Branch Status:</i></b>
-</h4>
-<p align="center">
-    <code><i>These built are not checking native docker/podman container</i></code>
-</p>
-<div align="center">
-    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=zig-x86_64-Linux-0.16">
-    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-linux-0.16.yml?label=zig-aarch64-Linux-0.16">
-    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-windows-0.16.yml?label=zig-x86_64-Windows-0.16">
-    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-macos-0.16.yml?label=zig-aarch64-MacOS-0.16">
-    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-freebsd-0.16.yml?label=zig-x86_64-FreeBSD-0.16">
-    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-netbsd-0.16.yml?label=zig-x86_64-NetBSD-0.16">
-    <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-openbsd-0.16.yml?label=zig-x86_64-OpenBSD-0.16">
-</div>
+<!-- <br> -->
+<!---->
+<!-- <h4 align="center"> -->
+<!--     <b><i>Zix Build Main Branch Status:</i></b> -->
+<!-- </h4> -->
+<!-- <p align="center"> -->
+<!--     <code><i>These built are not checking native docker/podman container</i></code> -->
+<!-- </p> -->
+<!-- <div align="center"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=zig-x86_64-Linux-0.16"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-linux-0.16.yml?label=zig-aarch64-Linux-0.16"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-windows-0.16.yml?label=zig-x86_64-Windows-0.16"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-macos-0.16.yml?label=zig-aarch64-MacOS-0.16"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-freebsd-0.16.yml?label=zig-x86_64-FreeBSD-0.16"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-netbsd-0.16.yml?label=zig-x86_64-NetBSD-0.16"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-openbsd-0.16.yml?label=zig-x86_64-OpenBSD-0.16"> -->
+<!-- </div> -->
 <!-- https://shields.io/badges/git-hub-actions-workflow-status -->
 
 <hr>

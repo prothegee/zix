@@ -2,6 +2,8 @@
 
 const std = @import("std");
 
+const request_scheme = @import("request_scheme.zig");
+
 /// Via element zixer appends on both legs (rfc 9110 intermediary rule).
 pub const VIA: []const u8 = "1.1 zixer";
 
@@ -66,16 +68,19 @@ pub fn stripHostPort(host: []const u8) []const u8 {
 /// - The for= node is always quoted: the address carries a port, and rfc 7239
 ///   requires the quoted form as soon as a port (or an ipv6 bracket) appears.
 /// - host is the client's original Host value, empty skips the parameter.
+/// - The proto parameter comes from the site, never from the client. See
+///   request_scheme for why a claimed scheme is not usable here.
 ///
 /// Param:
 /// out - *std.Io.Writer (upstream request head in progress)
 /// client_addr - std.Io.net.IpAddress (accepted connection's peer)
 /// host - []const u8 (original Host header value, may be empty)
+/// scheme - request_scheme.Scheme (how the client reached this site)
 ///
 /// Return:
 /// - void, the full `Forwarded: ...\r\n` line is written
-pub fn writeForwarded(out: *std.Io.Writer, client_addr: std.Io.net.IpAddress, host: []const u8) !void {
-    try out.print("Forwarded: for=\"{f}\";proto=http", .{client_addr});
+pub fn writeForwarded(out: *std.Io.Writer, client_addr: std.Io.net.IpAddress, host: []const u8, scheme: request_scheme.Scheme) !void {
+    try out.print("Forwarded: for=\"{f}\";proto={s}", .{ client_addr, scheme.token() });
     if (host.len != 0) try out.print(";host=\"{s}\"", .{host});
     try out.writeAll("\r\n");
 }
@@ -126,7 +131,7 @@ test "zix zixer: proxy headers, forwarded line quotes the node and carries host"
     var out = std.Io.Writer.fixed(&line_buf);
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 60 }, .port = 51000 } };
-    try writeForwarded(&out, addr, "example.com");
+    try writeForwarded(&out, addr, "example.com", .HTTP);
 
     try std.testing.expectEqualStrings("Forwarded: for=\"192.0.2.60:51000\";proto=http;host=\"example.com\"\r\n", out.buffered());
 }
@@ -136,7 +141,20 @@ test "zix zixer: proxy headers, forwarded line without host skips the parameter"
     var out = std.Io.Writer.fixed(&line_buf);
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 10, 0, 0, 9 }, .port = 40000 } };
-    try writeForwarded(&out, addr, "");
+    try writeForwarded(&out, addr, "", .HTTP);
 
     try std.testing.expectEqualStrings("Forwarded: for=\"10.0.0.9:40000\";proto=http\r\n", out.buffered());
+}
+
+test "zix zixer: proxy headers, the forwarded proto follows the site and not the client" {
+    var line_buf: [128]u8 = undefined;
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 60 }, .port = 51000 } };
+
+    var secure = std.Io.Writer.fixed(&line_buf);
+    try writeForwarded(&secure, addr, "example.com", .HTTPS);
+    try std.testing.expectEqualStrings("Forwarded: for=\"192.0.2.60:51000\";proto=https;host=\"example.com\"\r\n", secure.buffered());
+
+    var plain = std.Io.Writer.fixed(&line_buf);
+    try writeForwarded(&plain, addr, "example.com", .HTTP);
+    try std.testing.expect(std.mem.indexOf(u8, plain.buffered(), ";proto=http;") != null);
 }

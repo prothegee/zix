@@ -121,13 +121,16 @@ flowchart LR
 | `ws_tunnel.zig` | tunnel upgrade rfc 6455 |
 | `static_files.zig` | file dari `public_dir`, sibling terkompresi, fallback spa |
 | `static_cached.zig` | table bersama berisi file `public_dir` yang sudah terbuka, dan cara mengambil entry dari sana |
-| `acme_challenge.zig`, `acme_listener.zig` | challenge plane http-01 dan companion port 80 |
+| `acme_challenge.zig`, `acme_listener.zig` | challenge plane http-01, dan companion port 80 yang melayaninya sekaligus redirect `force_https` |
+| `https_redirect.zig` | status yang memindahkan request cleartext ke https, dan authority yang boleh disebut di Location |
 | `upstream_pool.zig`, `upstream_conn.zig` | pemilihan round-robin, ketersediaan, keep-alive idle |
 | `upstream_deadline.zig` | batas satu read upstream |
+| `upstream_status.zig` | yang disampaikan ke client ketika tidak ada percobaan yang menghasilkan koneksi: 504 untuk yang diam, 502 untuk yang menolak |
 | `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | batas client: slot-nya, cut-nya, dan mengambil slot atau menolak koneksi |
 | `client_lease.zig` | yang dipegang satu koneksi yang diterima: arm per exchange, hold saat stream, dan mengembalikan slot |
 | `site_sweep.zig` | satu thread background per site, menjalankan cut client dan sweep idle sekaligus |
 | `proxy_headers.zig` | pembuangan hop-by-hop, `Via`, `Forwarded` |
+| `request_scheme.zig` | bagaimana client mencapai site ini, dan token yang disebut parameter `proto` |
 
 <br>
 
@@ -320,7 +323,7 @@ Edge proxy mengikuti aturan intermediary, bukan meneruskan semuanya:
 
 - Header hop-by-hop tidak pernah menyeberang di arah mana pun: `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, apa pun yang disebut di `Connection`, dan `Content-Length`, karena zixer sendiri yang membingkai pesan yang dibangun ulang.
 - `Via: 1.1 zixer` ditambahkan di kedua leg.
-- `Forwarded` membawa alamat client, scheme, dan host asli (rfc 7239). Scheme-nya ditulis `proto=http` di tiap edge hari ini, termasuk edge TLS, jadi backend yang memercayainya tidak bisa membedakan request https yang diterminasi dari request cleartext.
+- `Forwarded` membawa alamat client, scheme, dan host asli (rfc 7239). Scheme-nya berasal dari setting `tls` site itu sendiri, tidak pernah dari apa pun yang dikirim client, jadi backend yang memercayainya bisa membedakan request https yang diterminasi dari request cleartext.
 - Kegagalan yang dihasilkan zixer sendiri membawa `Proxy-Status: zixer; error="..."`, jadi 502 dari gateway bisa dibedakan dari 502 yang dikirim upstream.
 
 <br>

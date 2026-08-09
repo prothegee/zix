@@ -45,15 +45,18 @@ pub const UpConn = struct {
 /// up_conn - *UpConn (initialized in place, address must be final)
 /// allocator - std.mem.Allocator (owns this leg's buffers until close)
 /// stream_buf_bytes - usize (one direction's size, resolved by the site)
+/// connect_timeout_ms - u32 (how long the handshake may take, 0 waits on the
+///   operating system's own limit)
 ///
 /// Return:
 /// - void, up_conn is ready for stream traffic
-/// - error.OutOfMemory, error.BadUpstreamAddress, or any connect / write error
-pub fn openInto(up_conn: *UpConn, io: std.Io, allocator: std.mem.Allocator, stream_buf_bytes: usize, host: []const u8, port: u16, slot_index: u32) !void {
+/// - error.OutOfMemory, error.BadUpstreamAddress, error.ConnectTimeout,
+///   error.ConnectFailed, or any write error
+pub fn openInto(up_conn: *UpConn, io: std.Io, allocator: std.mem.Allocator, stream_buf_bytes: usize, host: []const u8, port: u16, slot_index: u32, connect_timeout_ms: u32) !void {
     const buffers = try conn_buffer.Set.init(allocator, stream_buf_bytes, .{ .client = false, .upstream = true });
     errdefer buffers.deinit(allocator);
 
-    const conn = try upstream_conn.connect(io, host, port, slot_index);
+    const conn = try upstream_conn.connect(io, host, port, slot_index, connect_timeout_ms);
     errdefer conn.stream.close(io);
 
     up_conn.* = .{ .stream = conn.stream, .slot_index = slot_index, .buffers = buffers };
@@ -181,7 +184,7 @@ test "zix zixer: grpc upstream, open runs the client preface on the wire" {
     defer server.deinit(io);
 
     var up_conn = UpConn{ .stream = undefined, .slot_index = 3 };
-    try openInto(&up_conn, io, testing.allocator, conn_buffer.DEFAULT_BYTES, "127.0.0.1", 18840, 3);
+    try openInto(&up_conn, io, testing.allocator, conn_buffer.DEFAULT_BYTES, "127.0.0.1", 18840, 3, 3_000);
     defer close(&up_conn, io, testing.allocator);
 
     const accepted = try server.accept(io);

@@ -48,6 +48,8 @@ const SAMPLE_SITE_CFG =
     \\# tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
     \\# tls_key: /etc/letsencrypt/live/example.com/privkey.pem
     \\# acme_webroot: /var/www/acme
+    \\# force_https: true             # port 80 companion, redirects to this site
+    \\# redirect_host: example.com     # authority the redirect names, else the client's Host
     \\
     \\# upstreams: 127.0.0.1:3000, 127.0.0.1:3001
     \\

@@ -1,4 +1,5 @@
-//! zixer acme companion listener: cleartext challenge port for a TLS site
+//! zixer cleartext companion listener: the port 80 ear a TLS site keeps for
+//! the acme challenge path, the redirect to https, or both
 
 const std = @import("std");
 
@@ -10,13 +11,16 @@ const tcp_nodelay = @import("tcp_nodelay.zig");
 /// Consecutive accept failures before the loop gives up.
 const MAX_ACCEPT_FAILURES: usize = 100;
 
-/// The bound challenge listener a TLS site with acme keys owns beside its
-/// main listener. It serves exactly two things: the challenge path from
-/// the site's acme config, and a 301 to https for everything else.
+/// The bound cleartext listener a TLS site owns beside its main one. It
+/// serves exactly two things: the challenge path from the site's acme
+/// config, and a redirect to https for everything else.
 ///
 /// Note:
-/// - The CA validates http-01 on port 80 only (rfc 8555 8.3), so the
-///   production bind is always port 80. Tests bind high ports.
+/// - The CA validates http-01 on port 80 only (rfc 8555 8.3), and a browser
+///   typing a bare host name reaches the same port, so the production bind is
+///   always port 80. Tests bind high ports.
+/// - A site that asked for force_https alone has no challenge path to serve,
+///   and every request it takes is redirected.
 pub const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -24,6 +28,8 @@ pub const State = struct {
     webroot: ?[]const u8,
     relay: ?site_cfg.Upstream,
     https_port: u16,
+    /// The authority the redirect names, null echoes the client's own Host.
+    redirect_host: ?[]const u8,
     stop: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     /// Live connection tasks. A concurrent group member releases its
@@ -47,6 +53,7 @@ pub const State = struct {
     /// ip - []const u8 (listen ip, for the shutdown wake)
     /// port - u16 (the bound challenge port)
     /// https_port - u16 (the site's TLS port, redirect target)
+    /// redirect_host - ?[]const u8 (the site's redirect_host, duped here)
     ///
     /// Return:
     /// - *State with the accept thread running
@@ -59,6 +66,7 @@ pub const State = struct {
         ip: []const u8,
         port: u16,
         https_port: u16,
+        redirect_host: ?[]const u8,
     ) !*State {
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
@@ -70,6 +78,8 @@ pub const State = struct {
         errdefer if (owned_relay) |inner| allocator.free(inner.host);
         const wake_ip = try allocator.dupe(u8, ip);
         errdefer allocator.free(wake_ip);
+        const owned_redirect_host: ?[]const u8 = if (redirect_host) |inner| try allocator.dupe(u8, inner) else null;
+        errdefer if (owned_redirect_host) |inner| allocator.free(inner);
 
         state.* = .{
             .allocator = allocator,
@@ -78,6 +88,7 @@ pub const State = struct {
             .webroot = owned_webroot,
             .relay = owned_relay,
             .https_port = https_port,
+            .redirect_host = owned_redirect_host,
             .wake_ip = wake_ip,
             .port = port,
         };
@@ -100,6 +111,7 @@ pub const State = struct {
         state.server.deinit(io);
         if (state.webroot) |inner| state.allocator.free(inner);
         if (state.relay) |inner| state.allocator.free(inner.host);
+        if (state.redirect_host) |inner| state.allocator.free(inner);
         state.allocator.free(state.wake_ip);
 
         const allocator = state.allocator;
@@ -113,11 +125,17 @@ fn acceptLoop(state: *State) void {
     // No pool here, so a challenge connection buffers the client pair
     // alone. The companion is not a load path, so it keeps the built-in
     // size rather than the site's.
+    const configured_acme: ?acme_challenge.AcmeSite = if (state.webroot == null and state.relay == null)
+        null
+    else
+        .{ .webroot = state.webroot, .relay = state.relay };
+
     const proxy = http1_proxy.Proxy{
         .io = io,
         .allocator = state.allocator,
-        .acme = .{ .webroot = state.webroot, .relay = state.relay },
+        .acme = configured_acme,
         .redirect_https = state.https_port,
+        .redirect_host = state.redirect_host,
     };
 
     var accept_failures: usize = 0;
@@ -225,7 +243,7 @@ test "zix zixer: acme listener, challenge answers and the rest redirects" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18893);
     const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    const state = try State.create(std.testing.allocator, io, server, webroot, null, "127.0.0.1", 18893, 18894);
+    const state = try State.create(std.testing.allocator, io, server, webroot, null, "127.0.0.1", 18893, 18894, null);
 
     var reply_buf: [1024]u8 = undefined;
     const challenge_len = try fetch(io, 18893, "GET /.well-known/acme-challenge/tok_a HTTP/1.1\r\nHost: site.test\r\nConnection: close\r\n\r\n", &reply_buf);
@@ -241,6 +259,42 @@ test "zix zixer: acme listener, challenge answers and the rest redirects" {
     state.shutdown();
 
     // The port is free again: a fresh bind succeeds.
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: acme listener, a force_https companion redirects every path it takes" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18949);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    // No webroot and no relay: this site asked for the redirect alone.
+    const state = try State.create(std.testing.allocator, io, server, null, null, "127.0.0.1", 18949, 8443, null);
+
+    var reply_buf: [1024]u8 = undefined;
+    const page_len = try fetch(io, 18949, "GET /app/page HTTP/1.1\r\nHost: site.test:18949\r\nConnection: close\r\n\r\n", &reply_buf);
+    const page = reply_buf[0..page_len];
+    try testing.expect(std.mem.startsWith(u8, page, "HTTP/1.1 301 Moved Permanently\r\n"));
+    try testing.expect(std.mem.indexOf(u8, page, "Location: https://site.test:8443/app/page\r\n") != null);
+
+    // The challenge path is nothing special on a site with no acme config, so
+    // it moves to https like everything else rather than answering 404 from a
+    // webroot that does not exist.
+    const challenge_len = try fetch(io, 18949, "GET /.well-known/acme-challenge/tok HTTP/1.1\r\nHost: site.test:18949\r\nConnection: close\r\n\r\n", &reply_buf);
+    const challenge = reply_buf[0..challenge_len];
+    try testing.expect(std.mem.startsWith(u8, challenge, "HTTP/1.1 301 Moved Permanently\r\n"));
+    try testing.expect(std.mem.indexOf(u8, challenge, "Location: https://site.test:8443/.well-known/acme-challenge/tok\r\n") != null);
+
+    state.shutdown();
+
     var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
     rebound.deinit(io);
 }

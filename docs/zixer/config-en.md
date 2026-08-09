@@ -269,15 +269,17 @@ One file, one site. `engine` and `port` are required, everything else has a defa
 
 `ip` and `port` together decide the listening socket. `0.0.0.0` binds every interface, `127.0.0.1` binds loopback only, `::` binds every IPv6 interface.
 
-### Forwarded says proto=http even on a TLS site
+### Forwarded says how the client reached this site
 
 Every proxied request carries a `Forwarded` header (rfc 7239) with the client address, the scheme, and the original host:
 
 ```
-forwarded: for="127.0.0.1:50250";proto=http;host="localhost:9707"
+forwarded: for="127.0.0.1:50250";proto=https;host="localhost:9707"
 ```
 
-The `proto` parameter is `http` on every edge today, including a TLS one. A backend that decides "was this request secure" from that header will read it wrong on a `tls: true` site, so decide that from the port the backend listens on instead.
+The `proto` parameter comes from the site's own `tls` setting: `https` on a `tls: true` site, `http` on every other one, and `https` on an http3 site since quic has no cleartext transport. A backend deciding "was this request secure" can read it directly.
+
+It is never taken from anything the client sent. An h2 or grpc caller supplies its own `:scheme` pseudo header, and a cleartext one that claims `https` would otherwise tell the backend its request arrived secure.
 
 ### Upstream hosts must be ip literals
 

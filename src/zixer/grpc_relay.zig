@@ -4,6 +4,8 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const request_scheme = @import("request_scheme.zig");
+
 const Http2 = zix.Http2;
 
 /// Via element for the h2 upstream leg (rfc 9110: the protocol version of
@@ -24,9 +26,13 @@ pub const Error = error{
 };
 
 /// What the request validation hands back for the forwarded element.
+///
+/// Note:
+/// - The client's own `:scheme` is required by rfc 9113 8.3 and is still
+///   checked, but it is not carried here. The scheme the upstream is told
+///   comes from the site, see request_scheme.
 pub const RequestInfo = struct {
     authority: []const u8,
-    scheme: []const u8,
 };
 
 /// Validate the decoded request header list of one HEADERS block for the
@@ -87,21 +93,22 @@ pub fn validateRequest(headers: []const Http2.Header) Error!RequestInfo {
     if (method_value.len == 0) return error.Malformed;
     if (std.mem.eql(u8, method_value, "CONNECT")) return error.Malformed;
 
-    const scheme_value = scheme orelse return error.Malformed;
+    if (scheme == null) return error.Malformed;
+
     const target_value = target orelse return error.Malformed;
     if (target_value.len == 0) return error.Malformed;
 
     const final_authority = if (authority) |value| value else host_value;
     if (final_authority.len == 0) return error.Malformed;
 
-    return .{ .authority = final_authority, .scheme = scheme_value };
+    return .{ .authority = final_authority };
 }
 
 /// Re-encode a validated request block for the upstream conn: pseudo
 /// headers first in received order, regular headers lowercased, then
 /// zixer's own via and forwarded elements appended (existing chains pass
 /// through untouched).
-pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: *const RequestInfo, client_addr: std.Io.net.IpAddress) ![]const u8 {
+pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: *const RequestInfo, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme) ![]const u8 {
     var encoder = Http2.HpackEncoder.init(block_buf);
 
     for (headers) |header| {
@@ -116,7 +123,7 @@ pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: 
     try encoder.writeHeader("via", VIA_H2);
 
     var forwarded_buf: [160]u8 = undefined;
-    if (forwardedValue(&forwarded_buf, info, client_addr)) |value| {
+    if (forwardedValue(&forwarded_buf, info, client_addr, scheme)) |value| {
         try encoder.writeHeader("forwarded", value);
     }
 
@@ -197,10 +204,14 @@ fn validateRegularName(name: []const u8) Error!void {
 
 /// Format the rfc 7239 forwarded value for one client. Null when the
 /// buffer cannot hold it (the element drops, the request still relays).
-fn forwardedValue(buf: []u8, info: *const RequestInfo, client_addr: std.Io.net.IpAddress) ?[]const u8 {
+///
+/// Note:
+/// - proto is the site's scheme. Echoing the client's `:scheme` here would let
+///   a cleartext caller tell the backend its request arrived over https.
+fn forwardedValue(buf: []u8, info: *const RequestInfo, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme) ?[]const u8 {
     var writer = std.Io.Writer.fixed(buf);
 
-    writer.print("for=\"{f}\";proto={s}", .{ client_addr, info.scheme }) catch return null;
+    writer.print("for=\"{f}\";proto={s}", .{ client_addr, scheme.token() }) catch return null;
     if (info.authority.len != 0) writer.print(";host=\"{s}\"", .{info.authority}) catch return null;
 
     return writer.buffered();
@@ -249,11 +260,23 @@ const VALID_REQUEST = [_]Http2.Header{
     makeHeader("te", "trailers"),
 };
 
-test "zix zixer: grpc relay, valid request passes and yields authority and scheme" {
+test "zix zixer: grpc relay, valid request passes and yields the authority" {
     const info = try validateRequest(&VALID_REQUEST);
 
     try testing.expectEqualStrings("backend", info.authority);
-    try testing.expectEqualStrings("http", info.scheme);
+}
+
+test "zix zixer: grpc relay, a request with no scheme pseudo header is malformed" {
+    // rfc 9113 8.3 requires it, so its absence is still refused even though
+    // nothing downstream reads the value.
+    const no_scheme = [_]Http2.Header{
+        makeHeader(":method", "POST"),
+        makeHeader(":path", "/pkg.Svc/Call"),
+        makeHeader(":authority", "backend"),
+        makeHeader("content-type", "application/grpc"),
+    };
+
+    try testing.expectError(error.Malformed, validateRequest(&no_scheme));
 }
 
 test "zix zixer: grpc relay, connection specific headers are malformed" {
@@ -323,7 +346,7 @@ test "zix zixer: grpc relay, request block keeps order and appends via and forwa
     const addr = try std.Io.net.IpAddress.parse("10.1.2.3", 41000);
 
     var block_buf: [1024]u8 = undefined;
-    const block = try encodeRequestBlock(&block_buf, &VALID_REQUEST, &info, addr);
+    const block = try encodeRequestBlock(&block_buf, &VALID_REQUEST, &info, addr, .HTTP);
 
     var out: [16]Http2.Header = undefined;
     var scratch: [1024]u8 = undefined;
@@ -403,4 +426,21 @@ test "zix zixer: grpc relay, unavailable block is a trailers-only grpc answer" {
     try testing.expectEqualStrings("200", findValue(&out, count, ":status").?);
     try testing.expectEqualStrings("application/grpc", findValue(&out, count, "content-type").?);
     try testing.expectEqualStrings(GRPC_STATUS_UNAVAILABLE, findValue(&out, count, "grpc-status").?);
+}
+
+test "zix zixer: grpc relay, the forwarded proto is the site's and not the client's claim" {
+    // The block says http, and a tls site has to report https regardless: the
+    // pseudo header is a claim, the site's own setting is the fact.
+    const info = try validateRequest(&VALID_REQUEST);
+    const addr = try std.Io.net.IpAddress.parse("10.1.2.3", 41000);
+
+    var block_buf: [1024]u8 = undefined;
+    const block = try encodeRequestBlock(&block_buf, &VALID_REQUEST, &info, addr, .HTTPS);
+
+    var out: [16]Http2.Header = undefined;
+    var scratch: [1024]u8 = undefined;
+    const count = try decodeBlock(block, &out, &scratch);
+
+    const forwarded = findValue(&out, count, "forwarded").?;
+    try testing.expect(std.mem.indexOf(u8, forwarded, "proto=https") != null);
 }

@@ -6,6 +6,7 @@ const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const deadline_table = @import("deadline_table.zig");
 const fault = @import("fault.zig");
+const https_redirect = @import("https_redirect.zig");
 const process_gate = @import("process_gate.zig");
 const static_cached = @import("static_cached.zig");
 const upstream_conn = @import("upstream_conn.zig");
@@ -31,6 +32,15 @@ pub const SiteCfg = struct {
     ip: []const u8 = "0.0.0.0",
     port: ?u16 = null,
     tls: bool = false,
+    /// Whether a cleartext companion listener stands on port 80 and moves
+    /// every request to this site's https origin. Needs tls: true, since a
+    /// site with no https has nowhere to send them.
+    force_https: bool = false,
+    /// The authority the companion listener names in its Location. Null
+    /// echoes the client's own Host, which is what the acme companion always
+    /// did. Naming one here is what stops a client from choosing where the
+    /// redirect points.
+    redirect_host: ?[]const u8 = null,
     tls_cert: ?[]const u8 = null,
     tls_key: ?[]const u8 = null,
     acme_webroot: ?[]const u8 = null,
@@ -85,6 +95,8 @@ const Key = enum {
     tls,
     tls_cert,
     tls_key,
+    force_https,
+    redirect_host,
     acme_webroot,
     acme_proxy,
     upstreams,
@@ -180,6 +192,20 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
                     try faults.add(entry.key, "'{s}' is not a boolean, use true or false", .{entry.value});
                     continue;
                 };
+            },
+            .force_https => {
+                cfg.force_https = cfg_scanner.parseBool(entry.value) orelse {
+                    try faults.add(entry.key, "'{s}' is not a boolean, use true or false", .{entry.value});
+                    continue;
+                };
+            },
+            .redirect_host => {
+                if (!https_redirect.usableAuthority(entry.value)) {
+                    try faults.add(entry.key, "'{s}' is not a bare host or host:port, i.e. example.com or example.com:8443", .{entry.value});
+                    continue;
+                }
+
+                cfg.redirect_host = entry.value;
             },
             .tls_cert => cfg.tls_cert = entry.value,
             .tls_key => cfg.tls_key = entry.value,
@@ -374,6 +400,14 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
     } else {
         if (cfg.tls_cert != null) try faults.add("tls_cert", "set tls: true or remove it", .{});
         if (cfg.tls_key != null) try faults.add("tls_key", "set tls: true or remove it", .{});
+
+        // The companion listener exists to move a request to this site's own
+        // https origin, and without tls there is no origin to move it to. A
+        // udp site is told the key does not apply at all, further down, so
+        // naming tls here as well would point at a fix udp also refuses.
+        const on_udp = cfg.engine == .UDP;
+        if (cfg.force_https and !on_udp) try faults.add("force_https", "needs tls: true, there is no https origin to send clients to", .{});
+        if (cfg.redirect_host != null and !on_udp) try faults.add("redirect_host", "needs tls: true, only the https redirect names an authority", .{});
     }
 
     if (cfg.upstreams.len == 0 and cfg.public_dir == null) {
@@ -470,6 +504,8 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         },
         .UDP => {
             if (cfg.tls) try faults.add("tls", "udp forward is blind bytes, tls does not apply", .{});
+            if (cfg.force_https) try faults.add("force_https", "does not apply to udp sites, remove it", .{});
+            if (cfg.redirect_host != null) try faults.add("redirect_host", "does not apply to udp sites, remove it", .{});
             if (cfg.public_dir != null) try faults.add("public_dir", "not supported on udp sites, remove it", .{});
             if (cfg.public_dir_cache_ttl_ms != null) try faults.add("public_dir_cache_ttl_ms", "does not apply to udp sites, remove it", .{});
             if (cfg.kernel_backlog != null) try faults.add("kernel_backlog", "does not apply to udp sites, remove it", .{});
@@ -1217,6 +1253,139 @@ test "zix zixer: site cfg, the upstream connect and idle keys parse and default 
     const bare = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
     try testing.expectEqual(@as(?u32, null), bare.upstream_connect_timeout_ms);
     try testing.expectEqual(@as(?u32, null), bare.upstream_idle_ttl_ms);
+}
+
+test "zix zixer: site cfg, force_https rides with tls and is refused without it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var tls_faults = fault.FaultList.init(arena.allocator());
+    const tls_site = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\ntls: true\ntls_cert: /c.pem\ntls_key: /k.pem\nforce_https: true\n",
+        &tls_faults,
+    );
+    try testing.expectEqual(@as(usize, 0), tls_faults.slice().len);
+    try testing.expect(tls_site.force_https);
+
+    // Off by default, so an existing site file keeps its one listener.
+    var plain_faults = fault.FaultList.init(arena.allocator());
+    const plain = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\n",
+        &plain_faults,
+    );
+    try testing.expectEqual(@as(usize, 0), plain_faults.slice().len);
+    try testing.expect(!plain.force_https);
+
+    // Nowhere to send the client, so the key is a mistake rather than a no-op.
+    var cleartext_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nforce_https: true\n",
+        &cleartext_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), cleartext_faults.slice().len);
+    try testing.expectEqualStrings("force_https", cleartext_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs tls: true, there is no https origin to send clients to", cleartext_faults.slice()[0].hint);
+
+    // Saying false where it cannot apply asks for nothing, so nothing is
+    // reported.
+    var explicit_off_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nforce_https: false\n",
+        &explicit_off_faults,
+    );
+    try testing.expectEqual(@as(usize, 0), explicit_off_faults.slice().len);
+
+    var word_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\ntls: true\ntls_cert: /c.pem\ntls_key: /k.pem\nforce_https: yes\n",
+        &word_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), word_faults.slice().len);
+    try testing.expectEqualStrings("force_https", word_faults.slice()[0].key);
+    try testing.expectEqualStrings("'yes' is not a boolean, use true or false", word_faults.slice()[0].hint);
+}
+
+test "zix zixer: site cfg, redirect_host takes a bare authority and nothing else" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var ok_faults = fault.FaultList.init(arena.allocator());
+    const named = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\ntls: true\ntls_cert: /c.pem\ntls_key: /k.pem\nforce_https: true\nredirect_host: example.com\n",
+        &ok_faults,
+    );
+    try testing.expectEqual(@as(usize, 0), ok_faults.slice().len);
+    try testing.expectEqualStrings("example.com", named.redirect_host.?);
+
+    // A value that could reshape the Location line is refused at parse time,
+    // where the operator can still see it.
+    var shaped_faults = fault.FaultList.init(arena.allocator());
+    const shaped = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\ntls: true\ntls_cert: /c.pem\ntls_key: /k.pem\nredirect_host: https://example.com/x\n",
+        &shaped_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), shaped_faults.slice().len);
+    try testing.expectEqualStrings("redirect_host", shaped_faults.slice()[0].key);
+    try testing.expectEqualStrings("'https://example.com/x' is not a bare host or host:port, i.e. example.com or example.com:8443", shaped_faults.slice()[0].hint);
+    try testing.expectEqual(@as(?[]const u8, null), shaped.redirect_host);
+
+    // Only the https redirect names an authority, so a cleartext site has no
+    // use for one.
+    var cleartext_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nredirect_host: example.com\n",
+        &cleartext_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), cleartext_faults.slice().len);
+    try testing.expectEqualStrings("redirect_host", cleartext_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs tls: true, only the https redirect names an authority", cleartext_faults.slice()[0].hint);
+
+    var udp_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: udp\nport: 18898\nupstreams: 127.0.0.1:3000\nredirect_host: example.com\n",
+        &udp_faults,
+    );
+    var named_once: usize = 0;
+    for (udp_faults.slice()) |entry| {
+        if (!std.mem.eql(u8, entry.key, "redirect_host")) continue;
+
+        try testing.expectEqualStrings("does not apply to udp sites, remove it", entry.hint);
+        named_once += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), named_once);
+}
+
+test "zix zixer: site cfg, a udp site is told force_https does not apply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: udp\nport: 18898\nupstreams: 127.0.0.1:3000\nforce_https: true\n",
+        &faults,
+    );
+
+    // One fault for one key: the udp answer is the whole story, and the
+    // generic tls hint would name a fix a udp site also refuses.
+    var named: usize = 0;
+    for (faults.slice()) |entry| {
+        if (!std.mem.eql(u8, entry.key, "force_https")) continue;
+
+        try testing.expectEqualStrings("does not apply to udp sites, remove it", entry.hint);
+        named += 1;
+    }
+
+    try testing.expectEqual(@as(usize, 1), named);
 }
 
 test "zix zixer: site cfg, the upstream connect and idle keys are refused where they cannot apply" {

@@ -5,6 +5,7 @@ const std = @import("std");
 const h3_qpack = @import("h3_qpack.zig");
 const http1_head = @import("http1_head.zig");
 const proxy_headers = @import("proxy_headers.zig");
+const request_scheme = @import("request_scheme.zig");
 
 /// The via element an h3 hop adds (rfc 9110 7.6.3): protocol version then the
 /// pseudonym, matching the h1 "1.1 zixer" and grpc "2 zixer" forms.
@@ -139,14 +140,14 @@ fn validateRegularName(name: []const u8) Error!void {
 
 /// Build the h1 upstream head for one h3 request: filtered fields plus Host,
 /// Via, Forwarded, and zixer's own framing.
-pub fn buildUpstreamHead(buf: []u8, request: *const Request, fields: []const h3_qpack.Field, client_addr: std.Io.net.IpAddress) Error![]const u8 {
+pub fn buildUpstreamHead(buf: []u8, request: *const Request, fields: []const h3_qpack.Field, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme) Error![]const u8 {
     var fixed = std.Io.Writer.fixed(buf);
 
     fixed.print("{s} {s} HTTP/1.1\r\n", .{ request.method, request.target }) catch return error.BufferFull;
     fixed.print("Host: {s}\r\n", .{request.authority}) catch return error.BufferFull;
     writeFilteredFields(&fixed, fields) catch return error.BufferFull;
     fixed.print("Via: {s}\r\n", .{VIA_H3}) catch return error.BufferFull;
-    proxy_headers.writeForwarded(&fixed, client_addr, request.authority) catch return error.BufferFull;
+    proxy_headers.writeForwarded(&fixed, client_addr, request.authority, scheme) catch return error.BufferFull;
 
     if (request.has_body) {
         if (request.content_length) |len| {
@@ -380,7 +381,7 @@ test "zix zixer: h3 translate, a body without content length frames as chunked" 
     try testing.expect(request.content_length == null);
 
     var buf: [512]u8 = undefined;
-    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress());
+    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress(), .HTTPS);
     try testing.expect(std.mem.indexOf(u8, head, "Transfer-Encoding: chunked\r\n") != null);
 
     const sized = [_]h3_qpack.Field{
@@ -391,7 +392,7 @@ test "zix zixer: h3 translate, a body without content length frames as chunked" 
         .{ .name = "content-length", .value = "7" },
     };
     const sized_request = try assemble(&sized, false);
-    const sized_head = try buildUpstreamHead(&buf, &sized_request, &sized, testAddress());
+    const sized_head = try buildUpstreamHead(&buf, &sized_request, &sized, testAddress(), .HTTPS);
     try testing.expect(std.mem.indexOf(u8, sized_head, "Content-Length: 7\r\n") != null);
 
     // A promised body on an already ended stream is malformed.
@@ -411,7 +412,7 @@ test "zix zixer: h3 translate, the upstream head carries via, forwarded, and coa
 
     const request = try assemble(&fields, true);
     var buf: [512]u8 = undefined;
-    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress());
+    const head = try buildUpstreamHead(&buf, &request, &fields, testAddress(), .HTTPS);
 
     try testing.expect(std.mem.startsWith(u8, head, "GET /cart HTTP/1.1\r\n"));
     try testing.expect(std.mem.indexOf(u8, head, "Host: shop.test\r\n") != null);

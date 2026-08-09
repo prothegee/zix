@@ -121,13 +121,16 @@ flowchart LR
 | `ws_tunnel.zig` | the rfc 6455 upgrade tunnel |
 | `static_files.zig` | files from `public_dir`, precompressed siblings, the spa fallback |
 | `static_cached.zig` | the shared table of already-open `public_dir` files, and taking an entry from it |
-| `acme_challenge.zig`, `acme_listener.zig` | the http-01 challenge plane and the port 80 companion |
+| `acme_challenge.zig`, `acme_listener.zig` | the http-01 challenge plane, and the port 80 companion that serves it and the `force_https` redirect |
+| `https_redirect.zig` | which status moves a cleartext request to https, and which authority the Location may name |
 | `upstream_pool.zig`, `upstream_conn.zig` | round-robin picking, availability, idle keep-alive |
 | `upstream_deadline.zig` | the bound on one upstream read |
+| `upstream_status.zig` | what a client is told when no attempt produced a connection: 504 for silence, 502 for a refusal |
 | `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | the client bound: the slots, the cut, and taking a slot or refusing the connection |
 | `client_lease.zig` | what one accepted connection holds: arm per exchange, hold a stream, give the slot back |
 | `site_sweep.zig` | the one background thread per site, running both the client cut and the idle sweep |
 | `proxy_headers.zig` | hop-by-hop stripping, `Via`, `Forwarded` |
+| `request_scheme.zig` | how a client reached this site, and the token the `proto` parameter names |
 
 <br>
 
@@ -318,7 +321,7 @@ The proxy edges follow the intermediary rules rather than passing everything thr
 
 - Hop-by-hop headers never cross in either direction: `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, anything named in `Connection`, and `Content-Length`, because zixer frames the rebuilt message itself.
 - `Via: 1.1 zixer` is appended on both legs.
-- `Forwarded` carries the client address, the scheme, and the original host (rfc 7239). The scheme is written as `proto=http` on every edge today, including a TLS one, so a backend that trusts it cannot tell a terminated https request from a cleartext one.
+- `Forwarded` carries the client address, the scheme, and the original host (rfc 7239). The scheme comes from the site's own `tls` setting, never from anything the client sent, so a backend that trusts it can tell a terminated https request from a cleartext one.
 - A failure zixer itself produced carries `Proxy-Status: zixer; error="..."`, so a 502 from the gateway is distinguishable from a 502 an upstream sent.
 
 <br>

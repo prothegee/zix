@@ -407,7 +407,7 @@ fn acceptStream(session: *Session, id: u31, headers: []const Http2.Header, end_s
     };
     const up_conn = &session.up_conns[up_index];
 
-    const block = grpc_relay.encodeRequestBlock(&session.out_block_buf, headers, &info, session.client_addr) catch {
+    const block = grpc_relay.encodeRequestBlock(&session.out_block_buf, headers, &info, session.client_addr, session.proxy.client_scheme) catch {
         return streamError(session, id, Http2.ERR_INTERNAL_ERROR);
     };
 
@@ -653,7 +653,7 @@ fn findOrOpenUpstream(session: *Session) ?usize {
         if (existing) |index| return index;
         const open_index = free_index orelse return anyOpenUpstream(session);
 
-        grpc_upstream.openInto(&session.up_conns[open_index], io, session.proxy.allocator, session.proxy.stream_buf_bytes, picked.host, picked.port, picked.index) catch {
+        grpc_upstream.openInto(&session.up_conns[open_index], io, session.proxy.allocator, session.proxy.stream_buf_bytes, picked.host, picked.port, picked.index, session.proxy.upstream_connect_timeout_ms) catch {
             pool.markDown(picked.index, monotonic_clock.nowMs(io));
             continue;
         };

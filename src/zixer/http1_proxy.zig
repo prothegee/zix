@@ -9,14 +9,17 @@ const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
 const deadline_table = @import("deadline_table.zig");
 const http1_head = @import("http1_head.zig");
+const https_redirect = @import("https_redirect.zig");
 const process_gate = @import("process_gate.zig");
 const process_wait = @import("process_wait.zig");
 const proxy_headers = @import("proxy_headers.zig");
+const request_scheme = @import("request_scheme.zig");
 const static_cached = @import("static_cached.zig");
 const static_files = @import("static_files.zig");
 const upstream_conn = @import("upstream_conn.zig");
 const upstream_deadline = @import("upstream_deadline.zig");
 const upstream_pool = @import("upstream_pool.zig");
+const upstream_status = @import("upstream_status.zig");
 const ws_tunnel = @import("ws_tunnel.zig");
 
 const monotonic_clock = zix.utils.monotonic_clock;
@@ -62,10 +65,18 @@ pub const Proxy = struct {
     static: ?static_files.StaticSite = null,
     acme: ?acme_challenge.AcmeSite = null,
     tls_cert_der: ?[]const u8 = null,
-    /// The acme companion listener sets this to the site's https port:
-    /// everything past the challenge path answers 301 to https (443 keeps
-    /// the Location port-free).
+    /// The cleartext companion listener sets this to the site's https port:
+    /// everything past the challenge path is moved to https (443 keeps the
+    /// Location port-free).
     redirect_https: ?u16 = null,
+    /// The authority that redirect names. Null echoes the client's own Host,
+    /// which is what the acme companion always did, and a site that names one
+    /// here stops the client's Host from reaching the reply at all.
+    redirect_host: ?[]const u8 = null,
+    /// How a client reaches this site, which is what the upstream is told in
+    /// the rfc 7239 proto parameter. Resolved from the site's tls flag, never
+    /// from anything the client claimed.
+    client_scheme: request_scheme.Scheme = .HTTP,
     /// How long a bounded upstream read waits before the edge answers 504.
     /// Zero waits forever, which is what a site with a deliberately slow
     /// backend asks for.
@@ -184,7 +195,8 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
 
         var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
         const head_bytes = http1_head.readHead(client_r, &head_buf) catch |err| {
-            if (err == error.HeadTooLarge) writeEdgeError(client_w, 431, "head too large", "http_request_error");
+            answerUnreadableHead(client_w, err);
+
             return;
         };
 
@@ -211,7 +223,7 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
         // The companion listener proxies nothing: past the challenge path
         // everything moves to https.
         if (proxy.redirect_https) |https_port| {
-            const result = httpsRedirectAnswer(&request, client_w, https_port);
+            const result = httpsRedirectAnswer(proxy, &request, client_w, https_port);
 
             client_w.flush() catch return;
             if (result == .CLOSE) return;
@@ -231,7 +243,7 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
         const upgrade = ws_tunnel.wantsUpgrade(&request);
 
         var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
-        const upstream_head = buildUpstreamHead(&build_buf, &request, client_addr, upgrade) catch {
+        const upstream_head = buildUpstreamHead(&build_buf, &request, client_addr, upgrade, proxy.client_scheme) catch {
             writeEdgeError(client_w, 400, "bad request", "http_request_error");
             return;
         };
@@ -248,6 +260,37 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
 
         client_w.flush() catch return;
         if (outcome == .CLOSE) return;
+    }
+}
+
+/// Answer a head read that never produced a head. What is owed depends on how
+/// far the client got.
+///
+/// Note:
+/// - A head cut part way through is a request the client started and did not
+///   finish, whether it dribbled, vanished, or ran past the site's budget and
+///   had its read side taken away. rfc 9110 15.5.9 names that 408, and asks
+///   for the close option with it, since the edge is not waiting for the rest.
+/// - A connection that ends between requests asked nothing, so it is owed
+///   nothing. A status there arrives at a client that already moved on, and on
+///   a kept-alive pool it reads as the answer to a request never sent.
+/// - A head past the ceiling is one zixer refuses to hold, not one it ran out
+///   of patience with, so it keeps its own status.
+///
+/// Param:
+/// client_w - *std.Io.Writer (the edge connection's writer)
+/// err - http1_head.Error (how the head read ended)
+///
+/// Return:
+/// - void, and nothing at all is written for the silent close
+fn answerUnreadableHead(client_w: *std.Io.Writer, err: http1_head.Error) void {
+    switch (err) {
+        error.PartialHead => {
+            writeLocalStatus(client_w, 408, "request timeout", "", true);
+            client_w.flush() catch {};
+        },
+        error.HeadTooLarge => writeEdgeError(client_w, 431, "head too large", "http_request_error"),
+        else => {},
     }
 }
 
@@ -301,18 +344,26 @@ fn acmeAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, clien
     return null;
 }
 
-/// 301 to the https origin. Without a Host there is no authority to form
-/// the Location from, so the reply is a local 404.
-fn httpsRedirectAnswer(request: *const http1_head.RequestHead, client_w: *std.Io.Writer, https_port: u16) EdgeResult {
-    if (request.host.len == 0) {
-        writeLocalStatus(client_w, 404, "not found", "", requestCloses(request));
-        return closeOrKeep(request);
-    }
+/// Move one cleartext request to the https origin.
+///
+/// Note:
+/// - The status follows the method: a GET may be replayed as a GET, anything
+///   else has to keep its method and body across the move. See https_redirect.
+/// - The authority comes from the site when it named one, and only otherwise
+///   from the client. With neither there is nothing to form a Location from,
+///   and rfc 9112 3.2 already names a request with no usable Host a 400.
+fn httpsRedirectAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, client_w: *std.Io.Writer, https_port: u16) EdgeResult {
+    const authority = https_redirect.authorityFor(proxy.redirect_host, request.host) orelse {
+        writeLocalStatus(client_w, 400, "bad host", "", true);
 
-    const host = proxy_headers.stripHostPort(request.host);
+        return .CLOSE;
+    };
+
+    const host = https_redirect.originHost(authority);
+    const status = https_redirect.statusFor(request.method);
     const edge_close = requestCloses(request);
 
-    client_w.writeAll("HTTP/1.1 301 Moved Permanently\r\n") catch return .CLOSE;
+    client_w.print("HTTP/1.1 {d} {s}\r\n", .{ status, https_redirect.reasonFor(status) }) catch return .CLOSE;
     if (https_port == 443) {
         client_w.print("Location: https://{s}{s}\r\n", .{ host, request.target }) catch return .CLOSE;
     } else {
@@ -550,6 +601,7 @@ fn exchange(
     // single stale idle conn never eats a slot's only chance.
     var attempts: usize = pool.slots.len + 1;
     var failed_here: bool = false;
+    var connect_timed_out: bool = false;
     while (attempts > 0) : (attempts -= 1) {
         const picked = pool.pick(monotonic_clock.nowMs(io)) orelse {
             // Nothing left to pick. When this exchange itself emptied the
@@ -561,7 +613,9 @@ fn exchange(
         };
 
         const conn = idle.acquire(io, picked.index, monotonic_clock.nowMs(io)) orelse
-            upstream_conn.connect(io, picked.host, picked.port, picked.index) catch {
+            upstream_conn.connect(io, picked.host, picked.port, picked.index, proxy.upstream_connect_timeout_ms) catch |err| {
+            if (upstream_status.ranOutOfTime(err)) connect_timed_out = true;
+
             pool.markDown(picked.index, monotonic_clock.nowMs(io));
             failed_here = true;
             continue;
@@ -693,7 +747,8 @@ fn exchange(
         return .KEEP;
     }
 
-    writeEdgeError(client_w, 502, "all upstreams failed", "connection_refused");
+    const answer = upstream_status.afterAttempts(connect_timed_out);
+    writeEdgeError(client_w, answer.status, answer.reason, answer.proxy_error);
 
     return .CLOSE;
 }
@@ -743,7 +798,7 @@ fn readResponseHead(
 /// Rebuild the client head for the upstream leg: filtered headers plus Via,
 /// Forwarded, and zixer's own framing header. An upgrade rebuild re-adds
 /// the websocket pair the hop-by-hop strip removed.
-fn buildUpstreamHead(buf: []u8, request: *const http1_head.RequestHead, client_addr: std.Io.net.IpAddress, upgrade: bool) ![]const u8 {
+fn buildUpstreamHead(buf: []u8, request: *const http1_head.RequestHead, client_addr: std.Io.net.IpAddress, upgrade: bool, scheme: request_scheme.Scheme) ![]const u8 {
     var fixed = std.Io.Writer.fixed(buf);
 
     try fixed.print("{s} {s} HTTP/1.1\r\n", .{ request.method, request.target });
@@ -756,7 +811,7 @@ fn buildUpstreamHead(buf: []u8, request: *const http1_head.RequestHead, client_a
     }
 
     try fixed.print("Via: {s}\r\n", .{proxy_headers.VIA});
-    try proxy_headers.writeForwarded(&fixed, client_addr, request.host);
+    try proxy_headers.writeForwarded(&fixed, client_addr, request.host, scheme);
 
     switch (request.framing) {
         .none => {},
@@ -972,7 +1027,7 @@ test "zix zixer: http1 proxy, upstream head is rebuilt with forwarded and via" {
 
     var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 7 }, .port = 55000 } };
-    const head = try buildUpstreamHead(&build_buf, &request, addr, false);
+    const head = try buildUpstreamHead(&build_buf, &request, addr, false, .HTTP);
 
     try std.testing.expect(std.mem.startsWith(u8, head, "POST /api HTTP/1.1\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, head, "Host: app.example\r\n") != null);
@@ -985,6 +1040,20 @@ test "zix zixer: http1 proxy, upstream head is rebuilt with forwarded and via" {
     try std.testing.expect(std.mem.indexOf(u8, head, "X-Hop") == null);
     try std.testing.expect(std.mem.indexOf(u8, head, "Expect") == null);
     try std.testing.expect(std.mem.endsWith(u8, head, "\r\n\r\n"));
+}
+
+test "zix zixer: http1 proxy, a terminated tls edge tells the upstream https" {
+    const request = try http1_head.parseRequest("GET /api HTTP/1.1\r\nHost: app.example\r\n\r\n");
+
+    var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 7 }, .port = 55000 } };
+    const head = try buildUpstreamHead(&build_buf, &request, addr, false, .HTTPS);
+
+    // The backend decides things on this: whether to set Secure cookies,
+    // whether to redirect the caller to https itself. Reporting http from a
+    // tls edge sends it down the wrong branch every time.
+    try std.testing.expect(std.mem.indexOf(u8, head, "Forwarded: for=\"192.0.2.7:55000\";proto=https;host=\"app.example\"\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, head, "proto=http;") == null);
 }
 
 test "zix zixer: http1 proxy, response head relays filtered with edge framing" {
@@ -1311,6 +1380,65 @@ test "zix zixer: http1 proxy, dead upstream fails over inside one request" {
 
     try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 OK\r\n"));
     try std.testing.expectEqual(@as(usize, 1), pool.upCount());
+}
+
+test "zix zixer: http1 proxy, an upstream that never answers its handshake gets 504" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // The rfc 5737 documentation range: a SYN aimed there is dropped rather
+    // than refused, which is the one shape a connect budget exists for.
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "192.0.2.1", .port = 80 }};
+    var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
+    defer pool.deinit(std.testing.allocator);
+    var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
+    defer idle.deinit(std.testing.allocator, io);
+    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .upstream_connect_timeout_ms = 300 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    const edge_thread = try spawnServeConn(&proxy, edgeStream(fds[0]));
+
+    const client = edgeStream(fds[1]);
+    {
+        var write_buf: [512]u8 = undefined;
+        var writer = client.writer(io, &write_buf);
+        try writer.interface.writeAll("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        try writer.interface.flush();
+    }
+
+    const began_ms = monotonic_clock.nowMs(io);
+
+    var reply_buf: [2048]u8 = undefined;
+    const reply_len = readAllAvailable(io, client, &reply_buf);
+    const reply = reply_buf[0..reply_len];
+    const spent_ms = monotonic_clock.nowMs(io) - began_ms;
+    client.close(io);
+
+    edge_thread.join();
+
+    // A box with no route to that range never starts a handshake at all, and
+    // answers far inside the budget. The elapsed time is what tells that apart
+    // from the case under test, because the status alone cannot: a wrong answer
+    // and an unroutable box both read as 502.
+    if (spent_ms < 200) {
+        std.log.info("no route to the documentation range on this box, so no handshake started, test skipped", .{});
+
+        return;
+    }
+
+    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 504 upstream connect timeout\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, reply, "Proxy-Status: zixer; error=\"connection_timeout\"") != null);
+
+    // Answered on its own budget rather than the operating system's retry
+    // limit, which is minutes.
+    try std.testing.expect(spent_ms < 5_000);
 }
 
 test "zix zixer: http1 proxy, every upstream down answers 502 with proxy-status" {
@@ -1728,28 +1856,89 @@ test "zix zixer: http1 proxy, https redirect carries the site port" {
     try testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP/1.1 301 Moved Permanently\r\n"));
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Location: https://site.test:8443/app/page\r\n") != null);
 
-    // port 443 keeps the Location port-free, no Host answers a local 404.
+    // port 443 keeps the Location port-free.
     const on_443 = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: site.test\r\n\r\n");
     var plain_buf: [512]u8 = undefined;
     var plain_out = std.Io.Writer.fixed(&plain_buf);
-    try testing.expectEqual(EdgeResult.KEEP, httpsRedirectAnswer(&on_443, &plain_out, 443));
+    try testing.expectEqual(EdgeResult.KEEP, httpsRedirectAnswer(&proxy, &on_443, &plain_out, 443));
     try testing.expect(std.mem.indexOf(u8, plain_out.buffered(), "Location: https://site.test/x\r\n") != null);
 
+    // No Host and no configured one: rfc 9112 3.2 names that a 400, and there
+    // is no authority to redirect to either way.
     const no_host = try http1_head.parseRequest("GET /x HTTP/1.1\r\n\r\n");
     var nh_buf: [512]u8 = undefined;
     var nh_out = std.Io.Writer.fixed(&nh_buf);
-    _ = httpsRedirectAnswer(&no_host, &nh_out, 443);
-    try testing.expect(std.mem.startsWith(u8, nh_out.buffered(), "HTTP/1.1 404 "));
+    _ = httpsRedirectAnswer(&proxy, &no_host, &nh_out, 443);
+    try testing.expect(std.mem.startsWith(u8, nh_out.buffered(), "HTTP/1.1 400 bad host\r\n"));
 }
 
 // --------------------------------------------------------- //
+
+test "zix zixer: http1 proxy, a redirect keeps the method when the method matters" {
+    const proxy = Proxy{ .io = testing.io, .redirect_https = 8443 };
+
+    // A GET may be repeated as a GET, so the long-standing status stands.
+    const read_request = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: site.test\r\n\r\n");
+    var read_buf: [512]u8 = undefined;
+    var read_out = std.Io.Writer.fixed(&read_buf);
+    _ = httpsRedirectAnswer(&proxy, &read_request, &read_out, 8443);
+    try testing.expect(std.mem.startsWith(u8, read_out.buffered(), "HTTP/1.1 301 Moved Permanently\r\n"));
+
+    // A POST answered 301 may arrive at the https origin as a GET with no
+    // body, which is the whole reason 308 exists.
+    const write_request = try http1_head.parseRequest("POST /submit HTTP/1.1\r\nHost: site.test\r\nContent-Length: 0\r\n\r\n");
+    var write_buf: [512]u8 = undefined;
+    var write_out = std.Io.Writer.fixed(&write_buf);
+    _ = httpsRedirectAnswer(&proxy, &write_request, &write_out, 8443);
+    try testing.expect(std.mem.startsWith(u8, write_out.buffered(), "HTTP/1.1 308 Permanent Redirect\r\n"));
+    try testing.expect(std.mem.indexOf(u8, write_out.buffered(), "Location: https://site.test:8443/submit\r\n") != null);
+}
+
+test "zix zixer: http1 proxy, a named redirect host leaves the client no say" {
+    const named = Proxy{ .io = testing.io, .redirect_https = 443, .redirect_host = "example.com" };
+
+    // Whatever the client claimed to be talking to, the reply names the site.
+    const spoofed = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: evil.test\r\n\r\n");
+    var named_buf: [512]u8 = undefined;
+    var named_out = std.Io.Writer.fixed(&named_buf);
+    _ = httpsRedirectAnswer(&named, &spoofed, &named_out, 443);
+    try testing.expect(std.mem.indexOf(u8, named_out.buffered(), "Location: https://example.com/x\r\n") != null);
+
+    // Not even a missing Host changes it, since the client's is never read.
+    const hostless = try http1_head.parseRequest("GET /x HTTP/1.1\r\n\r\n");
+    var hostless_buf: [512]u8 = undefined;
+    var hostless_out = std.Io.Writer.fixed(&hostless_buf);
+    _ = httpsRedirectAnswer(&named, &hostless, &hostless_out, 443);
+    try testing.expect(std.mem.indexOf(u8, hostless_out.buffered(), "Location: https://example.com/x\r\n") != null);
+}
+
+test "zix zixer: http1 proxy, a host that would reshape the location is refused" {
+    const proxy = Proxy{ .io = testing.io, .redirect_https = 443 };
+
+    // A slash in the Host would put a client-written path inside zixer's own
+    // Location line.
+    const pathy = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: evil.test/@site.test\r\n\r\n");
+    var pathy_buf: [512]u8 = undefined;
+    var pathy_out = std.Io.Writer.fixed(&pathy_buf);
+    try testing.expectEqual(EdgeResult.CLOSE, httpsRedirectAnswer(&proxy, &pathy, &pathy_out, 443));
+    try testing.expect(std.mem.startsWith(u8, pathy_out.buffered(), "HTTP/1.1 400 bad host\r\n"));
+    try testing.expect(std.mem.indexOf(u8, pathy_out.buffered(), "Location:") == null);
+
+    // An ipv6 literal keeps its brackets, or the address colons would read as
+    // the port separator.
+    const literal = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: [2001:db8::1]:80\r\n\r\n");
+    var literal_buf: [512]u8 = undefined;
+    var literal_out = std.Io.Writer.fixed(&literal_buf);
+    _ = httpsRedirectAnswer(&proxy, &literal, &literal_out, 8443);
+    try testing.expect(std.mem.indexOf(u8, literal_out.buffered(), "Location: https://[2001:db8::1]:8443/x\r\n") != null);
+}
 
 test "zix zixer: http1 proxy, upgrade head rebuild carries the handshake pair" {
     const request = try http1_head.parseRequest("GET /chat HTTP/1.1\r\nHost: app.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: c2FtcGxlIG5vbmNl\r\nSec-WebSocket-Version: 13\r\n\r\n");
 
     var build_buf: [http1_head.MAX_HEAD_BYTES + 512]u8 = undefined;
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 192, 0, 2, 7 }, .port = 55001 } };
-    const head = try buildUpstreamHead(&build_buf, &request, addr, true);
+    const head = try buildUpstreamHead(&build_buf, &request, addr, true, .HTTP);
 
     try testing.expect(std.mem.startsWith(u8, head, "GET /chat HTTP/1.1\r\n"));
     try testing.expect(std.mem.indexOf(u8, head, "Sec-WebSocket-Key: c2FtcGxlIG5vbmNl\r\n") != null);
@@ -2954,4 +3143,164 @@ test "zix zixer: http1 proxy, a kept-alive connection arms a fresh budget per re
     client.close(io);
     thread.join();
     try std.testing.expect(probe.done.load(.acquire));
+}
+
+// --------------------------------------------------------- //
+
+test "zix zixer: http1 proxy, each way a head read ends has its own answer" {
+    var reply_buf: [512]u8 = undefined;
+
+    var timed_out = std.Io.Writer.fixed(&reply_buf);
+    answerUnreadableHead(&timed_out, error.PartialHead);
+    try testing.expect(std.mem.startsWith(u8, timed_out.buffered(), "HTTP/1.1 408 request timeout\r\n"));
+    try testing.expect(std.mem.indexOf(u8, timed_out.buffered(), "Connection: close\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, timed_out.buffered(), "\r\n\r\nrequest timeout\n"));
+
+    var oversized = std.Io.Writer.fixed(&reply_buf);
+    answerUnreadableHead(&oversized, error.HeadTooLarge);
+    try testing.expect(std.mem.startsWith(u8, oversized.buffered(), "HTTP/1.1 431 head too large\r\n"));
+
+    // The one end that gets no reply at all.
+    var silent = std.Io.Writer.fixed(&reply_buf);
+    answerUnreadableHead(&silent, error.ConnectionClosed);
+    try testing.expectEqual(@as(usize, 0), silent.buffered().len);
+}
+
+test "zix zixer: http1 proxy, a request that stops half way is answered 408" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const proxy = Proxy{ .io = io };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(fds[1]);
+
+    // A head with no blank line, then the sender goes away. No bound is
+    // configured here, so the 408 can only come from how the read ended.
+    var write_buf: [256]u8 = undefined;
+    var writer = client.writer(io, &write_buf);
+    try writer.interface.writeAll("GET /half HTTP/1.1\r\nHost: t");
+    try writer.interface.flush();
+    _ = std.os.linux.shutdown(fds[1], std.os.linux.SHUT.WR);
+
+    var read_buf: [1024]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var head_buf: [1024]u8 = undefined;
+    const head = try http1_head.readHead(&reader.interface, &head_buf);
+
+    try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 408 request timeout\r\n"));
+    try testing.expect(std.mem.indexOf(u8, head, "Connection: close\r\n") != null);
+
+    thread.join();
+    client.close(io);
+}
+
+test "zix zixer: http1 proxy, a half-sent request cut by the bound still gets its 408" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(std.testing.allocator, 1);
+    defer table.deinit(std.testing.allocator);
+
+    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 1 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(fds[1]);
+
+    try waitLive(io, &table, 1);
+
+    var write_buf: [256]u8 = undefined;
+    var writer = client.writer(io, &write_buf);
+    try writer.interface.writeAll("POST /dribble HTTP/1.1\r\nHost: t\r\nContent-Length: 4\r\n");
+    try writer.interface.flush();
+
+    // The edge has to have those bytes in hand before the cut lands, or the
+    // read it wakes from would look like a connection that asked nothing.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(150), .awake) catch {};
+
+    // One pass only: the escalation on a later pass takes the send side away,
+    // and the point here is that the first cut leaves the answer a way out.
+    const swept = deadline_sweep.sweepOnce(&table, std.math.maxInt(i64));
+    try testing.expectEqual(@as(usize, 1), swept.cut);
+
+    var read_buf: [1024]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var head_buf: [1024]u8 = undefined;
+    const head = try http1_head.readHead(&reader.interface, &head_buf);
+    try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 408 request timeout\r\n"));
+
+    thread.join();
+    client.close(io);
+
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+test "zix zixer: http1 proxy, a kept-alive connection cut while idle is closed without a word" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var table = try deadline_table.Table.init(std.testing.allocator, 1);
+    defer table.deinit(std.testing.allocator);
+
+    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 1 };
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    var probe = ServeProbe{ .proxy = &proxy, .stream = edgeStream(fds[0]) };
+    const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{&probe});
+    const client = edgeStream(fds[1]);
+
+    var write_buf: [256]u8 = undefined;
+    var writer = client.writer(io, &write_buf);
+    try writer.interface.writeAll("GET /one HTTP/1.1\r\nHost: t\r\n\r\n");
+    try writer.interface.flush();
+
+    var read_buf: [1024]u8 = undefined;
+    var reader = client.reader(io, &read_buf);
+    var head_buf: [1024]u8 = undefined;
+    const head = try http1_head.readHead(&reader.interface, &head_buf);
+    try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 404 "));
+
+    var body: [10]u8 = undefined;
+    try reader.interface.readSliceAll(&body);
+
+    // The exchange is over and the connection is waiting for a request that
+    // never comes, which is the one shape the bound reaches with nothing owed.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(150), .awake) catch {};
+    const swept = deadline_sweep.sweepOnce(&table, std.math.maxInt(i64));
+    try testing.expectEqual(@as(usize, 1), swept.cut);
+
+    // End of stream and not one byte more: a 408 here would be answering a
+    // request the client never sent.
+    var trailing: [1]u8 = undefined;
+    try testing.expectError(error.EndOfStream, reader.interface.readSliceAll(&trailing));
+
+    thread.join();
+    client.close(io);
+
+    try testing.expectEqual(@as(usize, 0), table.liveCount());
 }

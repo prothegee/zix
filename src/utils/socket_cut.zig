@@ -13,6 +13,11 @@
 //! - The full cut is the escalation, for the caller a read-side cut never reached. A peer that
 //!   stopped reading parks the caller in write, where no read-side cut lands, and only taking the
 //!   send side away frees it. By then the reply is lost either way, so nothing is given up.
+//! - Darwin will not take both directions at once on a socket whose read side is already down. Its
+//!   shutdown handles the read side first and answers ENOTCONN the moment it sees that side gone,
+//!   before it ever reaches the send side, so the escalation lands as a no-op and the peer is never
+//!   sent a FIN. Linux and the BSDs act on each direction on its own. The escalation therefore asks
+//!   for the send side alone whenever both-at-once was refused, which is the same FIN.
 //! - Windows never completes a receive already parked in the kernel on a receive-only disconnect
 //!   (documented winsock SD_RECEIVE behavior: it only disallows later receives), so the cut there
 //!   is windows_io's partial-disconnect ioctl plus a cancel of every request pending on the handle.
@@ -23,6 +28,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win_io = @import("windows_io.zig");
+const socket_poll = @import("socket_poll.zig");
 
 const is_windows = builtin.os.tag == .windows;
 const is_linux = builtin.os.tag == .linux;
@@ -63,6 +69,8 @@ pub fn shutdownRead(handle: std.posix.socket_t) void {
 ///   the caller can no longer answer, and it is only right once the reply is already lost.
 /// - Best effort, the same as shutdownRead: a socket already closed or never connected fails
 ///   silently.
+/// - Darwin refuses both directions at once once the read side is already down, so the escalation
+///   asks for the send side on its own when that happens. See the module note.
 ///
 /// Param:
 /// handle - std.posix.socket_t (the socket, from stream.socket.handle)
@@ -80,7 +88,10 @@ pub fn shutdownBoth(handle: std.posix.socket_t) void {
         return;
     }
 
-    _ = std.posix.system.shutdown(handle, std.posix.SHUT.RDWR);
+    const both = std.posix.system.shutdown(handle, std.posix.SHUT.RDWR);
+    if (std.posix.errno(both) == .SUCCESS) return;
+
+    _ = std.posix.system.shutdown(handle, std.posix.SHUT.WR);
 }
 
 // --------------------------------------------------------- //
@@ -231,6 +242,35 @@ test "zix utils: socket_cut shutdownBoth wakes a writer parked on a peer that st
     parked.join();
 
     try std.testing.expect(Parked.finished.load(.acquire));
+}
+
+test "zix utils: socket_cut the escalation still reaches the send side after a read-side cut" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18984);
+    var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
+    defer server.deinit(io);
+
+    const client = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(io);
+    const accepted = try server.accept(io);
+    defer accepted.close(io);
+
+    // The order every sweep uses: the read side on one tick, both sides on the next. Darwin answers
+    // the second call ENOTCONN because the read side is already gone, and stops there, so without
+    // the send-only fallback no FIN ever leaves this socket.
+    shutdownRead(accepted.socket.handle);
+    shutdownBoth(accepted.socket.handle);
+
+    // Waiting on the wire is the point: the peer has to be told, a local state change is not enough.
+    // The budget keeps a missing FIN a failure rather than a hang.
+    try std.testing.expect(socket_poll.readableWithin(client.socket.handle, 5_000));
+
+    var read_buf: [1]u8 = undefined;
+    var client_reader = client.reader(io, &read_buf);
+    try std.testing.expectError(error.EndOfStream, client_reader.interface.readSliceAll(&read_buf));
 }
 
 test "zix utils: socket_cut a read-side cut leaves a parked writer parked" {
