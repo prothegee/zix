@@ -15,6 +15,8 @@ const upstream_srcs = [_]struct { name: []const u8, path: []const u8 }{
     .{ .name = "zixer-tr-mixed", .path = "examples/proxies/mixed.zig" },
     .{ .name = "zixer-tr-round-robin", .path = "examples/proxies/round_robin.zig" },
     .{ .name = "zixer-tr-tls", .path = "examples/proxies/tls.zig" },
+    .{ .name = "zixer-tr-bounds", .path = "examples/proxies/bounds.zig" },
+    .{ .name = "zixer-tr-headers", .path = "examples/proxies/headers.zig" },
     // The media demo fronts a zix.Webrtc answering peer, which lives with the
     // webrtc examples rather than with the proxy demos.
     .{ .name = "zixer-tr-webrtc", .path = "examples/webrtc/webrtc_datachannel_echo.zig" },
