@@ -278,15 +278,17 @@ Satu file, satu site. `engine` dan `port` wajib, sisanya punya default atau opsi
 
 `ip` dan `port` bersama menentukan socket yang mendengarkan. `0.0.0.0` bind ke semua interface, `127.0.0.1` bind loopback saja, `::` bind ke semua interface IPv6.
 
-### Forwarded menulis proto=http bahkan di site TLS
+### Forwarded menulis bagaimana client mencapai site ini
 
 Tiap request yang diproxy membawa header `Forwarded` (rfc 7239) berisi alamat client, scheme, dan host asli:
 
 ```
-forwarded: for="127.0.0.1:50250";proto=http;host="localhost:9707"
+forwarded: for="127.0.0.1:50250";proto=https;host="localhost:9707"
 ```
 
-Parameter `proto` bernilai `http` di tiap edge hari ini, termasuk edge TLS. Backend yang memutuskan "apakah request ini aman" dari header itu akan salah baca di site `tls: true`, jadi putuskan hal itu dari port yang didengarkan backend.
+Parameter `proto` berasal dari setting `tls` site itu sendiri: `https` di site `tls: true`, `http` di site lainnya, dan `https` di site http3 karena quic tidak punya transport cleartext. Backend yang memutuskan "apakah request ini aman" bisa membacanya langsung.
+
+Nilainya tidak pernah diambil dari apa pun yang dikirim client. Caller h2 atau grpc mengirim pseudo header `:scheme` miliknya sendiri, dan caller cleartext yang mengaku `https` akan membuat backend mengira request-nya datang secara aman.
 
 ### Host upstream harus literal ip
 
