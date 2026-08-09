@@ -4,9 +4,11 @@ const std = @import("std");
 
 const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
+const deadline_table = @import("deadline_table.zig");
 const fault = @import("fault.zig");
 const process_gate = @import("process_gate.zig");
 const static_cached = @import("static_cached.zig");
+const upstream_conn = @import("upstream_conn.zig");
 
 pub const Engine = enum {
     HTTP1,
@@ -39,9 +41,22 @@ pub const SiteCfg = struct {
     spa_fallback: ?[]const u8 = null,
     kernel_backlog: ?u31 = null,
     max_recv_buf: ?usize = null,
+    /// How long one client exchange may take before the edge cuts it. Null
+    /// takes the main.cfg value, 0 turns the bound off.
+    client_timeout_ms: ?u32 = null,
+    /// Client connections this site tracks at once while the bound is on. A
+    /// connection arriving with every slot taken is refused with 503. Null
+    /// takes the main.cfg value.
+    client_conn_limit: ?usize = null,
     /// How long the edge waits on a silent upstream before it answers 504.
     /// Null takes the built-in default, 0 turns the bound off.
     upstream_timeout_ms: ?u32 = null,
+    /// How long a connect to an upstream may take before the edge answers
+    /// 504. Null takes the main.cfg value, 0 waits on the operating system.
+    upstream_connect_timeout_ms: ?u32 = null,
+    /// How long an unused upstream connection is kept for the next request.
+    /// Null takes the main.cfg value, 0 keeps none at all.
+    upstream_idle_ttl_ms: ?u32 = null,
     /// Requests this site may have running upstream at once. Null takes the
     /// main.cfg value, 0 turns the gate off for this site alone.
     process_limit: ?usize = null,
@@ -78,7 +93,11 @@ const Key = enum {
     spa_fallback,
     kernel_backlog,
     max_recv_buf,
+    client_timeout_ms,
+    client_conn_limit,
     upstream_timeout_ms,
+    upstream_connect_timeout_ms,
+    upstream_idle_ttl_ms,
     process_limit,
     process_queue_len,
     process_queue_timeout_ms,
@@ -210,6 +229,34 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
 
                 cfg.max_recv_buf = bytes;
             },
+            .client_timeout_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const budget = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the bound off", .{deadline_table.MAX_TIMEOUT_MS});
+                    continue;
+                };
+
+                if (!deadline_table.timeoutInRange(budget)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 turns the bound off", .{deadline_table.MAX_TIMEOUT_MS});
+                    continue;
+                }
+
+                cfg.client_timeout_ms = budget;
+            },
+            .client_conn_limit => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const conn_limit = std.math.cast(usize, value) orelse {
+                    try faults.add(entry.key, "must be 1-{d}, set client_timeout_ms: 0 to track nothing", .{deadline_table.MAX_SLOTS});
+                    continue;
+                };
+
+                if (!deadline_table.connLimitInRange(conn_limit)) {
+                    try faults.add(entry.key, "must be 1-{d}, set client_timeout_ms: 0 to track nothing", .{deadline_table.MAX_SLOTS});
+                    continue;
+                }
+
+                cfg.client_conn_limit = conn_limit;
+            },
             .upstream_timeout_ms => {
                 const value = try fault.evalNumber(faults, entry) orelse continue;
                 const budget = std.math.cast(u32, value) orelse {
@@ -218,6 +265,34 @@ pub fn parse(arena: std.mem.Allocator, content: []const u8, faults: *fault.Fault
                 };
 
                 cfg.upstream_timeout_ms = budget;
+            },
+            .upstream_connect_timeout_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const budget = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 waits on the operating system", .{upstream_conn.MAX_CONNECT_TIMEOUT_MS});
+                    continue;
+                };
+
+                if (!upstream_conn.connectTimeoutInRange(budget)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 waits on the operating system", .{upstream_conn.MAX_CONNECT_TIMEOUT_MS});
+                    continue;
+                }
+
+                cfg.upstream_connect_timeout_ms = budget;
+            },
+            .upstream_idle_ttl_ms => {
+                const value = try fault.evalNumber(faults, entry) orelse continue;
+                const ttl_ms = std.math.cast(u32, value) orelse {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 keeps no connection", .{upstream_conn.MAX_IDLE_TTL_MS});
+                    continue;
+                };
+
+                if (!upstream_conn.idleTtlInRange(ttl_ms)) {
+                    try faults.add(entry.key, "must be 0-{d} ms, 0 keeps no connection", .{upstream_conn.MAX_IDLE_TTL_MS});
+                    continue;
+                }
+
+                cfg.upstream_idle_ttl_ms = ttl_ms;
             },
             .process_limit => {
                 const value = try fault.evalNumber(faults, entry) orelse continue;
@@ -329,6 +404,19 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
         try faults.add("upstream_timeout_ms", "needs upstreams", .{});
     }
 
+    // Both bound the upstream leg, so a site answering from public_dir alone
+    // has no connect to time and no connection to keep.
+    if (cfg.upstreams.len == 0) {
+        if (cfg.upstream_connect_timeout_ms != null) try faults.add("upstream_connect_timeout_ms", "needs upstreams", .{});
+        if (cfg.upstream_idle_ttl_ms != null) try faults.add("upstream_idle_ttl_ms", "needs upstreams", .{});
+    }
+
+    // Only checkable when the site names both: a null bound inherits the
+    // main.cfg value, which carries its own version of this rule.
+    if (cfg.client_timeout_ms != null and cfg.client_timeout_ms.? == 0 and cfg.client_conn_limit != null) {
+        try faults.add("client_conn_limit", "needs client_timeout_ms above 0, otherwise nothing is tracked", .{});
+    }
+
     // The gate stands in front of the upstream leg, so a site that answers
     // from public_dir alone has nothing for it to hold back.
     if (cfg.upstreams.len == 0) {
@@ -367,6 +455,11 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
             // stream, so a per-request read bound needs its own mechanism
             // and this key would be accepted and ignored.
             if (cfg.upstream_timeout_ms != null) try faults.add("upstream_timeout_ms", "not supported on grpc sites, remove it", .{});
+
+            // That same connection is held for the life of the exchange
+            // rather than parked between requests, so there is no idle cache
+            // for an age to bound.
+            if (cfg.upstream_idle_ttl_ms != null) try faults.add("upstream_idle_ttl_ms", "not supported on grpc sites, remove it", .{});
         },
         .UDP => {
             if (cfg.tls) try faults.add("tls", "udp forward is blind bytes, tls does not apply", .{});
@@ -374,6 +467,13 @@ fn validate(cfg: *const SiteCfg, seen: std.EnumSet(Key), faults: *fault.FaultLis
             if (cfg.public_dir_cache_ttl_ms != null) try faults.add("public_dir_cache_ttl_ms", "does not apply to udp sites, remove it", .{});
             if (cfg.kernel_backlog != null) try faults.add("kernel_backlog", "does not apply to udp sites, remove it", .{});
             if (cfg.upstream_timeout_ms != null) try faults.add("upstream_timeout_ms", "does not apply to udp sites, remove it", .{});
+            if (cfg.upstream_connect_timeout_ms != null) try faults.add("upstream_connect_timeout_ms", "does not apply to udp sites, remove it", .{});
+            if (cfg.upstream_idle_ttl_ms != null) try faults.add("upstream_idle_ttl_ms", "does not apply to udp sites, remove it", .{});
+
+            // Datagram forwarding has no client connection to bound: a flow
+            // is remembered by its address, and the flow table ages it out.
+            if (cfg.client_timeout_ms != null) try faults.add("client_timeout_ms", "does not apply to udp sites, remove it", .{});
+            if (cfg.client_conn_limit != null) try faults.add("client_conn_limit", "does not apply to udp sites, remove it", .{});
 
             // Datagram forwarding has no request to hold back and no
             // upstream connect to bound, so the gate would count nothing.
@@ -985,4 +1085,168 @@ test "zix zixer: site cfg, the entry count says where it belongs" {
     try testing.expectEqual(@as(usize, 1), faults.slice().len);
     try testing.expectEqualStrings("public_dir_cache_max_entries", faults.slice()[0].key);
     try testing.expectEqualStrings("set it in main.cfg, the cache table is one per daemon and every site shares it", faults.slice()[0].hint);
+}
+
+test "zix zixer: site cfg, the client bound keys parse and default to null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nclient_timeout_ms: 30 * 1000\nclient_conn_limit: 2 * 1024\n",
+        &faults,
+    );
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expectEqual(@as(u32, 30_000), cfg.client_timeout_ms.?);
+    try testing.expectEqual(@as(usize, 2048), cfg.client_conn_limit.?);
+
+    // 0 is a site turning the bound off while the daemon leaves it on.
+    var off_faults = fault.FaultList.init(arena.allocator());
+    const off = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nclient_timeout_ms: 0\n", &off_faults);
+    try testing.expectEqual(@as(usize, 0), off_faults.slice().len);
+    try testing.expectEqual(@as(u32, 0), off.client_timeout_ms.?);
+
+    var bare_faults = fault.FaultList.init(arena.allocator());
+    const bare = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
+    try testing.expectEqual(@as(?u32, null), bare.client_timeout_ms);
+    try testing.expectEqual(@as(?usize, null), bare.client_conn_limit);
+}
+
+test "zix zixer: site cfg, the client bound keys are refused where they cannot apply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // A limit with the bound switched off in the same file is dead config:
+    // nothing is tracked, so no slot is ever taken.
+    var dead_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nclient_timeout_ms: 0\nclient_conn_limit: 64\n",
+        &dead_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), dead_faults.slice().len);
+    try testing.expectEqualStrings("client_conn_limit", dead_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs client_timeout_ms above 0, otherwise nothing is tracked", dead_faults.slice()[0].hint);
+
+    var udp_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: udp\nport: 18898\nupstreams: 127.0.0.1:3000\nclient_timeout_ms: 1000\nclient_conn_limit: 64\n",
+        &udp_faults,
+    );
+    try testing.expectEqual(@as(usize, 2), udp_faults.slice().len);
+    try testing.expectEqualStrings("client_timeout_ms", udp_faults.slice()[0].key);
+    try testing.expectEqualStrings("does not apply to udp sites, remove it", udp_faults.slice()[0].hint);
+    try testing.expectEqualStrings("client_conn_limit", udp_faults.slice()[1].key);
+
+    // A table with no slot would refuse every connection, which is not what
+    // turning the bound off means.
+    var zero_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nclient_timeout_ms: 1000\nclient_conn_limit: 0\n",
+        &zero_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), zero_faults.slice().len);
+    try testing.expectEqualStrings("client_conn_limit", zero_faults.slice()[0].key);
+
+    var over_buf: [192]u8 = undefined;
+    const over_content = try std.fmt.bufPrint(
+        &over_buf,
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nclient_timeout_ms: {d}\nclient_conn_limit: {d}\n",
+        .{ deadline_table.MAX_TIMEOUT_MS + 1, deadline_table.MAX_SLOTS + 1 },
+    );
+
+    var over_faults = fault.FaultList.init(arena.allocator());
+    const over = try parse(arena.allocator(), over_content, &over_faults);
+    try testing.expectEqual(@as(usize, 2), over_faults.slice().len);
+    try testing.expectEqual(@as(?u32, null), over.client_timeout_ms);
+    try testing.expectEqual(@as(?usize, null), over.client_conn_limit);
+}
+
+test "zix zixer: site cfg, the upstream connect and idle keys parse and default to null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_connect_timeout_ms: 5 * 1000\nupstream_idle_ttl_ms: 60 * 1000\n",
+        &faults,
+    );
+
+    try testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try testing.expectEqual(@as(u32, 5000), cfg.upstream_connect_timeout_ms.?);
+    try testing.expectEqual(@as(u32, 60_000), cfg.upstream_idle_ttl_ms.?);
+
+    // 0 on each: no connect bound, and no connection kept between requests.
+    var off_faults = fault.FaultList.init(arena.allocator());
+    const off = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_connect_timeout_ms: 0\nupstream_idle_ttl_ms: 0\n",
+        &off_faults,
+    );
+    try testing.expectEqual(@as(usize, 0), off_faults.slice().len);
+    try testing.expectEqual(@as(u32, 0), off.upstream_connect_timeout_ms.?);
+    try testing.expectEqual(@as(u32, 0), off.upstream_idle_ttl_ms.?);
+
+    var bare_faults = fault.FaultList.init(arena.allocator());
+    const bare = try parse(arena.allocator(), "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\n", &bare_faults);
+    try testing.expectEqual(@as(?u32, null), bare.upstream_connect_timeout_ms);
+    try testing.expectEqual(@as(?u32, null), bare.upstream_idle_ttl_ms);
+}
+
+test "zix zixer: site cfg, the upstream connect and idle keys are refused where they cannot apply" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var static_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: http1\nport: 18898\npublic_dir: /var/www/app\nupstream_connect_timeout_ms: 1000\nupstream_idle_ttl_ms: 1000\n",
+        &static_faults,
+    );
+    try testing.expectEqual(@as(usize, 2), static_faults.slice().len);
+    try testing.expectEqualStrings("upstream_connect_timeout_ms", static_faults.slice()[0].key);
+    try testing.expectEqualStrings("needs upstreams", static_faults.slice()[0].hint);
+    try testing.expectEqualStrings("upstream_idle_ttl_ms", static_faults.slice()[1].key);
+
+    // The grpc leg holds one h2 connection for the exchange instead of
+    // parking it, so only the age is refused there. The connect is the same
+    // dial every other engine makes.
+    var grpc_faults = fault.FaultList.init(arena.allocator());
+    const grpc = try parse(
+        arena.allocator(),
+        "engine: grpc\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_connect_timeout_ms: 1000\nupstream_idle_ttl_ms: 1000\n",
+        &grpc_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), grpc_faults.slice().len);
+    try testing.expectEqualStrings("upstream_idle_ttl_ms", grpc_faults.slice()[0].key);
+    try testing.expectEqualStrings("not supported on grpc sites, remove it", grpc_faults.slice()[0].hint);
+    try testing.expectEqual(@as(u32, 1000), grpc.upstream_connect_timeout_ms.?);
+
+    var udp_faults = fault.FaultList.init(arena.allocator());
+    _ = try parse(
+        arena.allocator(),
+        "engine: udp\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_idle_ttl_ms: 1000\n",
+        &udp_faults,
+    );
+    try testing.expectEqual(@as(usize, 1), udp_faults.slice().len);
+    try testing.expectEqualStrings("upstream_idle_ttl_ms", udp_faults.slice()[0].key);
+    try testing.expectEqualStrings("does not apply to udp sites, remove it", udp_faults.slice()[0].hint);
+
+    var over_buf: [224]u8 = undefined;
+    const over_content = try std.fmt.bufPrint(
+        &over_buf,
+        "engine: http1\nport: 18898\nupstreams: 127.0.0.1:3000\nupstream_connect_timeout_ms: {d}\nupstream_idle_ttl_ms: {d}\n",
+        .{ upstream_conn.MAX_CONNECT_TIMEOUT_MS + 1, upstream_conn.MAX_IDLE_TTL_MS + 1 },
+    );
+
+    var over_faults = fault.FaultList.init(arena.allocator());
+    const over = try parse(arena.allocator(), over_content, &over_faults);
+    try testing.expectEqual(@as(usize, 2), over_faults.slice().len);
+    try testing.expectEqual(@as(?u32, null), over.upstream_connect_timeout_ms);
+    try testing.expectEqual(@as(?u32, null), over.upstream_idle_ttl_ms);
 }
