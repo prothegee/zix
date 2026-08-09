@@ -15,6 +15,8 @@ const http2_frames = @import("http2_frames.zig");
 const process_wait = @import("process_wait.zig");
 
 const monotonic_clock = zix.utils.monotonic_clock;
+const socket_cut_reader = zix.utils.socket_cut_reader;
+const socket_cut_writer = zix.utils.socket_cut_writer;
 
 const Http2 = zix.Http2;
 
@@ -171,8 +173,11 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, client_stream: std.Io.net.Stre
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
     defer buffers.deinit(proxy.allocator);
 
-    var client_reader = client_stream.reader(io, buffers.client_read);
-    var client_writer = client_stream.writer(io, buffers.client_write);
+    // The sweep cuts this socket from another thread when the bound runs out, the first tick on
+    // the read side and the next on both, so the client leg goes over the pair that ends on a cut
+    // rather than the std pair that panics on it.
+    var client_reader = socket_cut_reader.init(client_stream, io, buffers.client_read);
+    var client_writer = socket_cut_writer.init(client_stream, io, buffers.client_write);
 
     serveSession(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, &lease);
 }

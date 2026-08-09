@@ -34,7 +34,7 @@ Nama file site adalah identitas site itu. Hanya file berakhiran `.cfg` yang dimu
 
 ## Sintaks nilai
 
-Kedua file memakai grammar flat yang sama.
+Kedua file memakai grammar yang sama: baris `key: value` yang flat, plus baris section yang hanya diterima file site.
 
 | bentuk | arti |
 | :- | :- |
@@ -45,8 +45,15 @@ Kedua file memakai grammar flat yang sama.
 | `upstreams: a:1, b:2` | list dengan koma, tiap item dipangkas |
 | `max_recv_buf: 16 * 1024` | math integer, lihat di bawah |
 | `tls: true` | boolean, hanya `true` dan `false` |
+| `[response_headers]` | baris section, hanya di file site, lihat header section di bawah |
 
 Nilai numerik menerima aritmetika integer dengan `+ - * /` dan tanda kurung, perkalian dan pembagian mengikat lebih dulu, kiri ke kanan. Pembagian harus pas: `10 / 4` ditolak alih-alih dipotong diam-diam, karena sisa bagi biasanya berarti salah ketik. Hasilnya harus muat di math 64-bit.
+
+Sebuah `#` membuka comment hanya di awal baris atau setelah spasi atau tab. Di posisi lain ia byte nilai biasa, jadi fragment sebuah URL tetap utuh:
+
+```
+link: </app.css#v2>; rel=preload      # bagian ini yang menjadi comment
+```
 
 Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-diam:
 
@@ -57,6 +64,10 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 | `port:` | `line 4 has no value after ':'` |
 | `wrokers: 2` | `unknown key, remove it or fix the typo` |
 | key yang sama dua kali | `duplicate key, keep one line` |
+| `[response_headers` | `line 7 opens '[' without closing ']' at the end, write [section_name]` |
+| `[]` | `line 7 has no name between the brackets, write [section_name]` |
+| `[headers]` | `unknown section, remove it or fix the typo` |
+| section di `main.cfg` | `sections belong in a site cfg, main.cfg takes plain key: value lines only` |
 
 <br>
 
@@ -70,6 +81,10 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 | sites_dir | `<root>/sites` | tempat file `.cfg` site dibaca | tiap `list`, `status`, `start`, dan `restart` | direktori yang hilang menjadi fault, dan tidak ada site yang ditemukan |
 | kernel_backlog | `1024` | panjang listen queue default untuk listener site tcp | site http1, http2, dan grpc yang tidak punya nilai sendiri, plus listener companion acme | `0` fault, kernel tetap membatasi nilainya di `net.core.somaxconn` |
 | max_recv_buf | `8192` | jumlah byte untuk satu stream buffer per koneksi, lihat di bawah | site http1, http2, grpc, dan TLS, sebagai default yang boleh ditimpa file site | di luar `1024` sampai `262144` ia fault dan tetap di default |
+| client_timeout_ms | `0` | berapa lama satu pertukaran client boleh berjalan sebelum edge memutusnya, `0` mematikan bound, lihat di bawah | site http1, http2, grpc, dan TLS, sebagai default yang boleh ditimpa file site | di luar `0` sampai `3600000` ia fault dan tetap di default |
+| client_conn_limit | `4096` | koneksi client yang dilacak satu site sekaligus selama bound menyala | dengan `client_timeout_ms` di atas `0` | di luar `1` sampai `65536` ia fault dan tetap di default |
+| upstream_connect_timeout_ms | `5000` | berapa lama sebuah connect ke backend boleh berjalan sebelum edge menjawab 504, `0` menunggu sesuai keputusan sistem operasi, lihat di bawah | tiap site yang di-proxy, sebagai default yang boleh ditimpa file site | di luar `0` sampai `600000` ia fault dan tetap di default |
+| upstream_idle_ttl_ms | `5000` | berapa lama koneksi backend yang menganggur disimpan untuk request berikutnya, `0` tidak menyimpan satu pun | tiap site yang di-proxy kecuali grpc, sebagai default yang boleh ditimpa file site | di luar `0` sampai `600000` ia fault dan tetap di default |
 | process_limit | `0` | request yang boleh satu site jalankan ke upstream sekaligus, `0` mematikan gate, lihat di bawah | tiap site yang di-proxy, sebagai default yang boleh ditimpa file site | di atas `65536` ia fault dan tetap di default |
 | process_queue_len | `0` | request yang boleh menunggu slot, `0` menolak alih-alih mengantre | dengan `process_limit` di atas `0` | di atas `65536` ia fault, dan nilai di atas `0` dengan `process_limit: 0` juga fault |
 | process_queue_timeout_ms | `6000` | berapa lama satu request menunggu sebelum edge menjawab 504 | dengan `process_queue_len` di atas `0` | di luar `1` sampai `600000` ia fault dan tetap di default |
@@ -125,6 +140,89 @@ Diukur pada site static demo project ini, resident memory per koneksi yang
 ditahan: 62,7 KiB di `1024`, 64,7 KiB di `2048`, 76,7 KiB di `8192`, dan
 124,7 KiB di `32768`. Site yang di-proxy adalah 112,7, 116,8, 140,8, dan
 236,8 KiB pada empat nilai yang sama.
+
+### Apa yang dilakukan client bound
+
+`client_timeout_ms` adalah berapa lama satu pertukaran client boleh berjalan
+sebelum zixer mengambil koneksinya, dan `client_conn_limit` adalah berapa
+koneksi client yang dilacak site itu selama bound tersebut menyala. Pasangan
+ini dikirim dalam keadaan mati (`client_timeout_ms: 0`), karena menyalakannya
+mengubah perilaku deployment yang sudah berjalan dalam dua hal sekaligus:
+client yang lambat mulai diputus, dan koneksi di atas limit mulai ditolak.
+
+Sebuah koneksi diterima sebelum byte pertamanya dibaca. Itu disengaja: saat
+site sedang di plafon, penolakan yang lebih dulu membaca sebagian request
+adalah thread yang bisa diparkir penyerang dengan mengirim satu byte kurang
+dari yang dibutuhkan parser.
+
+Di atas limit, jawabannya bergantung pada apa yang bisa dikatakan edge saat itu:
+
+| site | yang diterima koneksi yang ditolak |
+| :- | :- |
+| http1 cleartext | `503 Service Unavailable` dengan `Proxy-Status: zixer; error="connection_limit_reached"` dan `Connection: close` |
+| http2, grpc | satu frame SETTINGS lalu GOAWAY `ENHANCE_YOUR_CALM`, yang memang jadi sinyal retry bagi client h2 |
+| TLS, engine apa pun | koneksi ditutup tanpa tulisan apa pun, karena belum ada handshake dan belum ada session untuk menulis status di atasnya |
+
+Apa yang dicakup budget itu berbeda per engine, dan perbedaannya disengaja:
+
+| engine | budget mencakup |
+| :- | :- |
+| http1 | satu pertukaran penuh, termasuk pembacaan head request |
+| http2, grpc | jeda diam antar frame, di-arm saat koneksi menunggu dan ditahan saat koneksi punya pekerjaan |
+| http3 | tidak ada, kedua key ditolak di site http3 |
+| udp | tidak ada, kedua key ditolak di site udp |
+
+Satu budget tidak mungkin mencakup delapan stream h2 yang berjalan bersamaan,
+jadi di engine itu ia membatasi keheningan, bukan pekerjaannya. Di http1 sebuah
+tunnel websocket dan sebuah respons streaming juga ditahan: respons yang
+berjalan sampai koneksi ditutup selalu, dan respons chunked hanya bila content
+type-nya `text/event-stream`. Respons chunked biasa tetap dibatasi, sebab body
+chunked saja bukan alasan untuk menunggu selamanya.
+
+Site dengan bound menyala menjalankan satu tick latar tiap 100 ms. Koneksi yang
+lewat deadline mula-mula kehilangan sisi bacanya, dan bila di pass berikutnya ia
+masih ada, sisi kirimnya ikut hilang, itulah yang menaruh FIN di kabel.
+
+Sebuah pemutusan sampai ke client sebagai salah satu dari dua jawaban, dan yang
+diam justru bagian yang disengaja:
+
+| bagaimana pembacaan berakhir | yang diterima client |
+| :- | :- |
+| sebagian head request datang dan sisanya tidak pernah datang | `408 request timeout` dengan `Connection: close` |
+| koneksi menganggur di antara dua request | tidak ada sama sekali, koneksi hanya ditutup |
+
+Sebuah status di koneksi keep-alive yang menganggur berarti menjawab request
+yang tidak pernah dikirim.
+
+`client_conn_limit` sekaligus ukuran tabelnya, jadi ia memori yang ditahan site
+selama melayani: pilih berapa yang boleh ditahan site itu sekaligus, bukan
+berapa yang secara teori bisa diterima mesin. Site http3 menolak kedua key itu
+mentah-mentah, karena koneksi quic bukan socket yang bisa dipotong sweep:
+seluruh site berbagi satu socket datagram.
+
+### Apa yang dilakukan key connect dan idle upstream
+
+`upstream_connect_timeout_ms` membatasi connect ke backend, dan
+`upstream_idle_ttl_ms` membatasi berapa lama koneksi backend yang menganggur
+disimpan untuk request berikutnya. Keduanya dikirim di `5000`.
+
+Tanpa bound pada connect, alamat backend yang tidak menjawab apa pun (paket
+yang dibuang, bukan penolakan) menahan request selama sistem operasi mau, yang
+di Linux umum berarti puluhan detik. Budget-nya dihitung per percobaan, jadi
+site dengan tiga upstream bisa membelanjakannya tiga kali sebelum menyerah:
+
+| yang terjadi | yang diterima client |
+| :- | :- |
+| satu percobaan kehabisan budget | `504 upstream connect timeout` dengan `Proxy-Status: zixer; error="connection_timeout"` |
+| tiap percobaan ditolak mentah | `502 all upstreams failed` dengan `Proxy-Status: zixer; error="connection_refused"` |
+
+Site grpc menjawab `UNAVAILABLE` untuk keduanya, karena wire-nya tidak punya
+kode terpisah untuk membedakan keduanya.
+
+- **Windows tidak dibatasi.** Tiga panggilan yang dibutuhkan di sini tidak punya entry std untuk socket handle Windows, jadi build Windows tetap memakai connect dari standard library dan key-nya diterima tanpa memperpendek apa pun.
+- `0` adalah penantian tanpa batas yang dimiliki tiap site sebelum key ini ada.
+- `upstream_idle_ttl_ms: 0` tidak menyimpan koneksi sama sekali, jadi tiap pertukaran membuka koneksinya sendiri. Itu setelan yang jujur di depan backend yang menutup koneksi menganggur lebih cepat daripada window-nya, di mana koneksi yang disimpan justru koneksi yang sudah mati saat request berikutnya memakainya.
+- Site grpc menolak `upstream_idle_ttl_ms`: leg upstream-nya satu koneksi h2 yang ditahan selama pertukaran hidup, bukan diparkir di antara request, jadi tidak ada idle cache yang umurnya perlu dibatasi.
 
 ### Apa yang dilakukan process gate
 
@@ -262,6 +360,8 @@ Satu file, satu site. `engine` dan `port` wajib, sisanya punya default atau opsi
 | tls | `false` | terminasi TLS di edge | http1, http2, grpc, wajib di http3, ditolak di udp | nilai non boolean menjadi fault |
 | tls_cert | tidak ada | path certificate chain, PEM | dengan `tls: true` | wajib saat tls on, ditolak saat off, file yang hilang menjadi fault di `status` dan menolak `start` |
 | tls_key | tidak ada | path private key, PEM | dengan `tls: true` | sama dengan `tls_cert` |
+| force_https | `false` | bind listener companion cleartext di port 80 yang memindahkan tiap request ke origin https site ini | dengan `tls: true`, ditolak di udp | butuh `tls: true`, nilai non boolean menjadi fault |
+| redirect_host | tidak ada | authority yang disebut redirect itu, mis. `example.com` | dengan `tls: true` | butuh `tls: true`, apa pun yang bukan host polos atau `host:port` menjadi fault |
 | acme_webroot | tidak ada | direktori yang disajikan di bawah `/.well-known/acme-challenge/` | http1 cleartext, atau site TLS mana pun | butuh `tls: true` atau site http1, ditolak di udp, tidak boleh berpasangan dengan `acme_proxy` |
 | acme_proxy | tidak ada | `host:port` tujuan relay path challenge | sama dengan `acme_webroot` | harus `host:port`, tidak boleh berpasangan dengan `acme_webroot` |
 | upstreams | tidak ada | list `host:port` dipisah koma, dipilih round-robin | semua | tiap item harus `host:port`, host-nya harus literal ip (lihat di bawah), sebuah site butuh `upstreams` atau `public_dir` |
@@ -270,7 +370,11 @@ Satu file, satu site. `engine` dan `port` wajib, sisanya punya default atau opsi
 | spa_fallback | tidak ada | file yang disajikan saat tidak ada file static yang cocok, mis. `index.html` | dengan `public_dir` | butuh `public_dir`, dan butuh `public_prefix` saat site juga punya upstreams |
 | kernel_backlog | nilai main.cfg | panjang listen queue untuk site ini | http1, http2, grpc, ditolak di udp, diterima tapi tidak dipakai di http3 | `0` fault |
 | max_recv_buf | nilai main.cfg | jumlah byte untuk satu stream buffer per koneksi | site http1, http2, grpc, dan TLS | di luar `1024` sampai `262144` ia fault dan site jatuh ke nilai main.cfg |
+| client_timeout_ms | nilai main.cfg | berapa lama satu pertukaran client boleh berjalan sebelum edge memutusnya, `0` mematikan bound untuk site ini | http1, http2, grpc, ditolak di http3 dan udp | di luar `0` sampai `3600000` fault |
+| client_conn_limit | nilai main.cfg | koneksi client yang dilacak site ini sekaligus, koneksi yang datang saat semua slot terpakai ditolak | sama seperti `client_timeout_ms` | di luar `1` sampai `65536` fault, dan menyebutnya bersama `client_timeout_ms: 0` di file yang sama fault |
 | upstream_timeout_ms | `30000` | berapa lama edge menunggu upstream yang diam sebelum menjawab 504 | http1, http2, http3, ditolak di grpc dan udp | butuh `upstreams`, `0` menunggu selamanya, di atas 4294967295 fault |
+| upstream_connect_timeout_ms | nilai main.cfg | berapa lama connect ke backend boleh berjalan sebelum edge menjawab 504, `0` menunggu sesuai keputusan sistem operasi | http1, http2, grpc, http3, ditolak di udp | butuh `upstreams`, di luar `0` sampai `600000` fault |
+| upstream_idle_ttl_ms | nilai main.cfg | berapa lama koneksi backend yang menganggur disimpan untuk request berikutnya, `0` tidak menyimpan satu pun | http1, http2, http3, ditolak di grpc dan udp | butuh `upstreams`, di luar `0` sampai `600000` fault |
 | process_limit | nilai main.cfg | request yang boleh site ini jalankan ke upstream sekaligus, `0` mematikan gate untuk site ini | http1, http2, grpc, http3, ditolak di udp | butuh `upstreams`, di atas `65536` fault |
 | process_queue_len | nilai main.cfg | request yang boleh menunggu slot | sama seperti `process_limit` | butuh `upstreams`, ditolak di udp, dan nilai di atas `0` dengan `process_limit: 0` di file yang sama fault |
 | process_queue_timeout_ms | nilai main.cfg | berapa lama satu request menunggu sebelum edge menjawab 504 | sama seperti `process_limit` | butuh `upstreams`, ditolak di udp, di luar `1` sampai `600000` fault |
@@ -312,9 +416,9 @@ Batas ini berlaku pada edge yang menunggu backend, bukan pada seluruh request:
 | body response chunked | tidak |
 | body response yang diakhiri close | tidak |
 | tunnel websocket setelah 101 | tidak |
-| connect ke upstream | tidak |
+| connect ke upstream | tidak, `upstream_connect_timeout_ms` yang menjadi key untuk leg itu |
 
-Body chunked atau yang diakhiri close tidak membawa jumlah byte total untuk mengakhiri loop, dan stream server-sent-event memang diam di antara event, jadi deadline di sana akan memotong stream yang sehat. Connect tidak punya batas karena backend std yang akan dipakainya panic saat diberi satu.
+Body chunked atau yang diakhiri close tidak membawa jumlah byte total untuk mengakhiri loop, dan stream server-sent-event memang diam di antara event, jadi deadline di sana akan memotong stream yang sehat.
 
 Saat head tidak pernah datang, client menerima:
 
@@ -327,6 +431,151 @@ Upstream tidak ditandai down karena timeout, dan request tidak diulang ke upstre
 
 Set `upstream_timeout_ms: 0` pada site yang backend-nya memang berpikir lebih lama dari budget. Itu sama dengan menunggu tanpa batas seperti sebelum key ini ada.
 
+### Memindahkan tiap request ke https
+
+`force_https: true` mem-bind satu listener companion cleartext di port 80 untuk
+site ini, dan tiap request yang diterima listener itu dijawab dengan redirect ke
+origin https milik site itu sendiri.
+
+- Status-nya mengikuti method: 301 untuk GET dan HEAD, 308 untuk yang lain. 301 membolehkan user agent mengubah pengulangannya menjadi GET, yang diizinkan rfc 9110 15.4.2 karena alasan historis. Itu tidak berbahaya untuk GET dan keliru untuk POST, yang akan tiba di origin https tanpa body.
+- Satu listener mengerjakan dua tugas. Site TLS dengan key acme memang sudah punya companion di port 80 untuk path challenge, dan site yang meminta keduanya mendapat satu listener yang menjawab path challenge dari config acme-nya lalu me-redirect sisanya.
+- Site dengan `force_https` tanpa config acme me-redirect semuanya, termasuk path challenge, karena memang tidak ada challenge yang perlu dijawabnya.
+- Tidak ada companion untuk site cleartext, yang tidak punya origin https sebagai tujuan, dan tidak ada juga untuk site TLS yang sudah duduk di port 80, karena ia sendiri port itu.
+- Bind port 80 butuh privilege untuk bind port itu, sama seperti untuk acme.
+
+`redirect_host` menentukan authority di baris `Location` tersebut. Bila dibiarkan
+kosong, `Host` milik client yang dipantulkan kembali, dan itu pun hanya setelah
+lolos sebagai host polos atau `host:port`, selain itu dijawab 400. Bila diisi,
+`Host` milik client tidak pernah sampai ke jawaban, dan itulah yang menghentikan
+client memilih ke mana redirect itu menunjuk:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 443
+tls: true
+tls_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+tls_key: /etc/letsencrypt/live/example.com/privkey.pem
+force_https: true
+redirect_host: example.com
+upstreams: 127.0.0.1:3000
+```
+
+<br>
+
+## Header section
+
+File site boleh diakhiri salah satu atau kedua blok berikut:
+
+```
+[response_headers]
+x-frame-options: DENY
+strict-transport-security: max-age=31536000
+
+[request_headers]
+x-real-ip: $client_ip
+x-forwarded-proto: $scheme
+```
+
+Baris `[response_headers]` ikut di tiap jawaban yang dikirim site ini ke client.
+Baris `[request_headers]` ikut di tiap request yang dikirimnya ke upstream.
+Sebuah proxy punya dua leg dan satu blok `[headers]` tidak bisa menyebut yang
+mana yang dimaksud, jadi arahnya menjadi bagian dari nama section.
+
+**Sebuah section berjalan sampai akhir file.** Tidak ada yang menutupnya, jadi
+tiap baris `key: value` yang flat harus datang lebih dulu. Sebuah key site yang
+ditulis di bawah baris section ditolak dengan namanya, bukan diam-diam berubah
+jadi header, dan itulah yang menjaga baris `port` yang salah tempat tidak ikut
+dikirim alih-alih dipakai:
+
+```
+port: is a site key, move it above the first [section] line
+```
+
+**Nama yang di-config menggantikan nama yang direlai.** rfc 9110 5.2 menyambung
+baris field kembar dengan koma, yang benar untuk header list dan diam-diam
+keliru untuk header bernilai tunggal: origin yang sudah mengirim
+`X-Frame-Options: SAMEORIGIN` akan meninggalkan client dengan
+`SAMEORIGIN, DENY`. Jadi salinan milik origin untuk nama yang diatur section itu
+dibuang, dan baris milik site yang dikirim. Itu berlaku juga untuk header yang
+dibuat zixer sendiri, jadi menyebut `content-type`, `content-encoding`, atau
+`vary` di `[response_headers]` pada site static menggantikan apa yang akan
+ditulis plane static.
+
+Kedua blok dikompilasi sekali saat file site dibaca, bukan per request, dan site
+dengan baris header yang salah tidak akan start.
+
+### Tiga token itu
+
+| token | yang ditulisnya |
+| :- | :- |
+| `$client_ip` | alamat koneksi yang diterima, tanpa port-nya |
+| `$scheme` | `https` di site TLS dan di http3, `http` di site lainnya |
+| `$host` | authority yang dibawa request ini: `Host` di http1, `:authority` di http2, grpc, dan http3 |
+
+Sebuah token boleh muncul di mana saja dalam sebuah nilai, berapa kali pun, dan
+berdampingan dengan teks literal apa pun. Request yang tidak membawa authority
+menulis `$host` kosong, jadi header-nya tetap terkirim tanpa apa pun setelah
+titik dua.
+
+`$scheme` adalah setting milik site itu sendiri, tidak pernah apa pun yang
+dikirim client. Caller h2 atau grpc mengirim `:scheme` miliknya sendiri, dan
+caller cleartext yang mengaku `https` akan membuat backend mengira request-nya
+datang secara aman.
+
+Sebuah `$` yang diikuti apa pun di luar ketiganya ditolak saat load, jadi salah
+ketik tidak pernah sampai ke client sebagai teks literal yang diketik:
+
+```
+x-real-ip: $client-ip
+# unknown token '$client-ip' on line 12, use $client_ip, $scheme, or $host
+```
+
+### Apa yang ditolak sebuah section
+
+| baris | dilaporkan sebagai |
+| :- | :- |
+| nama dengan karakter di luar huruf, angka, dan `- . _ ~` | `line 12 is not a header name, use letters, digits, and - . _ ~ (rfc 9110 5.1)` |
+| nilai yang membawa byte control | `line 12 has byte 0x0D in its value, a header value is one line of visible characters` |
+| nama yang sama dua kali dalam satu section | `duplicate header on line 12, keep one line` |
+| `content-length`, `transfer-encoding` | `zixer writes the message framing itself, remove it` |
+| `connection`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`, `upgrade` | `is hop-by-hop and never crosses a proxy (rfc 9110), remove it` |
+| `via` | `zixer writes its own Via element on every hop, remove it` |
+| `date`, di `[response_headers]` | `zixer sends Date from its own clock, setting it here would send two` |
+| `strict-transport-security` di `[response_headers]` pada site cleartext | `needs tls: true, a cleartext answer must not carry HSTS (rfc 6797 7.2)` |
+| `strict-transport-security` di `[request_headers]` | `is a header for the client, move it to [response_headers]` |
+| `host` di `[request_headers]` | `the upstream Host comes from the client request, setting it here would send two` |
+| `forwarded` di `[request_headers]` | `zixer writes it from the accepted connection (rfc 7239), use $client_ip in a header of your own` |
+| blok di atas 1024 byte setelah dikompilasi | `the section compiles to 1100 bytes and the ceiling is 1024, keep fewer or shorter lines` |
+
+Plafon ukuran itu ada karena edge menyiapkan head request di buffer berukuran
+tetap dan bloknya harus muat di sampingnya. Menolak section kebesaran saat file
+dibaca lebih baik daripada site yang start lalu menjawab 400 di tiap request.
+
+Sebuah CR atau LF di dalam nilai adalah header injection, itu sebabnya aturan
+byte control tidak punya pengecualian untuk keduanya. Byte `0x80` ke atas tetap
+diterima, karena rfc 9110 masih mengizinkannya di nilai field.
+
+### Jawaban mana yang membawanya
+
+| jawaban | membawa `[response_headers]` |
+| :- | :- |
+| response upstream yang direlai | ya |
+| file static dari `public_dir` | ya |
+| error lokal yang dibangun edge, mis. 502, 504, 408 | ya |
+| jawaban challenge acme dari listener milik site itu sendiri | ya |
+| 1xx interim yang direlai dari upstream | tidak |
+| 503 yang dikirim edge saat kehabisan buffer | tidak |
+| 503 untuk koneksi yang ditolak di atas `client_conn_limit` | tidak |
+| apa pun yang dijawab listener companion di port 80 | tidak |
+
+1xx interim direlai persis seperti yang ditulis upstream. Kedua 503 itu adalah
+jawaban yang diberikan site ketika ia sudah memutuskan untuk tidak
+membelanjakan apa pun pada koneksi itu, jadi keduanya tetap jawaban tetap yang
+tidak memakan apa pun di luar barisnya sendiri. Listener companion itu
+cleartext: table-nya bisa membawa HSTS di atas plaintext, yang menurut rfc 6797
+7.2 harus diabaikan client.
+
 <br>
 
 ## Key mana berlaku untuk engine mana
@@ -336,15 +585,21 @@ Set `upstream_timeout_ms: 0` pada site yang backend-nya memang berpikir lebih la
 | engine, ip, port | ya | ya | ya | ya | ya |
 | tls | opsional | opsional | opsional | wajib | ditolak |
 | tls_cert, tls_key | dengan tls | dengan tls | dengan tls | wajib | ditolak |
+| force_https, redirect_host | TLS saja | TLS saja | TLS saja | ya (selalu TLS) | ditolak |
 | acme_webroot, acme_proxy | ya | TLS saja | TLS saja | ya (selalu TLS) | ditolak |
 | upstreams | ya | ya | ya | ya | ya, wajib |
 | public_dir, public_prefix, spa_fallback | ya | ya | ditolak | ya | ditolak |
 | kernel_backlog | ya | ya | ya | diterima, tanpa efek | ditolak |
 | max_recv_buf | menentukan ukuran stream buffer | menentukan ukuran stream buffer | menentukan ukuran stream buffer | diterima, tanpa efek | diterima, tanpa efek |
+| client_timeout_ms, client_conn_limit | ya | ya | ya | ditolak | ditolak |
 | upstream_timeout_ms | ya | ya | ditolak | ya | ditolak |
+| upstream_connect_timeout_ms | ya | ya | ya | ya | ditolak |
+| upstream_idle_ttl_ms | ya | ya | ditolak | ya | ditolak |
 | process_limit, process_queue_len, process_queue_timeout_ms | ya | ya | ya, hanya setup dan tidak pernah mengantre | ya | ditolak |
 | public_dir_cache_ttl_ms | ya | ya | ditolak | ya | ditolak |
 | public_dir_cache_max_entries | hanya main.cfg, satu table per daemon | hanya main.cfg | hanya main.cfg | hanya main.cfg | hanya main.cfg |
+| `[response_headers]` | ya | ya | ya | ya | ditolak |
+| `[request_headers]` | dengan upstreams | dengan upstreams | dengan upstreams | dengan upstreams | ditolak |
 
 "Ditolak" berarti key-nya fault dengan fix hint dan site tidak start. "Diterima, tanpa efek" berarti file lolos validasi dan tidak ada yang membaca nilainya.
 
@@ -362,6 +617,8 @@ Tiap aturan di bawah diperiksa setelah seluruh file dibaca, jadi satu pass melap
 | `port` hilang | `missing, set 1-65535` |
 | `tls: true` tanpa cert | `tls_cert: required when tls: true` |
 | `tls_cert` tanpa `tls: true` | `set tls: true or remove it` |
+| `force_https` tanpa `tls: true` | `needs tls: true, there is no https origin to send clients to` |
+| `redirect_host` tanpa `tls: true` | `needs tls: true, only the https redirect names an authority` |
 | tidak ada `upstreams` maupun `public_dir` | `site needs upstreams or public_dir` |
 | `public_prefix` tanpa `public_dir` | `needs public_dir` |
 | `spa_fallback` tanpa `public_dir` | `needs public_dir` |
@@ -370,13 +627,18 @@ Tiap aturan di bawah diperiksa setelah seluruh file dibaca, jadi satu pass melap
 | `acme_webroot` dan `acme_proxy` bersamaan | `choose acme_webroot or acme_proxy, not both` |
 | key acme di site http2, grpc, atau http3 cleartext | `needs tls: true or an http1 site` |
 | `engine: http3` tanpa tls | `tls: http3 requires tls: true` |
-| `public_dir`, `public_dir_cache_ttl_ms`, atau `upstream_timeout_ms` di site grpc | `not supported on grpc sites, remove it` |
-| `upstream_timeout_ms` di site tanpa upstreams | `needs upstreams` |
+| `client_timeout_ms` atau `client_conn_limit` di site http3 | `not supported on http3 sites, remove it` |
+| `public_dir`, `public_dir_cache_ttl_ms`, `upstream_timeout_ms`, atau `upstream_idle_ttl_ms` di site grpc | `not supported on grpc sites, remove it` |
+| `upstream_timeout_ms`, `upstream_connect_timeout_ms`, atau `upstream_idle_ttl_ms` di site tanpa upstreams | `needs upstreams` |
 | `tls` di site udp | `udp forward is blind bytes, tls does not apply` |
-| `public_dir`, `public_dir_cache_ttl_ms`, `kernel_backlog`, `upstream_timeout_ms`, key `process_`, atau key acme di site udp | `does not apply to udp sites, remove it` |
+| `public_dir`, `public_dir_cache_ttl_ms`, `kernel_backlog`, key `upstream_`, key `client_`, key `process_`, `force_https`, `redirect_host`, key acme, atau salah satu header section di site udp | `does not apply to udp sites, remove it` |
 | `public_dir_cache_max_entries` di file site | `set it in main.cfg, the cache table is one per daemon and every site shares it` |
 | key `process_` apa pun di site tanpa upstreams | `needs upstreams` |
 | `process_queue_len` di atas `0` sementara `process_limit` bernilai `0` | `needs process_limit above 0, otherwise nothing ever queues` |
+| `client_conn_limit` sementara `client_timeout_ms` bernilai `0` | `needs client_timeout_ms above 0, otherwise nothing is tracked` |
+| `[request_headers]` di site tanpa upstreams | `needs upstreams, a site answering from public_dir has no upstream leg` |
+| section yang sama dua kali | `duplicate section on line 12, keep one block` |
+| key site yang ditulis di bawah baris section | `is a site key, move it above the first [section] line` |
 
 Aturan prefix pada `spa_fallback` ada supaya sebuah miss dari backend tidak lenyap ke halaman fallback: tanpa prefix yang mengikat static plane, tiap 404 dari upstream akan dijawab sebagai app shell.
 
@@ -398,6 +660,9 @@ sites_dir: /srv/zixer/sites
 max_recv_buf: 8192
 kernel_backlog: 1024
 process_limit: 0 (gate off)
+client_timeout_ms: 0 (bound off)
+upstream_connect_timeout_ms: 5000
+upstream_idle_ttl_ms: 5000
 public_dir_cache_ttl_ms: 0 (cache off)
 
 # /srv/zixer/sites/api.cfg
@@ -412,6 +677,15 @@ errors:
 ```
 
 `status: ok` di tiap blok berarti exit code 0. Blok `errors:` mana pun berarti exit code 1, dan itulah yang harus dijadikan gerbang oleh skrip deploy. Site yang punya error ditolak saat `start` dengan penunjuk kembali ke `zixer status <name>`.
+
+Tiga baris main.cfg mewakili satu kelompok: `process_limit: 0 (gate off)`,
+`client_timeout_ms: 0 (bound off)`, dan `public_dir_cache_ttl_ms: 0 (cache off)`
+masing-masing menyembunyikan key yang tidak berarti apa-apa selama yang satu itu
+bernilai `0`. Nyalakan salah satunya dan pasangannya muncul di sampingnya.
+
+Blok site hanya mencetak key yang memang diisi file itu, dan ia tidak mencetak
+header section. Baca file-nya sendiri untuk itu, verdict status sudah menutup
+pertanyaan apakah section-nya diterima.
 
 <br>
 
@@ -505,6 +779,44 @@ upstreams: 127.0.0.1:3000
 kernel_backlog: 128
 ```
 
+Site yang menghadap internet terbuka, dibatasi di kedua leg. Tiap pertukaran
+client punya 30 detik, site menahan paling banyak 2048 koneksi client, dan
+backend yang tidak menjawab apa pun memakan 2 detik alih-alih kesabaran sistem
+operasi:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+upstreams: 127.0.0.1:3000
+client_timeout_ms: 30 * 1000
+client_conn_limit: 2048
+upstream_connect_timeout_ms: 2 * 1000
+upstream_idle_ttl_ms: 30 * 1000
+```
+
+Header di kedua leg. Backend tahu siapa yang memanggil dan lewat apa, dan tiap
+jawaban membawa header keamanan milik site itu:
+
+```
+engine: http1
+ip: 0.0.0.0
+port: 8080
+upstreams: 127.0.0.1:3000
+
+[response_headers]
+x-frame-options: DENY
+x-content-type-options: nosniff
+referrer-policy: strict-origin-when-cross-origin
+
+[request_headers]
+x-real-ip: $client_ip
+x-forwarded-proto: $scheme
+x-forwarded-host: $host
+```
+
+Key yang flat datang lebih dulu karena sebuah section berjalan sampai akhir file.
+
 <br>
 
 ## Memeriksa sebuah key sendiri
@@ -558,6 +870,31 @@ echo token-body > /var/www/acme/.well-known/acme-challenge/tok123
 curl -s http://127.0.0.1:8080/.well-known/acme-challenge/tok123
 ```
 
+Header yang ditambahkan site di leg client, dan yang ditambahkannya di leg
+upstream. Perintah kedua butuh backend yang melaporkan head yang diterimanya:
+
+```bash
+curl -sD - -o /dev/null http://127.0.0.1:8080/    # x-frame-options dan kawan-kawan
+curl -s http://127.0.0.1:8080/                    # x-real-ip seperti yang dilihat backend
+```
+
+Batas koneksi, dengan `client_timeout_ms` di atas `0` dan
+`client_conn_limit: 2`. Dua koneksi ditahan terbuka, yang ketiga ditolak sebelum
+mengirim satu byte pun:
+
+```bash
+(sleep 30 | nc 127.0.0.1 8080) &
+(sleep 30 | nc 127.0.0.1 8080) &
+curl -sv http://127.0.0.1:8080/   # 503, Proxy-Status: zixer; error="connection_limit_reached"
+```
+
+Redirect yang dikirim site `force_https`, dan authority yang disebutnya:
+
+```bash
+curl -sD - -o /dev/null http://127.0.0.1/app        # 301, Location: https://...
+curl -sD - -o /dev/null -X POST http://127.0.0.1/app  # 308, method-nya selamat
+```
+
 <br>
 
 ## Catatan
@@ -565,4 +902,5 @@ curl -s http://127.0.0.1:8080/.well-known/acme-challenge/tok123
 - Perubahan config tidak pernah berlaku ke site yang sedang jalan dengan sendirinya. `restart <site.cfg>` membaca ulang satu file site, dan `main.cfg` dibaca sekali per daemon, jadi mengubahnya butuh `daemon stop` lalu start ulang.
 - Daemon memegang control socket di `<root>/control.sock`. Seluruh path itu harus muat pada batas platform untuk unix socket (108 byte di Linux), jadi root dir yang terlalu dalam ditolak dengan `control socket path is too long for this platform`.
 - File site dibaca berurutan nama, dan namanya adalah identitas yang dipakai `start`, `stop`, `restart`, dan `status`. Akhiran `.cfg` opsional di command line.
-- Tidak ada satu pun file config yang membawa timeout, rate limit, aturan rewrite header, atau route per path. Itu bukan knob yang punya default, itu knob yang memang belum ada.
+- Sebuah header section menambah dan menggantikan, ia tidak pernah me-rewrite: tidak ada aturan yang membaca nilai yang direlai lalu menyuntingnya, dan tidak ada cara membuang header yang dikirim origin tanpa memasang satu header bernama sama.
+- Tidak ada satu pun file config yang membawa rate limit atau route per path. Itu bukan knob yang punya default, itu knob yang memang belum ada.

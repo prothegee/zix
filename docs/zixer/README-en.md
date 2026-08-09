@@ -7,6 +7,8 @@ A proxy gateway you run as a program, built on the zix engines, standard library
 - Terminates http1 (with SSE and WebSocket), http2 (with rfc 8441), gRPC, and http3, then re-originates http1 to the backend. Plus a per-flow udp forward.
 - TLS at the edge with ACME http-01 for certbot, and a cert reload that is just `zixer restart`.
 - Static files per site, round-robin upstreams with O(1) availability, bounded retry, and rfc 9209 `Proxy-Status` on every local failure.
+- Bounded on both legs: how long one client exchange may take, how many client connections a site tracks, and how long a connect to a backend may run.
+- Headers a site adds on either leg, written as a block in its config file, with the client address, the scheme, and the request authority available as tokens.
 - Validation first: an unknown key, a bad value, or a key that cannot apply is refused with a fix hint, never a silent default.
 - Builds on Zig 0.16 and 0.17.
 
@@ -93,22 +95,39 @@ The root resolves as `--dir <path>`, then `ZIXER_DIR`, then `$HOME/.zixer`.
 
 ## Site config
 
-Flat `key: value` lines, `#` comments, comma-separated lists, and integer math on numeric values:
+Flat `key: value` lines, `#` comments, comma-separated lists, integer math on numeric values, and two optional `[section]` blocks at the end:
 
 | key | meaning |
 | :- | :- |
 | `engine` | `http1`, `http2`, `grpc`, `http3`, or `udp` |
 | `ip`, `port` | the listening socket |
 | `tls`, `tls_cert`, `tls_key` | terminate TLS at this edge |
+| `force_https`, `redirect_host` | a cleartext companion on port 80 that moves every request to this site's https origin |
 | `acme_webroot`, `acme_proxy` | answer the rfc 8555 http-01 challenge |
 | `upstreams` | comma list of `host:port` backends, picked round-robin |
 | `public_dir`, `public_prefix`, `spa_fallback` | serve static files from this site |
 | `public_dir_cache_ttl_ms` | keep those files open between requests, `0` is off |
 | `kernel_backlog`, `max_recv_buf` | listener tuning |
+| `client_timeout_ms`, `client_conn_limit` | how long one client exchange may take, and how many client connections the site tracks |
 | `upstream_timeout_ms` | how long the edge waits on a silent upstream before answering 504 |
+| `upstream_connect_timeout_ms`, `upstream_idle_ttl_ms` | the connect budget per backend attempt, and how long an unused backend connection is kept |
 | `process_limit`, `process_queue_len`, `process_queue_timeout_ms` | overload valve, how many requests may run against the backends at once |
+| `[response_headers]`, `[request_headers]` | headers this site adds on the client leg and on the upstream leg |
 
 A site needs `upstreams` or `public_dir`. Everything else has a default. See `config-en.md` for the per-key rules, which engine each applies to, and every fault message.
+
+The two header sections take the same `name: value` lines, and a value may name
+`$client_ip`, `$scheme`, or `$host`:
+
+```
+[response_headers]
+x-frame-options: DENY
+
+[request_headers]
+x-real-ip: $client_ip
+```
+
+A section runs to the end of the file, so every flat key comes first.
 
 ## What each engine does at the edge
 

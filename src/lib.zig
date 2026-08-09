@@ -71,6 +71,8 @@ pub const utils = struct {
     pub const socket_pair = @import("utils/socket_pair.zig");
     pub const socket_poll = @import("utils/socket_poll.zig");
     pub const socket_cut = @import("utils/socket_cut.zig");
+    pub const socket_cut_reader = @import("utils/socket_cut_reader.zig");
+    pub const socket_cut_writer = @import("utils/socket_cut_writer.zig");
     pub const socket_connect = @import("utils/socket_connect.zig");
     pub const monotonic_clock = @import("utils/monotonic_clock.zig");
     pub const secure_random = @import("utils/secure_random.zig");
@@ -272,6 +274,8 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/socket_pair.zig"));
     std.testing.refAllDecls(@import("utils/socket_poll.zig"));
     std.testing.refAllDecls(@import("utils/socket_cut.zig"));
+    std.testing.refAllDecls(@import("utils/socket_cut_reader.zig"));
+    std.testing.refAllDecls(@import("utils/socket_cut_writer.zig"));
     std.testing.refAllDecls(@import("utils/socket_connect.zig"));
     std.testing.refAllDecls(@import("utils/monotonic_clock.zig"));
     std.testing.refAllDecls(@import("utils/secure_random.zig"));

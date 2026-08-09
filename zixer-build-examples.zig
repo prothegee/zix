@@ -15,6 +15,8 @@ const demos = [_][]const u8{
     "mixed",
     "round_robin",
     "tls",
+    "bounds",
+    "headers",
 };
 
 /// Wire the proxy demo upstreams: `zig build zixer-examples` builds them all,

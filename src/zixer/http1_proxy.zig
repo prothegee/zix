@@ -26,6 +26,8 @@ const upstream_status = @import("upstream_status.zig");
 const ws_tunnel = @import("ws_tunnel.zig");
 
 const monotonic_clock = zix.utils.monotonic_clock;
+const socket_cut_reader = zix.utils.socket_cut_reader;
+const socket_cut_writer = zix.utils.socket_cut_writer;
 
 /// Bytes one static-file read moves into the client writer at a time.
 const FILE_CHUNK: usize = 16 * 1024;
@@ -167,8 +169,11 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     };
     defer buffers.deinit(proxy.allocator);
 
-    var client_reader = client_stream.reader(io, buffers.client_read);
-    var client_writer = client_stream.writer(io, buffers.client_write);
+    // The sweep cuts this socket from another thread when the bound runs out, the first tick on
+    // the read side and the next on both, so the client leg goes over the pair that ends on a cut
+    // rather than the std pair that panics on it.
+    var client_reader = socket_cut_reader.init(client_stream, io, buffers.client_read);
+    var client_writer = socket_cut_writer.init(client_stream, io, buffers.client_write);
 
     serveLoopBuffered(proxy, &client_reader.interface, &client_writer.interface, client_stream.socket.address, client_stream, buffers, client_stream.socket.handle, &lease);
 }

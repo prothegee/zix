@@ -10,6 +10,9 @@ const grpc_edge = @import("grpc_edge.zig");
 const http2_edge = @import("http2_edge.zig");
 const site_cfg = @import("site_cfg.zig");
 
+const socket_cut_reader = zix.utils.socket_cut_reader;
+const socket_cut_writer = zix.utils.socket_cut_writer;
+
 const Tls = zix.Tls;
 
 /// Handshake flight staging (server flight fits well under this).
@@ -458,8 +461,11 @@ pub fn serveConn(proxy: *const http1_proxy.Proxy, ctx: *const Tls.Context, clien
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = true, .upstream = false }) catch return;
     defer buffers.deinit(proxy.allocator);
 
-    var stream_reader = client_stream.reader(io, buffers.client_read);
-    var stream_writer = client_stream.writer(io, buffers.client_write);
+    // The sweep cuts this socket from another thread when the bound runs out, the first tick on
+    // the read side and the next on both, so the ciphertext leg goes over the pair that ends on a
+    // cut rather than the std pair that panics on it.
+    var stream_reader = socket_cut_reader.init(client_stream, io, buffers.client_read);
+    var stream_writer = socket_cut_writer.init(client_stream, io, buffers.client_write);
 
     var session: Session = undefined;
     handshake(&session, io, ctx, &stream_reader.interface, &stream_writer.interface) catch return;

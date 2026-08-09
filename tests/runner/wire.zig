@@ -90,6 +90,35 @@ pub fn readOnceBounded(fd: std.posix.fd_t, buf: []u8) !usize {
     return fd_io.readOnce(fd, buf);
 }
 
+/// Read from fd until the peer closes, returning everything that arrived.
+///
+/// Note:
+/// - For a reply whose length is not known in advance and whose end is the
+///   close itself, i.e. an answer carrying `Connection: close`. Reading to end
+///   of stream is also how a check knows the edge is done with the connection.
+/// - Every read is bounded the same way readOnceBounded is, so a peer that
+///   holds the socket open without ever closing it fails rather than parks.
+///
+/// Param:
+/// fd - std.posix.fd_t (a connected, blocking descriptor)
+/// buf - []u8 (receives the whole reply, and caps it)
+///
+/// Return:
+/// - []const u8, a slice into buf, ending at the close or at buf.len
+/// - error.ReadTimeout when nothing arrived inside the bound
+pub fn readUntilClose(fd: std.posix.fd_t, buf: []u8) ![]const u8 {
+    var len: usize = 0;
+
+    while (len < buf.len) {
+        const got = try readOnceBounded(fd, buf[len..]);
+        if (got == 0) break;
+
+        len += got;
+    }
+
+    return buf[0..len];
+}
+
 /// Write all bytes to fd, looping over short writes and retrying on EINTR.
 pub fn tlsWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
     return fd_io.writeAll(fd, bytes);

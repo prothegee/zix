@@ -75,6 +75,8 @@ calls after a renewal.
 | tls | 9120 | 9121 | TLS terminated at zixer, cleartext upstream |
 | rtc_signal | 9122 | 9105 | webrtc signaling: wss edge over a websocket backend |
 | rtc_media | 9123 | 9083 | a whole webrtc session across the per-flow forward |
+| bounds | 9124 | 9125 | client budget, 408 on a partial head, 503 past the connection limit |
+| headers | 9128 | 9129 | the two cfg header sections, tokens, and the replace rule |
 
 Every site config carries its own run and drive commands in its header, so
 `sites/<demo>.cfg` is the reference for that demo.
@@ -95,11 +97,19 @@ Every site config carries its own run and drive commands in its header, so
 | `public_dir_cache_ttl_ms` | main.cfg for the daemon default, static for a site override |
 | `public_dir_cache_max_entries` | main.cfg, there is one cache table per daemon |
 | `kernel_backlog` | main.cfg, inherited by every site here |
+| `client_timeout_ms`, `client_conn_limit` | bounds |
+| `upstream_connect_timeout_ms`, `upstream_idle_ttl_ms` | bounds |
+| `[response_headers]`, `[request_headers]` | headers |
 
-`acme_webroot`, `acme_proxy`, and `upstream_timeout_ms` have no demo: a real challenge needs
-port 80 and a certificate authority, and a read deadline only shows itself against a backend
-that stalls on purpose. Their behavior is described in
+`acme_webroot`, `acme_proxy`, `upstream_timeout_ms`, `force_https`, and `redirect_host` have
+no demo: a real challenge needs port 80 and a certificate authority, a read deadline only
+shows itself against a backend that stalls on purpose, and the redirect needs the same
+privileged port 80 the challenge does. Their behavior is described in
 [`docs/zixer/config-en.md`](../../docs/zixer/config-en.md).
+
+The bounds demo sets `upstream_connect_timeout_ms` on a backend that is really there, so the
+key is visible in the file without slowing the demo down. It only shortens a wait against an
+address that answers nothing at all.
 
 <br>
 
@@ -121,8 +131,11 @@ touches a daemon already running on `examples/proxies`.
 
 ## Notes
 
-- Ports 9100 to 9123 belong to these demos. The upstreams the rtc pair reuses are the
-  websocket demo (9105) and `examples/webrtc/webrtc_datachannel_echo.zig` (9083).
+- Ports 9100 to 9129 belong to these demos, apart from 9126 and 9127, which the runner binds
+  on its own side for the two udp rows. The upstreams the rtc pair reuses are the websocket
+  demo (9105) and `examples/webrtc/webrtc_datachannel_echo.zig` (9083).
+- The bounds demo cuts a client after two seconds, so a connection held open by hand is
+  expected to be taken away. That is the demo working, not the daemon misbehaving.
 - The TLS and http3 demos use `examples/certs/ecdsa_p256_cert.pem`, self-signed for
   `localhost` and `127.0.0.1`, so clients need `-k`. Reach them as `https://localhost:<port>`:
   a Host that matches no name in the certificate is answered 421 by the edge.
