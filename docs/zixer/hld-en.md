@@ -98,6 +98,8 @@ flowchart LR
 | `root_dir.zig` | root dir resolution and its source |
 | `cfg_scanner.zig` | the flat `key: value` grammar, comments, comma lists |
 | `cfg_math.zig` | integer expressions in numeric values |
+| `cfg_headers.zig` | the two `[section]` header blocks, compiled once into a table per leg |
+| `header_syntax.zig` | what rfc 9110 allows in a field name and a field value |
 | `fault.zig` | fault collection, every entry carries a fix hint |
 | `main_cfg.zig` | main.cfg schema, defaults, validation |
 | `site_cfg.zig` | site schema, engine rules, cross-field validation |
@@ -112,6 +114,7 @@ flowchart LR
 | `worker_count.zig` | how many accept loops a site runs |
 | `bind_options.zig` | the main.cfg values a site needs at bind time |
 | `conn_buffer.zig` | the stream buffer block one edge connection holds |
+| `tcp_nodelay.zig` | turning Nagle off on one accepted connection |
 | `http1_proxy.zig`, `http1_head.zig` | the http1 edge and its message parsing |
 | `http2_edge.zig` and siblings | the h2 edge, frames, translation, the rfc 8441 websocket bridge |
 | `grpc_edge.zig` and siblings | the grpc edge, h2 on both legs |
@@ -126,6 +129,8 @@ flowchart LR
 | `upstream_pool.zig`, `upstream_conn.zig` | round-robin picking, availability, idle keep-alive |
 | `upstream_deadline.zig` | the bound on one upstream read |
 | `upstream_status.zig` | what a client is told when no attempt produced a connection: 504 for silence, 502 for a refusal |
+| `process_gate.zig` | one site's admission state: the counter and the waiting room |
+| `process_wait.zig` | how a task-per-connection edge waits out a ticket, and how the grpc relay sheds instead |
 | `deadline_table.zig`, `deadline_sweep.zig`, `client_admit.zig` | the client bound: the slots, the cut, and taking a slot or refusing the connection |
 | `client_lease.zig` | what one accepted connection holds: arm per exchange, hold a stream, give the slot back |
 | `site_sweep.zig` | the one background thread per site, running both the client cut and the idle sweep |
@@ -223,12 +228,45 @@ the edge decides to originate upstream. Nothing earlier reaches it: a static
 answer, an acme challenge, and an https redirect are all served before the
 gate is asked.
 
-- `process_limit` is how many requests may be running upstream at once, `process_queue_len` is how many may wait, and `process_queue_timeout_ms` bounds that wait. All three default to off, see `config-en.md`.
+- `process_limit` is how many requests may be running upstream at once, `process_queue_len` is how many may wait, and `process_queue_timeout_ms` bounds that wait. The first two default to 0, which is the gate off, so the third never comes into play until one of them is set. See `config-en.md`.
 - Site-wide rather than per worker on purpose. Splitting the count across workers would make one written number mean a different thing on every machine, because `workers: 0` follows the thread count, and a valve has to be sized by what the backend absorbs.
 - The gate never blocks. A request that cannot proceed is handed a ticket and its own task waits on it, which is why the same structure serves a task-per-connection loop and would serve a single-threaded readiness or completion loop, where the loop would check tickets from its own ready pass instead.
 - A full waiting room refuses in microseconds rather than holding the connection for the whole budget. Shedding early is the point: an unbounded line under a storm would pin every waiter's buffers and then fail all of them late.
 - A long-lived exchange releases its slot at handover. A websocket tunnel and a grpc stream live as long as their client, so holding the slot for their whole life would let a handful of open sockets pin the site.
 - grpc never queues. Its frame loop drives every live stream on the connection, so parking it would stall work already admitted, and a new stream is shed with a trailers-only `UNAVAILABLE` instead.
+
+<br>
+
+## The client bound
+
+The valve above bounds what a site spends on its backends. The client bound is
+the other side: what a site spends on a client that is slow, silent, or simply
+never leaves. `client_timeout_ms` defaults to 0, which is the bound off, so a
+site opts in and `client_conn_limit` means nothing until it does.
+
+- `client_timeout_ms` is how long one exchange may take. A connection over its
+  budget is cut by the site's background thread, not by the edge, so no timeout
+  logic lives inside a dispatch loop and a handler blocked in a read finds out
+  the same way it finds out about a client that vanished.
+- The cut lands in two stages. The first pass takes the read side only, which
+  wakes the handler and still leaves it able to write the `408` the client is
+  owed. The next pass, one tick later, takes the send side too, for the one
+  shape a read-side cut never reaches: a client that stopped reading parks the
+  handler in a write.
+- `client_conn_limit` is how many connections the site tracks at once. The table
+  is allocated once at site start and nothing allocates per connection, so a
+  connection arriving with every slot taken is refused `503` off a fixed reply
+  before it has sent a byte.
+- A long-lived exchange holds its slot instead of timing it. A websocket tunnel,
+  an SSE stream, and a grpc stream all live as long as their client, so the
+  bound stops counting against them at handover rather than cutting a working
+  stream.
+- Only the four client-facing edges take a slot, and only the leg that faces the
+  client. An upstream leg is bounded by its own keys, which answer a status
+  rather than cut a socket.
+- An http3 site has no bound. The cut works on a socket, and every QUIC
+  connection on a site shares one datagram socket, so both keys are refused
+  there when the file is read.
 
 <br>
 
@@ -311,7 +349,9 @@ flowchart LR
     relay --> backend[(challenge backend)]
 ```
 
-A cleartext http1 site answers the challenge path on its own listener. A TLS site on any port other than 80 also binds port 80 for the challenge, and that bind must succeed or the whole `start` fails, because a half-started site would silently break renewal.
+A cleartext http1 site answers the challenge path on its own listener. A TLS site on any port other than 80 binds port 80 as well, and that bind must succeed or the whole `start` fails, because a half-started site would silently break renewal.
+
+That port 80 listener is the cleartext companion, and acme is one of two reasons to have it. `force_https` earns it on its own: a site with no acme keys at all still binds port 80 so a browser typing a bare host name is moved to the https origin, `301` for GET and HEAD and `308` for every other method so the repeat never drops a body. `redirect_host` names the authority the `Location` carries, and without it the client's own `Host` is echoed. A site that asks for both serves the challenge path from the same listener and redirects everything else.
 
 <br>
 
@@ -324,6 +364,19 @@ The proxy edges follow the intermediary rules rather than passing everything thr
 - `Forwarded` carries the client address, the scheme, and the original host (rfc 7239). The scheme comes from the site's own `tls` setting, never from anything the client sent, so a backend that trusts it can tell a terminated https request from a cleartext one.
 - A failure zixer itself produced carries `Proxy-Status: zixer; error="..."`, so a 502 from the gateway is distinguishable from a 502 an upstream sent.
 
+On top of that contract a site adds its own headers, written as two optional blocks at the end of its config file:
+
+| block | leg | reaches |
+| :- | :- | :- |
+| `[response_headers]` | client | a relayed response, a file from `public_dir`, and a local error the edge builds |
+| `[request_headers]` | upstream | every message the edge re-originates |
+
+A value may name `$client_ip`, `$scheme`, or `$host`, which is how a backend behind a terminating edge learns the bare client address and the scheme the request really arrived on. The tokens resolve per request, and `$scheme` comes from the site's own `tls` setting rather than from anything the client claimed.
+
+The blocks add and replace, they never rewrite. A name already on the message is replaced by the site value, a name that is not there is appended, and no rule reads a relayed value and edits it. A name the intermediary rules already own is refused when the file is read rather than stripped later: the hop-by-hop list above, `Via`, `Date`, and `Forwarded` all belong to the edge.
+
+Both blocks are compiled once at load, so a request pays a copy and nothing else, and a site with a bad header line does not start. `config-en.md` carries the full refusal list and the few answers that deliberately carry no section, such as the fixed 503 an edge gives when it has already decided to spend nothing on the connection.
+
 <br>
 
 ## Failure model
@@ -332,11 +385,15 @@ The proxy edges follow the intermediary rules rather than passing everything thr
 | :- | :- |
 | no upstream is currently up | `503 no upstream available` |
 | every attempt failed | `502 all upstreams failed` with a `Proxy-Status` reason |
+| a connect ran past `upstream_connect_timeout_ms` | `504 upstream connect timeout` with a `Proxy-Status` reason |
 | the request already streamed its body | no retry, the failure is reported as is |
 | `Host` not covered by the certificate | `421 misdirected request` |
 | static path missing and no `spa_fallback` | `404 not found` from the edge, no upstream involved |
 | the site is at `process_limit` and the waiting room is full | `504 upstream queue full` with a `Proxy-Status` reason |
 | a queued request waited out `process_queue_timeout_ms` | `504 upstream queue timeout` with the same reason |
+| a client exchange ran past `client_timeout_ms` | `408 request timeout`, written after the sweep cut the read side |
+| a connection arrived with every `client_conn_limit` slot taken | `503 too many connections`, a fixed reply before the client sent a byte |
+| a cleartext request reached a `force_https` companion | `301` for GET and HEAD, `308` for every other method |
 
 An upstream that fails a connect is marked down and skipped by the round-robin picker for a cooldown window, then re-admitted and marked down again by the next failure. There is no health check thread and no probe: availability is learned from real traffic only.
 
@@ -358,10 +415,11 @@ An upstream that fails a connect is marked down and skipped by the round-robin p
 Being explicit about the gaps is part of the design:
 
 - No log output. `logs_dir` must exist and nothing writes into it.
-- No connect timeout, and no idle timeout on a websocket tunnel or an SSE stream. A blackholed upstream waits on the operating system. The wait for an upstream response head and for a `Content-Length` body is bounded by `upstream_timeout_ms`, see `config-en.md`.
+- No idle timeout on a websocket tunnel or an SSE stream. Both hold their client slot rather than spending it, so a stream that goes quiet is never cut. `client_timeout_ms` bounds an ordinary exchange, `upstream_timeout_ms` the wait for a response head or a `Content-Length` body, and `upstream_connect_timeout_ms` one connect attempt, see `config-en.md`.
 - No read deadline on a grpc site. Its upstream leg is one h2 connection multiplexing every stream, which needs its own mechanism, so the key is refused there rather than accepted and ignored.
+- No client bound on an http3 site. The bound cuts a socket, and every QUIC connection on a site shares one datagram socket, so `client_timeout_ms` and `client_conn_limit` are refused there rather than accepted and ignored.
 - No health checks, only failure learned from live traffic.
 - No hot reload of `main.cfg`, and no reload of every site at once.
-- No bound on how many connections one site accepts at once. The process gate bounds requests running against the backend, not sockets held open, so the accept ceiling is still what the operating system will give the process.
-- No per-path routing, header rewriting, rate limiting, or caching.
+- No accept ceiling separate from `client_conn_limit`. The bound refuses a connection past the limit, but only while `client_timeout_ms` is set, so a site with no client bound still accepts whatever the operating system will give the process.
+- No per-path routing, no rate limiting, and no response caching. A header section adds and replaces, it never reads a relayed value and edits it, and there is no way to remove a header the origin sent without setting one of the same name.
 - `dispatch` is validated and reported, and nothing reads it. See `config-en.md`.
