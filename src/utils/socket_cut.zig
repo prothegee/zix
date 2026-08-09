@@ -1,14 +1,18 @@
-//! Portable socket read-side cut: wake a parked read from outside its dispatch loop.
+//! Portable socket cut: wake a thread parked on a socket from outside its dispatch loop.
 //!
 //! What:
 //!   One helper, one concern. A shutdown of the read side wakes a blocking read, an epoll wait, or an
-//!   io_uring recv the same way, because none of them special-case a peer half-close. The caller acts
-//!   on the descriptor from outside, the loop parked on it is never told anything.
+//!   io_uring recv the same way, because none of them special-case a peer half-close. A shutdown of
+//!   both sides is the escalation for the one shape that cut does not reach. The caller acts on the
+//!   descriptor from outside, the loop parked on it is never told anything.
 //!
 //! Note:
-//! - SHUT_RD only, never SHUT_RDWR. A full shutdown wakes the same read but also takes the send side
-//!   away, which is the difference between a caller that can still write its own reply on the way out
-//!   and one that cannot.
+//! - The read-side cut comes first, always. A full shutdown wakes the same read but also takes the
+//!   send side away, which is the difference between a caller that can still write its own reply on
+//!   the way out and one that cannot.
+//! - The full cut is the escalation, for the caller a read-side cut never reached. A peer that
+//!   stopped reading parks the caller in write, where no read-side cut lands, and only taking the
+//!   send side away frees it. By then the reply is lost either way, so nothing is given up.
 //! - Windows never completes a receive already parked in the kernel on a receive-only disconnect
 //!   (documented winsock SD_RECEIVE behavior: it only disallows later receives), so the cut there
 //!   is windows_io's partial-disconnect ioctl plus a cancel of every request pending on the handle.
@@ -49,6 +53,34 @@ pub fn shutdownRead(handle: std.posix.socket_t) void {
     }
 
     _ = std.posix.system.shutdown(handle, std.posix.SHUT.RD);
+}
+
+/// Shut down both directions of a connected socket, so a thread parked on it wakes whether it is
+/// reading or writing.
+///
+/// Note:
+/// - The escalation after shutdownRead, not a replacement for it. This takes the send side away, so
+///   the caller can no longer answer, and it is only right once the reply is already lost.
+/// - Best effort, the same as shutdownRead: a socket already closed or never connected fails
+///   silently.
+///
+/// Param:
+/// handle - std.posix.socket_t (the socket, from stream.socket.handle)
+///
+/// Return:
+/// - void
+pub fn shutdownBoth(handle: std.posix.socket_t) void {
+    if (comptime is_windows) {
+        win_io.shutdownBoth(handle);
+        return;
+    }
+
+    if (comptime is_linux) {
+        _ = std.os.linux.shutdown(handle, std.os.linux.SHUT.RDWR);
+        return;
+    }
+
+    _ = std.posix.system.shutdown(handle, std.posix.SHUT.RDWR);
 }
 
 // --------------------------------------------------------- //
@@ -141,4 +173,120 @@ test "zix utils: socket_cut shutdownRead on an already-cut socket is a no-op" {
 
     var reader = accepted.reader(io, &read_buf);
     try std.testing.expectError(error.EndOfStream, reader.interface.readSliceAll(&read_buf));
+}
+
+test "zix utils: socket_cut shutdownBoth wakes a writer parked on a peer that stopped reading" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18987);
+    var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
+    defer server.deinit(io);
+
+    // The client connects and then never reads a byte, which is what fills both socket buffers and
+    // parks the sender. No read-side cut reaches a thread parked there.
+    const client = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(io);
+    const accepted = try server.accept(io);
+    defer accepted.close(io);
+
+    const Parked = struct {
+        var finished: std.atomic.Value(bool) = .init(false);
+
+        // Far more than any platform buffers, so the writer is parked long before the last chunk.
+        const TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+        fn run(stream: std.Io.net.Stream, parked_io: std.Io) void {
+            defer finished.store(true, .release);
+
+            var chunk: [64 * 1024]u8 = @splat('x');
+            var sent: usize = 0;
+
+            if (comptime is_windows) {
+                while (sent < TOTAL_BYTES) : (sent += chunk.len) {
+                    win_io.writeAll(stream.socket.handle, &chunk) catch return;
+                }
+
+                return;
+            }
+
+            var write_buf: [4096]u8 = undefined;
+            var writer = stream.writer(parked_io, &write_buf);
+            while (sent < TOTAL_BYTES) : (sent += chunk.len) {
+                writer.interface.writeAll(&chunk) catch return;
+                writer.interface.flush() catch return;
+            }
+        }
+    };
+
+    Parked.finished.store(false, .release);
+    const parked = try std.Thread.spawn(.{}, Parked.run, .{ accepted, io });
+
+    // Give the writer time to fill the buffers and park in its send.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+    try std.testing.expect(!Parked.finished.load(.acquire));
+
+    shutdownBoth(accepted.socket.handle);
+    parked.join();
+
+    try std.testing.expect(Parked.finished.load(.acquire));
+}
+
+test "zix utils: socket_cut a read-side cut leaves a parked writer parked" {
+    if (comptime !is_linux) {
+        // The escalation exists because of what a read-side cut does not reach, and that was
+        // measured on linux. Windows cancels every pending request with its cut, so a parked send
+        // wakes there and this check would be asserting the opposite. Nothing is bound.
+        std.log.info("the read-side cut against a parked writer was measured on linux, test skipped", .{});
+
+        return;
+    }
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18988);
+    var server = try addr.listen(io, .{ .kernel_backlog = 4, .reuse_address = true });
+    defer server.deinit(io);
+
+    const client = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
+    defer client.close(io);
+    const accepted = try server.accept(io);
+    defer accepted.close(io);
+
+    const Parked = struct {
+        var finished: std.atomic.Value(bool) = .init(false);
+
+        fn run(stream: std.Io.net.Stream, parked_io: std.Io) void {
+            defer finished.store(true, .release);
+
+            var chunk: [64 * 1024]u8 = @splat('x');
+            var write_buf: [4096]u8 = undefined;
+            var writer = stream.writer(parked_io, &write_buf);
+
+            var sent: usize = 0;
+            while (sent < 64 * 1024 * 1024) : (sent += chunk.len) {
+                writer.interface.writeAll(&chunk) catch return;
+                writer.interface.flush() catch return;
+            }
+        }
+    };
+
+    Parked.finished.store(false, .release);
+    const parked = try std.Thread.spawn(.{}, Parked.run, .{ accepted, io });
+
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+    shutdownRead(accepted.socket.handle);
+
+    // Still stuck: the read side is gone and the send side is untouched, so the sweep has to come
+    // back and take the send side away too.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+    try std.testing.expect(!Parked.finished.load(.acquire));
+
+    shutdownBoth(accepted.socket.handle);
+    parked.join();
+
+    try std.testing.expect(Parked.finished.load(.acquire));
 }

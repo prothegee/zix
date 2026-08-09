@@ -119,6 +119,18 @@ pub fn renderMain(out: *std.Io.Writer, path: []const u8, cfg: main_cfg.MainCfg, 
         try out.print("process_queue_timeout_ms: {d}\n", .{cfg.process_queue_timeout_ms});
     }
 
+    // The limit means nothing while the bound is 0, so an untouched daemon
+    // prints one honest line instead of two.
+    if (cfg.client_timeout_ms == 0) {
+        try out.writeAll("client_timeout_ms: 0 (bound off)\n");
+    } else {
+        try out.print("client_timeout_ms: {d}\n", .{cfg.client_timeout_ms});
+        try out.print("client_conn_limit: {d}\n", .{cfg.client_conn_limit});
+    }
+
+    try out.print("upstream_connect_timeout_ms: {d}\n", .{cfg.upstream_connect_timeout_ms});
+    try out.print("upstream_idle_ttl_ms: {d}\n", .{cfg.upstream_idle_ttl_ms});
+
     // The entry count means nothing while the window is 0, so the same one
     // honest line stands in for both keys.
     if (cfg.public_dir_cache_ttl_ms == 0) {
@@ -161,7 +173,11 @@ pub fn renderSite(out: *std.Io.Writer, path: []const u8, name: []const u8, cfg: 
     if (cfg.spa_fallback) |spa_fallback| try out.print("spa_fallback: {s}\n", .{spa_fallback});
     if (cfg.kernel_backlog) |kernel_backlog| try out.print("kernel_backlog: {d}\n", .{kernel_backlog});
     if (cfg.max_recv_buf) |max_recv_buf| try out.print("max_recv_buf: {d}\n", .{max_recv_buf});
+    if (cfg.client_timeout_ms) |client_timeout_ms| try out.print("client_timeout_ms: {d}\n", .{client_timeout_ms});
+    if (cfg.client_conn_limit) |client_conn_limit| try out.print("client_conn_limit: {d}\n", .{client_conn_limit});
     if (cfg.upstream_timeout_ms) |upstream_timeout_ms| try out.print("upstream_timeout_ms: {d}\n", .{upstream_timeout_ms});
+    if (cfg.upstream_connect_timeout_ms) |connect_timeout_ms| try out.print("upstream_connect_timeout_ms: {d}\n", .{connect_timeout_ms});
+    if (cfg.upstream_idle_ttl_ms) |idle_ttl_ms| try out.print("upstream_idle_ttl_ms: {d}\n", .{idle_ttl_ms});
     if (cfg.process_limit) |process_limit| try out.print("process_limit: {d}\n", .{process_limit});
     if (cfg.process_queue_len) |process_queue_len| try out.print("process_queue_len: {d}\n", .{process_queue_len});
     if (cfg.process_queue_timeout_ms) |process_queue_timeout_ms| try out.print("process_queue_timeout_ms: {d}\n", .{process_queue_timeout_ms});
@@ -454,9 +470,49 @@ test "zix zixer: cmd status, render main block matches the documented shape" {
         "max_recv_buf: 8192\n" ++
         "kernel_backlog: 1024\n" ++
         "process_limit: 0 (gate off)\n" ++
+        "client_timeout_ms: 0 (bound off)\n" ++
+        "upstream_connect_timeout_ms: 5000\n" ++
+        "upstream_idle_ttl_ms: 5000\n" ++
         "public_dir_cache_ttl_ms: 0 (cache off)\n" ++
         "\n";
     try std.testing.expectEqualStrings(expected, out.buffered());
+}
+
+test "zix zixer: cmd status, an armed client bound prints its limit too" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const cfg = main_cfg.MainCfg{
+        .logs_dir = "/r/logs",
+        .sites_dir = "/r/sites",
+        .client_timeout_ms = 30_000,
+        .client_conn_limit = 2048,
+    };
+    try renderMain(&out, "/r/main.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "client_timeout_ms: 30000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "client_conn_limit: 2048\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "bound off") == null);
+}
+
+test "zix zixer: cmd status, a site prints only the bound keys it names" {
+    var out_buf: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+
+    const upstreams = [_]site_cfg.Upstream{.{ .host = "127.0.0.1", .port = 3000 }};
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .port = 8080,
+        .upstreams = &upstreams,
+        .client_timeout_ms = 15_000,
+        .upstream_idle_ttl_ms = 60_000,
+    };
+    try renderSite(&out, "/r/sites/a.cfg", "a.cfg", cfg, &.{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "client_timeout_ms: 15000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "upstream_idle_ttl_ms: 60000\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "client_conn_limit") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "upstream_connect_timeout_ms") == null);
 }
 
 test "zix zixer: cmd status, an armed process gate prints all three values" {

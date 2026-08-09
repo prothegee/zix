@@ -11,10 +11,67 @@ pub const IDLE_CAP: usize = 4;
 /// upstreams would otherwise park IDLE_CAP against each of them at once.
 pub const TOTAL_IDLE_CAP: usize = 32;
 
-/// How long a parked connection may sit unused before it is closed. An idle
-/// pooled connection is capacity taken from the backend, so zixer gives it
-/// back rather than holding it for a request that may never come.
-pub const IDLE_TTL_MS: i64 = 5_000;
+/// How long a parked connection may sit unused before it is closed when the
+/// site names no age. An idle pooled connection is capacity taken from the
+/// backend, so zixer gives it back rather than holding it for a request that
+/// may never come.
+pub const DEFAULT_IDLE_TTL_MS: u32 = 5_000;
+
+/// Longest age a site may configure. Past ten minutes the backend has almost
+/// certainly dropped its end already, so the socket is parked capacity that
+/// buys nothing.
+pub const MAX_IDLE_TTL_MS: u32 = 600_000;
+
+/// How long a bounded connect waits for an upstream to answer when the site
+/// names no bound.
+pub const DEFAULT_CONNECT_TIMEOUT_MS: u32 = 5_000;
+
+/// Longest connect wait a site may configure. Past ten minutes no client is
+/// still listening, so the answer would go nowhere.
+pub const MAX_CONNECT_TIMEOUT_MS: u32 = 600_000;
+
+/// Whether a configured idle age is one a site may run.
+///
+/// Note:
+/// - 0 is valid and parks nothing: every finished exchange closes its upstream
+///   socket, which is what a backend that dislikes lingering sockets asks for.
+pub fn idleTtlInRange(ttl_ms: u32) bool {
+    return ttl_ms <= MAX_IDLE_TTL_MS;
+}
+
+/// Whether a configured connect wait is one a site may run. 0 is valid and
+/// means no bound, so only the ceiling is checked here.
+pub fn connectTimeoutInRange(timeout_ms: u32) bool {
+    return timeout_ms <= MAX_CONNECT_TIMEOUT_MS;
+}
+
+/// The site file's idle age over the daemon default, null falling back.
+///
+/// Note:
+/// - The cache measures age in i64 milliseconds against a monotonic stamp,
+///   the cfg carries a u32, so the widening happens once here.
+///
+/// Param:
+/// site_ttl_ms - ?u32 (the site file value, null when it names none)
+/// daemon_ttl_ms - u32 (the main.cfg value)
+///
+/// Return:
+/// - i64 age inside the configurable range
+pub fn resolveIdleTtl(site_ttl_ms: ?u32, daemon_ttl_ms: u32) i64 {
+    return @min(site_ttl_ms orelse daemon_ttl_ms, MAX_IDLE_TTL_MS);
+}
+
+/// The site file's connect wait over the daemon default, null falling back.
+///
+/// Param:
+/// site_timeout_ms - ?u32 (the site file value, null when it names none)
+/// daemon_timeout_ms - u32 (the main.cfg value)
+///
+/// Return:
+/// - u32 wait inside the configurable range
+pub fn resolveConnectTimeout(site_timeout_ms: ?u32, daemon_timeout_ms: u32) u32 {
+    return @min(site_timeout_ms orelse daemon_timeout_ms, MAX_CONNECT_TIMEOUT_MS);
+}
 
 /// One live connection to an upstream, tagged with its pool slot.
 pub const UpstreamConn = struct {
@@ -63,9 +120,9 @@ pub fn connect(io: std.Io, host: []const u8, port: u16, slot_index: u32) !Upstre
 /// - Guarded by the same short spinlock idiom as the pool: acquire and
 ///   release run from concurrent edge connection tasks.
 /// - Three bounds apply together: per_slot_cap per slot, total_cap across
-///   the cache, and IDLE_TTL_MS of age. The two counts stop a burst from
-///   parking a backend's capacity, the age stops a quiet site from holding
-///   it forever.
+///   the cache, and ttl_ms of age. The two counts stop a burst from parking
+///   a backend's capacity, the age stops a quiet site from holding it
+///   forever.
 /// - A site with several workers gives each worker its own cache through
 ///   initShare, which divides the counts. The bound is a site bound, not a
 ///   per-worker one: a backend must not lose more of its capacity just
@@ -76,6 +133,9 @@ pub const IdleCache = struct {
     stacks: []Stack,
     per_slot_cap: usize = IDLE_CAP,
     total_cap: usize = TOTAL_IDLE_CAP,
+    /// How long a parked conn may sit before it is closed, already resolved
+    /// from the site file and the main.cfg default.
+    ttl_ms: i64 = DEFAULT_IDLE_TTL_MS,
     total_len: usize = 0,
     lock_flag: std.atomic.Value(bool) = .init(false),
 
@@ -90,9 +150,10 @@ pub const IdleCache = struct {
         len: usize = 0,
     };
 
-    /// One stack per upstream slot, holding the whole site's idle bound.
+    /// One stack per upstream slot, holding the whole site's idle bound at
+    /// the default age.
     pub fn init(allocator: std.mem.Allocator, slot_count: usize) !IdleCache {
-        return initShare(allocator, slot_count, 1);
+        return initShare(allocator, slot_count, 1, DEFAULT_IDLE_TTL_MS);
     }
 
     /// One worker's share of the site's idle bound.
@@ -103,22 +164,30 @@ pub const IdleCache = struct {
     ///   more of a backend's capacity.
     /// - A share never falls below one connection: a worker that could
     ///   park nothing would reconnect on every request.
+    /// - The age is a site value, not a share: every worker of one site
+    ///   gives a backend connection back after the same wait.
     ///
     /// Param:
     /// allocator - std.mem.Allocator (owns the stacks)
     /// slot_count - usize (upstreams of this site)
     /// worker_count - usize (accept loops sharing the site bound)
+    /// ttl_ms - i64 (resolved idle age, 0 parks nothing)
     ///
     /// Return:
     /// - IdleCache with the divided bounds
-    pub fn initShare(allocator: std.mem.Allocator, slot_count: usize, worker_count: usize) !IdleCache {
+    pub fn initShare(allocator: std.mem.Allocator, slot_count: usize, worker_count: usize, ttl_ms: i64) !IdleCache {
         const stacks = try allocator.alloc(Stack, slot_count);
         for (stacks) |*stack| stack.len = 0;
 
         const workers = @max(1, worker_count);
         const total_cap = @max(1, TOTAL_IDLE_CAP / workers);
 
-        return .{ .stacks = stacks, .per_slot_cap = @min(IDLE_CAP, total_cap), .total_cap = total_cap };
+        return .{
+            .stacks = stacks,
+            .per_slot_cap = @min(IDLE_CAP, total_cap),
+            .total_cap = total_cap,
+            .ttl_ms = ttl_ms,
+        };
     }
 
     /// Close every idle conn and free the stacks.
@@ -156,7 +225,7 @@ pub const IdleCache = struct {
             cache.total_len -= 1;
 
             const parked = stack.conns[stack.len];
-            if (now_ms - parked.parked_at_ms >= IDLE_TTL_MS) {
+            if (now_ms - parked.parked_at_ms >= cache.ttl_ms) {
                 expired[expired_len] = parked.stream;
                 expired_len += 1;
                 continue;
@@ -177,11 +246,22 @@ pub const IdleCache = struct {
     /// Park a still-usable conn for reuse. A full stack, a full site, or a
     /// conn the caller kept past its age closes it instead.
     ///
+    /// Note:
+    /// - An age of 0 parks nothing at all. Holding the socket until the next
+    ///   sweep finds it already stale would take backend capacity for a
+    ///   reuse that can never happen.
+    ///
     /// Param:
     /// io - std.Io
     /// conn - UpstreamConn (the caller gives ownership up either way)
     /// now_ms - i64 (a monotonic_clock.nowMs stamp, drives the age bound)
     pub fn release(cache: *IdleCache, io: std.Io, conn: UpstreamConn, now_ms: i64) void {
+        if (cache.ttl_ms == 0) {
+            conn.stream.close(io);
+
+            return;
+        }
+
         cache.lockAcquire();
 
         const stack = &cache.stacks[conn.slot_index];
@@ -198,7 +278,7 @@ pub const IdleCache = struct {
         cache.lockRelease();
     }
 
-    /// Close every parked conn that has sat longer than IDLE_TTL_MS.
+    /// Close every parked conn that has sat longer than the cache's age.
     ///
     /// Note:
     /// - This is what a quiet site needs. Expiry on acquire only fires when
@@ -215,7 +295,7 @@ pub const IdleCache = struct {
         for (cache.stacks) |*stack| {
             var kept: usize = 0;
             for (stack.conns[0..stack.len]) |parked| {
-                if (now_ms - parked.parked_at_ms >= IDLE_TTL_MS and expired_len < expired.len) {
+                if (now_ms - parked.parked_at_ms >= cache.ttl_ms and expired_len < expired.len) {
                     expired[expired_len] = parked.stream;
                     expired_len += 1;
                     continue;
@@ -437,7 +517,7 @@ test "zix zixer: upstream conn, an aged conn is closed instead of handed out" {
 
     // Inside the age it comes back, past it the caller is told there is
     // nothing cached and the socket is gone.
-    try std.testing.expectEqual(@as(?UpstreamConn, null), cache.acquire(io, 0, 1000 + IDLE_TTL_MS));
+    try std.testing.expectEqual(@as(?UpstreamConn, null), cache.acquire(io, 0, 1000 + DEFAULT_IDLE_TTL_MS));
     try std.testing.expectEqual(@as(usize, 0), cache.totalIdle());
 
     var probe: [1]u8 = undefined;
@@ -469,9 +549,9 @@ test "zix zixer: upstream conn, sweep closes the aged and keeps the fresh" {
     defer cache.deinit(std.testing.allocator, io);
 
     cache.release(io, .{ .stream = fakeStream(aged[0]), .slot_index = 0, .reused = false }, 0);
-    cache.release(io, .{ .stream = fakeStream(fresh[0]), .slot_index = 1, .reused = false }, IDLE_TTL_MS);
+    cache.release(io, .{ .stream = fakeStream(fresh[0]), .slot_index = 1, .reused = false }, DEFAULT_IDLE_TTL_MS);
 
-    try std.testing.expectEqual(@as(usize, 1), cache.sweepExpired(io, IDLE_TTL_MS));
+    try std.testing.expectEqual(@as(usize, 1), cache.sweepExpired(io, DEFAULT_IDLE_TTL_MS));
     try std.testing.expectEqual(@as(usize, 0), cache.idleCount(0));
     try std.testing.expectEqual(@as(usize, 1), cache.idleCount(1));
     try std.testing.expectEqual(@as(usize, 1), cache.totalIdle());
@@ -480,9 +560,9 @@ test "zix zixer: upstream conn, sweep closes the aged and keeps the fresh" {
     var probe: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.read(aged[1], &probe, 1));
 
-    const fresh_conn = cache.acquire(io, 1, IDLE_TTL_MS).?;
+    const fresh_conn = cache.acquire(io, 1, DEFAULT_IDLE_TTL_MS).?;
     try std.testing.expectEqual(fresh[0], fresh_conn.stream.socket.handle);
-    cache.release(io, fresh_conn, IDLE_TTL_MS);
+    cache.release(io, fresh_conn, DEFAULT_IDLE_TTL_MS);
 }
 
 test "zix zixer: upstream conn, a worker share divides the site idle bound" {
@@ -491,13 +571,13 @@ test "zix zixer: upstream conn, a worker share divides the site idle bound" {
     const io = threaded.io();
 
     // One worker keeps the whole site bound, which is what init means.
-    var alone = try IdleCache.initShare(std.testing.allocator, 1, 1);
+    var alone = try IdleCache.initShare(std.testing.allocator, 1, 1, DEFAULT_IDLE_TTL_MS);
     defer alone.deinit(std.testing.allocator, io);
     try std.testing.expectEqual(TOTAL_IDLE_CAP, alone.total_cap);
     try std.testing.expectEqual(IDLE_CAP, alone.per_slot_cap);
 
     // Eight workers hold an eighth each, so the site total is unchanged.
-    var shared = try IdleCache.initShare(std.testing.allocator, 1, 8);
+    var shared = try IdleCache.initShare(std.testing.allocator, 1, 8, DEFAULT_IDLE_TTL_MS);
     defer shared.deinit(std.testing.allocator, io);
     try std.testing.expectEqual(TOTAL_IDLE_CAP / 8, shared.total_cap);
     try std.testing.expectEqual(@as(usize, 8) * shared.total_cap, TOTAL_IDLE_CAP);
@@ -513,7 +593,7 @@ test "zix zixer: upstream conn, a worker share never falls below one conn" {
 
     // More workers than the site bound has room for: a worker that could
     // park nothing would reconnect on every single request.
-    var tiny = try IdleCache.initShare(std.testing.allocator, 1, TOTAL_IDLE_CAP * 4);
+    var tiny = try IdleCache.initShare(std.testing.allocator, 1, TOTAL_IDLE_CAP * 4, DEFAULT_IDLE_TTL_MS);
     defer tiny.deinit(std.testing.allocator, io);
 
     try std.testing.expectEqual(@as(usize, 1), tiny.total_cap);
@@ -521,7 +601,7 @@ test "zix zixer: upstream conn, a worker share never falls below one conn" {
 
     // A zero worker count is nonsense a caller should never pass, and it
     // still has to give a usable cache rather than divide by zero.
-    var zero = try IdleCache.initShare(std.testing.allocator, 1, 0);
+    var zero = try IdleCache.initShare(std.testing.allocator, 1, 0, DEFAULT_IDLE_TTL_MS);
     defer zero.deinit(std.testing.allocator, io);
     try std.testing.expectEqual(TOTAL_IDLE_CAP, zero.total_cap);
 }
@@ -541,7 +621,7 @@ test "zix zixer: upstream conn, a share cache stops parking at its own total" {
 
     // Four workers, so this cache holds a quarter of the site bound.
     const share = TOTAL_IDLE_CAP / 4;
-    var cache = try IdleCache.initShare(std.testing.allocator, share + 1, 4);
+    var cache = try IdleCache.initShare(std.testing.allocator, share + 1, 4, DEFAULT_IDLE_TTL_MS);
     defer cache.deinit(std.testing.allocator, io);
 
     var pairs: [TOTAL_IDLE_CAP / 4 + 1][2]std.posix.fd_t = undefined;
@@ -560,4 +640,94 @@ test "zix zixer: upstream conn, a share cache stops parking at its own total" {
     // The one past the share was closed, so its peer reads EOF.
     var probe: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.read(pairs[share][1], &probe, 1));
+}
+
+test "zix zixer: upstream conn, the configured ranges end where the legs do" {
+    // 0 is a real setting on both: no parked conn on one, no connect bound on
+    // the other, so only the ceilings are refused.
+    try std.testing.expect(idleTtlInRange(0));
+    try std.testing.expect(idleTtlInRange(MAX_IDLE_TTL_MS));
+    try std.testing.expect(!idleTtlInRange(MAX_IDLE_TTL_MS + 1));
+
+    try std.testing.expect(connectTimeoutInRange(0));
+    try std.testing.expect(connectTimeoutInRange(MAX_CONNECT_TIMEOUT_MS));
+    try std.testing.expect(!connectTimeoutInRange(MAX_CONNECT_TIMEOUT_MS + 1));
+}
+
+test "zix zixer: upstream conn, the site file resolves over the daemon default" {
+    try std.testing.expectEqual(@as(i64, 9_000), resolveIdleTtl(null, 9_000));
+    try std.testing.expectEqual(@as(i64, 2_000), resolveIdleTtl(2_000, 9_000));
+    try std.testing.expectEqual(@as(i64, 0), resolveIdleTtl(0, 9_000));
+    try std.testing.expectEqual(@as(i64, MAX_IDLE_TTL_MS), resolveIdleTtl(MAX_IDLE_TTL_MS + 1, 9_000));
+
+    try std.testing.expectEqual(@as(u32, 5_000), resolveConnectTimeout(null, 5_000));
+    try std.testing.expectEqual(@as(u32, 250), resolveConnectTimeout(250, 5_000));
+    try std.testing.expectEqual(@as(u32, 0), resolveConnectTimeout(0, 5_000));
+    try std.testing.expectEqual(MAX_CONNECT_TIMEOUT_MS, resolveConnectTimeout(MAX_CONNECT_TIMEOUT_MS + 1, 5_000));
+}
+
+test "zix zixer: upstream conn, a site age of its own bounds the cache" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        // non-linux region: the fixture parks raw socketpair descriptors,
+        // which only linux hands out here. Nothing is bound.
+        std.log.info("idle cache configured age test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[1]);
+
+    // A site that keeps its backend conns far longer than the default.
+    var cache = try IdleCache.initShare(std.testing.allocator, 1, 1, 60_000);
+    defer cache.deinit(std.testing.allocator, io);
+    try std.testing.expectEqual(@as(i64, 60_000), cache.ttl_ms);
+
+    cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = 0, .reused = false }, 0);
+
+    // Well past the default age, and the configured one is what decides.
+    try std.testing.expectEqual(@as(usize, 0), cache.sweepExpired(io, DEFAULT_IDLE_TTL_MS * 2));
+    const kept = cache.acquire(io, 0, DEFAULT_IDLE_TTL_MS * 2).?;
+    try std.testing.expectEqual(fds[0], kept.stream.socket.handle);
+
+    cache.release(io, kept, 0);
+    try std.testing.expectEqual(@as(usize, 1), cache.sweepExpired(io, 60_000));
+
+    var probe: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.read(fds[1], &probe, 1));
+}
+
+test "zix zixer: upstream conn, an age of zero parks nothing" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        // non-linux region: the fixture parks raw socketpair descriptors,
+        // which only linux hands out here. Nothing is bound.
+        std.log.info("idle cache zero age test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[1]);
+
+    var cache = try IdleCache.initShare(std.testing.allocator, 1, 1, 0);
+    defer cache.deinit(std.testing.allocator, io);
+
+    // With no age at all the socket goes back to the backend at once, rather
+    // than sitting parked for a reuse that can never happen.
+    cache.release(io, .{ .stream = fakeStream(fds[0]), .slot_index = 0, .reused = false }, 1000);
+    try std.testing.expectEqual(@as(usize, 0), cache.totalIdle());
+    try std.testing.expectEqual(@as(?UpstreamConn, null), cache.acquire(io, 0, 1000));
+
+    var probe: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.read(fds[1], &probe, 1));
 }

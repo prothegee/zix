@@ -24,12 +24,82 @@ const std = @import("std");
 /// is what bounds that allocation.
 pub const MAX_SLOTS: usize = 65_536;
 
+/// Connections a site tracks when it turns the bound on without naming a number. Well past what one
+/// box serves at once with a thread per connection, so the ceiling is reached by a flood and not by
+/// ordinary traffic.
+pub const DEFAULT_CONN_LIMIT: usize = 4096;
+
+/// Longest client bound a site may configure. A connection meant to outlive an hour is a stream, and
+/// hold() is what a stream uses instead of a budget.
+pub const MAX_TIMEOUT_MS: u32 = 3_600_000;
+
 /// The deadline of a slot that is held rather than timed. Nothing is ever past it.
 pub const NEVER_MS: i64 = std.math.maxInt(i64);
 
 /// Empty-list marker for the free list. A real index can never reach it: MAX_SLOTS bounds the array
 /// far under this.
 const NIL: u32 = std.math.maxInt(u32);
+
+/// The two values one site runs the client bound with, already resolved from the site file and the
+/// main.cfg defaults.
+///
+/// Note:
+/// - conn_limit only means anything while timeout_ms is above 0. A site with no bound tracks no
+///   connection, so it needs no slot and never refuses one.
+pub const Settings = struct {
+    /// How long one client exchange may take. 0 is the bound off, which is what a site that never
+    /// asked for one gets.
+    timeout_ms: u32 = 0,
+    /// Connections this site may track at once. The table is this many slots, and a connection
+    /// arriving with every slot taken is refused rather than served unbounded.
+    conn_limit: usize = DEFAULT_CONN_LIMIT,
+
+    /// Whether the bound does anything at all.
+    pub fn armed(settings: Settings) bool {
+        return settings.timeout_ms > 0;
+    }
+
+    /// Slots the table needs for these settings, 0 when the bound is off.
+    pub fn capacity(settings: Settings) usize {
+        if (!settings.armed()) return 0;
+
+        return settings.conn_limit;
+    }
+};
+
+/// Whether a configured client bound is one a site may run.
+///
+/// Note:
+/// - 0 is valid and means off, so only the ceiling is checked here.
+pub fn timeoutInRange(timeout_ms: u32) bool {
+    return timeout_ms <= MAX_TIMEOUT_MS;
+}
+
+/// Whether a configured connection count is one a site may track. Zero is refused: a table with no
+/// slot would refuse every connection, and turning the bound off is what client_timeout_ms is for.
+pub fn connLimitInRange(conn_limit: usize) bool {
+    return conn_limit >= 1 and conn_limit <= MAX_SLOTS;
+}
+
+/// The site file's values over the daemon defaults, each null falling back.
+///
+/// Note:
+/// - Every input already passed validation, so none can be out of range. Clamping anyway keeps a
+///   caller that skipped validation (a test rig, a future caller) inside what the table can hold.
+///
+/// Param:
+/// site_timeout_ms - ?u32 (the site file value, null when it names none)
+/// site_conn_limit - ?usize (same)
+/// daemon - Settings (the main.cfg values)
+///
+/// Return:
+/// - Settings with both fields inside their range
+pub fn resolve(site_timeout_ms: ?u32, site_conn_limit: ?usize, daemon: Settings) Settings {
+    return .{
+        .timeout_ms = @min(site_timeout_ms orelse daemon.timeout_ms, MAX_TIMEOUT_MS),
+        .conn_limit = std.math.clamp(site_conn_limit orelse daemon.conn_limit, 1, MAX_SLOTS),
+    };
+}
 
 /// Where one slot stands. A sweeper reads this before anything else and acts on nothing but ARMED,
 /// which is what keeps it off a slot an owner is part way through.
@@ -401,6 +471,58 @@ fn testHandle(seed: usize) std.posix.socket_t {
     if (comptime @typeInfo(std.posix.socket_t) == .pointer) return @ptrFromInt(seed + 1);
 
     return @intCast(seed + 1);
+}
+
+test "zix zixer: deadline table, the bound is off until a timeout names it" {
+    const off = Settings{};
+    try std.testing.expect(!off.armed());
+    try std.testing.expectEqual(@as(usize, 0), off.capacity());
+
+    // The limit alone tracks nothing: without a budget there is no deadline to sweep for.
+    const limit_only = Settings{ .conn_limit = 64 };
+    try std.testing.expect(!limit_only.armed());
+    try std.testing.expectEqual(@as(usize, 0), limit_only.capacity());
+
+    const bounded = Settings{ .timeout_ms = 30_000, .conn_limit = 64 };
+    try std.testing.expect(bounded.armed());
+    try std.testing.expectEqual(@as(usize, 64), bounded.capacity());
+}
+
+test "zix zixer: deadline table, the configured ranges end where the table does" {
+    try std.testing.expect(timeoutInRange(0));
+    try std.testing.expect(timeoutInRange(MAX_TIMEOUT_MS));
+    try std.testing.expect(!timeoutInRange(MAX_TIMEOUT_MS + 1));
+
+    // 0 slots would refuse every connection, which is not what turning a bound off means.
+    try std.testing.expect(!connLimitInRange(0));
+    try std.testing.expect(connLimitInRange(1));
+    try std.testing.expect(connLimitInRange(MAX_SLOTS));
+    try std.testing.expect(!connLimitInRange(MAX_SLOTS + 1));
+}
+
+test "zix zixer: deadline table, the site file resolves over the daemon default" {
+    const daemon = Settings{ .timeout_ms = 30_000, .conn_limit = 1024 };
+
+    const silent = resolve(null, null, daemon);
+    try std.testing.expectEqual(@as(u32, 30_000), silent.timeout_ms);
+    try std.testing.expectEqual(@as(usize, 1024), silent.conn_limit);
+
+    const named = resolve(5_000, 64, daemon);
+    try std.testing.expectEqual(@as(u32, 5_000), named.timeout_ms);
+    try std.testing.expectEqual(@as(usize, 64), named.conn_limit);
+
+    // A site turning the bound off while the daemon leaves it on.
+    const site_off = resolve(0, null, daemon);
+    try std.testing.expect(!site_off.armed());
+
+    // Out of range only reaches here from a caller that skipped validation, and it lands inside
+    // what the table can hold rather than allocating past the ceiling.
+    const clamped = resolve(MAX_TIMEOUT_MS + 1, MAX_SLOTS + 1, daemon);
+    try std.testing.expectEqual(MAX_TIMEOUT_MS, clamped.timeout_ms);
+    try std.testing.expectEqual(MAX_SLOTS, clamped.conn_limit);
+
+    const floored = resolve(1_000, 0, daemon);
+    try std.testing.expectEqual(@as(usize, 1), floored.conn_limit);
 }
 
 test "zix zixer: deadline table, a table with no capacity tracks nothing" {
