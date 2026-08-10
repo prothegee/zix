@@ -5,6 +5,7 @@ const std = @import("std");
 const socket_pair = @import("../../../utils/socket_pair.zig");
 const fd_io = @import("../../../utils/fd_io.zig");
 const win_io = @import("../../../utils/windows_io.zig");
+const peer_addr = @import("../../../utils/peer_addr.zig");
 const h2 = @import("../Http2.zig");
 const frame = @import("frame.zig");
 const status = @import("status.zig");
@@ -1500,20 +1501,13 @@ fn serveGrpcLoop(
     }
 }
 
+/// The peer of a connected socket as "1.2.3.4:5678", or "-" when it cannot be read.
+///
+/// Note:
+/// - One line over the shared helper, which is also what the TCP connection records and the HTTP
+///   access records use, so every engine names a peer the same way.
 pub fn peerStr(fd: std.posix.fd_t, buf: *[64]u8) []const u8 {
-    // getpeername is POSIX-only in Zig 0.16 std: no peer string on Windows.
-    if (comptime @import("builtin").target.os.tag == .windows) return "-";
-
-    var storage: std.posix.sockaddr.storage = undefined;
-    var len: std.posix.socklen_t = @sizeOf(@TypeOf(storage));
-    std.posix.getpeername(fd, @ptrCast(&storage), &len) catch return "-";
-    if (storage.family == std.posix.AF.INET) {
-        const sock_addr_in: *const std.posix.sockaddr.in = @ptrCast(&storage);
-        const addr_bytes: [4]u8 = @bitCast(sock_addr_in.addr);
-        const port = std.mem.readInt(u16, @as([2]u8, @bitCast(sock_addr_in.port))[0..2], .big);
-        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3], port }) catch "-";
-    }
-    return "-";
+    return peer_addr.endpoint(fd, buf);
 }
 
 fn slotFor(stream_id: u31, streams: []Stream, used: []bool) ?usize {
