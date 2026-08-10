@@ -1,27 +1,39 @@
 //! zix uds server
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdsServerConfig = Config.UdsServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
-const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 const ignoreSigpipe = @import("../utils/ignore_sigpipe.zig").ignoreSigpipe;
+
+const log = std.log.scoped(.zix_uds);
 
 /// Read, write, and payload buffer size for the default echo handler. A frame
 /// whose payload exceeds this closes the connection.
 const ECHO_BUF_SIZE: usize = 4096;
 
-/// Emit a server lifecycle line. Routes through config.logger when present.
-/// Without a logger it prints to stderr only in Debug builds (silent in release).
-fn logSystem(config: UdsServerConfig, comptime fmt: []const u8, args: anytype) void {
+/// Emit a server line at the given level. Routes through config.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+fn logSystem(config: UdsServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (config.logger) |lg| {
-        lg.system(.INFO, "uds", fmt, args);
+        lg.system(level, "uds", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix uds: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 fn applyConnTimeout(sock_fd: std.posix.fd_t, recv_ms: u32, send_ms: u32) void {
@@ -55,8 +67,8 @@ fn UdsServerImpl(comptime handler: HandlerFn) type {
         config: UdsServerConfig,
 
         pub fn init(config: UdsServerConfig) !Self {
-            if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
-            if (config.path.len == 0) return error.PathEmpty;
+            if (comptime !std.Io.net.has_unix_sockets) return error.ZixUdsNotSupported;
+            if (config.path.len == 0) return error.ZixPathEmpty;
 
             return .{ .config = config };
         }
@@ -70,7 +82,7 @@ fn UdsServerImpl(comptime handler: HandlerFn) type {
         /// connection (it owns the stream and must close it). io is taken from
         /// config.io (caller-provided, must outlive the server).
         pub fn run(self: *Self) !void {
-            if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
+            if (comptime !std.Io.net.has_unix_sockets) return error.ZixUdsNotSupported;
 
             ignoreSigpipe();
 
@@ -79,14 +91,25 @@ fn UdsServerImpl(comptime handler: HandlerFn) type {
             // Remove stale socket from a previous run before binding.
             std.Io.Dir.cwd().deleteFile(io, self.config.path) catch {};
 
-            const unix_addr = try std.Io.net.UnixAddress.init(self.config.path);
-            var net_server = try unix_addr.listen(io, .{ .kernel_backlog = self.config.kernel_backlog });
+            // The bare std error names neither the socket nor what went wrong with it, and a unix
+            // socket fails in ways a tcp port does not: a path too long for sun_path, a directory
+            // that is not there, a stale socket the process may not remove.
+            const unix_addr = std.Io.net.UnixAddress.init(self.config.path) catch |err| {
+                logSystem(self.config, .ERROR, "the socket path is not usable: {s} ({s})", .{ self.config.path, @errorName(err) });
+
+                return error.ZixUdsPathInvalid;
+            };
+            var net_server = unix_addr.listen(io, .{ .kernel_backlog = self.config.kernel_backlog }) catch |err| {
+                logSystem(self.config, .ERROR, "could not listen on {s} ({s})", .{ self.config.path, @errorName(err) });
+
+                return error.ZixUdsListenFailed;
+            };
             defer {
                 net_server.deinit(io);
                 std.Io.Dir.cwd().deleteFile(io, self.config.path) catch {};
             }
 
-            logSystem(self.config, "listening on {s}", .{self.config.path});
+            logSystem(self.config, .INFO, "listening on {s}", .{self.config.path});
 
             const ConnTask = struct {
                 stream: std.Io.net.Stream,
@@ -138,7 +161,7 @@ pub const UdsServer = struct {
     ///
     /// Return:
     /// - !UdsServerImpl(handler)
-    /// - error.PathEmpty if config.path is empty
+    /// - error.ZixPathEmpty if config.path is empty
     pub fn init(comptime handler: HandlerFn, config: UdsServerConfig) !UdsServerImpl(handler) {
         return UdsServerImpl(handler).init(config);
     }
@@ -192,7 +215,7 @@ test "zix uds: UdsServer init, empty path returns PathEmpty" {
     defer threaded.deinit();
 
     try std.testing.expectError(
-        error.PathEmpty,
+        error.ZixPathEmpty,
         UdsServer.init(echoHandler, .{ .io = threaded.io(), .path = "", .allocator = std.testing.allocator }),
     );
 }
