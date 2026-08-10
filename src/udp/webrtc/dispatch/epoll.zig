@@ -24,6 +24,7 @@ const linux = std.os.linux;
 const Config = @import("../config.zig");
 const WebrtcServerConfig = Config.WebrtcServerConfig;
 const common = @import("common.zig");
+const listen_report = @import("../../../multiplexers/listen_report.zig");
 const core = @import("../core.zig");
 const datagram = @import("../../datagram.zig");
 const worker = @import("worker.zig");
@@ -48,20 +49,20 @@ const Listener = struct {
     ///
     /// Return:
     /// - Listener
-    /// - error.EpollCreateFailed / error.EpollWatchFailed when the kernel refused the descriptor
+    /// - error.ZixEpollCreateFailed / error.ZixEpollWatchFailed when the kernel refused the descriptor
     /// - whatever the bind or the allocations raised
     fn init(config: WebrtcServerConfig) !Listener {
         const fd = try common.openWorkerSocket(config);
         errdefer datagram.close(fd);
 
         const created = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-        if (std.posix.errno(created) != .SUCCESS) return error.EpollCreateFailed;
+        if (std.posix.errno(created) != .SUCCESS) return error.ZixEpollCreateFailed;
 
         const epfd: i32 = @intCast(created);
         errdefer _ = linux.close(epfd);
 
         var watch = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = fd } };
-        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &watch)) != .SUCCESS) return error.EpollWatchFailed;
+        if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &watch)) != .SUCCESS) return error.ZixEpollWatchFailed;
 
         var rx = try datagram.RecvBatch.init(config.allocator, RECV_BATCH, config.max_recv_buf);
         errdefer rx.deinit();
@@ -133,7 +134,7 @@ const Listener = struct {
                 // A datagram the slot could not hold is one no layer below can parse, and every
                 // layer here is authenticated, so guessing at the missing bytes is not an option.
                 if (self.rx.hdrs[i].hdr.flags & linux.MSG.TRUNC != 0) {
-                    common.logSystem(self.config, "dropped a datagram larger than max_recv_buf ({d})", .{self.config.max_recv_buf});
+                    common.logSystem(self.config, .WARN, "dropped a datagram larger than max_recv_buf ({d})", .{self.config.max_recv_buf});
 
                     continue;
                 }
@@ -161,15 +162,24 @@ const Listener = struct {
 ///
 /// Return:
 /// - void, returning only when the worker could not start
-pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: WebrtcServerConfig, worker_id: usize) void {
+pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: WebrtcServerConfig, worker_id: usize, report: *listen_report.Report) void {
     common.pinToCpu(worker_id);
 
+    // Every exit between here and the receive loop has to reach the group, or the workers that
+    // did bind wait on one that is already gone.
+    var slot = report.slot(config.io, error.ZixWebrtcWorkerSetupFailed);
+    defer slot.close();
+
     var listener = Listener.init(config) catch |err| {
-        common.logSystem(config, "epoll worker {d} could not start: {s}", .{ worker_id, @errorName(err) });
+        slot.fail(err);
 
         return;
     };
     defer listener.deinit();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them.
+    slot.ok();
+    if (report.awaitGroup(config.io) != null) return;
 
     while (true) listener.pass(handler);
 }
@@ -182,22 +192,41 @@ pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: WebrtcServerCon
 ///
 /// Return:
 /// - !void, blocking until every worker has gone
-/// - error.DispatchModelUnsupported off Linux (ADR-065), where the caller picks .ASYNC
+/// - error.ZixDispatchModelUnsupported off Linux (ADR-065), where the caller picks .ASYNC
 pub fn runEpoll(comptime handler: core.HandlerFn, config: WebrtcServerConfig) !void {
-    if (comptime !datagram.is_linux) return error.DispatchModelUnsupported;
+    if (comptime !datagram.is_linux) return error.ZixDispatchModelUnsupported;
 
     const want = common.effectiveWorkers(config);
-
-    common.logSystem(config, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + epoll)", .{ config.ip, config.port, want });
 
     const threads = try config.allocator.alloc(std.Thread, want);
     defer config.allocator.free(threads);
 
+    // What every worker says about its own socket, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(want);
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i, &report }) catch |err| {
+            common.logSystem(config, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ i, want, @errorName(err) });
+            report.abandon(config.io, want - i, err);
+
+            break;
+        };
         spawned += 1;
     }
+
+    if (report.awaitGroup(config.io)) |err| {
+        common.logSystem(config, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not start ({s})", .{ config.ip, config.port, report.failures(), want, @errorName(err) });
+
+        for (threads[0..spawned]) |thread| thread.join();
+
+        return error.ZixWebrtcListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a socket that may never have been bound.
+    common.logSystem(config, .INFO, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + epoll)", .{ config.ip, config.port, want });
 
     for (threads[0..spawned]) |thread| thread.join();
 }
@@ -221,7 +250,7 @@ test "zix webrtc: epoll, run is refused off linux and every worker binds on it" 
     const config = session.testConfig(threaded.io(), std.testing.allocator, &tls, TEST_SERVER_PORT);
 
     if (comptime builtin.target.os.tag != .linux) {
-        try std.testing.expectError(error.DispatchModelUnsupported, runEpoll(session.echoHandler, config));
+        try std.testing.expectError(error.ZixDispatchModelUnsupported, runEpoll(session.echoHandler, config));
 
         return;
     }

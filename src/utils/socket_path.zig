@@ -28,7 +28,7 @@ const separator: []const u8 = if (builtin.os.tag == .windows) "\\" else "/";
 /// bytes anyway, so a directory beyond this could not host one.
 const CWD_PATH_MAX: usize = 512;
 
-pub const Error = error{ PathTooLong, DirectoryUnavailable };
+pub const Error = error{ ZixPathTooLong, ZixDirectoryUnavailable };
 
 // --------------------------------------------------------- //
 
@@ -46,16 +46,16 @@ pub const Error = error{ PathTooLong, DirectoryUnavailable };
 ///
 /// Return:
 /// - the absolute path, a slice of buf
-/// - error.DirectoryUnavailable when the directory could not be created or the working
+/// - error.ZixDirectoryUnavailable when the directory could not be created or the working
 ///   directory could not be read
-/// - error.PathTooLong when the result does not fit in buf
+/// - error.ZixPathTooLong when the result does not fit in buf
 pub fn resolve(io: std.Io, dir_name: []const u8, file_name: []const u8, buf: []u8) Error![]const u8 {
-    std.Io.Dir.cwd().createDirPath(io, dir_name) catch return error.DirectoryUnavailable;
+    std.Io.Dir.cwd().createDirPath(io, dir_name) catch return error.ZixDirectoryUnavailable;
 
     var cwd_path: [CWD_PATH_MAX]u8 = undefined;
-    const cwd_len = std.process.currentPath(io, &cwd_path) catch return error.DirectoryUnavailable;
+    const cwd_len = std.process.currentPath(io, &cwd_path) catch return error.ZixDirectoryUnavailable;
 
-    return std.fmt.bufPrint(buf, "{s}{s}{s}{s}{s}", .{ cwd_path[0..cwd_len], separator, dir_name, separator, file_name }) catch return error.PathTooLong;
+    return std.fmt.bufPrint(buf, "{s}{s}{s}{s}{s}", .{ cwd_path[0..cwd_len], separator, dir_name, separator, file_name }) catch return error.ZixPathTooLong;
 }
 
 /// Remove a socket file left behind by an earlier run, so a rebind is not refused.
@@ -130,7 +130,7 @@ test "zix utils: socket_path resolve reports PathTooLong instead of truncating" 
 
     // a buffer far too small for any absolute path must error, never hand back a partial path
     var tiny: [4]u8 = undefined;
-    try std.testing.expectError(error.PathTooLong, resolve(io, "tmp", "socket_path_test.sock", &tiny));
+    try std.testing.expectError(error.ZixPathTooLong, resolve(io, "tmp", "socket_path_test.sock", &tiny));
 }
 
 test "zix utils: socket_path clear removes a stale socket file and tolerates a missing one" {

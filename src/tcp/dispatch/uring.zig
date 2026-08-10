@@ -16,6 +16,7 @@ const uring = @import("../../multiplexers/ring.zig");
 const slab = @import("../../multiplexers/slab.zig");
 const Logger = @import("../../logger/logger.zig").Logger;
 const reuseport = @import("../../multiplexers/reuseport.zig");
+const listen_report = @import("../../multiplexers/listen_report.zig");
 const common = @import("common.zig");
 const logSystem = common.logSystem;
 const FrameFn = common.FrameFn;
@@ -100,6 +101,8 @@ const UringFrameCtx = struct {
     logger: ?*Logger = null,
     /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
     steering: ?reuseport.Steering = null,
+    /// Where this worker says whether its listener came up, shared with the whole group.
+    report: *listen_report.Report,
 };
 
 /// Build a concrete framed io_uring worker entry with frame_fn baked in at
@@ -388,18 +391,36 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
             var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
             defer bind_turn.release();
 
-            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
+            // Every exit between here and the ring loop has to reach the group, or the workers
+            // that did bind wait on one that is already gone.
+            var slot = ctx.report.slot(ctx.io, error.ZixTcpWorkerSetupFailed);
+            defer slot.close();
+
+            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch |err| {
+                slot.fail(err);
+
+                return;
+            };
             var net_server = addr.listen(ctx.io, .{
                 .mode = .stream,
                 .protocol = .tcp,
                 .reuse_address = true,
                 .kernel_backlog = ctx.kernel_backlog,
-            }) catch return;
+            }) catch |err| {
+                slot.fail(err);
+
+                return;
+            };
             defer net_server.deinit(ctx.io);
             const listener_fd = net_server.socket.handle;
 
-            if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+            if (ctx.steering) |steer| _ = reuseport.attachCpuSteering(listener_fd, steer.group_size);
             bind_turn.release();
+
+            // Serve only once every worker is up, so a group where one bind failed serves on none
+            // of them and the caller gets one honest failure.
+            slot.ok();
+            if (ctx.report.awaitGroup(ctx.io) != null) return;
 
             const slots = slab.mapZeroedSlots(?*UringConn, ctx.max_conns) catch return;
 
@@ -427,8 +448,6 @@ fn uringFrameWorkerFn(comptime frame_fn: FrameFn) fn (UringFrameCtx) void {
 pub fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: FrameFn) !void {
     const worker_count = if (cfg.workers == 0) common.getAvailableCpuCount() else cfg.workers;
 
-    logSystem(cfg, "listening on {s}:{d} (io_uring framed/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
-
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
 
@@ -436,9 +455,13 @@ pub fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: Frame
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
+    // What every worker says about its own listener, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(worker_count);
+
     const worker_fn = uringFrameWorkerFn(frame_fn);
     for (threads, 0..) |*thread, worker_id|
-        thread.* = try std.Thread.spawn(
+        thread.* = std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
             .{UringFrameCtx{
@@ -452,8 +475,28 @@ pub fn runFramedUring(cfg: TcpServerConfig, io: std.Io, comptime frame_fn: Frame
                 .worker_id = worker_id,
                 .logger = cfg.logger,
                 .steering = steering,
+                .report = &report,
             }},
-        );
+        ) catch |err| {
+            logSystem(cfg, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ worker_id, worker_count, @errorName(err) });
+            report.abandon(io, worker_count - worker_id, err);
+
+            for (threads[0..worker_id]) |spawned| spawned.join();
+
+            return error.ZixTcpListenFailed;
+        };
+
+    if (report.awaitGroup(io)) |err| {
+        logSystem(cfg, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ cfg.ip, cfg.port, report.failures(), worker_count, @errorName(err) });
+
+        for (threads) |thread| thread.join();
+
+        return error.ZixTcpListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a listener that may never have come up.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (io_uring framed/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
 
     for (threads) |thread| thread.join();
 }

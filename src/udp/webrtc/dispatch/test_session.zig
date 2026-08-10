@@ -89,6 +89,13 @@ pub fn testContext(allocator: std.mem.Allocator) !Tls.Context {
 ///
 /// Return:
 /// - WebrtcServerConfig
+/// A logger that writes nowhere: console off and no save_path, so nothing is opened and nothing is
+/// printed. It gives the rejection and drop paths a destination, which keeps a test's expected
+/// failure message out of the runner's logged-error count.
+const Logger = @import("../../../logger/logger.zig").Logger;
+
+var quiet_logger = Logger{ .config = .{}, .allocator = std.testing.allocator };
+
 pub fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context, port: u16) WebrtcServerConfig {
     return .{
         .io = io,
@@ -104,6 +111,7 @@ pub fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context, p
         // Short, so a pass with nothing to read comes back quickly instead of parking a quarter of
         // a second at a time.
         .tick_interval_ms = 20,
+        .logger = &quiet_logger,
     };
 }
 

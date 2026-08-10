@@ -15,8 +15,8 @@ const std = @import("std");
 pub const DB_COUNT = 16;
 
 pub const Error = error{
-    WrongType,
-    NotAnInteger,
+    RedizWrongType,
+    RedizNotAnInteger,
     OutOfMemory,
 };
 
@@ -195,13 +195,13 @@ pub const Keyspace = struct {
     ///
     /// Return:
     /// - ?[]const u8, null when the key is missing or expired
-    /// - error.WrongType when the key holds a list or a hash
+    /// - error.RedizWrongType when the key holds a list or a hash
     pub fn get(self: *Self, db_index: usize, key: []const u8, arena: std.mem.Allocator) Error!?[]const u8 {
         self.acquire();
         defer self.release();
 
         const entry = self.liveEntry(&self.databases[db_index], key) orelse return null;
-        if (entry.value != .string) return error.WrongType;
+        if (entry.value != .string) return error.RedizWrongType;
 
         return try arena.dupe(u8, entry.value.string);
     }
@@ -241,8 +241,8 @@ pub const Keyspace = struct {
     ///
     /// Return:
     /// - i64 value after the delta
-    /// - error.NotAnInteger when the stored string is not a number
-    /// - error.WrongType when the key holds a list or a hash
+    /// - error.RedizNotAnInteger when the stored string is not a number
+    /// - error.RedizWrongType when the key holds a list or a hash
     pub fn incrBy(self: *Self, db_index: usize, key: []const u8, delta: i64) Error!i64 {
         self.acquire();
         defer self.release();
@@ -250,11 +250,11 @@ pub const Keyspace = struct {
         const database = &self.databases[db_index];
         const entry = self.liveEntry(database, key);
         if (entry) |live| {
-            if (live.value != .string) return error.WrongType;
+            if (live.value != .string) return error.RedizWrongType;
         }
 
         const current: i64 = if (entry) |live|
-            std.fmt.parseInt(i64, live.value.string, 10) catch return error.NotAnInteger
+            std.fmt.parseInt(i64, live.value.string, 10) catch return error.RedizNotAnInteger
         else
             0;
         const updated = current +% delta;
@@ -279,7 +279,7 @@ pub const Keyspace = struct {
         const database = &self.databases[db_index];
         const entry = self.liveEntry(database, key);
         if (entry) |live| {
-            if (live.value != .string) return error.WrongType;
+            if (live.value != .string) return error.RedizWrongType;
         }
 
         const current: []const u8 = if (entry) |live| live.value.string else "";
@@ -298,7 +298,7 @@ pub const Keyspace = struct {
         defer self.release();
 
         const entry = self.liveEntry(&self.databases[db_index], key) orelse return 0;
-        if (entry.value != .string) return error.WrongType;
+        if (entry.value != .string) return error.RedizWrongType;
 
         return entry.value.string.len;
     }
@@ -405,14 +405,14 @@ pub const Keyspace = struct {
     ///
     /// Return:
     /// - u64 list length after the push
-    /// - error.WrongType when the key holds a string or a hash
+    /// - error.RedizWrongType when the key holds a string or a hash
     pub fn rpush(self: *Self, db_index: usize, key: []const u8, values: []const []const u8) Error!u64 {
         self.acquire();
         defer self.release();
 
         const database = &self.databases[db_index];
         if (self.liveEntry(database, key)) |entry| {
-            if (entry.value != .list) return error.WrongType;
+            if (entry.value != .list) return error.RedizWrongType;
 
             for (values) |value| try entry.value.list.append(self.allocator, try self.allocator.dupe(u8, value));
 
@@ -436,7 +436,7 @@ pub const Keyspace = struct {
     ///
     /// Return:
     /// - u64 count of fields that did not exist before
-    /// - error.WrongType when the key holds a string or a list
+    /// - error.RedizWrongType when the key holds a string or a list
     pub fn hset(self: *Self, db_index: usize, key: []const u8, fields: []const Field) Error!u64 {
         self.acquire();
         defer self.release();
@@ -448,7 +448,7 @@ pub const Keyspace = struct {
         }
 
         const entry = database.getPtr(key).?;
-        if (entry.value != .hash) return error.WrongType;
+        if (entry.value != .hash) return error.RedizWrongType;
 
         var added: u64 = 0;
         for (fields) |field| {
@@ -476,13 +476,13 @@ pub const Keyspace = struct {
     ///
     /// Return:
     /// - []Field, empty when the key is missing
-    /// - error.WrongType when the key holds a string or a list
+    /// - error.RedizWrongType when the key holds a string or a list
     pub fn hgetAll(self: *Self, db_index: usize, key: []const u8, arena: std.mem.Allocator) Error![]Field {
         self.acquire();
         defer self.release();
 
         const entry = self.liveEntry(&self.databases[db_index], key) orelse return &.{};
-        if (entry.value != .hash) return error.WrongType;
+        if (entry.value != .hash) return error.RedizWrongType;
 
         const copies = try arena.alloc(Field, entry.value.hash.items.len);
         for (entry.value.hash.items, copies) |field, *copy| {
@@ -637,7 +637,7 @@ test "rediz inproc: keyspace incr on a non-numeric string is not an integer" {
     defer harness.deinit();
 
     _ = try harness.keyspace.set(0, "word", "abc", .{});
-    try testing.expectError(error.NotAnInteger, harness.keyspace.incrBy(0, "word", 1));
+    try testing.expectError(error.RedizNotAnInteger, harness.keyspace.incrBy(0, "word", 1));
 }
 
 test "rediz inproc: keyspace rejects a string operation on a list" {
@@ -651,9 +651,9 @@ test "rediz inproc: keyspace rejects a string operation on a list" {
     try testing.expectEqual(@as(u64, 1), try harness.keyspace.rpush(0, "list", &.{"item"}));
     try testing.expectEqualStrings("list", harness.keyspace.typeName(0, "list"));
 
-    try testing.expectError(error.WrongType, harness.keyspace.incrBy(0, "list", 1));
-    try testing.expectError(error.WrongType, harness.keyspace.get(0, "list", arena.allocator()));
-    try testing.expectError(error.WrongType, harness.keyspace.strlen(0, "list"));
+    try testing.expectError(error.RedizWrongType, harness.keyspace.incrBy(0, "list", 1));
+    try testing.expectError(error.RedizWrongType, harness.keyspace.get(0, "list", arena.allocator()));
+    try testing.expectError(error.RedizWrongType, harness.keyspace.strlen(0, "list"));
 }
 
 test "rediz inproc: keyspace append builds a string in place" {

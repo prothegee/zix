@@ -27,7 +27,7 @@ pub const WriteError = @import("sink.zig").Error;
 
 /// How reading a float can fail. Text the JSON grammar does not allow reports
 /// the same way unreadable digits do: this is not a number a field can take.
-pub const ReadError = error{BadNumber};
+pub const ReadError = error{JzonBadNumber};
 
 /// Write a float as JSON.
 ///
@@ -82,15 +82,15 @@ pub fn append(sink: *Sink, value: anytype) WriteError!void {
 ///
 /// Return:
 /// - T (the value)
-/// - error.BadNumber when the text is not a JSON number
+/// - error.JzonBadNumber when the text is not a JSON number
 pub fn parse(comptime T: type, text: []const u8) ReadError!T {
     // Reject a non-float at compile time, so an integer cannot reach the float
     // reading by accident.
     _ = floatInfo(T);
 
-    if (!isNumber(text)) return error.BadNumber;
+    if (!isNumber(text)) return error.JzonBadNumber;
 
-    return std.fmt.parseFloat(T, text) catch error.BadNumber;
+    return std.fmt.parseFloat(T, text) catch error.JzonBadNumber;
 }
 
 /// Whether `text` is a whole JSON number and nothing else (RFC 8259 6).
@@ -271,20 +271,20 @@ test "jzon: float parse takes every part of the JSON number grammar" {
 }
 
 test "jzon: float parse rejects text the JSON grammar does not allow" {
-    try std.testing.expectError(error.BadNumber, parse(f64, ""));
-    try std.testing.expectError(error.BadNumber, parse(f64, "-"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "007"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "1."));
-    try std.testing.expectError(error.BadNumber, parse(f64, ".5"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "1e"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "1e+"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "+1"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "1 "));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, ""));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "-"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "007"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "1."));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, ".5"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "1e"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "1e+"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "+1"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "1 "));
 
     // std.fmt reads all three of these, and none of them is JSON.
-    try std.testing.expectError(error.BadNumber, parse(f64, "inf"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "nan"));
-    try std.testing.expectError(error.BadNumber, parse(f64, "0x1p3"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "inf"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "nan"));
+    try std.testing.expectError(error.JzonBadNumber, parse(f64, "0x1p3"));
 }
 
 test "jzon: float parse widens past a type the way std.json does" {

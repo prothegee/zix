@@ -36,7 +36,7 @@ Permukaan trio identik bagi caller di kedua engine (test paritas compile-time di
 
 ## Model Runtime
 
-Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `error.DispatchModelUnsupported` alih-alih diam-diam menyajikan model lain (ADR-065).
+Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `error.ZixDispatchModelUnsupported` alih-alih diam-diam menyajikan model lain (ADR-065).
 
 ### .ASYNC: Accept Tunggal, Dispatch io.async()
 
@@ -76,12 +76,12 @@ flowchart TD
 
 - Setiap worker memiliki listener pribadi, instance epoll pribadi, dan connection table pribadi. Kernel menyeimbangkan koneksi baru di antara listener per-worker (`SO_REUSEPORT`), sehingga tidak ada accept thread, tidak ada queue bersama, dan tidak ada perpindahan fd antar thread.
 - Request pipelined yang tiba dalam satu readable event semuanya di-parse dan di-dispatch dalam satu pass, dan response-nya digabung menjadi satu `write()` melalui response sink per-event.
-- Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
+- Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
 - Ini satu-satunya model yang menghormati promosi WebSocket milik engine (lihat bagian WebSocket).
 
 ### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
 
-`zix.Http1` adalah engine referensi untuk jalur io_uring (ADR-037). Topologi shared-nothing, thread-per-core yang sama dengan `.EPOLL` (listener `SO_REUSEPORT` pribadi dan satu ring per worker), tetapi completion-based: accept, recv, send, dan close disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Pump WebSocket juga berjalan native di ring (BufferGroup). Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`, dan saat io_uring sendiri tidak tersedia di host Linux engine melipat ke loop `.EPOLL` dengan notice yang dicatat. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality per-request.
+`zix.Http1` adalah engine referensi untuk jalur io_uring (ADR-037). Topologi shared-nothing, thread-per-core yang sama dengan `.EPOLL` (listener `SO_REUSEPORT` pribadi dan satu ring per worker), tetapi completion-based: accept, recv, send, dan close disubmit sebagai SQE dan dipanen sebagai CQE, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Pump WebSocket juga berjalan native di ring (BufferGroup). Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`, dan saat io_uring sendiri tidak tersedia di host Linux engine melipat ke loop `.EPOLL` dengan notice yang dicatat. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality per-request.
 
 Teardown juga me-ring close-nya (`prep_close`, ADR-041) alih-alih `linux.close` sinkron, jadi worker terus memanen completion lintas teardown koneksi. Di mesin 64-core inilah pembedanya di bawah connection churn: dengan close sinkron ring nyaris tidak mengaktifkan core-nya di bawah reconnect storm, dengan ring close ia mengisinya dan mencapai paritas atau lebih baik di setiap cell dengan memori jauh lebih sedikit. `OpKind` io_uring bersama dan helper ring berada di `src/multiplexers/ring.zig`. Lihat ADR-041 untuk pengukurannya.
 
@@ -137,8 +137,8 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.WsFrameFn` | type | Callback per-frame untuk WebSocket milik engine |
 | `zix.Http1.setTimeout` | fn | Memasang atau memperpendek deadline per-handler (thread-local) |
 | `zix.Http1.isExpired` | fn | Apakah deadline handler saat ini sudah lewat |
-| `zix.Http1.parseHead` | fn | Parse head request lengkap dari buffer (zero copy). `error.UnknownMethod` untuk method yang tidak diimplementasikan engine ini, `error.InvalidRequest` untuk request line yang rusak |
-| `zix.Http1.parseErrorResponse` | fn | Bytes response untuk parse yang gagal: 501 untuk `error.UnknownMethod`, 400 untuk sisanya |
+| `zix.Http1.parseHead` | fn | Parse head request lengkap dari buffer (zero copy). `error.ZixUnknownMethod` untuk method yang tidak diimplementasikan engine ini, `error.ZixInvalidRequest` untuk request line yang rusak |
+| `zix.Http1.parseErrorResponse` | fn | Bytes response untuk parse yang gagal: 501 untuk `error.ZixUnknownMethod`, 400 untuk sisanya |
 | `zix.Http1.getHeader` | fn | Pencarian header case-insensitive pada ParsedHead |
 | `zix.Http1.acceptEncoding` | fn | Nilai Accept-Encoding sebuah ParsedHead: O(1) dari span parse-pass, fallback getHeader selain itu |
 | `zix.Http1.setCache` | fn | Memasang atau melepas response cache per-worker |

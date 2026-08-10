@@ -19,6 +19,7 @@
 //!   arena reset frees a whole parse in one step.
 
 const std = @import("std");
+const diagnostic = @import("diagnostic.zig");
 
 const fields = @import("fields.zig");
 const float = @import("../float.zig");
@@ -79,9 +80,9 @@ const Source = struct {
 ///
 /// Return:
 /// - T (the parsed value)
-/// - error.UnknownField, error.MissingField, error.UnknownEnumValue when the
+/// - error.JzonUnknownField, error.JzonMissingField, error.JzonUnknownEnumValue when the
 ///   document and the type disagree
-/// - error.Truncated, error.Unexpected, error.BadNumber when the document is not
+/// - error.JzonTruncated, error.JzonUnexpected, error.JzonBadNumber when the document is not
 ///   what it claims
 /// - error.OutOfMemory when the allocator runs out
 pub fn parse(
@@ -97,7 +98,7 @@ pub fn parse(
 
     const value = try readValue(T, source, options);
 
-    if ((try source.next(.alloc_if_needed)) != .end_of_document) return error.Unexpected;
+    if ((try source.next(.alloc_if_needed)) != .end_of_document) return error.JzonUnexpected;
 
     return value;
 }
@@ -129,7 +130,11 @@ fn readValue(comptime T: type, source: Source, comptime options: Options) Error!
 
             const name = try stringText(source, .alloc_if_needed);
 
-            return std.meta.stringToEnum(T, name) orelse error.UnknownEnumValue;
+            return std.meta.stringToEnum(T, name) orelse {
+                diagnostic.noteField(name);
+
+                return error.JzonUnknownEnumValue;
+            };
         },
 
         .@"struct" => |info| {
@@ -159,7 +164,7 @@ fn readBool(source: Source) Error!bool {
     return switch (try source.next(.alloc_if_needed)) {
         .true => true,
         .false => false,
-        else => error.Unexpected,
+        else => error.JzonUnexpected,
     };
 }
 
@@ -169,7 +174,7 @@ fn readBool(source: Source) Error!bool {
 /// - The key match is unrolled over the field names at compile time, so a key
 ///   costs one comparison per field and no lookup structure is built.
 fn readStruct(comptime T: type, source: Source, comptime options: Options) Error!T {
-    if ((try source.next(.alloc_if_needed)) != .object_begin) return error.Unexpected;
+    if ((try source.next(.alloc_if_needed)) != .object_begin) return error.JzonUnexpected;
 
     var result: T = undefined;
     var seen: fields.Seen(T) = .{};
@@ -179,7 +184,7 @@ fn readStruct(comptime T: type, source: Source, comptime options: Options) Error
             .object_end => break,
             .string => |text| text,
             .allocated_string => |text| text,
-            else => return error.Unexpected,
+            else => return error.JzonUnexpected,
         };
 
         var matched = false;
@@ -196,7 +201,11 @@ fn readStruct(comptime T: type, source: Source, comptime options: Options) Error
         if (matched) continue;
 
         switch (options.unknown) {
-            .REJECT => return error.UnknownField,
+            .REJECT => {
+                diagnostic.noteField(key);
+
+                return error.JzonUnknownField;
+            },
             .SKIP => try source.skip(),
         }
     }
@@ -214,7 +223,7 @@ fn readSlice(comptime T: type, source: Source, comptime options: Options) Error!
         "jzon parser: " ++ @typeName(T) ++ " is not a plain slice, so a parse cannot produce it",
     );
 
-    if ((try source.next(.alloc_if_needed)) != .array_begin) return error.Unexpected;
+    if ((try source.next(.alloc_if_needed)) != .array_begin) return error.JzonUnexpected;
 
     var elements: std.ArrayList(Element) = .empty;
 
@@ -248,7 +257,7 @@ fn stringText(source: Source, when: std.json.AllocWhen) Error![]const u8 {
     return switch (try source.next(when)) {
         .string => |text| text,
         .allocated_string => |text| text,
-        else => error.Unexpected,
+        else => error.JzonUnexpected,
     };
 }
 
@@ -257,7 +266,7 @@ fn numberText(source: Source) Error![]const u8 {
     return switch (try source.next(.alloc_if_needed)) {
         .number => |text| text,
         .allocated_number => |text| text,
-        else => error.Unexpected,
+        else => error.JzonUnexpected,
     };
 }
 
@@ -270,8 +279,8 @@ fn numberText(source: Source) Error![]const u8 {
 fn translate(failure: ScannerError) Error {
     return switch (failure) {
         error.OutOfMemory => error.OutOfMemory,
-        error.UnexpectedEndOfInput, error.BufferUnderrun => error.Truncated,
-        else => error.Unexpected,
+        error.UnexpectedEndOfInput, error.BufferUnderrun => error.JzonTruncated,
+        else => error.JzonUnexpected,
     };
 }
 
@@ -344,12 +353,12 @@ test "jzon: scanner parser reports the same failures the std path reports" {
     const allocator = arena.allocator();
     const Pair = struct { id: u8, name: []const u8 };
 
-    try std.testing.expectError(error.UnknownField, parse(Pair, allocator, "{\"id\":1,\"name\":\"x\",\"other\":2}", .{}));
-    try std.testing.expectError(error.MissingField, parse(Pair, allocator, "{\"id\":1}", .{}));
-    try std.testing.expectError(error.BadNumber, parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}));
-    try std.testing.expectError(error.Truncated, parse(Pair, allocator, "{\"id\":1,", .{}));
-    try std.testing.expectError(error.Unexpected, parse(Pair, allocator, "{\"id\":true,\"name\":\"x\"}", .{}));
-    try std.testing.expectError(error.UnknownEnumValue, parse(Status, allocator, "\"GONE\"", .{}));
+    try std.testing.expectError(error.JzonUnknownField, parse(Pair, allocator, "{\"id\":1,\"name\":\"x\",\"other\":2}", .{}));
+    try std.testing.expectError(error.JzonMissingField, parse(Pair, allocator, "{\"id\":1}", .{}));
+    try std.testing.expectError(error.JzonBadNumber, parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonTruncated, parse(Pair, allocator, "{\"id\":1,", .{}));
+    try std.testing.expectError(error.JzonUnexpected, parse(Pair, allocator, "{\"id\":true,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonUnknownEnumValue, parse(Status, allocator, "\"GONE\"", .{}));
 }
 
 test "jzon: scanner parser steps over an unknown key when asked to" {
@@ -392,5 +401,5 @@ test "jzon: scanner parser refuses a document with anything after the value" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
-    try std.testing.expectError(error.Unexpected, parse(u8, arena.allocator(), "1 2", .{}));
+    try std.testing.expectError(error.JzonUnexpected, parse(u8, arena.allocator(), "1 2", .{}));
 }

@@ -220,7 +220,7 @@ fn fetch(session: *Session, path: []const u8, out: []u8) !Fetched {
         const opened = try session.conn.readAppData(record, &plain);
         records += 1;
 
-        if (filled + opened.len > out.len) return error.ResponseTooLarge;
+        if (filled + opened.len > out.len) return error.ZixResponseTooLarge;
         @memcpy(out[filled..][0..opened.len], opened);
         filled += opened.len;
 

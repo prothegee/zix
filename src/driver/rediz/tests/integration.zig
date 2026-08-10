@@ -51,7 +51,7 @@ test "rediz integration: 00 server becomes ready (driver-polled)" {
     var attempt: u32 = 0;
     while (true) : (attempt += 1) {
         const conn = rediz.Conn.connect(arena.allocator(), io, DEFAULT_CONFIG) catch {
-            if (attempt >= 240) return error.ServerNeverBecameReady;
+            if (attempt >= 240) return error.RedizServerNeverBecameReady;
             ioSleepMs(io, 500);
 
             continue;
@@ -145,7 +145,7 @@ test "rediz integration: 05 wrong password surfaces WRONGPASS" {
     var config = ACL_CONFIG;
     config.password = "wrong";
 
-    try testing.expectError(error.ServerError, rediz.Conn.connect(arena.allocator(), threaded.io(), config));
+    try testing.expectError(error.RedizServerError, rediz.Conn.connect(arena.allocator(), threaded.io(), config));
 }
 
 test "rediz integration: 06 tls connect round trips" {
@@ -279,7 +279,7 @@ test "rediz integration: 10 max_pending_replies bounds a pipeline batch" {
     var pipe = try conn.pipeline();
     try pipe.add(&.{ "SET", "bound:a", "1" });
     try pipe.add(&.{ "SET", "bound:b", "2" });
-    try testing.expectError(error.QueueFull, pipe.add(&.{ "SET", "bound:c", "3" }));
+    try testing.expectError(error.RedizQueueFull, pipe.add(&.{ "SET", "bound:c", "3" }));
 
     const replies = try pipe.sync();
     try testing.expectEqual(@as(usize, 2), replies.len);
@@ -301,7 +301,7 @@ test "rediz integration: 11 wrongtype surfaces the mapped prefix" {
 
     _ = try conn.command(&.{ "RPUSH", "wrong:list", "item" });
 
-    try testing.expectError(error.ServerError, conn.incr("wrong:list"));
+    try testing.expectError(error.RedizServerError, conn.incr("wrong:list"));
     try testing.expectEqual(rediz.Prefix.WRONGTYPE, conn.lastServerError().prefix);
 
     _ = try conn.del(&.{"wrong:list"});
@@ -339,7 +339,7 @@ test "rediz integration: 12 pool heals a killed connection" {
 
     // the idle slot hands back the dead connection: discard + reacquire heals
     const dead = try pool.acquire();
-    try testing.expectError(error.ConnectionClosed, dead.ping());
+    try testing.expectError(error.RedizConnectionClosed, dead.ping());
     pool.discard(dead);
 
     const healed = try pool.acquire();
@@ -468,7 +468,7 @@ test "rediz integration: 16 raw command reaches untyped surface" {
         .map => |entries| try testing.expectEqual(@as(usize, 2), entries.len),
         // RESP2 would return a flat array
         .array => |items| try testing.expectEqual(@as(usize, 4), items.len),
-        else => return error.ProtocolViolation,
+        else => return error.RedizProtocolViolation,
     }
 
     _ = try conn.del(&.{"raw:hash"});

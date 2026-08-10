@@ -43,10 +43,10 @@ pub const SseClientConfig = struct {
     /// TCP connect timeout in milliseconds. 0 = no timeout.
     connect_timeout_ms: u32 = 0,
     /// Time allowed to receive the response head after the request is sent, in milliseconds.
-    /// 0 = no timeout. Yields error.ResponseTimeout when a server accepts and then never answers.
+    /// 0 = no timeout. Yields error.ZixResponseTimeout when a server accepts and then never answers.
     response_timeout_ms: u32 = 0,
     /// Idle bound between events, in milliseconds. The budget restarts on every event.
-    /// 0 = no timeout. Yields error.ReadTimeout when the stream goes quiet.
+    /// 0 = no timeout. Yields error.ZixReadTimeout when the stream goes quiet.
     ///
     /// Note:
     /// - Defaults to no bound on purpose. A live SSE stream is expected to sit idle between
@@ -193,7 +193,7 @@ pub const SseStream = struct {
 
             // A quiet stream is an error, never a clean close: null here would surface as "no
             // event" and hide a server that accepted and then stopped answering.
-            if (!socket_poll.readableWithin(self.fd, self.read_timeout_ms)) return error.ReadTimeout;
+            if (!socket_poll.readableWithin(self.fd, self.read_timeout_ms)) return error.ZixReadTimeout;
 
             const n = readOnceFD(self.fd, &self.read_buf) catch return null;
             if (n == 0) return if (line_len > 0) out[0..line_len] else null;
@@ -240,11 +240,15 @@ pub const SseClient = struct {
     ///
     /// Return:
     /// - SseStream
-    /// - error.InvalidUrl (malformed URL or missing host)
-    /// - error.TlsNotSupported (https:// scheme)
-    /// - error.ConnectionFailed (TCP error or server closed early)
-    /// - error.NotEventStream (server did not respond with text/event-stream)
-    /// - error.UnexpectedStatus (server did not respond 200)
+    /// - error.ZixUrlMalformed (the URL does not parse)
+    /// - error.ZixUrlSchemeUnsupported (the scheme is not http)
+    /// - error.ZixUrlHostMissing (the URL carries no host)
+    /// - error.ZixUrlPortInvalid (the port is not a number in range)
+    /// - error.ZixUrlPathTooLong (the request line does not fit the buffer)
+    /// - error.ZixTlsNotSupported (https:// scheme)
+    /// - error.ZixConnectionFailed (TCP error or server closed early)
+    /// - error.ZixNotEventStream (server did not respond with text/event-stream)
+    /// - error.ZixUnexpectedStatus (server did not respond 200)
     pub fn open(self: Self, url: []const u8) !SseStream {
         const parsed = try parseHttpUrl(url);
 
@@ -263,19 +267,19 @@ pub const SseClient = struct {
                 "Connection: keep-alive\r\n" ++
                 "\r\n",
             .{ parsed.path, parsed.host, parsed.port },
-        ) catch return error.InvalidUrl;
+        ) catch return error.ZixUrlPathTooLong;
 
-        writeAllFD(fd, req) catch return error.ConnectionFailed;
+        writeAllFD(fd, req) catch return error.ZixConnectionFailed;
 
         var head_buf: [RESPONSE_HEAD_BUF]u8 = undefined;
         var head_len: usize = 0;
         var header_end: usize = 0;
 
         while (head_len < head_buf.len) {
-            if (!socket_poll.readableWithin(fd, self.config.response_timeout_ms)) return error.ResponseTimeout;
+            if (!socket_poll.readableWithin(fd, self.config.response_timeout_ms)) return error.ZixResponseTimeout;
 
-            const n = readOnceFD(fd, head_buf[head_len..]) catch return error.ConnectionFailed;
-            if (n == 0) return error.ConnectionFailed;
+            const n = readOnceFD(fd, head_buf[head_len..]) catch return error.ZixConnectionFailed;
+            if (n == 0) return error.ZixConnectionFailed;
             head_len += n;
             if (std.mem.indexOf(u8, head_buf[0..head_len], "\r\n\r\n")) |pos| {
                 header_end = pos + 4;
@@ -283,11 +287,11 @@ pub const SseClient = struct {
             }
         }
 
-        if (header_end == 0) return error.ConnectionFailed;
-        if (!std.mem.startsWith(u8, head_buf[0..header_end], "HTTP/1.1 200")) return error.UnexpectedStatus;
+        if (header_end == 0) return error.ZixConnectionFailed;
+        if (!std.mem.startsWith(u8, head_buf[0..header_end], "HTTP/1.1 200")) return error.ZixUnexpectedStatus;
 
-        const content_type = findHeader(head_buf[0..header_end], "content-type") orelse return error.NotEventStream;
-        if (std.mem.indexOf(u8, content_type, "text/event-stream") == null) return error.NotEventStream;
+        const content_type = findHeader(head_buf[0..header_end], "content-type") orelse return error.ZixNotEventStream;
+        if (std.mem.indexOf(u8, content_type, "text/event-stream") == null) return error.ZixNotEventStream;
 
         var result = SseStream{
             .fd = fd,
@@ -313,24 +317,24 @@ pub const SseClient = struct {
 const HttpUrlParsed = struct { host: []const u8, port: u16, path: []const u8 };
 
 fn parseHttpUrl(url: []const u8) !HttpUrlParsed {
-    if (std.mem.startsWith(u8, url, "https://")) return error.TlsNotSupported;
-    if (!std.mem.startsWith(u8, url, "http://")) return error.InvalidUrl;
+    if (std.mem.startsWith(u8, url, "https://")) return error.ZixTlsNotSupported;
+    if (!std.mem.startsWith(u8, url, "http://")) return error.ZixUrlSchemeUnsupported;
 
     const authority_start: usize = "http://".len;
     const path_start = std.mem.indexOfScalarPos(u8, url, authority_start, '/') orelse url.len;
     const authority = url[authority_start..path_start];
     const path_str: []const u8 = if (path_start < url.len) url[path_start..] else "/";
 
-    if (authority.len == 0) return error.InvalidUrl;
+    if (authority.len == 0) return error.ZixUrlHostMissing;
 
     const colon_pos = std.mem.lastIndexOfScalar(u8, authority, ':');
     const host: []const u8 = if (colon_pos) |cp| authority[0..cp] else authority;
     const port: u16 = if (colon_pos) |cp|
-        (std.fmt.parseInt(u16, authority[cp + 1 ..], 10) catch return error.InvalidUrl)
+        (std.fmt.parseInt(u16, authority[cp + 1 ..], 10) catch return error.ZixUrlPortInvalid)
     else
         80;
 
-    if (host.len == 0) return error.InvalidUrl;
+    if (host.len == 0) return error.ZixUrlHostMissing;
 
     return HttpUrlParsed{ .host = host, .port = port, .path = path_str };
 }
@@ -442,7 +446,7 @@ test "zix http sse client: parseHttpUrl default port 80" {
 }
 
 test "zix http sse client: parseHttpUrl https returns TlsNotSupported" {
-    try std.testing.expectError(error.TlsNotSupported, parseHttpUrl("https://example.com/events"));
+    try std.testing.expectError(error.ZixTlsNotSupported, parseHttpUrl("https://example.com/events"));
 }
 
 test "zix http sse client: a server that never answers yields ResponseTimeout" {
@@ -462,7 +466,7 @@ test "zix http sse client: a server that never answers yields ResponseTimeout" {
         .response_timeout_ms = 150,
     });
 
-    try std.testing.expectError(error.ResponseTimeout, client.open("http://127.0.0.1:9079/events"));
+    try std.testing.expectError(error.ZixResponseTimeout, client.open("http://127.0.0.1:9079/events"));
 }
 
 test "zix http sse client: a stream that goes quiet yields ReadTimeout, not a clean close" {
@@ -520,5 +524,5 @@ test "zix http sse client: a stream that goes quiet yields ReadTimeout, not a cl
     const outcome = stream.next(&buf);
     release.store(true, .release);
 
-    try std.testing.expectError(error.ReadTimeout, outcome);
+    try std.testing.expectError(error.ZixReadTimeout, outcome);
 }

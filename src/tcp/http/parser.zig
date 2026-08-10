@@ -54,15 +54,15 @@ pub const ParsedHead = struct {
 };
 
 pub const ParseError = error{
-    InvalidRequest,
-    TooManyHeaders,
+    ZixInvalidRequest,
+    ZixTooManyHeaders,
     /// Well-formed request line naming a method this engine does not implement.
-    /// Distinct from InvalidRequest so the caller can answer 501 rather than 400.
-    UnknownMethod,
+    /// Distinct from ZixInvalidRequest so the caller can answer 501 rather than 400.
+    ZixUnknownMethod,
 };
 
 const DechunkError = error{
-    InvalidChunkSize,
+    ZixInvalidChunkSize,
 };
 
 /// Find the start index of the end-of-headers marker "\r\n\r\n".
@@ -164,13 +164,13 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
     const first_crlf = if (first_nl > 0 and head_buf[first_nl - 1] == '\r') first_nl - 1 else first_nl;
     const req_line = head_buf[0..first_crlf];
 
-    const first_space = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
+    const first_space = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.ZixInvalidRequest;
     // The line tokenized, so an unmatched token is an unimplemented method rather
     // than a malformed request. The caller turns this into a 501.
-    const method_code = Method.codeFromString(req_line[0..first_space]) orelse return error.UnknownMethod;
+    const method_code = Method.codeFromString(req_line[0..first_space]) orelse return error.ZixUnknownMethod;
 
     const after_method = req_line[first_space + 1 ..];
-    const second_space = std.mem.indexOfScalar(u8, after_method, ' ') orelse return error.InvalidRequest;
+    const second_space = std.mem.indexOfScalar(u8, after_method, ' ') orelse return error.ZixInvalidRequest;
     const target = after_method[0..second_space];
 
     // Absolute offsets of path and query into buf.
@@ -211,7 +211,7 @@ pub fn parse(buf: []const u8, max_headers: u8) ParseError!?ParsedHead {
             continue;
         };
 
-        if (header_count >= max_headers) return error.TooManyHeaders;
+        if (header_count >= max_headers) return error.ZixTooManyHeaders;
         header_count += 1;
 
         // Skip colon + leading whitespace for value.
@@ -320,7 +320,7 @@ pub fn getHeader(head: ParsedHead, buf: []const u8, name: []const u8) ?[]const u
 /// Return:
 /// - usize (bytes of raw the body occupies, terminal chunk and trailers included)
 /// - null when the body has not fully arrived
-/// - error.InvalidChunkSize when a size line is not hex
+/// - error.ZixInvalidChunkSize when a size line is not hex
 pub fn chunkedEnd(raw: []const u8, scan_from: *usize) DechunkError!?usize {
     var pos: usize = scan_from.*;
 
@@ -332,9 +332,9 @@ pub fn chunkedEnd(raw: []const u8, scan_from: *usize) DechunkError!?usize {
 
         const ext_pos = std.mem.indexOfScalar(u8, size_line, ';') orelse size_line.len;
         const size_hex = std.mem.trim(u8, size_line[0..ext_pos], " \t");
-        if (size_hex.len == 0) return error.InvalidChunkSize;
+        if (size_hex.len == 0) return error.ZixInvalidChunkSize;
 
-        const chunk_size = std.fmt.parseInt(usize, size_hex, 16) catch return error.InvalidChunkSize;
+        const chunk_size = std.fmt.parseInt(usize, size_hex, 16) catch return error.ZixInvalidChunkSize;
 
         if (chunk_size == 0) {
             // Terminal chunk. The trailer section runs to the first blank line.
@@ -368,7 +368,7 @@ pub fn chunkedEnd(raw: []const u8, scan_from: *usize) DechunkError!?usize {
 ///
 /// Return:
 /// - usize (decoded bytes, living at raw[0..returned])
-/// - error.InvalidChunkSize when a size line is not hex
+/// - error.ZixInvalidChunkSize when a size line is not hex
 pub fn dechunkInPlace(raw: []u8) DechunkError!usize {
     var pos: usize = 0;
     var written: usize = 0;
@@ -379,9 +379,9 @@ pub fn dechunkInPlace(raw: []u8) DechunkError!usize {
 
         const ext_pos = std.mem.indexOfScalar(u8, size_line, ';') orelse size_line.len;
         const size_hex = std.mem.trim(u8, size_line[0..ext_pos], " \t");
-        if (size_hex.len == 0) return error.InvalidChunkSize;
+        if (size_hex.len == 0) return error.ZixInvalidChunkSize;
 
-        const chunk_size = std.fmt.parseInt(usize, size_hex, 16) catch return error.InvalidChunkSize;
+        const chunk_size = std.fmt.parseInt(usize, size_hex, 16) catch return error.ZixInvalidChunkSize;
         if (chunk_size == 0) break;
 
         const data_start = crlf + 2;
@@ -461,15 +461,15 @@ test "zix http: parser all methods" {
 
 test "zix http: parser an unimplemented method is UnknownMethod, not InvalidRequest" {
     // The request line tokenized fine, so the caller owes a 501 rather than a 400.
-    try std.testing.expectError(error.UnknownMethod, parse("BREW / HTTP/1.1\r\n\r\n", 64));
-    try std.testing.expectError(error.UnknownMethod, parse("QUERX / HTTP/1.1\r\n\r\n", 64));
+    try std.testing.expectError(error.ZixUnknownMethod, parse("BREW / HTTP/1.1\r\n\r\n", 64));
+    try std.testing.expectError(error.ZixUnknownMethod, parse("QUERX / HTTP/1.1\r\n\r\n", 64));
 }
 
 test "zix http: parser a malformed request line stays InvalidRequest" {
     // No space at all, then only one space. Neither tokenizes, so neither is a
     // statement about the method.
-    try std.testing.expectError(error.InvalidRequest, parse("GET\r\n\r\n", 64));
-    try std.testing.expectError(error.InvalidRequest, parse("GET /x\r\n\r\n", 64));
+    try std.testing.expectError(error.ZixInvalidRequest, parse("GET\r\n\r\n", 64));
+    try std.testing.expectError(error.ZixInvalidRequest, parse("GET /x\r\n\r\n", 64));
 }
 
 test "zix http: parser chunked flag set when Transfer-Encoding: chunked" {
@@ -624,7 +624,7 @@ test "zix http: chunkedEnd stops at the pipelined request behind the terminator"
 
 test "zix http: chunkedEnd rejects a size line that is not hex" {
     var scan_from: usize = 0;
-    try std.testing.expectError(error.InvalidChunkSize, chunkedEnd("zz\r\nabc\r\n0\r\n\r\n", &scan_from));
+    try std.testing.expectError(error.ZixInvalidChunkSize, chunkedEnd("zz\r\nabc\r\n0\r\n\r\n", &scan_from));
 }
 
 test "zix http: dechunkInPlace decodes over the source buffer" {

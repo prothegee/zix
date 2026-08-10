@@ -20,8 +20,8 @@ const Target = struct {
 ///
 /// Return:
 /// - config.ScrapeConfig on success
-/// - error.UnsupportedScheme (not http://)
-/// - error.InvalidUrl (malformed host or port)
+/// - error.PrometheuzUnsupportedScheme (not http://)
+/// - error.PrometheuzInvalidUrl (malformed host or port)
 pub fn parseScrapeUrl(url: []const u8) !config.ScrapeConfig {
     const target = try parseTarget(url);
 
@@ -37,8 +37,8 @@ pub fn parseScrapeUrl(url: []const u8) !config.ScrapeConfig {
 ///
 /// Return:
 /// - config.WriteConfig on success
-/// - error.UnsupportedScheme (not http://)
-/// - error.InvalidUrl (malformed host or port)
+/// - error.PrometheuzUnsupportedScheme (not http://)
+/// - error.PrometheuzInvalidUrl (malformed host or port)
 pub fn parseWriteUrl(url: []const u8) !config.WriteConfig {
     const target = try parseTarget(url);
 
@@ -55,8 +55,8 @@ pub fn parseWriteUrl(url: []const u8) !config.WriteConfig {
 ///
 /// Return:
 /// - config.QueryConfig on success
-/// - error.UnsupportedScheme (not http://)
-/// - error.InvalidUrl (malformed host or port)
+/// - error.PrometheuzUnsupportedScheme (not http://)
+/// - error.PrometheuzInvalidUrl (malformed host or port)
 pub fn parseQueryUrl(url: []const u8) !config.QueryConfig {
     const target = try parseTarget(url);
 
@@ -69,11 +69,11 @@ pub fn parseQueryUrl(url: []const u8) !config.QueryConfig {
 // --------------------------------------------------------- //
 
 fn parseTarget(url: []const u8) !Target {
-    if (std.mem.startsWith(u8, url, "https://")) return error.UnsupportedScheme;
-    if (!std.mem.startsWith(u8, url, "http://")) return error.UnsupportedScheme;
+    if (std.mem.startsWith(u8, url, "https://")) return error.PrometheuzUnsupportedScheme;
+    if (!std.mem.startsWith(u8, url, "http://")) return error.PrometheuzUnsupportedScheme;
 
     var rest = url["http://".len..];
-    if (rest.len == 0) return error.InvalidUrl;
+    if (rest.len == 0) return error.PrometheuzInvalidUrl;
 
     var path: []const u8 = "";
     if (std.mem.indexOfScalar(u8, rest, '/')) |slash_pos| {
@@ -83,11 +83,11 @@ fn parseTarget(url: []const u8) !Target {
 
     var port: ?u16 = null;
     if (std.mem.indexOfScalar(u8, rest, ':')) |colon_pos| {
-        port = std.fmt.parseInt(u16, rest[colon_pos + 1 ..], 10) catch return error.InvalidUrl;
+        port = std.fmt.parseInt(u16, rest[colon_pos + 1 ..], 10) catch return error.PrometheuzInvalidUrl;
         rest = rest[0..colon_pos];
     }
 
-    if (rest.len == 0) return error.InvalidUrl;
+    if (rest.len == 0) return error.PrometheuzInvalidUrl;
 
     return .{ .ip = rest, .port = port, .path = path };
 }
@@ -129,8 +129,8 @@ test "prometheuz: url query target host and port only" {
 }
 
 test "prometheuz: url rejects https and malformed input" {
-    try testing.expectError(error.UnsupportedScheme, parseScrapeUrl("https://127.0.0.1:9100/metrics"));
-    try testing.expectError(error.UnsupportedScheme, parseScrapeUrl("node-exporter:9100"));
-    try testing.expectError(error.InvalidUrl, parseScrapeUrl("http://"));
-    try testing.expectError(error.InvalidUrl, parseScrapeUrl("http://127.0.0.1:notaport"));
+    try testing.expectError(error.PrometheuzUnsupportedScheme, parseScrapeUrl("https://127.0.0.1:9100/metrics"));
+    try testing.expectError(error.PrometheuzUnsupportedScheme, parseScrapeUrl("node-exporter:9100"));
+    try testing.expectError(error.PrometheuzInvalidUrl, parseScrapeUrl("http://"));
+    try testing.expectError(error.PrometheuzInvalidUrl, parseScrapeUrl("http://127.0.0.1:notaport"));
 }

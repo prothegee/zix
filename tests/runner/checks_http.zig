@@ -44,7 +44,7 @@ pub fn runHttp(io: std.Io, server_path: []const u8, port: u16) !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (resp.body().len == 0) return error.EmptyBody;
 }
 
@@ -73,7 +73,7 @@ pub fn runHttp1(io: std.Io, server_path: []const u8, port: u16) !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (!std.mem.eql(u8, resp.body(), "Hello, World!")) return error.UnexpectedBody;
 }
 
@@ -112,7 +112,7 @@ pub fn runHttpGet(
     var resp = try client.get(url, .{ .headers = headers });
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
 
     if (expected_substr.len > 0) {
         if (!std.mem.containsAtLeast(u8, resp.body(), 1, expected_substr)) return error.MissingExpectedSubstring;
@@ -146,7 +146,7 @@ pub fn runHttpHeader(io: std.Io, server_path: []const u8, port: u16, route: []co
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
 
     const got = resp.header(header_name) orelse return error.MissingExpectedHeader;
     if (!std.mem.eql(u8, got, header_value)) return error.UnexpectedHeaderValue;
@@ -192,7 +192,7 @@ pub fn runHttpStatic(
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (!std.mem.eql(u8, resp.body(), file_content)) return error.StaticBodyMismatch;
 
     // Multipart upload round trip (http1_static only): POST a multipart/form-data body to the
@@ -256,7 +256,7 @@ fn checkCoding(io: std.Io, port: u16, route: []const u8, encoding: zix.utils.com
     if (header_end == 0) return error.NoHeaderTerminator;
 
     const head = buf[0..header_end];
-    if (std.mem.indexOf(u8, head, " 200 ") == null) return error.UnexpectedStatus;
+    if (std.mem.indexOf(u8, head, " 200 ") == null) return error.ZixUnexpectedStatus;
 
     const content_encoding = wire.headerValue(head, "content-encoding") orelse return error.MissingContentEncoding;
     if (!std.ascii.eqlIgnoreCase(content_encoding, token)) return error.UnexpectedContentEncoding;
@@ -351,7 +351,7 @@ pub fn runHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
     while (rounds < 64) : (rounds += 1) {
         var tmp: [16384]u8 = undefined;
         const got = try fd_io.readOnce(fd, &tmp);
-        if (got == 0) return error.ConnectionClosed;
+        if (got == 0) return error.ZixConnectionClosed;
 
         if (try scanner.push(tmp[0..got])) return;
     }

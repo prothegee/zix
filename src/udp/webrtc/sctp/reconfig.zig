@@ -45,11 +45,11 @@ pub const STREAM_LEN: usize = 2;
 /// Everything that stops a reconfiguration parameter from being read or built.
 pub const Error = error{
     /// Fewer bytes than the parameter needs, or a list ending mid-entry.
-    Truncated,
+    ZixTruncated,
     /// A parameter length below the parameter header size.
-    BadLength,
+    ZixBadLength,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// What the peer made of a request (RFC 6525 4.4 Table 3).
@@ -180,13 +180,13 @@ pub const AddStreams = struct {
 ///
 /// Return:
 /// - OutgoingReset borrowing `value`
-/// - error.Truncated if the value is short or ends mid-stream-number
+/// - error.ZixTruncated if the value is short or ends mid-stream-number
 pub fn readOutgoingReset(value: []const u8) Error!OutgoingReset {
-    if (value.len < OUTGOING_FIXED_LEN) return error.Truncated;
+    if (value.len < OUTGOING_FIXED_LEN) return error.ZixTruncated;
 
     const streams = value[OUTGOING_FIXED_LEN..];
 
-    if (streams.len % STREAM_LEN != 0) return error.Truncated;
+    if (streams.len % STREAM_LEN != 0) return error.ZixTruncated;
 
     return .{
         .request_sequence = std.mem.readInt(u32, value[0..4], .big),
@@ -203,13 +203,13 @@ pub fn readOutgoingReset(value: []const u8) Error!OutgoingReset {
 ///
 /// Return:
 /// - IncomingReset borrowing `value`
-/// - error.Truncated if the value is short or ends mid-stream-number
+/// - error.ZixTruncated if the value is short or ends mid-stream-number
 pub fn readIncomingReset(value: []const u8) Error!IncomingReset {
-    if (value.len < INCOMING_FIXED_LEN) return error.Truncated;
+    if (value.len < INCOMING_FIXED_LEN) return error.ZixTruncated;
 
     const streams = value[INCOMING_FIXED_LEN..];
 
-    if (streams.len % STREAM_LEN != 0) return error.Truncated;
+    if (streams.len % STREAM_LEN != 0) return error.ZixTruncated;
 
     return .{
         .request_sequence = std.mem.readInt(u32, value[0..4], .big),
@@ -224,9 +224,9 @@ pub fn readIncomingReset(value: []const u8) Error!IncomingReset {
 ///
 /// Return:
 /// - Response
-/// - error.Truncated if the value is shorter than the two required fields
+/// - error.ZixTruncated if the value is shorter than the two required fields
 pub fn readResponse(value: []const u8) Error!Response {
-    if (value.len < RESPONSE_FIXED_LEN) return error.Truncated;
+    if (value.len < RESPONSE_FIXED_LEN) return error.ZixTruncated;
 
     var response: Response = .{
         .response_sequence = std.mem.readInt(u32, value[0..4], .big),
@@ -249,9 +249,9 @@ pub fn readResponse(value: []const u8) Error!Response {
 ///
 /// Return:
 /// - AddStreams
-/// - error.Truncated if the value is short
+/// - error.ZixTruncated if the value is short
 pub fn readAddStreams(value: []const u8) Error!AddStreams {
-    if (value.len < ADD_STREAMS_LEN) return error.Truncated;
+    if (value.len < ADD_STREAMS_LEN) return error.ZixTruncated;
 
     return .{
         .request_sequence = std.mem.readInt(u32, value[0..4], .big),
@@ -277,11 +277,11 @@ pub const OutgoingFields = struct {
 ///
 /// Return:
 /// - []const u8, the whole parameter including its header and padding
-/// - error.NoSpace, error.BadLength
+/// - error.ZixNoSpace, error.ZixBadLength
 pub fn writeOutgoingReset(out: []u8, fields: OutgoingFields, streams: []const u16) Error![]const u8 {
     var body: [OUTGOING_FIXED_LEN + MAX_STREAMS * STREAM_LEN]u8 = undefined;
 
-    if (streams.len > MAX_STREAMS) return error.NoSpace;
+    if (streams.len > MAX_STREAMS) return error.ZixNoSpace;
 
     std.mem.writeInt(u32, body[0..4], fields.request_sequence, .big);
     std.mem.writeInt(u32, body[4..8], fields.response_sequence, .big);
@@ -300,11 +300,11 @@ pub fn writeOutgoingReset(out: []u8, fields: OutgoingFields, streams: []const u1
 ///
 /// Return:
 /// - []const u8, the whole parameter
-/// - error.NoSpace, error.BadLength
+/// - error.ZixNoSpace, error.ZixBadLength
 pub fn writeIncomingReset(out: []u8, request_sequence: u32, streams: []const u16) Error![]const u8 {
     var body: [INCOMING_FIXED_LEN + MAX_STREAMS * STREAM_LEN]u8 = undefined;
 
-    if (streams.len > MAX_STREAMS) return error.NoSpace;
+    if (streams.len > MAX_STREAMS) return error.ZixNoSpace;
 
     std.mem.writeInt(u32, body[0..4], request_sequence, .big);
     writeStreams(body[INCOMING_FIXED_LEN..], streams);
@@ -320,7 +320,7 @@ pub fn writeIncomingReset(out: []u8, request_sequence: u32, streams: []const u16
 ///
 /// Return:
 /// - []const u8, the whole parameter
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeResponse(out: []u8, response: Response) Error![]const u8 {
     var body: [RESPONSE_WITH_TSN_LEN]u8 = undefined;
 
@@ -347,7 +347,7 @@ pub fn writeResponse(out: []u8, response: Response) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8, the whole parameter
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeAddStreams(out: []u8, kind: parameter.Type, request: AddStreams) Error![]const u8 {
     var body: [ADD_STREAMS_LEN]u8 = undefined;
 
@@ -562,28 +562,28 @@ test "zix sctp: reconfig add streams, both directions use the same layout" {
 test "zix sctp: reconfig read, a value shorter than its fixed fields errors" {
     const short: [11]u8 = @splat(0);
 
-    try std.testing.expectError(error.Truncated, readOutgoingReset(&short));
-    try std.testing.expectError(error.Truncated, readIncomingReset(short[0..3]));
-    try std.testing.expectError(error.Truncated, readResponse(short[0..7]));
-    try std.testing.expectError(error.Truncated, readAddStreams(short[0..7]));
+    try std.testing.expectError(error.ZixTruncated, readOutgoingReset(&short));
+    try std.testing.expectError(error.ZixTruncated, readIncomingReset(short[0..3]));
+    try std.testing.expectError(error.ZixTruncated, readResponse(short[0..7]));
+    try std.testing.expectError(error.ZixTruncated, readAddStreams(short[0..7]));
 }
 
 test "zix sctp: reconfig read, a stream list ending mid-number errors" {
     const ragged: [13]u8 = @splat(0);
 
-    try std.testing.expectError(error.Truncated, readOutgoingReset(&ragged));
-    try std.testing.expectError(error.Truncated, readIncomingReset(ragged[0..5]));
+    try std.testing.expectError(error.ZixTruncated, readOutgoingReset(&ragged));
+    try std.testing.expectError(error.ZixTruncated, readIncomingReset(ragged[0..5]));
 }
 
 test "zix sctp: reconfig write, more streams than the ceiling errors" {
     var buf: [256]u8 = undefined;
     const many: [MAX_STREAMS + 1]u16 = @splat(1);
 
-    try std.testing.expectError(error.NoSpace, writeIncomingReset(&buf, 1, &many));
+    try std.testing.expectError(error.ZixNoSpace, writeIncomingReset(&buf, 1, &many));
 }
 
 test "zix sctp: reconfig write, a buffer too small errors" {
     var buf: [8]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeIncomingReset(&buf, 1, &.{ 1, 2 }));
+    try std.testing.expectError(error.ZixNoSpace, writeIncomingReset(&buf, 1, &.{ 1, 2 }));
 }

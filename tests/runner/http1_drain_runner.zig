@@ -136,7 +136,7 @@ const Reader = struct {
         };
 
         const head = self.buf[self.pos..header_end];
-        if (!std.mem.startsWith(u8, head, "HTTP/1.1 200")) return error.UnexpectedStatus;
+        if (!std.mem.startsWith(u8, head, "HTTP/1.1 200")) return error.ZixUnexpectedStatus;
 
         const content_length = parseContentLength(head) orelse return error.NoContentLength;
         const body_end = header_end + content_length;
@@ -150,10 +150,10 @@ const Reader = struct {
     }
 
     fn fill(self: *Reader) !void {
-        if (self.len == self.buf.len) return error.ResponseTooLarge;
+        if (self.len == self.buf.len) return error.ZixResponseTooLarge;
 
         const n = std.posix.read(self.fd, self.buf[self.len..]) catch return error.ReadFailed;
-        if (n == 0) return error.ConnectionClosed;
+        if (n == 0) return error.ZixConnectionClosed;
         self.len += n;
     }
 };

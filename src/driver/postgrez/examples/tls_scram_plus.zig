@@ -37,9 +37,9 @@ pub fn main(process: std.process.Init) !void {
     });
     defer conn.deinit();
 
-    const session = conn.tls_session orelse return error.TlsSessionMissing;
+    const session = conn.tls_session orelse return error.PostgrezTlsSessionMissing;
     std.debug.print("tls active, server cert {d} bytes\n", .{session.serverCertDer().len});
-    std.debug.print("mechanism: {s}\n", .{(conn.sasl_mechanism orelse return error.SaslMissing).name()});
+    std.debug.print("mechanism: {s}\n", .{(conn.sasl_mechanism orelse return error.PostgrezSaslMissing).name()});
 
     const one = try conn.queryRow(One, "SELECT 1::int8 AS one", .{});
     std.debug.print("query over tls: {d}\n", .{one.?.one});

@@ -29,17 +29,17 @@ pub const Level = enum {
 /// Errors the gzip / deflate encoders can raise. Shares BufferTooSmall and OutOfMemory with
 /// brotli.EncodeError, so a caller can switch codecs without changing its error handling.
 pub const EncodeError = error{
-    CompressFailed,
-    BufferTooSmall,
+    ZixCompressFailed,
+    ZixBufferTooSmall,
     OutOfMemory,
 };
 
 /// Errors the gzip / deflate decoders surface, identical to brotli.DecodeError. An output that
 /// overflows a caller buffer is BufferTooSmall. An over-cap alloc-variant output is OutputTooLarge.
 pub const DecodeError = error{
-    DecompressFailed,
-    OutputTooLarge,
-    BufferTooSmall,
+    ZixDecompressFailed,
+    ZixOutputTooLarge,
+    ZixBufferTooSmall,
     OutOfMemory,
 };
 
@@ -87,8 +87,8 @@ fn options(level: Level) flate.Compress.Options {
 ///
 /// Return:
 /// - usize (compressed byte count written into out_buf)
-/// - error.BufferTooSmall if out_buf cannot hold the result
-/// - error.CompressFailed if the codec fails
+/// - error.ZixBufferTooSmall if out_buf cannot hold the result
+/// - error.ZixCompressFailed if the codec fails
 fn compressContainer(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -96,7 +96,7 @@ fn compressContainer(
     level: Level,
     container: Container,
 ) !usize {
-    if (out_buf.len < compressBound(data.len)) return error.BufferTooSmall;
+    if (out_buf.len < compressBound(data.len)) return error.ZixBufferTooSmall;
 
     const work_buf = try allocator.alloc(u8, flate.max_window_len);
     defer allocator.free(work_buf);
@@ -112,9 +112,9 @@ fn compressContainer(
     var out_writer = std.Io.Writer.fixed(out_buf);
     slot.* = flate.Compress.init(&out_writer, work_buf, container, options(level));
 
-    const comp: *flate.Compress = if (slot.*) |*payload| payload else |_| return error.CompressFailed;
-    comp.writer.writeAll(data) catch return error.CompressFailed;
-    comp.finish() catch return error.CompressFailed;
+    const comp: *flate.Compress = if (slot.*) |*payload| payload else |_| return error.ZixCompressFailed;
+    comp.writer.writeAll(data) catch return error.ZixCompressFailed;
+    comp.finish() catch return error.ZixCompressFailed;
 
     return out_writer.end;
 }
@@ -140,16 +140,16 @@ fn compressContainerAlloc(allocator: std.mem.Allocator, data: []const u8, level:
 ///
 /// Return:
 /// - usize (inflated byte count written into out_buf)
-/// - error.BufferTooSmall if out_buf cannot hold the inflated result
-/// - error.DecompressFailed if the stream is malformed
+/// - error.ZixBufferTooSmall if out_buf cannot hold the inflated result
+/// - error.ZixDecompressFailed if the stream is malformed
 fn decompressContainer(compressed: []const u8, out_buf: []u8, container: Container) !usize {
     var in_reader = std.Io.Reader.fixed(compressed);
     var decomp = flate.Decompress.init(&in_reader, container, &.{});
 
     var out_writer = std.Io.Writer.fixed(out_buf);
     const n = decomp.reader.stream(&out_writer, .unlimited) catch |err| switch (err) {
-        error.WriteFailed => return error.BufferTooSmall,
-        else => return error.DecompressFailed,
+        error.WriteFailed => return error.ZixBufferTooSmall,
+        else => return error.ZixDecompressFailed,
     };
 
     return n;
@@ -164,8 +164,8 @@ fn decompressContainerAlloc(allocator: std.mem.Allocator, compressed: []const u8
 
     var out_writer = std.Io.Writer.fixed(buf);
     const n = decomp.reader.stream(&out_writer, .unlimited) catch |err| switch (err) {
-        error.WriteFailed => return error.OutputTooLarge,
-        else => return error.DecompressFailed,
+        error.WriteFailed => return error.ZixOutputTooLarge,
+        else => return error.ZixDecompressFailed,
     };
 
     return allocator.realloc(buf, n);
@@ -328,7 +328,7 @@ test "zix compression: flate gzip decompress into too-small buffer errors" {
 
     var tiny: [8]u8 = undefined;
 
-    try testing.expectError(error.BufferTooSmall, decompressGzip(packed_bytes, &tiny));
+    try testing.expectError(error.ZixBufferTooSmall, decompressGzip(packed_bytes, &tiny));
 }
 
 test "zix compression: flate gzip decompress past the cap errors" {
@@ -338,7 +338,7 @@ test "zix compression: flate gzip decompress past the cap errors" {
     const packed_bytes = try compressGzipAlloc(testing.allocator, &original, .DEFAULT);
     defer testing.allocator.free(packed_bytes);
 
-    try testing.expectError(error.OutputTooLarge, decompressGzipAlloc(testing.allocator, packed_bytes, 16));
+    try testing.expectError(error.ZixOutputTooLarge, decompressGzipAlloc(testing.allocator, packed_bytes, 16));
 }
 
 test "zix compression: flate gzip malformed stream errors" {
@@ -346,7 +346,7 @@ test "zix compression: flate gzip malformed stream errors" {
 
     var out_buf: [64]u8 = undefined;
 
-    try testing.expectError(error.DecompressFailed, decompressGzip(garbage, &out_buf));
+    try testing.expectError(error.ZixDecompressFailed, decompressGzip(garbage, &out_buf));
 }
 
 test "zix compression: flate gzip compress into undersized buffer errors" {
@@ -355,7 +355,7 @@ test "zix compression: flate gzip compress into undersized buffer errors" {
 
     var out_buf: [4]u8 = undefined;
 
-    try testing.expectError(error.BufferTooSmall, compressGzip(testing.allocator, &original, &out_buf, .DEFAULT));
+    try testing.expectError(error.ZixBufferTooSmall, compressGzip(testing.allocator, &original, &out_buf, .DEFAULT));
 }
 
 test "zix compression: flate deflate roundtrip ascii" {
@@ -424,5 +424,5 @@ test "zix compression: flate deflate a gzip stream does not decode as deflate" {
 
     var out_buf: [64]u8 = undefined;
 
-    try testing.expectError(error.DecompressFailed, decompressDeflate(packed_gzip, &out_buf));
+    try testing.expectError(error.ZixDecompressFailed, decompressDeflate(packed_gzip, &out_buf));
 }

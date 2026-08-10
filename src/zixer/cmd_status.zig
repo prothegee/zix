@@ -4,6 +4,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const fault = @import("fault.zig");
+const daemon_log = @import("daemon_log.zig");
 const main_cfg = @import("main_cfg.zig");
 const root_dir = @import("root_dir.zig");
 const site_cfg = @import("site_cfg.zig");
@@ -105,6 +106,7 @@ pub fn renderMain(out: *std.Io.Writer, path: []const u8, cfg: main_cfg.MainCfg, 
     }
     try out.print("dispatch: {s}\n", .{main_cfg.dispatchName(cfg.dispatch)});
     try out.print("logs_dir: {s}\n", .{cfg.logs_dir});
+    try out.print("log_level: {s}\n", .{daemon_log.levelName(cfg.log_level)});
     try out.print("sites_dir: {s}\n", .{cfg.sites_dir});
     try out.print("max_recv_buf: {d}\n", .{cfg.max_recv_buf});
     try out.print("kernel_backlog: {d}\n", .{cfg.kernel_backlog});
@@ -468,6 +470,7 @@ test "zix zixer: cmd status, render main block matches the documented shape" {
         "workers: 1\n" ++
         "dispatch: async\n" ++
         "logs_dir: /r/logs\n" ++
+        "log_level: info\n" ++
         "sites_dir: /r/sites\n" ++
         "max_recv_buf: 8192\n" ++
         "kernel_backlog: 1024\n" ++

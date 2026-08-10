@@ -56,16 +56,20 @@ pub const Http2Server = struct {
     /// config.port (already overridden to tls_port by the caller) while the cleartext model
     /// runs on the original port.
     fn serveTlsThread(handler: core.HandlerFn, config: Http2ServerConfig) void {
-        tls_serve.runTls(handler, config) catch {};
+        tls_serve.runTls(handler, config) catch |err| {
+            // The cleartext listener keeps serving on its own thread, so without this the h2 TLS
+            // side is dead and the server still looks healthy.
+            common.logSystem(config, .ERROR, "the h2 TLS listener on {s}:{d} stopped ({s}), cleartext is still serving", .{ config.ip, config.tls_port, @errorName(err) });
+        };
     }
 
     /// Listen and serve.
     ///
     /// Return:
     /// - !void
-    /// - error.PortNotConfigured if config.port is 0
+    /// - error.ZixPortNotConfigured if config.port is 0
     pub fn run(self: *Self) !void {
-        if (self.config.port == 0) return error.PortNotConfigured;
+        if (self.config.port == 0) return error.ZixPortNotConfigured;
 
         const cfg = self.config;
         const handler = self.handler;
@@ -73,20 +77,32 @@ pub const Http2Server = struct {
         // Reject an unrunnable model before any listener or TLS thread starts, so a rejected config
         // leaves nothing behind (ADR-065).
         if (!dispatch_support.isSupported(cfg.dispatch_model)) {
-            common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+            common.logSystem(cfg, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-            return error.DispatchModelUnsupported;
+            return error.ZixDispatchModelUnsupported;
         }
 
         // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
         // rather than 404-ing every file request at runtime. Mirrors zix.Http1.Server.run.
         if (cfg.public_dir.len > 0) {
-            const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), cfg.io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
+            // One name used to cover missing, not-a-directory and permission-denied alike, so
+            // a public_dir the process cannot enter reported as one that is not there.
+            const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), cfg.io, cfg.public_dir, .{}) catch |err| return switch (err) {
+                error.FileNotFound => error.ZixPublicDirNotFound,
+                error.NotDir => error.ZixPublicDirNotADirectory,
+                else => error.ZixPublicDirUnreadable,
+            };
             dir.close(cfg.io);
 
-            const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch .DISABLED;
+            // A failed install used to look exactly like caching being off, so a box out of
+            // memory served every static file through the slow path and said nothing.
+            const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch |err| downgrade: {
+                common.logSystem(cfg, .WARN, "the static cache could not be installed ({s}), every static request re-opens its file", .{@errorName(err)});
+
+                break :downgrade .DISABLED;
+            };
             if (installed == .MISMATCHED) {
-                std.log.info("zix http2: a static cache is already installed in this process with different settings, keeping it", .{});
+                common.logSystem(cfg, .WARN, "a static cache is already installed in this process with different settings, keeping it", .{});
             }
         }
 
@@ -94,7 +110,7 @@ pub const Http2Server = struct {
             // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
             // fleet, instead of a second server launch.
             if (cfg.tls_port != 0) {
-                if (cfg.tls_port == cfg.port) return error.TlsPortConflict;
+                if (cfg.tls_port == cfg.port) return error.ZixTlsPortConflict;
 
                 if (is_linux and cfg.dispatch_model == .EPOLL)
                     return epoll_model.runEpoll(handler, cfg);
@@ -126,10 +142,10 @@ pub const Http2Server = struct {
         return switch (cfg.dispatch_model) {
             .ASYNC => async_model.runAsync(handler, cfg),
             // .EPOLL is the shared-nothing multiplexed h2 event loop (Linux-only).
-            .EPOLL => if (is_linux) epoll_model.runEpoll(handler, cfg) else error.DispatchModelUnsupported,
+            .EPOLL => if (is_linux) epoll_model.runEpoll(handler, cfg) else error.ZixDispatchModelUnsupported,
             // .URING is the native io_uring shared-nothing loop (Linux-only). It probes the ring
             // at startup and falls back to .EPOLL when io_uring is unavailable.
-            .URING => if (is_linux) uring_model.runUring(handler, cfg) else error.DispatchModelUnsupported,
+            .URING => if (is_linux) uring_model.runUring(handler, cfg) else error.ZixDispatchModelUnsupported,
         };
     }
 };
@@ -147,7 +163,7 @@ test "zix http2: Http2Server.run, port zero returns PortNotConfigured" {
     var server = Http2Server.init(empty_router.dispatch, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
-    try std.testing.expectError(error.PortNotConfigured, server.run());
+    try std.testing.expectError(error.ZixPortNotConfigured, server.run());
 }
 
 test "zix http2: Http2Server.init, valid config succeeds and deinit is safe" {

@@ -64,7 +64,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     // brotli: preferred when offered, compressed, decodes back to the original.
     {
         const resp = try request(io, port, "/data", "br", &resp_buf);
-        if (!statusIs200(resp)) return error.UnexpectedStatus;
+        if (!statusIs200(resp)) return error.ZixUnexpectedStatus;
         const encoding = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
         if (!std.mem.eql(u8, encoding, "br")) return error.WrongEncoding;
 
@@ -75,7 +75,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     // gzip: compressed, decodes back to the original.
     {
         const resp = try request(io, port, "/data", "gzip", &resp_buf);
-        if (!statusIs200(resp)) return error.UnexpectedStatus;
+        if (!statusIs200(resp)) return error.ZixUnexpectedStatus;
         const encoding = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
         if (!std.mem.eql(u8, encoding, "gzip")) return error.WrongEncoding;
 
@@ -86,7 +86,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     // deflate: compressed with the zlib container, decodes back to the original.
     {
         const resp = try request(io, port, "/data", "deflate", &resp_buf);
-        if (!statusIs200(resp)) return error.UnexpectedStatus;
+        if (!statusIs200(resp)) return error.ZixUnexpectedStatus;
         const encoding = headerValue(resp, "content-encoding") orelse return error.MissingContentEncoding;
         if (!std.mem.eql(u8, encoding, "deflate")) return error.WrongEncoding;
 
@@ -97,7 +97,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     // no Accept-Encoding: identity, the original bytes unchanged.
     {
         const resp = try request(io, port, "/data", null, &resp_buf);
-        if (!statusIs200(resp)) return error.UnexpectedStatus;
+        if (!statusIs200(resp)) return error.ZixUnexpectedStatus;
         if (headerValue(resp, "content-encoding") != null) return error.UnexpectedContentEncoding;
         if (!std.mem.startsWith(u8, bodyOf(resp), EXPECTED_PREFIX)) return error.UnexpectedBody;
     }
@@ -105,7 +105,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     // under the size floor: never compressed, even when gzip is accepted.
     {
         const resp = try request(io, port, "/ping", "gzip", &resp_buf);
-        if (!statusIs200(resp)) return error.UnexpectedStatus;
+        if (!statusIs200(resp)) return error.ZixUnexpectedStatus;
         if (headerValue(resp, "content-encoding") != null) return error.FloorNotApplied;
         if (!std.mem.eql(u8, bodyOf(resp), "pong")) return error.UnexpectedBody;
     }

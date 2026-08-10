@@ -89,12 +89,12 @@ pub const Config = struct {
     dispatch_model: DispatchModel = .ASYNC,
     /// Bounds replies a connection may owe: statements queued by a
     /// Pipeline or by Statement.sendRows. At the bound the queuing call
-    /// sheds with error.QueueFull, 0 = no bound.
+    /// sheds with error.PostgrezQueueFull, 0 = no bound.
     max_pending_replies: usize = 16,
     /// Pool only: acquires parked on a fully-held pool (FIFO handoff on
     /// release), 0 = off (acquire sheds immediately with
-    /// error.PoolExhausted). Beyond the bound acquire sheds with
-    /// error.PoolBusy.
+    /// error.PostgrezPoolExhausted). Beyond the bound acquire sheds with
+    /// error.PostgrezPoolBusy.
     process_queue_len: usize = 0,
     /// Pool only: connections per pool.
     pool_size: usize = 6,

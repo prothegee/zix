@@ -173,13 +173,13 @@ pub const Transport = struct {
     ///
     /// Return:
     /// - *Transport, deinit closes the connections and frees everything
-    /// - error.AsyncUsesExecutor when model is ASYNC
-    /// - error.TlsUnsupported when config.tls is not OFF
+    /// - error.PostgrezAsyncUsesExecutor when model is ASYNC
+    /// - error.PostgrezTlsUnsupported when config.tls is not OFF
     /// - connect or allocation errors
     pub fn open(allocator: std.mem.Allocator, io: std.Io, config: lib.Config, options: Options) !*Self {
-        if (options.model == .ASYNC) return error.AsyncUsesExecutor;
-        if (config.tls != .OFF) return error.TlsUnsupported;
-        if (options.conns == 0 or options.window == 0) return error.BadOptions;
+        if (options.model == .ASYNC) return error.PostgrezAsyncUsesExecutor;
+        if (config.tls != .OFF) return error.PostgrezTlsUnsupported;
+        if (options.conns == 0 or options.window == 0) return error.PostgrezBadOptions;
 
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
@@ -255,7 +255,7 @@ pub const Transport = struct {
     ///
     /// Return:
     /// - usize count of replies delivered this call (0 when idle)
-    /// - error.ConnectionClosed when a peer closed mid-flight
+    /// - error.PostgrezConnectionClosed when a peer closed mid-flight
     pub fn poll(self: *Self) !usize {
         return switch (self.model) {
             .EPOLL => self.pollEpoll(),
@@ -278,7 +278,7 @@ pub const Transport = struct {
         switch (self.model) {
             .EPOLL => {
                 const created = linux.epoll_create1(0);
-                if (std.posix.errno(created) != .SUCCESS) return error.EpollCreate;
+                if (std.posix.errno(created) != .SUCCESS) return error.PostgrezEpollCreate;
                 self.epoll_fd = @intCast(created);
 
                 for (self.channels, 0..) |*channel, index| {
@@ -317,7 +317,7 @@ pub const Transport = struct {
 
             if (event.events & linux.EPOLL.IN != 0) {
                 const nread = readNb(channel.fd, channel.in[channel.in_len..]);
-                if (nread == 0) return error.ConnectionClosed;
+                if (nread == 0) return error.PostgrezConnectionClosed;
 
                 channel.in_len += nread;
                 completed += self.deliver(channel);
@@ -349,7 +349,7 @@ pub const Transport = struct {
             const op = cqe.user_data & 1;
             const channel = &self.channels[index];
 
-            if (cqe.res <= 0) return error.ConnectionClosed;
+            if (cqe.res <= 0) return error.PostgrezConnectionClosed;
             const done: usize = @intCast(cqe.res);
 
             if (op == OP_SEND) {
@@ -407,11 +407,11 @@ pub const Line = struct {
     ///
     /// Return:
     /// - *Line, deinit closes the connection and frees everything
-    /// - error.TlsUnsupported when config.tls is not OFF
+    /// - error.PostgrezTlsUnsupported when config.tls is not OFF
     /// - connect or allocation errors
     pub fn open(allocator: std.mem.Allocator, io: std.Io, config: lib.Config, options: Transport.Options) !*Line {
-        if (config.tls != .OFF) return error.TlsUnsupported;
-        if (options.window == 0) return error.BadOptions;
+        if (config.tls != .OFF) return error.PostgrezTlsUnsupported;
+        if (options.window == 0) return error.PostgrezBadOptions;
 
         const self = try allocator.create(Line);
         errdefer allocator.destroy(self);
@@ -470,7 +470,7 @@ pub const Line = struct {
     ///
     /// Return:
     /// - usize count of replies delivered this call (0 when nothing whole)
-    /// - error.ConnectionClosed when the peer closed the connection
+    /// - error.PostgrezConnectionClosed when the peer closed the connection
     pub fn pump(self: *Line) !usize {
         const channel = &self.channel;
 
@@ -479,14 +479,14 @@ pub const Line = struct {
             const rc = linux.read(channel.fd, channel.in.ptr + channel.in_len, channel.in.len - channel.in_len);
             switch (std.posix.errno(rc)) {
                 .SUCCESS => {
-                    if (rc == 0) return error.ConnectionClosed;
+                    if (rc == 0) return error.PostgrezConnectionClosed;
 
                     channel.in_len += rc;
                     completed += self.deliverLine();
                 },
                 .AGAIN => break,
                 .INTR => {},
-                else => return error.ConnectionClosed,
+                else => return error.PostgrezConnectionClosed,
             }
         }
 
@@ -619,8 +619,8 @@ fn writeNb(fd: Fd, buf: []const u8) usize {
 ///
 /// Return:
 /// - void when every statement is prepared on every channel
-/// - error.PrepareFailed on a server ErrorResponse
-/// - error.PrepareOverflow when a reply exceeds the receive buffer
+/// - error.PostgrezPrepareFailed on a server ErrorResponse
+/// - error.PostgrezPrepareOverflow when a reply exceeds the receive buffer
 /// - connection errors
 fn prepareChannels(channels: []Channel, prepares: []const []const u8) !void {
     for (channels) |*channel| {
@@ -629,7 +629,7 @@ fn prepareChannels(channels: []Channel, prepares: []const []const u8) !void {
         var acked: usize = 0;
         while (acked < prepares.len) {
             if (scanReply(channel.in[0..channel.in_len])) |framed| {
-                if (framed.is_error) return error.PrepareFailed;
+                if (framed.is_error) return error.PostgrezPrepareFailed;
 
                 std.mem.copyForwards(u8, channel.in[0 .. channel.in_len - framed.len], channel.in[framed.len..channel.in_len]);
                 channel.in_len -= framed.len;
@@ -638,10 +638,10 @@ fn prepareChannels(channels: []Channel, prepares: []const []const u8) !void {
                 continue;
             }
 
-            if (channel.in_len == channel.in.len) return error.PrepareOverflow;
+            if (channel.in_len == channel.in.len) return error.PostgrezPrepareOverflow;
 
             const nread = try recvBlocking(channel.fd, channel.in[channel.in_len..]);
-            if (nread == 0) return error.ConnectionClosed;
+            if (nread == 0) return error.PostgrezConnectionClosed;
 
             channel.in_len += nread;
         }
@@ -681,7 +681,7 @@ fn sendAllBlocking(fd: Fd, bytes: []const u8) !void {
         const rc = linux.write(fd, bytes.ptr + sent, bytes.len - sent);
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
-                if (rc == 0) return error.ConnectionClosed;
+                if (rc == 0) return error.PostgrezConnectionClosed;
 
                 sent += rc;
             },
@@ -752,7 +752,7 @@ test "postgrez dispatch: open rejects ASYNC" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.AsyncUsesExecutor, Transport.open(testing.allocator, threaded.io(), .{
+    try testing.expectError(error.PostgrezAsyncUsesExecutor, Transport.open(testing.allocator, threaded.io(), .{
         .user = "tester",
     }, .{ .model = .ASYNC, .conns = 1, .on_reply = noopReply }));
 }
@@ -766,7 +766,7 @@ test "postgrez dispatch: open rejects TLS" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.TlsUnsupported, Transport.open(testing.allocator, threaded.io(), .{
+    try testing.expectError(error.PostgrezTlsUnsupported, Transport.open(testing.allocator, threaded.io(), .{
         .user = "tester",
         .tls = .REQUIRE,
     }, .{ .model = .EPOLL, .conns = 1, .on_reply = noopReply }));
@@ -890,5 +890,5 @@ test "postgrez dispatch: Line pump surfaces a closed peer" {
     try testing.expect(line.submit("Q", 1));
     _ = linux.close(fds[1]);
 
-    try testing.expectError(error.ConnectionClosed, line.pump());
+    try testing.expectError(error.PostgrezConnectionClosed, line.pump());
 }

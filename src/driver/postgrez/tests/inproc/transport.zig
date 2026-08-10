@@ -20,7 +20,7 @@ const READ_BUF_SIZE = 8 * 1024;
 const WRITE_BUF_SIZE = 8 * 1024;
 
 pub const Error = error{
-    ConnectionClosed,
+    PostgrezConnectionClosed,
     WriteFailed,
 };
 
@@ -62,12 +62,12 @@ pub const Transport = struct {
     /// Fill buf completely.
     pub fn readExact(self: *Self, buf: []u8) Error!void {
         if (self.tls) |*session| {
-            session.readAll(&self.reader.interface, buf) catch return error.ConnectionClosed;
+            session.readAll(&self.reader.interface, buf) catch return error.PostgrezConnectionClosed;
 
             return;
         }
 
-        self.reader.interface.readSliceAll(buf) catch return error.ConnectionClosed;
+        self.reader.interface.readSliceAll(buf) catch return error.PostgrezConnectionClosed;
     }
 
     /// Write one reply flight and put it on the wire.
@@ -229,5 +229,5 @@ test "postgrez inproc: transport reports a closed peer" {
     try pair.client_side.shutdown(pair.threaded.io(), .both);
 
     var buf: [5]u8 = undefined;
-    try testing.expectError(error.ConnectionClosed, transport.readExact(&buf));
+    try testing.expectError(error.PostgrezConnectionClosed, transport.readExact(&buf));
 }

@@ -30,7 +30,7 @@ pub const Statement = struct {
     ///
     /// Return:
     /// - Statement ready for exec/query/rows, deinit() closes it
-    /// - error.ServerError when parsing fails (see conn.lastServerError)
+    /// - error.PostgrezServerError when parsing fails (see conn.lastServerError)
     pub fn prepare(conn: *Conn, sql: []const u8) !Statement {
         conn.statement_seq += 1;
 
@@ -77,11 +77,11 @@ pub const Statement = struct {
                 },
                 .ready_for_query => |status| {
                     conn.transaction_status = status;
-                    if (failed) return error.ServerError;
+                    if (failed) return error.PostgrezServerError;
 
                     return self;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -150,7 +150,7 @@ pub const Statement = struct {
     ///
     /// Note:
     /// - config.max_pending_replies bounds the queued executions (0 = no
-    ///   bound), at the bound sendRows sheds with error.QueueFull: await
+    ///   bound), at the bound sendRows sheds with error.PostgrezQueueFull: await
     ///   the queued results first.
     /// - No other queries on the connection until every queued result was
     ///   consumed by awaitRows.
@@ -166,11 +166,11 @@ pub const Statement = struct {
     ///
     /// Return:
     /// - void on success (awaitRows sends the batch and reads the result)
-    /// - error.QueueFull when max_pending_replies is set and reached
+    /// - error.PostgrezQueueFull when max_pending_replies is set and reached
     pub fn sendRows(self: *Statement, args: anytype) !void {
         const conn = self.conn;
         const bound = conn.config.max_pending_replies;
-        if (bound != 0 and conn.batch_pending >= bound) return error.QueueFull;
+        if (bound != 0 and conn.batch_pending >= bound) return error.PostgrezQueueFull;
 
         if (conn.batch_pending == 0) {
             _ = conn.query_arena.reset(.retain_capacity);
@@ -201,18 +201,18 @@ pub const Statement = struct {
     ///
     /// Return:
     /// - conn.Result for the oldest queued execution
-    /// - error.BatchEmpty when nothing was queued
-    /// - error.BatchAborted when an earlier statement of the batch failed
+    /// - error.PostgrezBatchEmpty when nothing was queued
+    /// - error.PostgrezBatchAborted when an earlier statement of the batch failed
     ///   (the server discarded this one until Sync)
     pub fn awaitRows(self: *Statement) !conn_mod.Result {
         const conn = self.conn;
-        if (conn.batch_pending == 0) return error.BatchEmpty;
+        if (conn.batch_pending == 0) return error.PostgrezBatchEmpty;
 
         if (conn.batch_aborted) {
             conn.batch_pending -= 1;
             if (conn.batch_pending == 0) conn.batch_aborted = false;
 
-            return error.BatchAborted;
+            return error.PostgrezBatchAborted;
         }
 
         if (!conn.batch_flushed) {
@@ -265,10 +265,10 @@ pub const Statement = struct {
 ///
 /// Return:
 /// - the parallel Bind arrays
-/// - error.ParamCountMismatch when args and the statement disagree
+/// - error.PostgrezParamCountMismatch when args and the statement disagree
 pub fn encodeParamsForOids(arena: std.mem.Allocator, param_oids: []const u32, args: anytype) !conn_mod.Params(row_mod.fieldCount(@TypeOf(args))) {
     const count = comptime row_mod.fieldCount(@TypeOf(args));
-    if (count != param_oids.len) return error.ParamCountMismatch;
+    if (count != param_oids.len) return error.PostgrezParamCountMismatch;
 
     var out: conn_mod.Params(count) = undefined;
     inline for (0..count) |index| {
@@ -321,5 +321,5 @@ test "postgrez: encodeParamsForOids rejects a count mismatch" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    try testing.expectError(error.ParamCountMismatch, encodeParamsForOids(arena.allocator(), &.{ 20, 23 }, .{@as(i64, 7)}));
+    try testing.expectError(error.PostgrezParamCountMismatch, encodeParamsForOids(arena.allocator(), &.{ 20, 23 }, .{@as(i64, 7)}));
 }

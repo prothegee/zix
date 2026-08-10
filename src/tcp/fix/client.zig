@@ -58,9 +58,9 @@ pub const FixClient = struct {
     /// Connect to a FIX server.
     ///
     /// Return:
-    /// - error.PortNotConfigured if config.port is 0
+    /// - error.ZixPortNotConfigured if config.port is 0
     pub fn connect(config: FixClientConfig, io: std.Io) !Self {
-        if (config.port == 0) return error.PortNotConfigured;
+        if (config.port == 0) return error.ZixPortNotConfigured;
 
         const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
         const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
@@ -88,7 +88,7 @@ pub const FixClient = struct {
     /// heart_bt_int: HeartBtInt value in seconds (tag 108).
     pub fn logon(self: *Self, io: std.Io, heart_bt_int: u16) !void {
         var hbt_buf: [8]u8 = undefined;
-        const hbt_str = std.fmt.bufPrint(&hbt_buf, "{d}", .{heart_bt_int}) catch return error.InvalidHeartbeatInterval;
+        const hbt_str = std.fmt.bufPrint(&hbt_buf, "{d}", .{heart_bt_int}) catch return error.ZixInvalidHeartbeatInterval;
         const extra = [_]core.BuildField{
             .{ .tag = .EncryptMethod, .value = "0" },
             .{ .tag = .HeartBtInt, .value = hbt_str },
@@ -99,8 +99,8 @@ pub const FixClient = struct {
         const raw = try self.recvMessage(io);
         var fields: [core.MAX_FIELDS]core.Field = undefined;
         const field_count = try core.parseFields(raw, &fields);
-        const msg_type = core.getField(fields[0..field_count], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msg_type, core.MsgType.Logon)) return error.ExpectedLogon;
+        const msg_type = core.getField(fields[0..field_count], .MsgType) orelse return error.ZixMissingMsgType;
+        if (!std.mem.eql(u8, msg_type, core.MsgType.Logon)) return error.ZixExpectedLogon;
     }
 
     /// Send Logout (35=5) and wait for the server's Logout response.
@@ -110,14 +110,14 @@ pub const FixClient = struct {
         const raw = try self.recvMessage(io);
         var fields: [core.MAX_FIELDS]core.Field = undefined;
         const field_count = try core.parseFields(raw, &fields);
-        const msg_type = core.getField(fields[0..field_count], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msg_type, core.MsgType.Logout)) return error.ExpectedLogout;
+        const msg_type = core.getField(fields[0..field_count], .MsgType) orelse return error.ZixMissingMsgType;
+        if (!std.mem.eql(u8, msg_type, core.MsgType.Logout)) return error.ZixExpectedLogout;
     }
 
     /// Build and send a FIX message. Increments the outgoing sequence number.
     ///
     /// Return:
-    /// - error.SendTimeout if send_timeout_ms is set and the socket is not writable in time
+    /// - error.ZixSendTimeout if send_timeout_ms is set and the socket is not writable in time
     pub fn sendMessage(self: *Self, io: std.Io, msg_type: []const u8, extra: []const core.BuildField) !void {
         var out_buf: [core.MAX_MSG_SIZE]u8 = undefined;
         const n = try core.buildMessage(&out_buf, self.comp_id, self.target_comp_id, self.seq_out, msg_type, extra);
@@ -126,7 +126,7 @@ pub const FixClient = struct {
         if (self.send_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
             if (!try pollReady(self.stream.socket.handle, POLL_OUT, self.send_timeout_ms)) {
-                return error.SendTimeout;
+                return error.ZixSendTimeout;
             }
         }
 
@@ -140,8 +140,8 @@ pub const FixClient = struct {
     ///
     /// Return:
     /// - slice into the internal buffer (valid until the next recvMessage call)
-    /// - error.RecvTimeout if recv_timeout_ms is set and no data arrives in time
-    /// - error.ConnectionClosed if the peer closes the connection before a full message arrives
+    /// - error.ZixRecvTimeout if recv_timeout_ms is set and no data arrives in time
+    /// - error.ZixConnectionClosed if the peer closes the connection before a full message arrives
     pub fn recvMessage(self: *Self, io: std.Io) ![]const u8 {
         _ = io;
         const fd = self.stream.socket.handle;
@@ -157,11 +157,11 @@ pub const FixClient = struct {
                 return msg;
             }
 
-            if (self.recv_len >= self.recv_buf.len) return error.MessageTooLarge;
+            if (self.recv_len >= self.recv_buf.len) return error.ZixMessageTooLarge;
 
             if (self.recv_timeout_ms > 0) {
                 if (!try pollReady(fd, POLL_IN, self.recv_timeout_ms)) {
-                    return error.RecvTimeout;
+                    return error.ZixRecvTimeout;
                 }
             }
 
@@ -169,7 +169,7 @@ pub const FixClient = struct {
                 try win_io.readOnce(fd, self.recv_buf[self.recv_len..])
             else
                 try std.posix.read(fd, self.recv_buf[self.recv_len..]);
-            if (n == 0) return error.ConnectionClosed;
+            if (n == 0) return error.ZixConnectionClosed;
             self.recv_len += n;
         }
     }
@@ -184,7 +184,7 @@ test "zix fix: FixClient.connect port zero returns PortNotConfigured" {
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         FixClient.connect(.{
             .ip = "127.0.0.1",
             .port = 0,
@@ -248,7 +248,7 @@ test "zix fix: FixClient.recvMessage reassembles message split across two reads"
     try std.testing.expectEqualSlices(u8, full_msg, msg);
 }
 
-test "zix fix: FixClient.recvMessage returns error.RecvTimeout when nothing arrives" {
+test "zix fix: FixClient.recvMessage returns error.ZixRecvTimeout when nothing arrives" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
         return;
@@ -280,7 +280,7 @@ test "zix fix: FixClient.recvMessage returns error.RecvTimeout when nothing arri
         .send_timeout_ms = 0,
     };
 
-    try std.testing.expectError(error.RecvTimeout, client.recvMessage(io));
+    try std.testing.expectError(error.ZixRecvTimeout, client.recvMessage(io));
 }
 
 test "zix fix: FixClient.sendMessage succeeds within send_timeout_ms when the peer drains" {
@@ -325,7 +325,7 @@ test "zix fix: FixClient.sendMessage succeeds within send_timeout_ms when the pe
     try std.testing.expect(n > 0);
 }
 
-test "zix fix: FixClient.sendMessage returns error.SendTimeout when the peer's buffer is full" {
+test "zix fix: FixClient.sendMessage returns error.ZixSendTimeout when the peer's buffer is full" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
         return;
@@ -374,5 +374,5 @@ test "zix fix: FixClient.sendMessage returns error.SendTimeout when the peer's b
         .{ .tag = .EncryptMethod, .value = "0" },
         .{ .tag = .HeartBtInt, .value = "30" },
     };
-    try std.testing.expectError(error.SendTimeout, client.sendMessage(io, core.MsgType.Logon, &extra));
+    try std.testing.expectError(error.ZixSendTimeout, client.sendMessage(io, core.MsgType.Logon, &extra));
 }

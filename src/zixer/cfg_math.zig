@@ -6,9 +6,9 @@ const std = @import("std");
 const MAX_DEPTH: usize = 32;
 
 pub const Error = error{
-    BadExpression,
-    DivisionByZero,
-    InexactDivision,
+    ZixerBadExpression,
+    ZixerDivisionByZero,
+    ZixerInexactDivision,
     Overflow,
 };
 
@@ -42,13 +42,13 @@ const Cursor = struct {
 ///
 /// Return:
 /// - i64 result of the expression
-/// - error.BadExpression when the text is not an expression the grammar covers
-/// - error.DivisionByZero, error.InexactDivision, error.Overflow on bad arithmetic
+/// - error.ZixerBadExpression when the text is not an expression the grammar covers
+/// - error.ZixerDivisionByZero, error.ZixerInexactDivision, error.Overflow on bad arithmetic
 pub fn evaluate(text: []const u8) Error!i64 {
     var cursor = Cursor{ .text = text };
     const result = try parseSum(&cursor, 0);
 
-    if (cursor.peek() != null) return error.BadExpression;
+    if (cursor.peek() != null) return error.ZixerBadExpression;
 
     return result;
 }
@@ -59,9 +59,9 @@ pub fn evaluate(text: []const u8) Error!i64 {
 /// - []const u8 (static hint text, junior-readable)
 pub fn hint(err: Error) []const u8 {
     return switch (err) {
-        error.BadExpression => "not a number or integer math (i.e. 16 * 1024)",
-        error.DivisionByZero => "division by zero",
-        error.InexactDivision => "division leaves a remainder, config values must be exact",
+        error.ZixerBadExpression => "not a number or integer math (i.e. 16 * 1024)",
+        error.ZixerDivisionByZero => "division by zero",
+        error.ZixerInexactDivision => "division leaves a remainder, config values must be exact",
         error.Overflow => "number does not fit 64-bit integer math",
     };
 }
@@ -96,8 +96,8 @@ fn parseProduct(cursor: *Cursor, depth: usize) Error!i64 {
         if (op == '*') {
             total = std.math.mul(i64, total, rhs) catch return error.Overflow;
         } else {
-            if (rhs == 0) return error.DivisionByZero;
-            if (@rem(total, rhs) != 0) return error.InexactDivision;
+            if (rhs == 0) return error.ZixerDivisionByZero;
+            if (@rem(total, rhs) != 0) return error.ZixerInexactDivision;
 
             total = @divTrunc(total, rhs);
         }
@@ -108,20 +108,20 @@ fn parseProduct(cursor: *Cursor, depth: usize) Error!i64 {
 
 /// Factor level: a plain integer or a parenthesized sub-expression.
 fn parseFactor(cursor: *Cursor, depth: usize) Error!i64 {
-    const first = cursor.peek() orelse return error.BadExpression;
+    const first = cursor.peek() orelse return error.ZixerBadExpression;
 
     if (first == '(') {
-        if (depth >= MAX_DEPTH) return error.BadExpression;
+        if (depth >= MAX_DEPTH) return error.ZixerBadExpression;
         cursor.pos += 1;
 
         const inner = try parseSum(cursor, depth + 1);
-        if (cursor.peek() != ')') return error.BadExpression;
+        if (cursor.peek() != ')') return error.ZixerBadExpression;
         cursor.pos += 1;
 
         return inner;
     }
 
-    if (first < '0' or first > '9') return error.BadExpression;
+    if (first < '0' or first > '9') return error.ZixerBadExpression;
 
     var value: i64 = 0;
     while (cursor.pos < cursor.text.len) {
@@ -167,13 +167,13 @@ test "zix zixer: cfg math, spaces and tabs are skipped" {
 }
 
 test "zix zixer: cfg math, inexact division is an error" {
-    try std.testing.expectError(error.InexactDivision, evaluate("10 / 4"));
-    try std.testing.expectError(error.InexactDivision, evaluate("1 / 2"));
+    try std.testing.expectError(error.ZixerInexactDivision, evaluate("10 / 4"));
+    try std.testing.expectError(error.ZixerInexactDivision, evaluate("1 / 2"));
 }
 
 test "zix zixer: cfg math, division by zero is an error" {
-    try std.testing.expectError(error.DivisionByZero, evaluate("1 / 0"));
-    try std.testing.expectError(error.DivisionByZero, evaluate("1 / (2 - 2)"));
+    try std.testing.expectError(error.ZixerDivisionByZero, evaluate("1 / 0"));
+    try std.testing.expectError(error.ZixerDivisionByZero, evaluate("1 / (2 - 2)"));
 }
 
 test "zix zixer: cfg math, overflow is an error" {
@@ -182,14 +182,14 @@ test "zix zixer: cfg math, overflow is an error" {
 }
 
 test "zix zixer: cfg math, syntax the grammar does not cover is an error" {
-    try std.testing.expectError(error.BadExpression, evaluate(""));
-    try std.testing.expectError(error.BadExpression, evaluate("abc"));
-    try std.testing.expectError(error.BadExpression, evaluate("1 +"));
-    try std.testing.expectError(error.BadExpression, evaluate("(1"));
-    try std.testing.expectError(error.BadExpression, evaluate("1)"));
-    try std.testing.expectError(error.BadExpression, evaluate("1 2"));
-    try std.testing.expectError(error.BadExpression, evaluate("-1"));
-    try std.testing.expectError(error.BadExpression, evaluate("1.5"));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate(""));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate("abc"));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate("1 +"));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate("(1"));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate("1)"));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate("1 2"));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate("-1"));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate("1.5"));
 }
 
 test "zix zixer: cfg math, nesting past the depth cap is an error" {
@@ -198,5 +198,5 @@ test "zix zixer: cfg math, nesting past the depth cap is an error" {
     const closes: [MAX_DEPTH + 1]u8 = @splat(')');
 
     const deep = try std.fmt.bufPrint(&deep_buf, "{s}1{s}", .{ opens, closes });
-    try std.testing.expectError(error.BadExpression, evaluate(deep));
+    try std.testing.expectError(error.ZixerBadExpression, evaluate(deep));
 }

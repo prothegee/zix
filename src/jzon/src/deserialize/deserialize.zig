@@ -63,9 +63,9 @@ pub const Error = options_mod.Error;
 ///
 /// Return:
 /// - T (the parsed value)
-/// - error.UnknownField, error.MissingField, error.UnknownEnumValue when the
+/// - error.JzonUnknownField, error.JzonMissingField, error.JzonUnknownEnumValue when the
 ///   document and the type disagree
-/// - error.Truncated, error.Unexpected, error.BadNumber, error.BadEscape when
+/// - error.JzonTruncated, error.JzonUnexpected, error.JzonBadNumber, error.JzonBadEscape when
 ///   the document is not what it claims
 /// - error.OutOfMemory when the allocator runs out
 pub fn deserialize(
@@ -170,7 +170,7 @@ test "jzon: deserialize carries the unknown key rule down to the path it picked"
         try std.testing.expectEqual(@as(i32, 1), skipped.alpha);
         try std.testing.expectEqualStrings("x", skipped.beta);
 
-        try std.testing.expectError(error.UnknownField, deserialize(Nested, arena.allocator(), src, .{
+        try std.testing.expectError(error.JzonUnknownField, deserialize(Nested, arena.allocator(), src, .{
             .strategy = strategy,
             .unknown = .REJECT,
         }));
@@ -184,10 +184,10 @@ test "jzon: deserialize reports every strategy's failure through one error set" 
     inline for (STRATEGIES) |strategy| {
         const options: Options = .{ .strategy = strategy };
 
-        try std.testing.expectError(error.Truncated, deserialize(Nested, arena.allocator(), "{\"alpha\":", options));
-        try std.testing.expectError(error.Unexpected, deserialize(Nested, arena.allocator(), "[]", options));
-        try std.testing.expectError(error.MissingField, deserialize(Nested, arena.allocator(), "{\"alpha\":1}", options));
-        try std.testing.expectError(error.UnknownField, deserialize(Nested, arena.allocator(), "{\"gone\":1}", options));
+        try std.testing.expectError(error.JzonTruncated, deserialize(Nested, arena.allocator(), "{\"alpha\":", options));
+        try std.testing.expectError(error.JzonUnexpected, deserialize(Nested, arena.allocator(), "[]", options));
+        try std.testing.expectError(error.JzonMissingField, deserialize(Nested, arena.allocator(), "{\"alpha\":1}", options));
+        try std.testing.expectError(error.JzonUnknownField, deserialize(Nested, arena.allocator(), "{\"gone\":1}", options));
     }
 }
 

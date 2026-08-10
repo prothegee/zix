@@ -134,10 +134,10 @@ Setiap generated parser butuh dua jawaban yang sama, jadi `fields.zig` yang memi
 flowchart TB
     key[sebuah key datang] --> known{apakah T mendeklarasikannya?}
     known -- tidak --> unknown{opsi unknown}
-    unknown -- REJECT --> uf[error.UnknownField]
+    unknown -- REJECT --> uf[error.JzonUnknownField]
     unknown -- SKIP --> step[langkahi seluruh nilainya]
     known -- ya --> seen{sudah ditandai?}
-    seen -- ya --> dup[error.Unexpected]
+    seen -- ya --> dup[error.JzonUnexpected]
     seen -- tidak --> read[baca nilainya, tandai field-nya]
     read --> done[dokumen berakhir]
     step --> done
@@ -145,7 +145,7 @@ flowchart TB
     fill -- ya --> ok[nilainya]
     fill -- tidak --> def{field tak bertanda punya default?}
     def -- ya --> apply[terapkan]
-    def -- tidak --> mf[error.MissingField]
+    def -- tidak --> mf[error.JzonMissingField]
 ```
 
 Key yang sama dua kali adalah `Unexpected`, bukan diam-diam yang terakhir menang.
@@ -200,9 +200,9 @@ Setiap strategy serialize menulis byte yang dibaca kembali oleh setiap strategy 
 
 | Dokumen | `.STD` | `.SCANNER` | `.GENERATED` dan `.GENERATED_VECTOR` |
 | :- | :- | :- | :- |
-| `[104,105]` ke sebuah `[]const u8` | mengisinya, menghasilkan `"hi"` | `error.Unexpected` | `error.Unexpected` |
-| `-0` ke field unsigned | membaca digitnya, menghasilkan `0` | `error.BadNumber` | `error.BadNumber` |
-| `"\q"` | `error.Unexpected`, sebuah syntax error | `error.Unexpected`, sebuah syntax error | `error.BadEscape` |
+| `[104,105]` ke sebuah `[]const u8` | mengisinya, menghasilkan `"hi"` | `error.JzonUnexpected` | `error.JzonUnexpected` |
+| `-0` ke field unsigned | membaca digitnya, menghasilkan `0` | `error.JzonBadNumber` | `error.JzonBadNumber` |
+| `"\q"` | `error.JzonUnexpected`, sebuah syntax error | `error.JzonUnexpected`, sebuah syntax error | `error.JzonBadEscape` |
 
 Alasannya masing-masing:
 

@@ -114,7 +114,7 @@ test "zix edge: SseClient.open, https:// returns TlsNotSupported" {
     defer threaded.deinit();
 
     const client = zix.Http.SseClient.init(.{ .io = threaded.io() });
-    try std.testing.expectError(error.TlsNotSupported, client.open("https://example.com/events"));
+    try std.testing.expectError(error.ZixTlsNotSupported, client.open("https://example.com/events"));
 }
 
 test "zix edge: SseClient.open, non-http scheme returns InvalidUrl" {
@@ -122,5 +122,5 @@ test "zix edge: SseClient.open, non-http scheme returns InvalidUrl" {
     defer threaded.deinit();
 
     const client = zix.Http.SseClient.init(.{ .io = threaded.io() });
-    try std.testing.expectError(error.InvalidUrl, client.open("ftp://example.com/events"));
+    try std.testing.expectError(error.ZixUrlSchemeUnsupported, client.open("ftp://example.com/events"));
 }

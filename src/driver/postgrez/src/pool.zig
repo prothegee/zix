@@ -6,9 +6,9 @@
 //!   and waiter bookkeeping (uncontended cost is one atomic swap), parked
 //!   acquires sleep on a futex until a connection is handed over.
 //! - config.process_queue_len is the waiter bound: 0 = off (acquire on a
-//!   fully-held pool sheds immediately with error.PoolExhausted), N parks
+//!   fully-held pool sheds immediately with error.PostgrezPoolExhausted), N parks
 //!   up to N acquires FIFO and hands each released connection directly to
-//!   the oldest waiter. Beyond N acquire sheds with error.PoolBusy.
+//!   the oldest waiter. Beyond N acquire sheds with error.PostgrezPoolBusy.
 //! - Parking blocks the calling OS thread: another thread must release or
 //!   discard for a parked acquire to resume.
 //! - Slots connect lazily on first acquire and reconnect (with the config
@@ -51,7 +51,7 @@ pub const Pool = struct {
     /// Param:
     /// config - lib.Config (pool_size, process_queue_len, retry_max, retry_delay_ms drive the pool)
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: lib.Config) !Self {
-        if (config.pool_size == 0) return error.PoolSizeNotConfigured;
+        if (config.pool_size == 0) return error.PostgrezPoolSizeNotConfigured;
 
         const slots = try allocator.alloc(?*Conn, config.pool_size);
         errdefer allocator.free(slots);
@@ -86,8 +86,8 @@ pub const Pool = struct {
     ///
     /// Return:
     /// - *Conn, give it back with release (or discard when broken)
-    /// - error.PoolExhausted when every slot is held and parking is off
-    /// - error.PoolBusy when process_queue_len waiters are already parked
+    /// - error.PostgrezPoolExhausted when every slot is held and parking is off
+    /// - error.PostgrezPoolBusy when process_queue_len waiters are already parked
     /// - connect errors after retry_max + 1 attempts
     pub fn acquire(self: *Self) !*Conn {
         self.lock();
@@ -119,12 +119,12 @@ pub const Pool = struct {
         if (self.config.process_queue_len == 0) {
             self.unlock();
 
-            return error.PoolExhausted;
+            return error.PostgrezPoolExhausted;
         }
         if (self.waiter_count >= self.config.process_queue_len) {
             self.unlock();
 
-            return error.PoolBusy;
+            return error.PostgrezPoolBusy;
         }
 
         var waiter = Waiter{};
@@ -319,7 +319,7 @@ test "postgrez: pool init validates pool_size and starts empty" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.PoolSizeNotConfigured, Pool.init(testing.allocator, threaded.io(), .{
+    try testing.expectError(error.PostgrezPoolSizeNotConfigured, Pool.init(testing.allocator, threaded.io(), .{
         .user = "tester",
         .pool_size = 0,
     }));
@@ -407,7 +407,7 @@ test "postgrez: pool fully held sheds when parking is off" {
     pool.slots[0] = &fake_conn;
     pool.in_use[0] = true;
 
-    try testing.expectError(error.PoolExhausted, pool.acquire());
+    try testing.expectError(error.PostgrezPoolExhausted, pool.acquire());
 
     // clear the planted slot by hand
     pool.slots[0] = null;
@@ -472,7 +472,7 @@ test "postgrez: pool sheds PoolBusy beyond the waiter bound" {
     while (pool.waiterCount() == 0) std.atomic.spinLoopHint();
 
     // the bound is one parked waiter: the next acquire sheds
-    try testing.expectError(error.PoolBusy, pool.acquire());
+    try testing.expectError(error.PostgrezPoolBusy, pool.acquire());
 
     pool.release(&fake_conn);
     parker.join();

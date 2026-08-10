@@ -181,7 +181,7 @@ test "zix integration: an RSA key below 2048 bits is rejected" {
     defer std.Io.Dir.cwd().deleteFile(io, cert_path) catch {};
     defer std.Io.Dir.cwd().deleteFile(io, key_path) catch {};
 
-    try std.testing.expectError(error.RsaKeyTooSmall, zix.Tls.Context.init(std.testing.allocator, io, .{
+    try std.testing.expectError(error.ZixRsaKeyTooSmall, zix.Tls.Context.init(std.testing.allocator, io, .{
         .cert_path = cert_path,
         .key_path = key_path,
         .alpn = &.{.HTTP_1_1},

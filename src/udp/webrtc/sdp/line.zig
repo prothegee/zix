@@ -26,9 +26,9 @@ pub const MIN_LINE_LEN: usize = 2;
 /// Everything that stops a line from being read or built.
 pub const Error = error{
     /// A line without a type character followed by an equals sign.
-    Malformed,
+    ZixMalformed,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// The line types RFC 8866 5 defines.
@@ -72,14 +72,14 @@ pub const Line = struct {
 ///
 /// Return:
 /// - void
-/// - error.Malformed
+/// - error.ZixMalformed
 pub fn validate(text: []const u8) Error!void {
     var walker = Walker{ .text = text };
 
     while (walker.nextRaw()) |raw| {
         if (raw.len == 0) continue;
-        if (raw.len < MIN_LINE_LEN) return error.Malformed;
-        if (raw[1] != '=') return error.Malformed;
+        if (raw.len < MIN_LINE_LEN) return error.ZixMalformed;
+        if (raw[1] != '=') return error.ZixMalformed;
     }
 }
 
@@ -170,11 +170,11 @@ pub fn writtenLen(value: []const u8) usize {
 ///
 /// Return:
 /// - []const u8, the whole line
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn write(out: []u8, kind: Kind, value: []const u8) Error![]const u8 {
     const total = writtenLen(value);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     out[0] = @intFromEnum(kind);
     out[1] = '=';
@@ -233,11 +233,11 @@ test "zix sdp: line validate, a well formed description passes" {
 }
 
 test "zix sdp: line validate, a line without an equals sign is refused" {
-    try std.testing.expectError(error.Malformed, validate("v=0\r\nbroken\r\n"));
+    try std.testing.expectError(error.ZixMalformed, validate("v=0\r\nbroken\r\n"));
 }
 
 test "zix sdp: line validate, a one character line is refused" {
-    try std.testing.expectError(error.Malformed, validate("v=0\r\nx\r\n"));
+    try std.testing.expectError(error.ZixMalformed, validate("v=0\r\nx\r\n"));
 }
 
 test "zix sdp: line validate, a trailing empty line is allowed" {
@@ -352,7 +352,7 @@ test "zix sdp: line write, an empty value is still a line" {
 test "zix sdp: line write, a buffer one byte short errors" {
     var buf: [4]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, .VERSION, "0"));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, .VERSION, "0"));
 }
 
 test "zix sdp: line write, what was written reads back the same" {

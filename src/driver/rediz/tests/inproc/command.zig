@@ -153,8 +153,8 @@ fn unknownCommand(argv: []const []const u8, out: *wire.ReplyWriter, arena: std.m
 /// Translate a keyspace failure into the error reply a real server sends.
 fn keyspaceError(err: keyspace_mod.Error, out: *wire.ReplyWriter) Error!void {
     return switch (err) {
-        error.WrongType => out.err(WRONGTYPE_MESSAGE),
-        error.NotAnInteger => out.err(NOT_AN_INTEGER_MESSAGE),
+        error.RedizWrongType => out.err(WRONGTYPE_MESSAGE),
+        error.RedizNotAnInteger => out.err(NOT_AN_INTEGER_MESSAGE),
         error.OutOfMemory => error.OutOfMemory,
     };
 }

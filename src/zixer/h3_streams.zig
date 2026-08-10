@@ -17,11 +17,11 @@ pub const MAX_RECV_BYTES: usize = 1024 * 1024;
 
 pub const Error = error{
     /// The stream grew past MAX_RECV_BYTES.
-    StreamTooLarge,
+    ZixerStreamTooLarge,
     /// More out-of-order fragments than MAX_RANGES.
-    TooManyGaps,
+    ZixerTooManyGaps,
     /// The peer changed bytes it had already sent, or moved the fin.
-    Inconsistent,
+    ZixerInconsistent,
     OutOfMemory,
 };
 
@@ -48,16 +48,16 @@ pub const RecvStream = struct {
     /// idempotent, which is what a retransmission delivers.
     pub fn insert(recv: *RecvStream, allocator: std.mem.Allocator, offset: u64, bytes: []const u8, fin: bool) Error!void {
         const end = offset + bytes.len;
-        if (end > MAX_RECV_BYTES) return error.StreamTooLarge;
+        if (end > MAX_RECV_BYTES) return error.ZixerStreamTooLarge;
 
         if (fin) {
             if (recv.fin_offset) |known| {
-                if (known != end) return error.Inconsistent;
+                if (known != end) return error.ZixerInconsistent;
             }
             recv.fin_offset = end;
         }
         if (recv.fin_offset) |known| {
-            if (end > known) return error.Inconsistent;
+            if (end > known) return error.ZixerInconsistent;
         }
 
         if (bytes.len == 0) return;
@@ -87,7 +87,7 @@ pub const RecvStream = struct {
             merged.end = @max(merged.end, existing.end);
         }
 
-        if (write >= MAX_RANGES) return error.TooManyGaps;
+        if (write >= MAX_RANGES) return error.ZixerTooManyGaps;
 
         recv.ranges[write] = merged;
         recv.range_len = write + 1;
@@ -164,7 +164,7 @@ pub const SendStream = struct {
 
     /// Append response bytes at the end of the stream.
     pub fn append(send: *SendStream, allocator: std.mem.Allocator, bytes: []const u8) Error!void {
-        if (send.fin_offset != null) return error.Inconsistent;
+        if (send.fin_offset != null) return error.ZixerInconsistent;
 
         try send.pending.appendSlice(allocator, bytes);
     }
@@ -362,7 +362,7 @@ test "zix zixer: h3 streams, a stream past the bound is refused" {
     var recv = RecvStream{ .active = true, .stream_id = 0 };
     defer recv.deinit(testing.allocator);
 
-    try testing.expectError(error.StreamTooLarge, recv.insert(testing.allocator, MAX_RECV_BYTES, "x", false));
+    try testing.expectError(error.ZixerStreamTooLarge, recv.insert(testing.allocator, MAX_RECV_BYTES, "x", false));
 }
 
 test "zix zixer: h3 streams, a moved fin is inconsistent" {
@@ -370,7 +370,7 @@ test "zix zixer: h3 streams, a moved fin is inconsistent" {
     defer recv.deinit(testing.allocator);
 
     try recv.insert(testing.allocator, 0, "abc", true);
-    try testing.expectError(error.Inconsistent, recv.insert(testing.allocator, 3, "de", true));
+    try testing.expectError(error.ZixerInconsistent, recv.insert(testing.allocator, 3, "de", true));
 }
 
 test "zix zixer: h3 streams, send buffers append and chunk by offset" {

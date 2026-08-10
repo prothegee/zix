@@ -54,9 +54,9 @@ pub const PayloadFormat = enum(u5) {
 /// What stops a feedback packet from being read.
 pub const Error = error{
     /// Shorter than the two identifiers need, or the block does not divide evenly.
-    Truncated,
+    ZixTruncated,
     /// A packet that is not RTPFB or PSFB.
-    WrongType,
+    ZixWrongType,
 };
 
 /// One feedback packet, borrowed from the datagram it came in.
@@ -164,14 +164,14 @@ pub const Entries = struct {
 ///
 /// Return:
 /// - Feedback borrowing the packet
-/// - error.WrongType, error.Truncated
+/// - error.ZixWrongType, error.ZixTruncated
 pub fn read(packet: rtcp.Packet) Error!Feedback {
     switch (packet.packet_type) {
         .RTPFB, .PSFB => {},
-        else => return error.WrongType,
+        else => return error.ZixWrongType,
     }
 
-    if (packet.body.len < 8) return error.Truncated;
+    if (packet.body.len < 8) return error.ZixTruncated;
 
     return .{
         .sender_ssrc = std.mem.readInt(u32, packet.body[0..4], .big),
@@ -187,9 +187,9 @@ pub fn read(packet: rtcp.Packet) Error!Feedback {
 ///
 /// Return:
 /// - TransportFormat
-/// - error.WrongType when the packet is not RTPFB
+/// - error.ZixWrongType when the packet is not RTPFB
 pub fn transportFormat(packet: rtcp.Packet) Error!TransportFormat {
-    if (packet.packet_type != .RTPFB) return error.WrongType;
+    if (packet.packet_type != .RTPFB) return error.ZixWrongType;
 
     return @enumFromInt(packet.count);
 }
@@ -201,9 +201,9 @@ pub fn transportFormat(packet: rtcp.Packet) Error!TransportFormat {
 ///
 /// Return:
 /// - PayloadFormat
-/// - error.WrongType when the packet is not PSFB
+/// - error.ZixWrongType when the packet is not PSFB
 pub fn payloadFormat(packet: rtcp.Packet) Error!PayloadFormat {
-    if (packet.packet_type != .PSFB) return error.WrongType;
+    if (packet.packet_type != .PSFB) return error.ZixWrongType;
 
     return @enumFromInt(packet.count);
 }
@@ -215,10 +215,10 @@ pub fn payloadFormat(packet: rtcp.Packet) Error!PayloadFormat {
 ///
 /// Return:
 /// - Entries borrowing the packet
-/// - error.Truncated when the block does not divide into whole entries
+/// - error.ZixTruncated when the block does not divide into whole entries
 pub fn nackEntries(feedback: Feedback) Error!Entries {
-    if (feedback.fci.len % NACK_ENTRY_LEN != 0) return error.Truncated;
-    if (feedback.fci.len == 0) return error.Truncated;
+    if (feedback.fci.len % NACK_ENTRY_LEN != 0) return error.ZixTruncated;
+    if (feedback.fci.len == 0) return error.ZixTruncated;
 
     return .{ .fci = feedback.fci };
 }
@@ -232,8 +232,8 @@ pub fn nackEntries(feedback: Feedback) Error!Entries {
 ///
 /// Return:
 /// - []const u8 of exactly HEADER_LEN bytes
-/// - error.NoSpace
-pub fn writePictureLoss(out: []u8, sender_ssrc: u32, media_ssrc: u32) error{NoSpace}![]const u8 {
+/// - error.ZixNoSpace
+pub fn writePictureLoss(out: []u8, sender_ssrc: u32, media_ssrc: u32) error{ZixNoSpace}![]const u8 {
     return writeFeedback(out, .PSFB, @intFromEnum(PayloadFormat.PLI), sender_ssrc, media_ssrc, 0);
 }
 
@@ -253,21 +253,21 @@ pub fn writePictureLoss(out: []u8, sender_ssrc: u32, media_ssrc: u32) error{NoSp
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace, error.NothingMissing
+/// - error.ZixNoSpace, error.ZixNothingMissing
 pub fn writeNack(
     out: []u8,
     sender_ssrc: u32,
     media_ssrc: u32,
     missing: []const u16,
-) error{ NoSpace, NothingMissing }![]const u8 {
-    if (missing.len == 0) return error.NothingMissing;
-    if (out.len < HEADER_LEN) return error.NoSpace;
+) error{ ZixNoSpace, ZixNothingMissing }![]const u8 {
+    if (missing.len == 0) return error.ZixNothingMissing;
+    if (out.len < HEADER_LEN) return error.ZixNoSpace;
 
     var at = HEADER_LEN;
     var index: usize = 0;
 
     while (index < missing.len) {
-        if (at + NACK_ENTRY_LEN > out.len) return error.NoSpace;
+        if (at + NACK_ENTRY_LEN > out.len) return error.ZixNoSpace;
 
         const packet_id = missing[index];
         var bitmask: u16 = 0;
@@ -301,12 +301,12 @@ fn writeFeedback(
     sender_ssrc: u32,
     media_ssrc: u32,
     fci_len: usize,
-) error{NoSpace}![]const u8 {
+) error{ZixNoSpace}![]const u8 {
     const total = HEADER_LEN + fci_len;
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
-    rtcp.writeHeader(out, packet_type, format, total - rtcp.HEADER_LEN) catch return error.NoSpace;
+    rtcp.writeHeader(out, packet_type, format, total - rtcp.HEADER_LEN) catch return error.ZixNoSpace;
     std.mem.writeInt(u32, out[rtcp.HEADER_LEN..][0..4], sender_ssrc, .big);
     std.mem.writeInt(u32, out[rtcp.HEADER_LEN + 4 ..][0..4], media_ssrc, .big);
 
@@ -337,15 +337,15 @@ test "zix media: feedback read, a nack packet reads its two identifiers" {
 test "zix media: feedback read, a packet that is not feedback is refused" {
     const receiver_report = [_]u8{ 0x80, 201, 0x00, 0x01, 0xDE, 0xAD, 0xBE, 0xEF };
 
-    try std.testing.expectError(error.WrongType, read(try firstPacket(&receiver_report)));
-    try std.testing.expectError(error.WrongType, transportFormat(try firstPacket(&receiver_report)));
-    try std.testing.expectError(error.WrongType, payloadFormat(try firstPacket(&receiver_report)));
+    try std.testing.expectError(error.ZixWrongType, read(try firstPacket(&receiver_report)));
+    try std.testing.expectError(error.ZixWrongType, transportFormat(try firstPacket(&receiver_report)));
+    try std.testing.expectError(error.ZixWrongType, payloadFormat(try firstPacket(&receiver_report)));
 }
 
 test "zix media: feedback read, a body too short for both identifiers is refused" {
     const stub = [_]u8{ 0x81, 205, 0x00, 0x01, 0xDE, 0xAD, 0xBE, 0xEF };
 
-    try std.testing.expectError(error.Truncated, read(try firstPacket(&stub)));
+    try std.testing.expectError(error.ZixTruncated, read(try firstPacket(&stub)));
 }
 
 test "zix media: feedback nack, one entry names seventeen sequence numbers" {
@@ -471,17 +471,17 @@ test "zix media: feedback writeNack, what was written reads back the same number
 test "zix media: feedback writeNack, the limits are refused" {
     var buf: [64]u8 = undefined;
 
-    try std.testing.expectError(error.NothingMissing, writeNack(&buf, 1, 2, &.{}));
-    try std.testing.expectError(error.NoSpace, writeNack(buf[0..HEADER_LEN], 1, 2, &.{1}));
-    try std.testing.expectError(error.NoSpace, writeNack(buf[0..8], 1, 2, &.{1}));
+    try std.testing.expectError(error.ZixNothingMissing, writeNack(&buf, 1, 2, &.{}));
+    try std.testing.expectError(error.ZixNoSpace, writeNack(buf[0..HEADER_LEN], 1, 2, &.{1}));
+    try std.testing.expectError(error.ZixNoSpace, writeNack(buf[0..8], 1, 2, &.{1}));
 }
 
 test "zix media: feedback nackEntries, a block that is not whole entries is refused" {
     const ragged = Feedback{ .sender_ssrc = 1, .media_ssrc = 2, .fci = &[_]u8{ 0, 1, 2 } };
     const empty = Feedback{ .sender_ssrc = 1, .media_ssrc = 2, .fci = &.{} };
 
-    try std.testing.expectError(error.Truncated, nackEntries(ragged));
-    try std.testing.expectError(error.Truncated, nackEntries(empty));
+    try std.testing.expectError(error.ZixTruncated, nackEntries(ragged));
+    try std.testing.expectError(error.ZixTruncated, nackEntries(empty));
 }
 
 test "zix media: feedback writePictureLoss, it carries no control information" {
@@ -500,7 +500,7 @@ test "zix media: feedback writePictureLoss, it carries no control information" {
 test "zix media: feedback writePictureLoss, a short buffer errors" {
     var buf: [HEADER_LEN - 1]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writePictureLoss(&buf, 1, 2));
+    try std.testing.expectError(error.ZixNoSpace, writePictureLoss(&buf, 1, 2));
 }
 
 test "zix media: feedback, an unregistered format still reads" {

@@ -45,16 +45,20 @@ fn GrpcServerImpl(comptime RouterType: type) type {
         /// config.port (already overridden to tls_port by the caller) while the cleartext model
         /// runs on the original port.
         fn serveTlsThread(config: GrpcServerConfig) void {
-            tls_serve.runTls(RouterType, config) catch {};
+            tls_serve.runTls(RouterType, config) catch |err| {
+                // The cleartext listener keeps serving on its own thread, so without this the grpc
+                // TLS side is dead and the server still looks healthy.
+                common.logSystem(config, .ERROR, "the grpc TLS listener on {s}:{d} stopped ({s}), cleartext is still serving", .{ config.ip, config.tls_port, @errorName(err) });
+            };
         }
 
         /// Listen and serve. The Router type is baked in at compile time via Server.init.
         ///
         /// Return:
         /// - !void
-        /// - error.PortNotConfigured if config.port is 0
+        /// - error.ZixPortNotConfigured if config.port is 0
         pub fn run(self: *Self) !void {
-            if (self.config.port == 0) return error.PortNotConfigured;
+            if (self.config.port == 0) return error.ZixPortNotConfigured;
 
             ignoreSigpipe();
 
@@ -63,9 +67,9 @@ fn GrpcServerImpl(comptime RouterType: type) type {
             // Reject an unrunnable model before any listener or TLS thread starts, so a rejected
             // config leaves nothing behind (ADR-065).
             if (!dispatch_support.isSupported(cfg.dispatch_model)) {
-                common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+                common.logSystem(cfg, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-                return error.DispatchModelUnsupported;
+                return error.ZixDispatchModelUnsupported;
             }
 
             if (cfg.tls != null) {
@@ -74,7 +78,7 @@ fn GrpcServerImpl(comptime RouterType: type) type {
                 // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
                 // fleet, instead of a second server launch.
                 if (cfg.tls_port != 0) {
-                    if (cfg.tls_port == cfg.port) return error.TlsPortConflict;
+                    if (cfg.tls_port == cfg.port) return error.ZixTlsPortConflict;
 
                     if (is_linux and cfg.dispatch_model == .EPOLL)
                         return epoll_model.runEpoll(RouterType, cfg);
@@ -107,12 +111,12 @@ fn GrpcServerImpl(comptime RouterType: type) type {
                 .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
                     epoll_model.runEpoll(RouterType, cfg)
                 else
-                    error.DispatchModelUnsupported,
+                    error.ZixDispatchModelUnsupported,
                 // Native io_uring ring path (ADR-037 Phase 4 step 3).
                 .URING => if (comptime @import("builtin").target.os.tag == .linux)
                     uring_model.runUring(RouterType, cfg)
                 else
-                    error.DispatchModelUnsupported,
+                    error.ZixDispatchModelUnsupported,
             };
         }
     };
@@ -156,7 +160,7 @@ test "zix grpc: GrpcServer.run port zero returns PortNotConfigured" {
     var server = GrpcServer.init(core.Router(&[_]Route{}), .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
-    try std.testing.expectError(error.PortNotConfigured, server.run());
+    try std.testing.expectError(error.ZixPortNotConfigured, server.run());
 }
 
 test "zix grpc: GrpcServer.init valid config succeeds and deinit is safe" {

@@ -448,7 +448,7 @@ The daemon runs in the foreground with `zixer daemon`, which is what a service m
 ZIXER_DIR=/srv/zixer zixer daemon
 ```
 
-There is no log output yet. `logs_dir` must exist because `status` checks it, and nothing writes into it.
+The daemon writes to two places at once: `logs_dir/<date>/zixer-000000.log`, and the console it was started on. `log_level` sets the threshold for both, `info` by default. `logs_dir` must already exist, which `zixer init` handles and `zixer status` checks, and a daemon that cannot write there keeps the console output.
 
 <br>
 

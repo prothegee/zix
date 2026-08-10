@@ -2,7 +2,7 @@
 //!
 //! What:
 //! - .EPOLL and .URING are Linux-only. Off Linux an engine's run() returns
-//!   error.DispatchModelUnsupported instead of silently serving a different model, so a caller
+//!   error.ZixDispatchModelUnsupported instead of silently serving a different model, so a caller
 //!   never believes it got the model it asked for. .ASYNC is the only portable model.
 //! - The gate is one shared predicate (zix.utils.dispatch_support.isSupported) that every engine
 //!   consults, so these tests assert the contract once for the whole tree. They cover the predicate

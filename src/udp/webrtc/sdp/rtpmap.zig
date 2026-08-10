@@ -33,11 +33,11 @@ pub const MAX_VALUE_LEN: usize = 96;
 /// What stops a mapping from being read.
 pub const Error = error{
     /// Not a payload type, a space, an encoding name, a slash, and a clock rate.
-    Malformed,
+    ZixMalformed,
     /// A payload type that is not a number, or one past 127.
-    BadPayloadType,
+    ZixBadPayloadType,
     /// A clock rate that is not a number.
-    BadClockRate,
+    ZixBadClockRate,
 };
 
 /// What one payload type number means.
@@ -68,30 +68,30 @@ pub fn isStatic(payload_type: u7) bool {
 ///
 /// Return:
 /// - RtpMap borrowing `value`
-/// - error.Malformed, error.BadPayloadType, error.BadClockRate
+/// - error.ZixMalformed, error.ZixBadPayloadType, error.ZixBadClockRate
 pub fn read(value: []const u8) Error!RtpMap {
-    const space = std.mem.indexOfScalar(u8, value, ' ') orelse return error.Malformed;
+    const space = std.mem.indexOfScalar(u8, value, ' ') orelse return error.ZixMalformed;
     const payload_type = try readPayloadType(value[0..space]);
     const rest = value[space + 1 ..];
 
-    if (rest.len == 0) return error.Malformed;
+    if (rest.len == 0) return error.ZixMalformed;
 
-    const first_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.Malformed;
+    const first_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.ZixMalformed;
     const encoding = rest[0..first_slash];
 
-    if (encoding.len == 0) return error.Malformed;
+    if (encoding.len == 0) return error.ZixMalformed;
 
     const after = rest[first_slash + 1 ..];
     const second_slash = std.mem.indexOfScalar(u8, after, '/');
     const rate_text = if (second_slash) |at| after[0..at] else after;
 
-    if (rate_text.len == 0) return error.BadClockRate;
+    if (rate_text.len == 0) return error.ZixBadClockRate;
 
     var parameters: ?[]const u8 = null;
     if (second_slash) |at| {
         const tail = after[at + 1 ..];
 
-        if (tail.len == 0) return error.Malformed;
+        if (tail.len == 0) return error.ZixMalformed;
 
         parameters = tail;
     }
@@ -99,7 +99,7 @@ pub fn read(value: []const u8) Error!RtpMap {
     return .{
         .payload_type = payload_type,
         .encoding = encoding,
-        .clock_rate = std.fmt.parseInt(u32, rate_text, 10) catch return error.BadClockRate,
+        .clock_rate = std.fmt.parseInt(u32, rate_text, 10) catch return error.ZixBadClockRate,
         .parameters = parameters,
     };
 }
@@ -162,8 +162,8 @@ pub fn valueLen(entry: RtpMap) usize {
 ///
 /// Return:
 /// - []const u8, the value alone, with no attribute name and no terminator
-/// - error.NoSpace
-pub fn write(out: []u8, entry: RtpMap) error{NoSpace}![]const u8 {
+/// - error.ZixNoSpace
+pub fn write(out: []u8, entry: RtpMap) error{ZixNoSpace}![]const u8 {
     var at: usize = 0;
 
     at += try writeNumber(out[at..], entry.payload_type);
@@ -182,14 +182,14 @@ pub fn write(out: []u8, entry: RtpMap) error{NoSpace}![]const u8 {
 
 /// Read a payload type field.
 fn readPayloadType(text: []const u8) Error!u7 {
-    if (text.len == 0) return error.BadPayloadType;
+    if (text.len == 0) return error.ZixBadPayloadType;
 
-    return std.fmt.parseInt(u7, text, 10) catch error.BadPayloadType;
+    return std.fmt.parseInt(u7, text, 10) catch error.ZixBadPayloadType;
 }
 
 /// Append one byte.
-fn writeByte(out: []u8, value: u8) error{NoSpace}!usize {
-    if (out.len < 1) return error.NoSpace;
+fn writeByte(out: []u8, value: u8) error{ZixNoSpace}!usize {
+    if (out.len < 1) return error.ZixNoSpace;
 
     out[0] = value;
 
@@ -197,8 +197,8 @@ fn writeByte(out: []u8, value: u8) error{NoSpace}!usize {
 }
 
 /// Append text.
-fn writeText(out: []u8, text: []const u8) error{NoSpace}!usize {
-    if (out.len < text.len) return error.NoSpace;
+fn writeText(out: []u8, text: []const u8) error{ZixNoSpace}!usize {
+    if (out.len < text.len) return error.ZixNoSpace;
 
     @memcpy(out[0..text.len], text);
 
@@ -206,7 +206,7 @@ fn writeText(out: []u8, text: []const u8) error{NoSpace}!usize {
 }
 
 /// Append a number in base ten.
-fn writeNumber(out: []u8, value: u32) error{NoSpace}!usize {
+fn writeNumber(out: []u8, value: u32) error{ZixNoSpace}!usize {
     var digits: [10]u8 = undefined;
     var count: usize = 0;
     var left = value;
@@ -219,7 +219,7 @@ fn writeNumber(out: []u8, value: u32) error{NoSpace}!usize {
         if (left == 0) break;
     }
 
-    if (out.len < count) return error.NoSpace;
+    if (out.len < count) return error.ZixNoSpace;
 
     for (0..count) |index| out[index] = digits[count - 1 - index];
 
@@ -262,26 +262,26 @@ test "zix sdp: rtpmap read, the encoding name is not interpreted" {
 }
 
 test "zix sdp: rtpmap read, a malformed value is refused" {
-    try std.testing.expectError(error.Malformed, read("111"));
-    try std.testing.expectError(error.Malformed, read("111 "));
-    try std.testing.expectError(error.Malformed, read("111 opus"));
-    try std.testing.expectError(error.Malformed, read("111 /48000"));
-    try std.testing.expectError(error.Malformed, read("111 opus/48000/"));
-    try std.testing.expectError(error.Malformed, read(""));
+    try std.testing.expectError(error.ZixMalformed, read("111"));
+    try std.testing.expectError(error.ZixMalformed, read("111 "));
+    try std.testing.expectError(error.ZixMalformed, read("111 opus"));
+    try std.testing.expectError(error.ZixMalformed, read("111 /48000"));
+    try std.testing.expectError(error.ZixMalformed, read("111 opus/48000/"));
+    try std.testing.expectError(error.ZixMalformed, read(""));
 }
 
 test "zix sdp: rtpmap read, a bad payload type is refused" {
-    try std.testing.expectError(error.BadPayloadType, read("x opus/48000"));
-    try std.testing.expectError(error.BadPayloadType, read(" opus/48000"));
+    try std.testing.expectError(error.ZixBadPayloadType, read("x opus/48000"));
+    try std.testing.expectError(error.ZixBadPayloadType, read(" opus/48000"));
 
     // 128 does not fit the 7-bit field.
-    try std.testing.expectError(error.BadPayloadType, read("128 opus/48000"));
+    try std.testing.expectError(error.ZixBadPayloadType, read("128 opus/48000"));
     try std.testing.expectEqual(@as(u7, 127), (try read("127 opus/48000")).payload_type);
 }
 
 test "zix sdp: rtpmap read, a bad clock rate is refused" {
-    try std.testing.expectError(error.BadClockRate, read("111 opus/"));
-    try std.testing.expectError(error.BadClockRate, read("111 opus/x"));
+    try std.testing.expectError(error.ZixBadClockRate, read("111 opus/"));
+    try std.testing.expectError(error.ZixBadClockRate, read("111 opus/x"));
 }
 
 test "zix sdp: rtpmap find, a section is searched by number and not by order" {
@@ -354,7 +354,7 @@ test "zix sdp: rtpmap write, a mapping with no parameters writes two fields" {
 test "zix sdp: rtpmap write, a short buffer errors" {
     var buf: [8]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, .{
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, .{
         .payload_type = 111,
         .encoding = "opus",
         .clock_rate = 48000,

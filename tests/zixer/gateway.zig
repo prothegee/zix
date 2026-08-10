@@ -93,7 +93,7 @@ pub const Gateway = struct {
 ///
 /// Return:
 /// - Gateway with the daemon serving
-/// - error.DaemonStartTimeout when the control socket never appears
+/// - error.ZixerDaemonStartTimeout when the control socket never appears
 pub fn start(io: std.Io, zixer_path: []const u8, root: []const u8) !Gateway {
     const err_file = try child_stderr.create(io, root, child_stderr.DAEMON_NAME);
     defer err_file.close(io);
@@ -118,5 +118,5 @@ pub fn start(io: std.Io, zixer_path: []const u8, root: []const u8) !Gateway {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(POLL_GAP_MS), .awake) catch {};
     }
 
-    return error.DaemonStartTimeout;
+    return error.ZixerDaemonStartTimeout;
 }

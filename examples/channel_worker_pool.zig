@@ -57,7 +57,7 @@ fn worker(cap: WorkerCap) void {
     var processed: u32 = 0;
     while (true) {
         const task_id = cap.ch.recv(cap.io) catch |err| {
-            if (err != error.Closed) std.debug.print("worker {d}: recv error: {}\n", .{ cap.id, err });
+            if (err != error.ZixClosed) std.debug.print("worker {d}: recv error: {}\n", .{ cap.id, err });
             break;
         };
         const result = task_id * task_id;

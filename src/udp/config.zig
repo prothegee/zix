@@ -46,7 +46,7 @@ pub const UdpServerConfig = struct {
 
     /// Concurrency model for the raw path. `.ASYNC` runs a single worker. `.EPOLL` / `.URING` run one
     /// per-core SO_REUSEPORT worker per CPU (ADR-050) and are Linux-only, run() rejects them elsewhere
-    /// with error.DispatchModelUnsupported. Required: set explicitly (no default).
+    /// with error.ZixDispatchModelUnsupported. Required: set explicitly (no default).
     dispatch_model: DispatchModel,
     /// Worker count for the per-core models. 0 means one per available CPU.
     workers: usize = 0,
@@ -168,7 +168,7 @@ pub fn applyClientArgs(config: UdpClientConfig, args: anytype) UdpClientConfig {
 // --------------------------------------------------------- //
 
 // RFC 768: port 0 is reserved and must not be used for binding.
-// init() enforces this, port 0 in config yields error.PortNotConfigured.
+// init() enforces this, port 0 in config yields error.ZixPortNotConfigured.
 // These tests verify that defaults are safe and that enum representations are stable.
 
 test "zix udp: UdpServerConfig, default field values" {

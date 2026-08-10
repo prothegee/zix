@@ -32,7 +32,7 @@ Sel dikosongkan bila tidak berlaku (handle wajib tidak punya trade-off penyetela
 | tls | `.OFF` | perilaku TLS: `.OFF`, `.REQUIRE` | band perf terpisah (handshake plus AEAD per record) | `.REQUIRE` di jaringan tak tepercaya (atau URL `rediss://`) | | | port TLS Redis adalah TLS dari byte pertama, tidak ada upgrade in-band |
 | dispatch_model | `.ASYNC` | transport yang me-multiplex I/O socket: `.ASYNC` (Pool), `.EPOLL`, `.URING` | memilih execution model, bukan knob hot path | biarkan `.ASYNC` untuk jalur ber-pool, pilih `.EPOLL` atau `.URING` untuk transport multiplexed satu thread | | | `.EPOLL` dan `.URING` cleartext saja, jadi jaga tls = `.OFF` untuk keduanya |
 | max_pending_replies | `16` | reply yang boleh tertunggak satu koneksi: batas pipeline dan batas deferred tertunggak, 0 = tanpa batas | hot: kedalaman batch dan backpressure deferred | cocokkan ke batch yang Anda pipeline (lihat bagian sizing) | batch lebih dangkal, lebih banyak round trip | server yang macet menumbuhkan send buffer | 0 menghapus batas, producer tanpa batas bisa menumbuhkan memori |
-| process_queue_len | `0` | pool saja: batas acquire yang parkir, 0 = tanpa parkir | perilaku acquire saat pool penuh | setel ke jumlah worker plus margin (lihat bagian sizing) | acquire shed alih-alih parkir | lebih banyak thread parkir (blokir) alih-alih shed | 0 shed `error.PoolExhausted` seketika, melewati batas shed `error.PoolBusy` |
+| process_queue_len | `0` | pool saja: batas acquire yang parkir, 0 = tanpa parkir | perilaku acquire saat pool penuh | setel ke jumlah worker plus margin (lihat bagian sizing) | acquire shed alih-alih parkir | lebih banyak thread parkir (blokir) alih-alih shed | 0 shed `error.RedizPoolExhausted` seketika, melewati batas shed `error.RedizPoolBusy` |
 | pool_size | `6` | pool saja: jumlah koneksi per pool | throughput kira-kira `pool_size / round_trip` | naikkan untuk lebih banyak command bersamaan (lihat bagian sizing) | command mengantre di pool | lebih banyak koneksi server dan memori | tiap koneksi adalah satu client sisi server, tetap di bawah `maxclients` server |
 | retry_max | `3` | pool saja: percobaan connect per acquire di luar yang pertama | latency acquire pada connect yang labil | naikkan untuk jaringan labil | acquire menyerah connect lebih cepat | acquire retry lebih lama sebelum gagal | total percobaan adalah `retry_max + 1` |
 | retry_delay_ms | `250` | pool saja: jeda antar retry connect | latency acquire selama retry | turunkan untuk retry lebih cepat, naikkan untuk back off | loop retry lebih rapat | pemulihan lebih lambat, lebih lembut ke server | jeda berlaku antar percobaan, bukan sebelum yang pertama |
@@ -66,7 +66,7 @@ syscall   : sekitar 2K   ->  sekitar 2   (satu send seluruh K, satu burst receiv
 wall time : K x round_trip  ->  round_trip + K x server_exec
 ```
 
-`max_pending_replies` adalah batas kedalaman: `Pipeline.add` melewati batas shed `error.QueueFull`, sehingga producer liar tak bisa menumbuhkan send buffer tanpa batas. Setel ke kedalaman batch yang benar-benar Anda pipeline. Terlalu rendah men-serialize menjadi lebih banyak round trip, terlalu tinggi membiarkan server yang macet mem-buffer tanpa batas, 0 menghapus batas.
+`max_pending_replies` adalah batas kedalaman: `Pipeline.add` melewati batas shed `error.RedizQueueFull`, sehingga producer liar tak bisa menumbuhkan send buffer tanpa batas. Setel ke kedalaman batch yang benar-benar Anda pipeline. Terlalu rendah men-serialize menjadi lebih banyak round trip, terlalu tinggi membiarkan server yang macet mem-buffer tanpa batas, 0 menghapus batas.
 
 ### max_pending_replies untuk jalur deferred write-behind
 
@@ -86,13 +86,13 @@ Hitungan reply tertunggak dibatasi `max_pending_replies` (0 berlaku sebagai satu
 ```mermaid
 flowchart LR
     acq[acquire pada pool penuh] --> q{waiter < process_queue_len?}
-    q -->|0| shed0[error.PoolExhausted]
+    q -->|0| shed0[error.RedizPoolExhausted]
     q -->|di bawah batas| park[parkir FIFO, tunggu release]
-    q -->|di batas| shed1[error.PoolBusy]
+    q -->|di batas| shed1[error.RedizPoolBusy]
 ```
 
-- 0 berarti tanpa parkir: pool penuh shed `error.PoolExhausted` seketika. Pilih ini untuk backpressure langsung ke pemanggil.
-- `N` memarkir hingga `N` acquire FIFO dan menyerahkan tiap koneksi yang di-release ke waiter tertua. Melewati `N`, acquire shed `error.PoolBusy`.
+- 0 berarti tanpa parkir: pool penuh shed `error.RedizPoolExhausted` seketika. Pilih ini untuk backpressure langsung ke pemanggil.
+- `N` memarkir hingga `N` acquire FIFO dan menyerahkan tiap koneksi yang di-release ke waiter tertua. Melewati `N`, acquire shed `error.RedizPoolBusy`.
 - Aturan praktis: jumlah worker plus margin kecil, jadi macet sesaat parkir dan overload sungguhan shed.
 
 ### pool_size: berapa koneksi

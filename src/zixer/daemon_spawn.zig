@@ -23,7 +23,7 @@ const SPAWN_WAIT_STEP_MS: u64 = 100;
 ///
 /// Return:
 /// - void once a daemon answers ping
-/// - error.DaemonStartTimeout when the spawned daemon never answers
+/// - error.ZixerDaemonStartTimeout when the spawned daemon never answers
 pub fn ensure(io: std.Io, exe_path: []const u8, root_path: []const u8, socket_path: []const u8) !void {
     if (control_client.ping(io, socket_path)) return;
 
@@ -40,7 +40,7 @@ pub fn ensure(io: std.Io, exe_path: []const u8, root_path: []const u8, socket_pa
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(SPAWN_WAIT_STEP_MS), .awake) catch {};
     }
 
-    return error.DaemonStartTimeout;
+    return error.ZixerDaemonStartTimeout;
 }
 
 // --------------------------------------------------------- //

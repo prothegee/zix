@@ -21,6 +21,7 @@
 //!   arena reset frees a whole parse in one step.
 
 const std = @import("std");
+const diagnostic = @import("diagnostic.zig");
 
 const cursor_mod = @import("../cursor.zig");
 const fields = @import("fields.zig");
@@ -75,9 +76,9 @@ const NAME_OPTIONS: Options = .{ .strings = .BORROW };
 ///
 /// Return:
 /// - T (the parsed value)
-/// - error.UnknownField, error.MissingField, error.UnknownEnumValue when the
+/// - error.JzonUnknownField, error.JzonMissingField, error.JzonUnknownEnumValue when the
 ///   document and the type disagree
-/// - error.Truncated, error.Unexpected, error.BadNumber, error.BadEscape when
+/// - error.JzonTruncated, error.JzonUnexpected, error.JzonBadNumber, error.JzonBadEscape when
 ///   the document is not what it claims
 /// - error.OutOfMemory when the allocator runs out
 pub fn parse(
@@ -94,7 +95,7 @@ pub fn parse(
     const value = try readValue(T, source, options, shape);
 
     scan.skipSpace(&cursor, shape);
-    if (!cursor.atEnd()) return error.Unexpected;
+    if (!cursor.atEnd()) return error.JzonUnexpected;
 
     return value;
 }
@@ -176,7 +177,7 @@ fn readBool(cursor: *Cursor, comptime shape: Shape) Error!bool {
             return false;
         },
 
-        else => return error.Unexpected,
+        else => return error.JzonUnexpected,
     }
 }
 
@@ -187,7 +188,11 @@ fn readEnum(comptime T: type, source: Source, comptime shape: Shape) Error!T {
     const span = try scan.stringSpan(source.cursor, shape);
     const name = try string_value.take(source.allocator, span, NAME_OPTIONS);
 
-    return std.meta.stringToEnum(T, name) orelse error.UnknownEnumValue;
+    return std.meta.stringToEnum(T, name) orelse {
+        diagnostic.noteField(name);
+
+        return error.JzonUnknownEnumValue;
+    };
 }
 
 /// Read a struct as a JSON object, matching each key against a field name.
@@ -252,7 +257,11 @@ fn readField(
     }
 
     switch (options.unknown) {
-        .REJECT => return error.UnknownField,
+        .REJECT => {
+            diagnostic.noteFieldAt(key, source.cursor.pos);
+
+            return error.JzonUnknownField;
+        },
         .SKIP => try skip.value(source.cursor, shape),
     }
 }
@@ -383,12 +392,12 @@ test "jzon: generated parser reports the same failures the other paths report" {
     const Pair = struct { id: u8, name: []const u8 };
 
     inline for (SHAPES) |shape| {
-        try std.testing.expectError(error.UnknownField, parse(Pair, allocator, "{\"id\":1,\"name\":\"x\",\"other\":2}", .{}, shape));
-        try std.testing.expectError(error.MissingField, parse(Pair, allocator, "{\"id\":1}", .{}, shape));
-        try std.testing.expectError(error.BadNumber, parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}, shape));
-        try std.testing.expectError(error.Truncated, parse(Pair, allocator, "{\"id\":1,", .{}, shape));
-        try std.testing.expectError(error.Unexpected, parse(Pair, allocator, "{\"id\":true,\"name\":\"x\"}", .{}, shape));
-        try std.testing.expectError(error.UnknownEnumValue, parse(Status, allocator, "\"GONE\"", .{}, shape));
+        try std.testing.expectError(error.JzonUnknownField, parse(Pair, allocator, "{\"id\":1,\"name\":\"x\",\"other\":2}", .{}, shape));
+        try std.testing.expectError(error.JzonMissingField, parse(Pair, allocator, "{\"id\":1}", .{}, shape));
+        try std.testing.expectError(error.JzonBadNumber, parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}, shape));
+        try std.testing.expectError(error.JzonTruncated, parse(Pair, allocator, "{\"id\":1,", .{}, shape));
+        try std.testing.expectError(error.JzonUnexpected, parse(Pair, allocator, "{\"id\":true,\"name\":\"x\"}", .{}, shape));
+        try std.testing.expectError(error.JzonUnknownEnumValue, parse(Status, allocator, "\"GONE\"", .{}, shape));
     }
 }
 
@@ -457,6 +466,6 @@ test "jzon: generated parser refuses a document with anything after the value" {
     defer arena.deinit();
 
     inline for (SHAPES) |shape| {
-        try std.testing.expectError(error.Unexpected, parse(u8, arena.allocator(), "1 2", .{}, shape));
+        try std.testing.expectError(error.JzonUnexpected, parse(u8, arena.allocator(), "1 2", .{}, shape));
     }
 }

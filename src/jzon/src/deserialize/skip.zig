@@ -41,15 +41,15 @@ pub const MAX_DEPTH = 256;
 ///
 /// Return:
 /// - void
-/// - error.Truncated when the document ends inside the value
-/// - error.Unexpected when the value is malformed, or nests past MAX_DEPTH
+/// - error.JzonTruncated when the document ends inside the value
+/// - error.JzonUnexpected when the value is malformed, or nests past MAX_DEPTH
 pub fn value(cursor: *Cursor, comptime shape: Shape) Error!void {
     return valueAt(cursor, shape, 0);
 }
 
 /// Step over one value sitting `depth` containers deep.
 fn valueAt(cursor: *Cursor, comptime shape: Shape, depth: usize) Error!void {
-    if (depth > MAX_DEPTH) return error.Unexpected;
+    if (depth > MAX_DEPTH) return error.JzonUnexpected;
 
     scan.skipSpace(cursor, shape);
 
@@ -63,10 +63,10 @@ fn valueAt(cursor: *Cursor, comptime shape: Shape, depth: usize) Error!void {
         'f' => try cursor.literal("false"),
         'n' => try cursor.literal("null"),
         '-', '0'...'9' => {
-            if (!float.isNumber(try cursor.numberSpan())) return error.Unexpected;
+            if (!float.isNumber(try cursor.numberSpan())) return error.JzonUnexpected;
         },
 
-        else => return error.Unexpected,
+        else => return error.JzonUnexpected,
     }
 }
 
@@ -162,19 +162,19 @@ test "jzon: skip steps over a value laid out with whitespace" {
 }
 
 test "jzon: skip refuses a value it cannot walk to the end of" {
-    try expectRefused("{\"a\":1", error.Truncated);
-    try expectRefused("[1,2", error.Truncated);
-    try expectRefused("\"unterminated", error.Truncated);
-    try expectRefused("tru", error.Truncated);
+    try expectRefused("{\"a\":1", error.JzonTruncated);
+    try expectRefused("[1,2", error.JzonTruncated);
+    try expectRefused("\"unterminated", error.JzonTruncated);
+    try expectRefused("tru", error.JzonTruncated);
 }
 
 test "jzon: skip refuses a malformed value the way the read paths do" {
-    try expectRefused("{,}", error.Unexpected);
-    try expectRefused("[1,,2]", error.Unexpected);
-    try expectRefused("{\"a\" 1}", error.Unexpected);
-    try expectRefused("{1:2}", error.Unexpected);
-    try expectRefused("1.2.3", error.Unexpected);
-    try expectRefused("trve", error.Unexpected);
+    try expectRefused("{,}", error.JzonUnexpected);
+    try expectRefused("[1,,2]", error.JzonUnexpected);
+    try expectRefused("{\"a\" 1}", error.JzonUnexpected);
+    try expectRefused("{1:2}", error.JzonUnexpected);
+    try expectRefused("1.2.3", error.JzonUnexpected);
+    try expectRefused("trve", error.JzonUnexpected);
 }
 
 test "jzon: skip refuses nesting past the cap" {
@@ -182,5 +182,5 @@ test "jzon: skip refuses nesting past the cap" {
     @memset(document[0 .. MAX_DEPTH + 2], '[');
     @memset(document[MAX_DEPTH + 2 ..], ']');
 
-    try expectRefused(&document, error.Unexpected);
+    try expectRefused(&document, error.JzonUnexpected);
 }

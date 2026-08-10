@@ -104,7 +104,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     }
 
     const response = recv_accum[0..recv_len];
-    if (std.mem.indexOf(u8, response, " 200 ") == null) return error.UnexpectedStatus;
+    if (std.mem.indexOf(u8, response, " 200 ") == null) return error.ZixUnexpectedStatus;
     if (std.mem.indexOf(u8, response, EXPECTED_BODY) == null) return error.UnexpectedBody;
     if (std.mem.indexOf(u8, response, "Strict-Transport-Security") == null) return error.MissingHsts;
 }

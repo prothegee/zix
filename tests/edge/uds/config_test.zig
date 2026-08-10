@@ -6,7 +6,7 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-test "zix edge: UdsServer.init, empty path returns error.PathEmpty" {
+test "zix edge: UdsServer.init, empty path returns error.ZixPathEmpty" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
@@ -15,7 +15,7 @@ test "zix edge: UdsServer.init, empty path returns error.PathEmpty" {
         .path = "",
         .allocator = std.testing.allocator,
     });
-    try std.testing.expectError(error.PathEmpty, result);
+    try std.testing.expectError(error.ZixPathEmpty, result);
 }
 
 test "zix edge: UdsClientConfig, recv_timeout_ms = 0 disables timeout (default)" {
@@ -36,7 +36,7 @@ test "zix edge: UdsClientConfig, large recv_timeout_ms value is stored without o
     try std.testing.expectEqual(std.math.maxInt(u32), cfg.recv_timeout_ms);
 }
 
-test "zix edge: HttpClient.requestUds, path too long returns error.InvalidPath" {
+test "zix edge: HttpClient.requestUds, path too long returns error.ZixInvalidPath" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -49,5 +49,5 @@ test "zix edge: HttpClient.requestUds, path too long returns error.InvalidPath" 
     // Unix socket paths are limited to 108 bytes on Linux. Build a path that exceeds that.
     const over_limit: [108]u8 = @splat('a');
     const long_path = "tmp/" ++ over_limit ++ ".sock";
-    try std.testing.expectError(error.InvalidPath, client.requestUds(.GET, long_path, "/", .{}));
+    try std.testing.expectError(error.ZixInvalidPath, client.requestUds(.GET, long_path, "/", .{}));
 }

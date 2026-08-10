@@ -61,14 +61,14 @@ flowchart TD
     F --> G["socket.send(io, dest, bytes)"]
     D --> H["receiveFeedback()"]
     H --> P{"recv_timeout_ms > 0 and poll times out?"}
-    P -->|yes| Q["error.RecvTimeout"]
+    P -->|yes| Q["error.ZixRecvTimeout"]
     P -->|no| I["socket.receive(io, buf)"]
     I --> J{"len == 1?"}
     J -->|0x06| K[".ack"]
     J -->|other| L[".nack"]
     J -->|no| M{"len == @sizeOf(Packet)?"}
     M -->|yes| N["fromEndian(packet)\n.packet(Packet)"]
-    M -->|no| O["error.UnexpectedPacketSize"]
+    M -->|no| O["error.ZixUnexpectedPacketSize"]
 ```
 
 ---
@@ -220,7 +220,7 @@ A single `init(config, args)` takes the process args. The `allow_args` flag deci
 | `false` (default) | Args are ignored. Port comes from the config struct. Pass `.{}` for `args`. | none |
 | `true` | Recognized flags override the config. A missing or unknown flag keeps the config value. | `--ip` / `--port` (server), `--bind-ip` / `--bind-port` / `--server-port` (client) |
 
-The port guard is independent of `allow_args`: `init()` fails with `error.PortNotConfigured` when the resolved port is zero. Validation happens at `init()`, not at `run()`.
+The port guard is independent of `allow_args`: `init()` fails with `error.ZixPortNotConfigured` when the resolved port is zero. Validation happens at `init()`, not at `run()`.
 
 ---
 
@@ -315,7 +315,7 @@ Use `std.heap.smp_allocator` (or any general-purpose allocator) so that `free()`
 
 ## RFC Notes
 
-- **RFC 768 (UDP)**: Port 0 is reserved. `init()` rejects it with `error.PortNotConfigured`. Max payload is 65,507 bytes, enforced at comptime via `@compileError`.
+- **RFC 768 (UDP)**: Port 0 is reserved. `init()` rejects it with `error.ZixPortNotConfigured`. Max payload is 65,507 bytes, enforced at comptime via `@compileError`.
 - **RFC 791 / network convention**: `Endianness.BIG` corresponds to network byte order (big-endian).
 - Timeout-based disconnect detection has no RFC (application-level behavior since UDP is connectionless).
 - ACK (0x06) and NACK (0x15) byte values are ASCII control codes, not defined by any UDP RFC.
@@ -354,7 +354,7 @@ Alongside the typed `Server(Packet)`, `zix.Udp.Raw(handler)` serves variable-len
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. It gets the bytes as received (up to `max_recv_buf`), the peer, and a `Sink`. `sink.reply(bytes)` answers the sender with no address conversion, `sink.replyTo(peer, bytes)` answers an explicit peer.
 - Batched I/O (Linux): receive in `recvmmsg` batches (`recv_batch`), send in `sendmmsg` batches (`send_batch`). Replies coalesce into one `sendmmsg` per received batch. Non-Linux falls back to a single `std.Io.net` receive loop.
-- Dispatch (`dispatch_model`, the same enum as the TCP engines, partitioned per ADR-043 into `src/udp/dispatch/`): `.ASYNC` runs a single worker. `.EPOLL` / `.URING` run one SO_REUSEPORT worker per CPU (per-core shared-nothing) and are Linux-only, rejected off Linux with `error.DispatchModelUnsupported`. `.EPOLL` is an epoll readiness loop, `.URING` a real io_uring completion loop (epoll fallback when io_uring is unavailable).
+- Dispatch (`dispatch_model`, the same enum as the TCP engines, partitioned per ADR-043 into `src/udp/dispatch/`): `.ASYNC` runs a single worker. `.EPOLL` / `.URING` run one SO_REUSEPORT worker per CPU (per-core shared-nothing) and are Linux-only, rejected off Linux with `error.ZixDispatchModelUnsupported`. `.EPOLL` is an epoll readiness loop, `.URING` a real io_uring completion loop (epoll fallback when io_uring is unavailable).
 
 ```zig
 fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {

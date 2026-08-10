@@ -23,7 +23,7 @@ fn recvMessage(
             recv_len.* = remaining;
             return msg;
         }
-        if (recv_len.* >= recv_buf.len) return error.MessageTooLarge;
+        if (recv_len.* >= recv_buf.len) return error.ZixMessageTooLarge;
         const byte = try reader.takeByte();
         recv_buf[recv_len.*] = byte;
         recv_len.* += 1;
@@ -92,8 +92,8 @@ pub fn main(process: std.process.Init) !void {
 
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
-        const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logon)) return error.ExpectedLogon;
+        const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.ZixMissingMsgType;
+        if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logon)) return error.ZixExpectedLogon;
         std.debug.print("client: recv Logon from server\n", .{});
     }
 
@@ -122,7 +122,7 @@ pub fn main(process: std.process.Init) !void {
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
         const fslice = fields[0..nf];
-        const msgtype = zix.Fix.getField(fslice, .MsgType) orelse return error.MissingMsgType;
+        const msgtype = zix.Fix.getField(fslice, .MsgType) orelse return error.ZixMissingMsgType;
         const symbol = zix.Fix.getField(fslice, .Symbol) orelse "(missing)";
         const qty = zix.Fix.getField(fslice, .OrderQty) orelse "(missing)";
 
@@ -145,8 +145,8 @@ pub fn main(process: std.process.Init) !void {
 
         var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
         const nf = try zix.Fix.parseFields(raw, &fields);
-        const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.MissingMsgType;
-        if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logout)) return error.ExpectedLogout;
+        const msgtype = zix.Fix.getField(fields[0..nf], .MsgType) orelse return error.ZixMissingMsgType;
+        if (!std.mem.eql(u8, msgtype, zix.Fix.MsgType.Logout)) return error.ZixExpectedLogout;
         std.debug.print("client: recv Logout, session complete\n", .{});
     }
 }

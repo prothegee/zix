@@ -29,13 +29,13 @@ pub const PROBE_VALUE_LEN: usize = parameter.HEADER_LEN + PROBE_LEN;
 /// Framing faults, and a buffer too small to write into.
 pub const Error = error{
     /// The chunk value does not hold a Heartbeat Info parameter.
-    MissingInfo,
+    ZixMissingInfo,
     /// A parameter runs past the end of the chunk value.
-    Truncated,
+    ZixTruncated,
     /// A parameter length below the parameter header size.
-    BadLength,
+    ZixBadLength,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// What this endpoint puts in the blob it sends.
@@ -67,12 +67,12 @@ pub const Probe = struct {
 ///
 /// Return:
 /// - []const u8 borrowing `value`, the blob to echo or to decode
-/// - error.MissingInfo if there is no Heartbeat Info parameter
-/// - error.Truncated, error.BadLength if the parameter region is malformed
+/// - error.ZixMissingInfo if there is no Heartbeat Info parameter
+/// - error.ZixTruncated, error.ZixBadLength if the parameter region is malformed
 pub fn readInfo(value: []const u8) Error![]const u8 {
     try parameter.validate(value);
 
-    const found = parameter.find(value, .HEARTBEAT_INFO) orelse return error.MissingInfo;
+    const found = parameter.find(value, .HEARTBEAT_INFO) orelse return error.ZixMissingInfo;
 
     return found.value;
 }
@@ -89,7 +89,7 @@ pub fn readInfo(value: []const u8) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8 chunk value
-/// - error.NoSpace, error.BadLength
+/// - error.ZixNoSpace, error.ZixBadLength
 pub fn writeInfo(out: []u8, info: []const u8) Error![]const u8 {
     return parameter.write(out, .HEARTBEAT_INFO, info);
 }
@@ -102,7 +102,7 @@ pub fn writeInfo(out: []u8, info: []const u8) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8 chunk value
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeProbe(out: []u8, probe: Probe) Error![]const u8 {
     var blob: [PROBE_LEN]u8 = undefined;
     std.mem.writeInt(u64, blob[0..8], probe.nonce, .big);
@@ -203,22 +203,22 @@ test "zix sctp: heartbeat info, a chunk value with no info parameter errors" {
     var buf: [8]u8 = undefined;
     const value = try parameter.write(&buf, .STATE_COOKIE, &.{});
 
-    try std.testing.expectError(error.MissingInfo, readInfo(value));
+    try std.testing.expectError(error.ZixMissingInfo, readInfo(value));
     try std.testing.expect(readProbe(value) == null);
 }
 
 test "zix sctp: heartbeat info, an empty chunk value errors" {
-    try std.testing.expectError(error.MissingInfo, readInfo(&.{}));
+    try std.testing.expectError(error.ZixMissingInfo, readInfo(&.{}));
 }
 
 test "zix sctp: heartbeat info, a malformed parameter region errors" {
     const broken: [4]u8 = .{ 0x00, 0x01, 0x00, 0x40 };
 
-    try std.testing.expectError(error.Truncated, readInfo(&broken));
+    try std.testing.expectError(error.ZixTruncated, readInfo(&broken));
 }
 
 test "zix sctp: heartbeat info, a buffer too small errors" {
     var buf: [PROBE_VALUE_LEN - 1]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeProbe(&buf, .{ .nonce = 1, .sent_ms = 1 }));
+    try std.testing.expectError(error.ZixNoSpace, writeProbe(&buf, .{ .nonce = 1, .sent_ms = 1 }));
 }

@@ -6,7 +6,7 @@ This document covers the wire-level and internal detail. For the shape of the dr
 
 The client writes the request line, `Host`, `Connection: close`, any caller headers, then `Content-Length` and the body (empty body sends `Content-Length: 0`). It reads the response in two phases:
 
-1. Read into a fixed `HEAD_SCAN_BUF` (8192 bytes) until `"\r\n\r\n"` is found. `error.InvalidResponse` if the head never terminates within that buffer, `error.ConnectionClosed` if the peer closes first.
+1. Read into a fixed `HEAD_SCAN_BUF` (8192 bytes) until `"\r\n\r\n"` is found. `error.PrometheuzInvalidResponse` if the head never terminates within that buffer, `error.PrometheuzConnectionClosed` if the peer closes first.
 2. Parse the status line and, from the head, `Content-Length` and `Transfer-Encoding`. Then read the body by whichever framing the response declared:
 
 ```mermaid
@@ -70,7 +70,7 @@ Sample          { double value = 1; int64 timestamp = 2 }
 
 The encoded `WriteRequest` bytes are then snappy-compressed (`snappy.zig`) before the POST. `snappy.zig` writes a varint uncompressed-length preamble, then splits the input into literal elements of at most 60 bytes (`MAX_LITERAL_CHUNK`), each with a one-byte tag `(chunk_len - 1) << 2` (wire type `00` = literal, so every tag fits one byte). This is spec-valid but not compressing: it never emits a copy/back-reference element, real snappy decoders accept an all-literal stream by design. See `hld-en.md`'s design decisions for why this is a deliberate v1 scope cut rather than a defect.
 
-`checkStatus` accepts any 2xx, everything else (including a network failure) surfaces as `error.RemoteWriteRejected` or the underlying transport error.
+`checkStatus` accepts any 2xx, everything else (including a network failure) surfaces as `error.PrometheuzRemoteWriteRejected` or the underlying transport error.
 
 ## PromQL response decode (`query.zig`)
 
@@ -80,7 +80,7 @@ The encoded `WriteRequest` bytes are then snappy-compressed (`snappy.zig`) befor
 ]}}
 ```
 
-`parseResponse` parses the body with `std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{})`, then walks the tree by hand (`jsonObject`/`jsonArray`/`jsonString`/`jsonNumber` helpers) rather than a typed struct parse: a PromQL point is a two-element JSON array `[number, "string"]` (the value travels as a string to preserve full float precision), which a fixed struct shape cannot describe. `"status": "error"` in the body (a well-formed but failed query) surfaces as `error.QueryFailed`, same as a non-200 HTTP status. A body that fails to parse as JSON, or has an unexpected shape at any step, surfaces as `error.InvalidResponse`.
+`parseResponse` parses the body with `std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{})`, then walks the tree by hand (`jsonObject`/`jsonArray`/`jsonString`/`jsonNumber` helpers) rather than a typed struct parse: a PromQL point is a two-element JSON array `[number, "string"]` (the value travels as a string to preserve full float precision), which a fixed struct shape cannot describe. `"status": "error"` in the body (a well-formed but failed query) surfaces as `error.PrometheuzQueryFailed`, same as a non-200 HTTP status. A body that fails to parse as JSON, or has an unexpected shape at any step, surfaces as `error.PrometheuzInvalidResponse`.
 
 `resultType: "vector"` populates `QueryResult.vector` (`[]VectorEntry`, one `(metric labels, timestamp, value)` per series), `"matrix"` populates `.matrix` (`[]MatrixEntry`, one `(metric labels, []Point)` per series - a `queryRange` call, one point per step). `"scalar"`/`"string"` results set `result_type` but leave both slices empty (no example or caller in this driver needs them decoded further yet).
 
@@ -91,15 +91,15 @@ Query expressions URL-encode through `urlEncodeAppend`: alphanumerics and `-_.~`
 | Error | Surface | Meaning |
 | :- | :- | :- |
 | `Snapshot.up = false`, `.last_error` set | `scrapeOnce`/`Scraper` | scrape failed (connect, non-200, parse) - observed through the value, never thrown |
-| `error.InvalidSample` | `parser.parse` | malformed label block, value, or timestamp |
-| `error.UnsupportedScheme` | `url.zig` | target URL is not `http://` |
-| `error.InvalidUrl` | `url.zig` | malformed host or port in a target URL |
-| `error.ConnectionClosed` | `http_client` | peer closed before a full head or body arrived |
-| `error.InvalidResponse` | `http_client` | no `"\r\n\r\n"` within `HEAD_SCAN_BUF`, or a malformed chunk size line |
-| `error.BodyTooLarge` | `http_client` | response body exceeded `max_response_body` |
-| `error.RemoteWriteRejected` | `remote_write` | receiver returned a non-2xx status |
-| `error.QueryFailed` | `query`/`queryRange` | non-200 response, or `"status": "error"` in an otherwise well-formed body |
-| `error.InvalidResponse` | `query`/`queryRange` | malformed JSON, or an unexpected shape in an otherwise-valid JSON body |
+| `error.PrometheuzInvalidSample` | `parser.parse` | malformed label block, value, or timestamp |
+| `error.PrometheuzUnsupportedScheme` | `url.zig` | target URL is not `http://` |
+| `error.PrometheuzInvalidUrl` | `url.zig` | malformed host or port in a target URL |
+| `error.PrometheuzConnectionClosed` | `http_client` | peer closed before a full head or body arrived |
+| `error.PrometheuzInvalidResponse` | `http_client` | no `"\r\n\r\n"` within `HEAD_SCAN_BUF`, or a malformed chunk size line |
+| `error.PrometheuzBodyTooLarge` | `http_client` | response body exceeded `max_response_body` |
+| `error.PrometheuzRemoteWriteRejected` | `remote_write` | receiver returned a non-2xx status |
+| `error.PrometheuzQueryFailed` | `query`/`queryRange` | non-200 response, or `"status": "error"` in an otherwise well-formed body |
+| `error.PrometheuzInvalidResponse` | `query`/`queryRange` | malformed JSON, or an unexpected shape in an otherwise-valid JSON body |
 
 ## Config reference
 

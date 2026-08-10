@@ -33,7 +33,7 @@ Sender task  -->  [ Channel(T) ring buffer ]  -->  Receiver task
 | `send(io, value)` | buffer is full |
 | `recv(io)` | buffer is empty |
 
-After `close(io)` no new sends are accepted. `recv()` drains any remaining items then returns `error.Closed`.
+After `close(io)` no new sends are accepted. `recv()` drains any remaining items then returns `error.ZixClosed`.
 
 ---
 
@@ -46,10 +46,10 @@ const MyChan = zix.Channel(u32);
 var ch = try MyChan.init(allocator, 8);
 defer ch.deinit();
 
-// send blocks when full, returns error.Closed if ch.close() was called
+// send blocks when full, returns error.ZixClosed if ch.close() was called
 try ch.send(io, 42);
 
-// recv blocks when empty, drains remaining items after close(), then returns error.Closed
+// recv blocks when empty, drains remaining items after close(), then returns error.ZixClosed
 const v = try ch.recv(io);  // v == 42
 
 // close: no more sends, blocked receivers are unblocked and drain remaining items

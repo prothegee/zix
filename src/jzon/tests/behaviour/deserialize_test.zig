@@ -183,7 +183,7 @@ test "jzon behaviour: the unknown key rule reaches the path the strategy named" 
         try std.testing.expectEqual(@as(i64, 1), skipped.net_cents);
         try std.testing.expectEqual(@as(i64, 2), skipped.tax_cents);
 
-        try std.testing.expectError(error.UnknownField, jzon.deserialize(Totals, arena.allocator(), src, .{
+        try std.testing.expectError(error.JzonUnknownField, jzon.deserialize(Totals, arena.allocator(), src, .{
             .strategy = strategy,
             .unknown = .REJECT,
         }));
@@ -224,4 +224,58 @@ test "jzon behaviour: deserialize reads a shape only the default strategy has a 
     const pair = try jzon.deserialize(struct { u8, bool }, arena.allocator(), "[1,true]", .{});
     try std.testing.expectEqual(@as(u8, 1), pair[0]);
     try std.testing.expect(pair[1]);
+}
+
+/// The shape the three diagnostic tests below parse into.
+const Record = struct { id: u32, customer: []const u8 };
+
+test "jzon behaviour: a rejected field is named, which the error value cannot do" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    jzon.diagnostic.reset();
+
+    const body = "{\"id\":42,\"customer\":\"Ada\",\"discount\":5}";
+    try std.testing.expectError(
+        error.JzonUnknownField,
+        jzon.deserialize(Record, arena.allocator(), body, .{ .strategy = .GENERATED }),
+    );
+
+    const why = jzon.lastFailure();
+    try std.testing.expect(why.filled);
+    try std.testing.expectEqualStrings("discount", why.field);
+}
+
+test "jzon behaviour: a field the document never filled is named" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    jzon.diagnostic.reset();
+
+    try std.testing.expectError(
+        error.JzonMissingField,
+        jzon.deserialize(Record, arena.allocator(), "{\"id\":42}", .{ .strategy = .GENERATED }),
+    );
+
+    const why = jzon.lastFailure();
+    try std.testing.expect(why.filled);
+    try std.testing.expectEqualStrings("customer", why.field);
+}
+
+test "jzon behaviour: a document that stops early reports the byte it stopped on" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    jzon.diagnostic.reset();
+
+    const cut = "{\"id\":42,\"customer\":\"Ada";
+    try std.testing.expectError(
+        error.JzonTruncated,
+        jzon.deserialize(Record, arena.allocator(), cut, .{ .strategy = .GENERATED }),
+    );
+
+    const why = jzon.lastFailure();
+    try std.testing.expect(why.filled);
+    try std.testing.expect(why.offset > 0);
+    try std.testing.expect(why.offset <= cut.len);
 }

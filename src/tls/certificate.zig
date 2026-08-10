@@ -194,12 +194,12 @@ pub fn clientCertificateVerifyContent(buf: []u8, transcript_hash: Secret) []cons
 ///
 /// Return:
 /// - void on a valid signature
-/// - error.UnsupportedSignatureScheme (scheme is not ecdsa_secp256r1_sha256)
+/// - error.ZixUnsupportedSignatureScheme (scheme is not ecdsa_secp256r1_sha256)
 /// - error.SignatureVerificationFailed (signature does not verify)
 pub fn verifyClientCertificateVerify(certificate_verify_body: []const u8, public_key: EcdsaP256.PublicKey, transcript_hash: Secret) !void {
     var r = Reader{ .buf = certificate_verify_body };
     const scheme = try r.readU16();
-    if (scheme != @intFromEnum(handshake.SignatureScheme.ECDSA_SECP256R1_SHA256)) return error.UnsupportedSignatureScheme;
+    if (scheme != @intFromEnum(handshake.SignatureScheme.ECDSA_SECP256R1_SHA256)) return error.ZixUnsupportedSignatureScheme;
 
     const sig_len = try r.readU16();
     const sig_bytes = try r.readBytes(sig_len);

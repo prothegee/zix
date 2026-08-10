@@ -58,8 +58,8 @@ pub inline fn skipSpace(cursor: *Cursor, comptime shape: Shape) void {
 ///
 /// Return:
 /// - StringSpan (the undecoded body, plus whether it holds an escape)
-/// - error.Truncated when the closing quote never arrives
-/// - error.Unexpected when the token does not open with a quote, or carries a
+/// - error.JzonTruncated when the closing quote never arrives
+/// - error.JzonUnexpected when the token does not open with a quote, or carries a
 ///   raw control byte
 pub inline fn stringSpan(cursor: *Cursor, comptime shape: Shape) Error!StringSpan {
     return switch (shape.scan) {

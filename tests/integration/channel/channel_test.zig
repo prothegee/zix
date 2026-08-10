@@ -61,5 +61,5 @@ test "zix integration: Channel(u32), drain remaining items after close" {
     channel.close(io);
     try std.testing.expectEqual(@as(u32, 10), try channel.recv(io));
     try std.testing.expectEqual(@as(u32, 20), try channel.recv(io));
-    try std.testing.expectError(error.Closed, channel.recv(io));
+    try std.testing.expectError(error.ZixClosed, channel.recv(io));
 }

@@ -31,6 +31,7 @@ const IoUring = std.os.linux.IoUring;
 const Config = @import("../config.zig");
 const WebrtcServerConfig = Config.WebrtcServerConfig;
 const common = @import("common.zig");
+const listen_report = @import("../../../multiplexers/listen_report.zig");
 const core = @import("../core.zig");
 const datagram = @import("../../datagram.zig");
 const epoll = @import("epoll.zig");
@@ -216,7 +217,7 @@ const Ring = struct {
         // A datagram the slot could not hold is one no layer below can parse, and every layer here
         // is authenticated, so guessing at the missing bytes is not an option.
         if (self.msgs[slot].flags & linux.MSG.TRUNC != 0) {
-            common.logSystem(self.config, "dropped a datagram larger than max_recv_buf ({d})", .{self.config.max_recv_buf});
+            common.logSystem(self.config, .WARN, "dropped a datagram larger than max_recv_buf ({d})", .{self.config.max_recv_buf});
 
             return;
         }
@@ -328,17 +329,21 @@ fn openRing() !IoUring {
 ///
 /// Return:
 /// - void, returning only when the worker could not start
-fn workerLoopUring(comptime handler: core.HandlerFn, config: WebrtcServerConfig, worker_id: usize) void {
+fn workerLoopUring(comptime handler: core.HandlerFn, config: WebrtcServerConfig, worker_id: usize, report: *listen_report.Report) void {
     common.pinToCpu(worker_id);
 
     var ring = Ring.init(config) catch |err| {
-        common.logSystem(config, "uring worker {d} could not start ({s}), folding to epoll", .{ worker_id, @errorName(err) });
+        common.logSystem(config, .WARN, "uring worker {d} could not start ({s}), folding to epoll", .{ worker_id, @errorName(err) });
 
-        return epoll.workerLoopEpoll(handler, config, worker_id);
+        return epoll.workerLoopEpoll(handler, config, worker_id, report);
     };
     defer ring.deinit();
 
     ring.prime();
+
+    // The ring is up, which for this engine is the socket too. Serve once the group agrees.
+    report.bound(config.io);
+    if (report.awaitGroup(config.io) != null) return;
 
     while (true) ring.pass(handler);
 }
@@ -351,22 +356,41 @@ fn workerLoopUring(comptime handler: core.HandlerFn, config: WebrtcServerConfig,
 ///
 /// Return:
 /// - !void, blocking until every worker has gone
-/// - error.DispatchModelUnsupported off Linux (ADR-065), where the caller picks .ASYNC
+/// - error.ZixDispatchModelUnsupported off Linux (ADR-065), where the caller picks .ASYNC
 pub fn runUring(comptime handler: core.HandlerFn, config: WebrtcServerConfig) !void {
-    if (comptime !datagram.is_linux) return error.DispatchModelUnsupported;
+    if (comptime !datagram.is_linux) return error.ZixDispatchModelUnsupported;
 
     const want = common.effectiveWorkers(config);
-
-    common.logSystem(config, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + io_uring)", .{ config.ip, config.port, want });
 
     const threads = try config.allocator.alloc(std.Thread, want);
     defer config.allocator.free(threads);
 
+    // What every worker says about its own socket, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(want);
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i, &report }) catch |err| {
+            common.logSystem(config, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ i, want, @errorName(err) });
+            report.abandon(config.io, want - i, err);
+
+            break;
+        };
         spawned += 1;
     }
+
+    if (report.awaitGroup(config.io)) |err| {
+        common.logSystem(config, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not start ({s})", .{ config.ip, config.port, report.failures(), want, @errorName(err) });
+
+        for (threads[0..spawned]) |thread| thread.join();
+
+        return error.ZixWebrtcListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a socket that may never have been bound.
+    common.logSystem(config, .INFO, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + io_uring)", .{ config.ip, config.port, want });
 
     for (threads[0..spawned]) |thread| thread.join();
 }
@@ -388,7 +412,7 @@ test "zix webrtc: uring, run is refused off linux and every slot arms on it" {
     const config = session.testConfig(threaded.io(), std.testing.allocator, &tls, TEST_SERVER_PORT);
 
     if (comptime builtin.target.os.tag != .linux) {
-        try std.testing.expectError(error.DispatchModelUnsupported, runUring(session.echoHandler, config));
+        try std.testing.expectError(error.ZixDispatchModelUnsupported, runUring(session.echoHandler, config));
 
         return;
     }

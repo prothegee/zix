@@ -28,7 +28,7 @@ const FamilyBuilder = struct {
 ///
 /// Return:
 /// - []MetricFamily (arena-owned)
-/// - error.InvalidSample (malformed labels, value, or timestamp)
+/// - error.PrometheuzInvalidSample (malformed labels, value, or timestamp)
 pub fn parse(arena: std.mem.Allocator, text: []const u8) ![]MetricFamily {
     const owned_text = try arena.dupe(u8, text);
 
@@ -163,7 +163,7 @@ fn parseSampleLine(arena: std.mem.Allocator, line: []const u8) !Sample {
     while (pos < line.len and line[pos] == ' ') pos += 1;
 
     const timestamp_ms: ?i64 = if (pos < line.len)
-        std.fmt.parseInt(i64, line[pos..], 10) catch return error.InvalidSample
+        std.fmt.parseInt(i64, line[pos..], 10) catch return error.PrometheuzInvalidSample
     else
         null;
 
@@ -200,7 +200,7 @@ fn findClosingBrace(line: []const u8, start: usize) !usize {
         }
     }
 
-    return error.InvalidSample;
+    return error.PrometheuzInvalidSample;
 }
 
 fn parseSampleValue(text: []const u8) !f64 {
@@ -208,7 +208,7 @@ fn parseSampleValue(text: []const u8) !f64 {
     if (std.mem.eql(u8, text, "-Inf")) return -std.math.inf(f64);
     if (std.mem.eql(u8, text, "Nan") or std.mem.eql(u8, text, "NaN")) return std.math.nan(f64);
 
-    return std.fmt.parseFloat(f64, text) catch error.InvalidSample;
+    return std.fmt.parseFloat(f64, text) catch error.PrometheuzInvalidSample;
 }
 
 fn parseLabels(arena: std.mem.Allocator, text: []const u8) ![]const Label {
@@ -219,11 +219,11 @@ fn parseLabels(arena: std.mem.Allocator, text: []const u8) ![]const Label {
         while (pos < text.len and (text[pos] == ' ' or text[pos] == ',')) pos += 1;
         if (pos >= text.len) break;
 
-        const eq_pos = std.mem.indexOfScalarPos(u8, text, pos, '=') orelse return error.InvalidSample;
+        const eq_pos = std.mem.indexOfScalarPos(u8, text, pos, '=') orelse return error.PrometheuzInvalidSample;
         const label_name = std.mem.trim(u8, text[pos..eq_pos], " ");
         pos = eq_pos + 1;
 
-        if (pos >= text.len or text[pos] != '"') return error.InvalidSample;
+        if (pos >= text.len or text[pos] != '"') return error.PrometheuzInvalidSample;
         pos += 1;
 
         const value_start = pos;
@@ -241,7 +241,7 @@ fn parseLabels(arena: std.mem.Allocator, text: []const u8) ![]const Label {
             }
             if (text[pos] == '"') break;
         }
-        if (pos >= text.len) return error.InvalidSample;
+        if (pos >= text.len) return error.PrometheuzInvalidSample;
 
         const label_value = try unescapeText(arena, text[value_start..pos], true);
         pos += 1; // past the closing quote
@@ -438,5 +438,5 @@ test "prometheuz: parser rejects an unterminated label block" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    try testing.expectError(error.InvalidSample, parse(arena, "broken_metric{label=\"value\" 5\n"));
+    try testing.expectError(error.PrometheuzInvalidSample, parse(arena, "broken_metric{label=\"value\" 5\n"));
 }

@@ -22,7 +22,7 @@ const win_io = @import("windows_io.zig");
 const is_windows = builtin.os.tag == .windows;
 const is_linux = builtin.os.tag == .linux;
 
-pub const ReadError = error{ ReadFailed, ConnectionClosed };
+pub const ReadError = error{ ReadFailed, ZixConnectionClosed };
 pub const WriteError = error{WriteFailed};
 
 /// Outcome of one raw syscall, before a caller turns it into its own error.
@@ -110,7 +110,7 @@ fn writeSyscall(fd: posix.fd_t, bytes: []const u8) SyscallError!usize {
 ///
 /// Return:
 /// - void when the whole buffer was filled
-/// - error.ConnectionClosed when the peer hung up mid-read
+/// - error.ZixConnectionClosed when the peer hung up mid-read
 /// - error.ReadFailed on any other read error
 pub fn readAll(fd: posix.fd_t, buf: []u8) ReadError!void {
     var filled: usize = 0;
@@ -120,7 +120,7 @@ pub fn readAll(fd: posix.fd_t, buf: []u8) ReadError!void {
 
         if (comptime is_windows) {
             const got = win_io.readOnce(fd, chunk) catch return error.ReadFailed;
-            if (got == 0) return error.ConnectionClosed;
+            if (got == 0) return error.ZixConnectionClosed;
 
             filled += got;
             continue;
@@ -130,7 +130,7 @@ pub fn readAll(fd: posix.fd_t, buf: []u8) ReadError!void {
             error.Interrupted => continue,
             error.SyscallFailed => return error.ReadFailed,
         };
-        if (got == 0) return error.ConnectionClosed;
+        if (got == 0) return error.ZixConnectionClosed;
 
         filled += got;
     }
@@ -272,7 +272,7 @@ test "zix utils: fd_io readAll reports ConnectionClosed when the peer hangs up e
 
     // asking for more than the peer ever sent must surface the hangup, not a short read
     var received: [16]u8 = undefined;
-    try std.testing.expectError(error.ConnectionClosed, readAll(pair[1], &received));
+    try std.testing.expectError(error.ZixConnectionClosed, readAll(pair[1], &received));
 }
 
 test "zix utils: fd_io waitReadable sees pending bytes and times out on a quiet descriptor" {
@@ -350,15 +350,15 @@ test "zix utils: fd_io writeAll on a closed descriptor errors instead of reporti
 ///   rather than a skip, because a skip would leave the caller holding two descriptors that were
 ///   never opened. Every caller guards Windows first, so the error is unreachable at runtime.
 fn testSocketPair(fds: *[2]posix.fd_t) !void {
-    if (comptime is_windows) return error.SocketPairNeedsPosix;
+    if (comptime is_windows) return error.ZixSocketPairNeedsPosix;
 
     if (comptime is_linux) {
         const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
-        if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
+        if (posix.errno(rc) != .SUCCESS) return error.ZixSocketPairFailed;
 
         return;
     }
 
     const rc = posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
-    if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
+    if (posix.errno(rc) != .SUCCESS) return error.ZixSocketPairFailed;
 }

@@ -26,8 +26,8 @@ pub const ProtocolVersion = enum {
 pub const MIN_SERVER_MAJOR: u32 = 15;
 
 pub const StartupError = error{
-    ProtocolNotSupported,
-    UnsupportedServerVersion,
+    PostgrezProtocolNotSupported,
+    PostgrezUnsupportedServerVersion,
 };
 
 // --------------------------------------------------------- //
@@ -50,11 +50,11 @@ pub fn buildStartup(allocator: std.mem.Allocator, out: *std.ArrayList(u8), knob:
 ///
 /// Return:
 /// - frontend.PROTOCOL_V3_0 when the downgrade is acceptable
-/// - error.ProtocolNotSupported under the strict .V3_2 knob, or when the
+/// - error.PostgrezProtocolNotSupported under the strict .V3_2 knob, or when the
 ///   server's newest supported version is not a 3.x protocol
 pub fn handleNegotiate(knob: ProtocolVersion, negotiate: backend.NegotiateProtocolVersion) StartupError!i32 {
-    if (knob == .V3_2) return error.ProtocolNotSupported;
-    if (@divTrunc(negotiate.newest_code, 0x0001_0000) != 3) return error.ProtocolNotSupported;
+    if (knob == .V3_2) return error.PostgrezProtocolNotSupported;
+    if (@divTrunc(negotiate.newest_code, 0x0001_0000) != 3) return error.PostgrezProtocolNotSupported;
 
     return frontend.PROTOCOL_V3_0;
 }
@@ -73,11 +73,11 @@ pub fn serverVersionMajor(text: []const u8) ?u32 {
 ///
 /// Return:
 /// - void when the server is PostgreSQL 15 or newer
-/// - error.UnsupportedServerVersion below 15 or on an unparseable version
+/// - error.PostgrezUnsupportedServerVersion below 15 or on an unparseable version
 pub fn checkServerVersion(text: []const u8) StartupError!void {
-    const major = serverVersionMajor(text) orelse return error.UnsupportedServerVersion;
+    const major = serverVersionMajor(text) orelse return error.PostgrezUnsupportedServerVersion;
 
-    if (major < MIN_SERVER_MAJOR) return error.UnsupportedServerVersion;
+    if (major < MIN_SERVER_MAJOR) return error.PostgrezUnsupportedServerVersion;
 }
 
 // --------------------------------------------------------- //
@@ -118,7 +118,7 @@ test "postgrez protocol: handleNegotiate rejects under strict V3_2" {
         .options_payload = "",
     };
 
-    try testing.expectError(error.ProtocolNotSupported, handleNegotiate(.V3_2, negotiate));
+    try testing.expectError(error.PostgrezProtocolNotSupported, handleNegotiate(.V3_2, negotiate));
 }
 
 test "postgrez protocol: handleNegotiate rejects a non-3.x server" {
@@ -128,7 +128,7 @@ test "postgrez protocol: handleNegotiate rejects a non-3.x server" {
         .options_payload = "",
     };
 
-    try testing.expectError(error.ProtocolNotSupported, handleNegotiate(.AUTO, negotiate));
+    try testing.expectError(error.PostgrezProtocolNotSupported, handleNegotiate(.AUTO, negotiate));
 }
 
 test "postgrez protocol: serverVersionMajor parses release and pre-release" {
@@ -143,7 +143,7 @@ test "postgrez protocol: checkServerVersion gates below 15" {
     try checkServerVersion("15.2");
     try checkServerVersion("18beta1");
 
-    try testing.expectError(error.UnsupportedServerVersion, checkServerVersion("14.8"));
-    try testing.expectError(error.UnsupportedServerVersion, checkServerVersion("9.6.24"));
-    try testing.expectError(error.UnsupportedServerVersion, checkServerVersion("garbage"));
+    try testing.expectError(error.PostgrezUnsupportedServerVersion, checkServerVersion("14.8"));
+    try testing.expectError(error.PostgrezUnsupportedServerVersion, checkServerVersion("9.6.24"));
+    try testing.expectError(error.PostgrezUnsupportedServerVersion, checkServerVersion("garbage"));
 }

@@ -157,7 +157,7 @@ test "jzon behaviour: scanner parser refuses a key the type does not declare" {
     const src = "{\"id\":1,\"name\":\"x\",\"shipped_at\":\"today\"}";
 
     try std.testing.expectError(
-        error.UnknownField,
+        error.JzonUnknownField,
         scanner_parser.parse(Pair, arena.allocator(), src, .{}),
     );
 }

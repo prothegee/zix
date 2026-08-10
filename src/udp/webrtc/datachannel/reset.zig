@@ -41,11 +41,11 @@ pub const MAX_DEFERRED_STREAMS: usize = 8;
 /// Everything that can go wrong driving a reset.
 pub const Error = error{
     /// A parameter longer than the buffers here.
-    NoSpace,
+    ZixNoSpace,
     /// A parameter region that ends mid-parameter.
-    Truncated,
+    ZixTruncated,
     /// A parameter length below the parameter header size.
-    BadLength,
+    ZixBadLength,
 };
 
 /// The answer to a request this endpoint sent.
@@ -179,7 +179,7 @@ pub const Driver = struct {
     ///
     /// Return:
     /// - bool, false when a request is already outstanding and this one has to wait
-    /// - error.NoSpace, error.BadLength
+    /// - error.ZixNoSpace, error.ZixBadLength
     pub fn requestReset(self: *Driver, stream_identifier: u16, last_assigned_tsn: u32) Error!bool {
         if (self.isBusy()) return false;
 
@@ -191,9 +191,9 @@ pub const Driver = struct {
             .response_sequence = serial.Tsn.previous(self.peer_next_sequence),
             .last_assigned_tsn = last_assigned_tsn,
         }, &.{stream_identifier}) catch |err| switch (err) {
-            error.NoSpace => return error.NoSpace,
-            error.BadLength => return error.BadLength,
-            error.Truncated => return error.Truncated,
+            error.ZixNoSpace => return error.ZixNoSpace,
+            error.ZixBadLength => return error.ZixBadLength,
+            error.ZixTruncated => return error.ZixTruncated,
         };
 
         self.request_len = written.len;
@@ -251,12 +251,12 @@ pub const Driver = struct {
     ///
     /// Return:
     /// - Handled, borrowing `value`
-    /// - error.Truncated, error.BadLength, error.NoSpace
+    /// - error.ZixTruncated, error.ZixBadLength, error.ZixNoSpace
     pub fn handleValue(self: *Driver, value: []const u8, cumulative_tsn: u32) Error!Handled {
         parameter.validate(value) catch |err| switch (err) {
-            error.Truncated => return error.Truncated,
-            error.BadLength => return error.BadLength,
-            error.NoSpace => return error.NoSpace,
+            error.ZixTruncated => return error.ZixTruncated,
+            error.ZixBadLength => return error.ZixBadLength,
+            error.ZixNoSpace => return error.ZixNoSpace,
         };
 
         var outcome: Handled = .{};
@@ -282,7 +282,7 @@ pub const Driver = struct {
     ///
     /// Return:
     /// - ?Release, the streams to reset now
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn releaseDeferred(self: *Driver, cumulative_tsn: u32) Error!?Release {
         const held = self.deferred orelse return null;
 
@@ -299,9 +299,9 @@ pub const Driver = struct {
     /// An Outgoing SSN Reset arrived, which is the peer closing one or more channels.
     fn onOutgoingReset(self: *Driver, value: []const u8, cumulative_tsn: u32) Error!?reconfig.OutgoingReset {
         const request = reconfig.readOutgoingReset(value) catch |err| switch (err) {
-            error.Truncated => return error.Truncated,
-            error.BadLength => return error.BadLength,
-            error.NoSpace => return error.NoSpace,
+            error.ZixTruncated => return error.ZixTruncated,
+            error.ZixBadLength => return error.ZixBadLength,
+            error.ZixNoSpace => return error.ZixNoSpace,
         };
 
         if (self.last_answered) |answered| {
@@ -366,9 +366,9 @@ pub const Driver = struct {
     /// A Re-configuration Response arrived, which answers a request from here.
     fn onResponse(self: *Driver, value: []const u8) Error!?Completed {
         const response = reconfig.readResponse(value) catch |err| switch (err) {
-            error.Truncated => return error.Truncated,
-            error.BadLength => return error.BadLength,
-            error.NoSpace => return error.NoSpace,
+            error.ZixTruncated => return error.ZixTruncated,
+            error.ZixBadLength => return error.ZixBadLength,
+            error.ZixNoSpace => return error.ZixNoSpace,
         };
 
         if (self.request_len == 0) return null;
@@ -393,9 +393,9 @@ pub const Driver = struct {
     /// Refuse a request that this endpoint reset its own outgoing streams.
     fn denyIncomingReset(self: *Driver, value: []const u8) Error!void {
         const request = reconfig.readIncomingReset(value) catch |err| switch (err) {
-            error.Truncated => return error.Truncated,
-            error.BadLength => return error.BadLength,
-            error.NoSpace => return error.NoSpace,
+            error.ZixTruncated => return error.ZixTruncated,
+            error.ZixBadLength => return error.ZixBadLength,
+            error.ZixNoSpace => return error.ZixNoSpace,
         };
 
         try self.buildAnswer(request.request_sequence, .DENIED);
@@ -404,9 +404,9 @@ pub const Driver = struct {
     /// Refuse a request to widen the association.
     fn denyAddStreams(self: *Driver, value: []const u8) Error!void {
         const request = reconfig.readAddStreams(value) catch |err| switch (err) {
-            error.Truncated => return error.Truncated,
-            error.BadLength => return error.BadLength,
-            error.NoSpace => return error.NoSpace,
+            error.ZixTruncated => return error.ZixTruncated,
+            error.ZixBadLength => return error.ZixBadLength,
+            error.ZixNoSpace => return error.ZixNoSpace,
         };
 
         try self.buildAnswer(request.request_sequence, .DENIED);
@@ -418,9 +418,9 @@ pub const Driver = struct {
             .response_sequence = response_sequence,
             .result = result,
         }) catch |err| switch (err) {
-            error.NoSpace => return error.NoSpace,
-            error.BadLength => return error.BadLength,
-            error.Truncated => return error.Truncated,
+            error.ZixNoSpace => return error.ZixNoSpace,
+            error.ZixBadLength => return error.ZixBadLength,
+            error.ZixTruncated => return error.ZixTruncated,
         };
 
         self.answer_len = written.len;
@@ -719,7 +719,7 @@ test "zix datachannel: reset handleValue, a value ending mid-parameter is refuse
     var buf: [MAX_VALUE_BYTES]u8 = undefined;
     const request = try peerResetValue(&buf, PEER_TSN, 1, 5_010);
 
-    try std.testing.expectError(error.Truncated, driver.handleValue(request[0 .. request.len - 4], 5_010));
+    try std.testing.expectError(error.ZixTruncated, driver.handleValue(request[0 .. request.len - 4], 5_010));
 }
 
 test "zix datachannel: reset nextPending, an answer goes out before a request" {

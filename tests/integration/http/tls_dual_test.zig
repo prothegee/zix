@@ -336,5 +336,5 @@ test "zix integration: Http tls_port equal to port is rejected at run" {
     });
     defer server.deinit();
 
-    try std.testing.expectError(error.TlsPortConflict, server.run());
+    try std.testing.expectError(error.ZixTlsPortConflict, server.run());
 }

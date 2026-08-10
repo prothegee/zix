@@ -77,11 +77,11 @@ pub const Conn = struct {
     ///
     /// Return:
     /// - *Conn ready for commands
-    /// - error.PortNotConfigured / connect errors
-    /// - error.ProtocolNotSupported (strict .RESP3 refused by the server)
-    /// - error.ServerError (auth or select rejected, see lastServerError)
+    /// - error.RedizPortNotConfigured / connect errors
+    /// - error.RedizProtocolNotSupported (strict .RESP3 refused by the server)
+    /// - error.RedizServerError (auth or select rejected, see lastServerError)
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, config: lib.Config) !*Self {
-        if (config.port == 0) return error.PortNotConfigured;
+        if (config.port == 0) return error.RedizPortNotConfigured;
 
         const stream = try connectTcp(io, config.ip, config.port);
 
@@ -168,7 +168,7 @@ pub const Conn = struct {
     ///
     /// Return:
     /// - resp.Reply valid until the next command on this connection
-    /// - error.ServerError with lastServerError filled on an error reply
+    /// - error.RedizServerError with lastServerError filled on an error reply
     pub fn command(self: *Self, args: []const []const u8) !resp.Reply {
         _ = self.reply_arena.reset(.retain_capacity);
 
@@ -180,7 +180,7 @@ pub const Conn = struct {
     /// PING, expects PONG.
     pub fn ping(self: *Self) !void {
         const reply = try self.command(&.{"PING"});
-        if (reply != .simple or !std.mem.eql(u8, reply.simple, "PONG")) return error.ProtocolViolation;
+        if (reply != .simple or !std.mem.eql(u8, reply.simple, "PONG")) return error.RedizProtocolViolation;
     }
 
     /// SET with optional expiry and NX/XX condition.
@@ -264,7 +264,7 @@ pub const Conn = struct {
         return switch (reply) {
             .simple => reply.isOk(),
             .null => false,
-            else => error.ProtocolViolation,
+            else => error.RedizProtocolViolation,
         };
     }
 
@@ -324,7 +324,7 @@ pub const Conn = struct {
         return switch (reply) {
             .bulk => |value| value,
             .null => null,
-            else => error.ProtocolViolation,
+            else => error.RedizProtocolViolation,
         };
     }
 
@@ -378,7 +378,7 @@ pub const Conn = struct {
     /// TYPE of a key ("string", "list", ..., "none" when missing).
     pub fn keyType(self: *Self, key: []const u8) ![]const u8 {
         const reply = try self.command(&.{ "TYPE", key });
-        if (reply != .simple) return error.ProtocolViolation;
+        if (reply != .simple) return error.RedizProtocolViolation;
 
         return reply.simple;
     }
@@ -400,7 +400,7 @@ pub const Conn = struct {
         const delta_text = try std.fmt.allocPrint(arena, "{d}", .{delta});
 
         const reply = try self.roundTrip(&.{ "INCRBY", key, delta_text });
-        if (reply != .integer) return error.ProtocolViolation;
+        if (reply != .integer) return error.RedizProtocolViolation;
 
         return reply.integer;
     }
@@ -408,7 +408,7 @@ pub const Conn = struct {
     /// APPEND, returns the new length.
     pub fn append(self: *Self, key: []const u8, value: []const u8) !u64 {
         const reply = try self.command(&.{ "APPEND", key, value });
-        if (reply != .integer or reply.integer < 0) return error.ProtocolViolation;
+        if (reply != .integer or reply.integer < 0) return error.RedizProtocolViolation;
 
         return @intCast(reply.integer);
     }
@@ -416,7 +416,7 @@ pub const Conn = struct {
     /// STRLEN (0 when the key does not exist).
     pub fn strlen(self: *Self, key: []const u8) !u64 {
         const reply = try self.command(&.{ "STRLEN", key });
-        if (reply != .integer or reply.integer < 0) return error.ProtocolViolation;
+        if (reply != .integer or reply.integer < 0) return error.RedizProtocolViolation;
 
         return @intCast(reply.integer);
     }
@@ -432,14 +432,14 @@ pub const Conn = struct {
         @memcpy(argv[1..], keys);
 
         const reply = try self.roundTrip(argv);
-        if (reply != .array or reply.array.len != keys.len) return error.ProtocolViolation;
+        if (reply != .array or reply.array.len != keys.len) return error.RedizProtocolViolation;
 
         const values = try arena.alloc(?[]const u8, keys.len);
         for (reply.array, values) |item, *value| {
             value.* = switch (item) {
                 .bulk => |bytes| bytes,
                 .null => null,
-                else => return error.ProtocolViolation,
+                else => return error.RedizProtocolViolation,
             };
         }
 
@@ -459,7 +459,7 @@ pub const Conn = struct {
         }
 
         const reply = try self.roundTrip(argv);
-        if (!reply.isOk()) return error.ProtocolViolation;
+        if (!reply.isOk()) return error.RedizProtocolViolation;
     }
 
     /// SELECT a database index.
@@ -469,13 +469,13 @@ pub const Conn = struct {
         const database_text = try std.fmt.allocPrint(arena, "{d}", .{database});
 
         const reply = try self.roundTrip(&.{ "SELECT", database_text });
-        if (!reply.isOk()) return error.ProtocolViolation;
+        if (!reply.isOk()) return error.RedizProtocolViolation;
     }
 
     /// DBSIZE, key count of the selected database.
     pub fn dbSize(self: *Self) !u64 {
         const reply = try self.command(&.{"DBSIZE"});
-        if (reply != .integer or reply.integer < 0) return error.ProtocolViolation;
+        if (reply != .integer or reply.integer < 0) return error.RedizProtocolViolation;
 
         return @intCast(reply.integer);
     }
@@ -483,7 +483,7 @@ pub const Conn = struct {
     /// FLUSHDB, wipe the selected database (test suites).
     pub fn flushDb(self: *Self) !void {
         const reply = try self.command(&.{"FLUSHDB"});
-        if (!reply.isOk()) return error.ProtocolViolation;
+        if (!reply.isOk()) return error.RedizProtocolViolation;
     }
 
     /// Open a pipeline on this connection.
@@ -545,7 +545,7 @@ pub const Conn = struct {
         @memcpy(argv[1..], keys);
 
         const reply = try self.roundTrip(argv);
-        if (reply != .integer or reply.integer < 0) return error.ProtocolViolation;
+        if (reply != .integer or reply.integer < 0) return error.RedizProtocolViolation;
 
         return @intCast(reply.integer);
     }
@@ -569,7 +569,7 @@ pub const Conn = struct {
     }
 
     fn expectInteger(reply: resp.Reply) !i64 {
-        if (reply != .integer) return error.ProtocolViolation;
+        if (reply != .integer) return error.RedizProtocolViolation;
 
         return reply.integer;
     }
@@ -598,7 +598,7 @@ pub const Conn = struct {
     /// Internal: read one reply, skipping RESP3 pushes.
     ///
     /// Param:
-    /// map_errors - bool (true maps an error reply to error.ServerError,
+    /// map_errors - bool (true maps an error reply to error.RedizServerError,
     /// false hands it back as data, the pipeline drain wants that)
     pub fn receiveReply(self: *Self, map_errors: bool) !resp.Reply {
         while (true) {
@@ -609,7 +609,7 @@ pub const Conn = struct {
                 if (reply.errLine()) |line| {
                     self.last_server_error.capture(line);
 
-                    return error.ServerError;
+                    return error.RedizServerError;
                 }
             }
 
@@ -622,11 +622,11 @@ pub const Conn = struct {
         const writer = &self.stream_writer.interface;
 
         if (self.tls_session) |session| {
-            session.writeAll(writer, self.send_buf.items) catch return error.ConnectionClosed;
+            session.writeAll(writer, self.send_buf.items) catch return error.RedizConnectionClosed;
         } else {
-            writer.writeAll(self.send_buf.items) catch return error.ConnectionClosed;
+            writer.writeAll(self.send_buf.items) catch return error.RedizConnectionClosed;
         }
-        writer.flush() catch return error.ConnectionClosed;
+        writer.flush() catch return error.RedizConnectionClosed;
         self.send_buf.clearRetainingCapacity();
     }
 
@@ -651,7 +651,7 @@ pub const Conn = struct {
             try self.waitReadableAfterSend();
 
             const reply = try self.receiveReply(true);
-            if (!reply.isOk()) return error.ProtocolViolation;
+            if (!reply.isOk()) return error.RedizProtocolViolation;
         }
     }
 
@@ -695,15 +695,15 @@ pub const Conn = struct {
             // speak RESP3
             const refused = self.last_server_error.prefix == .NOPROTO or
                 self.last_server_error.prefix == .ERR;
-            if (!refused) return error.ServerError;
-            if (self.config.protocol_version == .RESP3) return error.ProtocolNotSupported;
+            if (!refused) return error.RedizServerError;
+            if (self.config.protocol_version == .RESP3) return error.RedizProtocolNotSupported;
 
             try self.legacyAuth();
 
             return;
         }
 
-        if (reply != .map) return error.ProtocolViolation;
+        if (reply != .map) return error.RedizProtocolViolation;
         self.protocol_active = .RESP3;
         self.captureServerVersion(reply.map);
     }
@@ -726,7 +726,7 @@ pub const Conn = struct {
         try self.waitReadableAfterSend();
 
         const reply = try self.receiveReply(true);
-        if (!reply.isOk()) return error.ProtocolViolation;
+        if (!reply.isOk()) return error.RedizProtocolViolation;
     }
 
     fn captureServerVersion(self: *Self, entries: []resp.MapEntry) void {
@@ -755,12 +755,12 @@ pub const Conn = struct {
     /// Internal: read exactly buf.len bytes through the transport.
     fn transportReadAll(self: *Self, buf: []u8) !void {
         if (self.tls_session) |session| {
-            session.readAll(&self.stream_reader.interface, buf) catch return error.ConnectionClosed;
+            session.readAll(&self.stream_reader.interface, buf) catch return error.RedizConnectionClosed;
 
             return;
         }
 
-        self.stream_reader.interface.readSliceAll(buf) catch return error.ConnectionClosed;
+        self.stream_reader.interface.readSliceAll(buf) catch return error.RedizConnectionClosed;
     }
 
     /// Internal: one protocol line into buf, CRLF stripped.
@@ -771,19 +771,19 @@ pub const Conn = struct {
             var byte: u8 = undefined;
             if (self.tls_session) |session| {
                 var one: [1]u8 = undefined;
-                session.readAll(&self.stream_reader.interface, &one) catch return error.ConnectionClosed;
+                session.readAll(&self.stream_reader.interface, &one) catch return error.RedizConnectionClosed;
                 byte = one[0];
             } else {
-                byte = self.stream_reader.interface.takeByte() catch return error.ConnectionClosed;
+                byte = self.stream_reader.interface.takeByte() catch return error.RedizConnectionClosed;
             }
 
             if (byte == '\n') {
-                if (len == 0 or buf[len - 1] != '\r') return error.ProtocolViolation;
+                if (len == 0 or buf[len - 1] != '\r') return error.RedizProtocolViolation;
 
                 return buf[0 .. len - 1];
             }
 
-            if (len >= buf.len) return error.ProtocolViolation;
+            if (len >= buf.len) return error.RedizProtocolViolation;
             buf[len] = byte;
             len += 1;
         }
@@ -808,8 +808,8 @@ pub const Conn = struct {
         }};
         const timeout_ms: i32 = @intCast(@min(self.config.conn_timeout_ms, @as(u32, std.math.maxInt(i32))));
 
-        const ready = std.posix.poll(&poll_fds, timeout_ms) catch return error.ConnectionClosed;
-        if (ready == 0) return error.ConnectTimeout;
+        const ready = std.posix.poll(&poll_fds, timeout_ms) catch return error.RedizConnectionClosed;
+        if (ready == 0) return error.RedizConnectTimeout;
     }
 };
 
@@ -931,7 +931,7 @@ test "rediz: conn mock noproto fails a strict resp3 config" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.ProtocolNotSupported, connectScripted(
+    try testing.expectError(error.RedizProtocolNotSupported, connectScripted(
         threaded.io(),
         "-NOPROTO unsupported protocol version\r\n",
         .{ .protocol_version = .RESP3 },
@@ -954,7 +954,7 @@ test "rediz: conn mock wrong password surfaces server error" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.ServerError, connectScripted(
+    try testing.expectError(error.RedizServerError, connectScripted(
         threaded.io(),
         "-WRONGPASS invalid username-password pair or user is disabled.\r\n",
         .{ .user = "app", .password = "bad" },
@@ -1079,7 +1079,7 @@ test "rediz: conn mock error reply maps to ServerError" {
     defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
-    try testing.expectError(error.ServerError, conn.get("a-list"));
+    try testing.expectError(error.RedizServerError, conn.get("a-list"));
     try testing.expectEqual(reply_error.Prefix.WRONGTYPE, conn.lastServerError().prefix);
 }
 
@@ -1208,5 +1208,5 @@ test "rediz: conn mock deferred transport error surfaces on drain" {
     // The peer goes away with a reply still owed: the next command fails
     // on the transport, the consumer drops the connection.
     mock.script_stream.close(threaded.io());
-    try testing.expectError(error.ConnectionClosed, conn.get("key"));
+    try testing.expectError(error.RedizConnectionClosed, conn.get("key"));
 }

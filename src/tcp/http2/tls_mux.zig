@@ -20,6 +20,7 @@ const Response = @import("response.zig").Response;
 const Context = @import("context.zig").Context;
 const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
+const listen_report = @import("../../multiplexers/listen_report.zig");
 const mux = @import("mux.zig");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
@@ -249,6 +250,8 @@ const WorkerCtx = struct {
     opts: core.ServeOpts,
     handler: core.HandlerFn,
     worker_id: usize,
+    /// Where this worker says whether its listener came up, shared with the whole group.
+    report: *listen_report.Report,
 };
 
 fn tlsMuxWorker(worker: WorkerCtx) void {
@@ -256,8 +259,21 @@ fn tlsMuxWorker(worker: WorkerCtx) void {
     // oversubscribe one core under a handshake storm (mirrors http1's tls_mux).
     common.pinToCpu(worker.worker_id);
 
-    const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch return;
-    var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
+    // Every exit between here and the event loop has to reach the group, or the workers that
+    // did bind wait on one that is already gone.
+    var slot = worker.report.slot(worker.io, error.ZixHttp2TlsWorkerSetupFailed);
+    defer slot.close();
+
+    const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
+    var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
     defer srv.deinit(worker.io);
     const listener_fd = srv.socket.handle;
     common.setNonBlock(listener_fd);
@@ -272,6 +288,11 @@ fn tlsMuxWorker(worker: WorkerCtx) void {
 
     var table = ConnTable.init() catch return;
     defer table.deinit();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them
+    // and the caller gets one honest failure.
+    slot.ok();
+    if (worker.report.awaitGroup(worker.io) != null) return;
 
     var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
     while (true) {
@@ -316,13 +337,15 @@ pub fn runTlsMux(handler: core.HandlerFn, config: Http2ServerConfig) !void {
     const worker_count = if (config.workers == 0) cpu else config.workers;
     const opts = common.serveOpts(config);
 
-    common.logSystem(config, "listening on {s}:{d} (h2 TLS, epoll-mux/{d})", .{ config.ip, config.port, worker_count });
-
     const workers = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(workers);
 
+    // What every worker says about its own listener, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(worker_count);
+
     for (workers, 0..) |*t, i|
-        t.* = try std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, tlsMuxWorker, .{WorkerCtx{
+        t.* = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, tlsMuxWorker, .{WorkerCtx{
             .io = config.io,
             .ip = config.ip,
             .port = config.port,
@@ -331,7 +354,27 @@ pub fn runTlsMux(handler: core.HandlerFn, config: Http2ServerConfig) !void {
             .opts = opts,
             .handler = handler,
             .worker_id = i,
-        }});
+            .report = &report,
+        }}) catch |err| {
+            common.logSystem(config, .ERROR, "could not spawn tls worker {d} of {d} ({s})", .{ i, worker_count, @errorName(err) });
+            report.abandon(config.io, worker_count - i, err);
+
+            for (workers[0..i]) |spawned| spawned.join();
+
+            return error.ZixHttp2TlsListenFailed;
+        };
+
+    if (report.awaitGroup(config.io)) |err| {
+        common.logSystem(config, .ERROR, "tls not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ config.ip, config.port, report.failures(), worker_count, @errorName(err) });
+
+        for (workers) |t| t.join();
+
+        return error.ZixHttp2TlsListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a listener that may never have come up.
+    common.logSystem(config, .INFO, "listening on {s}:{d} (h2 TLS, epoll-mux/{d})", .{ config.ip, config.port, worker_count });
 
     for (workers) |t| t.join();
 }
@@ -376,7 +419,7 @@ fn readExactBlocking(fd: posix.fd_t, buf: []u8) !void {
     while (got < buf.len) {
         const rc = linux.read(fd, buf[got..].ptr, buf.len - got);
         if (posix.errno(rc) != .SUCCESS) return error.ReadFailed;
-        if (rc == 0) return error.Eof;
+        if (rc == 0) return error.ZixEof;
         got += rc;
     }
 }
@@ -492,7 +535,7 @@ test "zix http2: h2 over TLS resumes flow-control-parked streams (static-h2 stal
     try std.testing.expectEqual(Tls.Alpn.H2, finished.alpn.?);
 
     _ = onReadable(repro_router.dispatch, &server_conn);
-    _ = server_conn.h2 orelse return error.HandshakeIncomplete;
+    _ = server_conn.h2 orelse return error.ZixHandshakeIncomplete;
 
     // Default 65535 connection and per-stream windows (the client advertised none), matching the bench:
     // each 70 KB body overruns both, so the server parks and must resume on stream AND connection

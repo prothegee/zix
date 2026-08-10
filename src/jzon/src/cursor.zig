@@ -8,13 +8,14 @@
 //!   ends. Turning a token into a value belongs to the parser above it.
 
 const std = @import("std");
+const diagnostic = @import("deserialize/diagnostic.zig");
 
 /// How a read can fail.
 ///
 /// Note:
 /// - Truncated means the document ended early. Unexpected means the byte that is
 ///   there cannot start what was asked for.
-pub const Error = error{ Truncated, Unexpected };
+pub const Error = error{ JzonTruncated, JzonUnexpected };
 
 /// The insignificant whitespace RFC 8259 2 allows between tokens: space,
 /// horizontal tab, line feed, carriage return.
@@ -70,6 +71,20 @@ pub const Cursor = struct {
     src: []const u8,
     pos: usize,
 
+    /// Record where the parse stopped, then hand the error back.
+    ///
+    /// Note:
+    /// - The error value has nowhere to put an offset, so it goes to the diagnostic side channel
+    ///   and the caller reads it with jzon.lastFailure() right after the parse returned.
+    ///
+    /// Return:
+    /// - the same error it was given, always
+    fn stopAt(self: Cursor, err: anytype) @TypeOf(err) {
+        diagnostic.noteOffset(self.pos);
+
+        return err;
+    }
+
     /// A cursor positioned at the start of `src`.
     pub fn init(src: []const u8) Cursor {
         return .{ .src = src, .pos = 0 };
@@ -89,9 +104,9 @@ pub const Cursor = struct {
     ///
     /// Return:
     /// - u8 (the byte at the current position)
-    /// - error.Truncated at the end of the document
+    /// - error.JzonTruncated at the end of the document
     pub fn peek(self: Cursor) Error!u8 {
-        if (self.pos == self.src.len) return error.Truncated;
+        if (self.pos == self.src.len) return self.stopAt(error.JzonTruncated);
 
         return self.src[self.pos];
     }
@@ -100,9 +115,9 @@ pub const Cursor = struct {
     ///
     /// Return:
     /// - u8 (the byte that was at the current position)
-    /// - error.Truncated at the end of the document
+    /// - error.JzonTruncated at the end of the document
     pub fn take(self: *Cursor) Error!u8 {
-        if (self.pos == self.src.len) return error.Truncated;
+        if (self.pos == self.src.len) return self.stopAt(error.JzonTruncated);
 
         const value = self.src[self.pos];
         self.pos += 1;
@@ -117,11 +132,11 @@ pub const Cursor = struct {
     ///
     /// Return:
     /// - void
-    /// - error.Truncated at the end of the document
-    /// - error.Unexpected when a different byte is there
+    /// - error.JzonTruncated at the end of the document
+    /// - error.JzonUnexpected when a different byte is there
     pub fn expect(self: *Cursor, wanted: u8) Error!void {
-        if (self.pos == self.src.len) return error.Truncated;
-        if (self.src[self.pos] != wanted) return error.Unexpected;
+        if (self.pos == self.src.len) return self.stopAt(error.JzonTruncated);
+        if (self.src[self.pos] != wanted) return self.stopAt(error.JzonUnexpected);
 
         self.pos += 1;
     }
@@ -149,11 +164,11 @@ pub const Cursor = struct {
     ///
     /// Return:
     /// - void
-    /// - error.Truncated when fewer bytes than the run are left
-    /// - error.Unexpected when the bytes differ
+    /// - error.JzonTruncated when fewer bytes than the run are left
+    /// - error.JzonUnexpected when the bytes differ
     pub fn literal(self: *Cursor, comptime text: []const u8) Error!void {
-        if (self.remaining() < text.len) return error.Truncated;
-        if (!std.mem.eql(u8, self.src[self.pos..][0..text.len], text)) return error.Unexpected;
+        if (self.remaining() < text.len) return self.stopAt(error.JzonTruncated);
+        if (!std.mem.eql(u8, self.src[self.pos..][0..text.len], text)) return self.stopAt(error.JzonUnexpected);
 
         self.pos += text.len;
     }
@@ -175,8 +190,8 @@ pub const Cursor = struct {
     ///
     /// Return:
     /// - StringSpan (the undecoded body, plus whether it holds an escape)
-    /// - error.Truncated when the closing quote never arrives
-    /// - error.Unexpected when the token does not open with a quote, or carries a
+    /// - error.JzonTruncated when the closing quote never arrives
+    /// - error.JzonUnexpected when the token does not open with a quote, or carries a
     ///   raw control byte
     pub fn stringSpan(self: *Cursor) Error!StringSpan {
         try self.expect('"');
@@ -193,17 +208,17 @@ pub const Cursor = struct {
                 return .{ .raw = raw, .escaped = escaped };
             }
 
-            if (byte < 0x20) return error.Unexpected;
+            if (byte < 0x20) return self.stopAt(error.JzonUnexpected);
 
             if (byte == '\\') {
-                if (self.pos + 1 == self.src.len) return error.Truncated;
+                if (self.pos + 1 == self.src.len) return self.stopAt(error.JzonTruncated);
 
                 escaped = true;
                 self.pos += 1;
             }
         }
 
-        return error.Truncated;
+        return self.stopAt(error.JzonTruncated);
     }
 
     /// Read a number token and return its bytes (RFC 8259 6).
@@ -214,14 +229,14 @@ pub const Cursor = struct {
     ///
     /// Return:
     /// - []const u8 (the number's bytes)
-    /// - error.Truncated at the end of the document
-    /// - error.Unexpected when the byte there is one no number can start with
+    /// - error.JzonTruncated at the end of the document
+    /// - error.JzonUnexpected when the byte there is one no number can start with
     pub fn numberSpan(self: *Cursor) Error![]const u8 {
-        if (self.pos == self.src.len) return error.Truncated;
+        if (self.pos == self.src.len) return self.stopAt(error.JzonTruncated);
 
         switch (self.src[self.pos]) {
             '-', '0'...'9' => {},
-            else => return error.Unexpected,
+            else => return error.JzonUnexpected,
         }
 
         const start = self.pos;
@@ -276,10 +291,10 @@ test "jzon: cursor reads the literal words and rejects a near miss" {
     try std.testing.expect(yes.atEnd());
 
     var wrong: Cursor = .init("trve");
-    try std.testing.expectError(error.Unexpected, wrong.literal("true"));
+    try std.testing.expectError(error.JzonUnexpected, wrong.literal("true"));
 
     var short: Cursor = .init("nul");
-    try std.testing.expectError(error.Truncated, short.literal("null"));
+    try std.testing.expectError(error.JzonTruncated, short.literal("null"));
 }
 
 test "jzon: cursor peek and take agree on the same byte" {
@@ -288,8 +303,8 @@ test "jzon: cursor peek and take agree on the same byte" {
     try std.testing.expectEqual(@as(u8, 'a'), try cursor.peek());
     try std.testing.expectEqual(@as(u8, 'a'), try cursor.take());
     try std.testing.expectEqual(@as(u8, 'b'), try cursor.take());
-    try std.testing.expectError(error.Truncated, cursor.peek());
-    try std.testing.expectError(error.Truncated, cursor.take());
+    try std.testing.expectError(error.JzonTruncated, cursor.peek());
+    try std.testing.expectError(error.JzonTruncated, cursor.take());
 }
 
 test "jzon: cursor isSpace answers for exactly the bytes skipSpace steps over" {

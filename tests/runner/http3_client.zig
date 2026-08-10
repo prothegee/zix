@@ -433,7 +433,7 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
             const server_hello = firstCryptoData(opened.payload) orelse continue;
 
             transcript.update(server_hello);
-            const server_pub = serverKeyShare(server_hello) orelse return error.NoServerKeyShare;
+            const server_pub = serverKeyShare(server_hello) orelse return error.ZixNoServerKeyShare;
             const shared = X25519.scalarmult(ephemeral, server_pub) catch return error.X25519;
             hs_keys = keyschedule.handshakeKeys(shared, transcript.current());
 
@@ -451,7 +451,7 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
         }
     }
 
-    if (!have_app) return error.HandshakeIncomplete;
+    if (!have_app) return error.ZixHandshakeIncomplete;
 
     return result;
 }

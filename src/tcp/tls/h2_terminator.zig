@@ -32,7 +32,7 @@ pub const content_type_application_data: u8 = 23;
 fn peerAlert(body: []const u8) anyerror {
     _ = Tls.parseInboundAlert(body) catch {};
 
-    return error.PeerAlert;
+    return error.ZixPeerAlert;
 }
 
 /// Terminate TLS on fd, then serve the decrypted h2 stream through the caller-supplied engine.
@@ -58,7 +58,7 @@ pub fn serveConnTls(
 
     // ClientHello (a plaintext handshake record carries the message in its body).
     const client_hello_rec = try readRecord(fd, &record_buf);
-    if (client_hello_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+    if (client_hello_rec.content_type != content_type_handshake) return error.ZixUnexpectedRecord;
 
     var ephemeral_secret: [32]u8 = undefined;
     var server_random: [32]u8 = undefined;
@@ -75,7 +75,7 @@ pub fn serveConnTls(
     if (!ctx.allowsTls13()) {
         const ecdsa_key = switch (ctx.signing_key) {
             .ecdsa_p256 => |kp| kp,
-            else => return error.Tls12RequiresEcdsa,
+            else => return error.ZixTls12RequiresEcdsa,
         };
 
         return serveConnTls12(fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, driver);
@@ -85,7 +85,7 @@ pub fn serveConnTls(
     const result = Tls.serverHandshake(hs_opts, client_hello_rec.body, &handshake_out) catch |err| {
         // no 1.3 offer -> the client is TLS 1.2 only. Honor the floor: refuse when min_version is
         // 1.3, else take the h2-over-1.2 path.
-        if (err == error.UnsupportedTlsVersion) {
+        if (err == error.ZixUnsupportedTlsVersion) {
             if (!ctx.allowsTls12()) {
                 var ver_alert: [Tls.fatal_record_len]u8 = undefined;
                 if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAllFD(fd, rec) catch {};
@@ -95,7 +95,7 @@ pub fn serveConnTls(
 
             const ecdsa_key = switch (ctx.signing_key) {
                 .ecdsa_p256 => |kp| kp,
-                else => return error.Tls12RequiresEcdsa,
+                else => return error.ZixTls12RequiresEcdsa,
             };
 
             return serveConnTls12(fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random, driver);
@@ -113,14 +113,14 @@ pub fn serveConnTls(
 
     // h2 over TLS requires ALPN to have selected h2 (RFC 7540 3.3). Without it, end the connection
     // rather than guess the application protocol.
-    if (result.alpn != .H2) return error.AlpnNotH2;
+    if (result.alpn != .H2) return error.ZixAlpnNotH2;
 
     // client ChangeCipherSpec (skipped) + Finished. A plaintext alert here means the peer aborted.
     while (true) {
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
         if (rec.content_type == content_type_alert) return peerAlert(rec.body);
-        if (rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+        if (rec.content_type != content_type_application_data) return error.ZixUnexpectedRecord;
 
         try conn.verifyClientFinished(rec.full);
         break;
@@ -153,15 +153,15 @@ fn serveConnTls12(
     var state = flight.state;
 
     // h2 over TLS requires ALPN to have selected h2 (RFC 7540 3.3).
-    if (state.alpn != .H2) return error.AlpnNotH2;
+    if (state.alpn != .H2) return error.ZixAlpnNotH2;
 
     var record_buf: [record.max_record_wire]u8 = undefined;
 
     // ClientKeyExchange (plaintext handshake record), copied out before record_buf is reused.
     const cke_rec = try readRecord(fd, &record_buf);
-    if (cke_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+    if (cke_rec.content_type != content_type_handshake) return error.ZixUnexpectedRecord;
     var cke_buf: [256]u8 = undefined;
-    if (cke_rec.body.len > cke_buf.len) return error.RecordTooLarge;
+    if (cke_rec.body.len > cke_buf.len) return error.ZixRecordTooLarge;
     @memcpy(cke_buf[0..cke_rec.body.len], cke_rec.body);
     const client_key_exchange = cke_buf[0..cke_rec.body.len];
 
@@ -170,7 +170,7 @@ fn serveConnTls12(
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
         if (rec.content_type == content_type_alert) return peerAlert(rec.body);
-        if (rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+        if (rec.content_type != content_type_handshake) return error.ZixUnexpectedRecord;
 
         break rec;
     };
@@ -195,7 +195,7 @@ pub fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
     try readAll(fd, buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
-    if (5 + length > buf.len) return error.RecordTooLarge;
+    if (5 + length > buf.len) return error.ZixRecordTooLarge;
 
     try readAll(fd, buf[5 .. 5 + length]);
 

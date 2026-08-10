@@ -23,7 +23,7 @@ HTTP server dan client yang dibangun di atas `std.Io` Zig 0.16.x.
 
 ## Model Runtime
 
-Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, jadi pemanggil portabel memilih model per target saat comptime dan `run()` menolak model khusus Linux di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
+Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, jadi pemanggil portabel memilih model per target saat comptime dan `run()` menolak model khusus Linux di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### .ASYNC: Accept Tunggal, Dispatch io.async()
 
@@ -78,7 +78,7 @@ flowchart TD
 - Fd non-blocking: worker membaca sampai EAGAIN ke buffer koneksi, lalu `processRequest` melakukan parse/dispatch/send secara sinkron dan mengembalikan worker ke `epoll_wait`.
 - `workers` mengontrol jumlah worker (0 = cpu_count).
 - Terbaik untuk request berumur pendek throughput tinggi di Linux. Tidak cocok untuk SSE atau WebSocket (blocking read akan menahan worker).
-- Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
+- Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`: pakai `.ASYNC` di sana.
 
 ### .URING: Worker io_uring Shared-Nothing (Linux-only)
 
@@ -87,7 +87,7 @@ Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REU
 - `workers` mengontrol jumlah worker (0 = cpu_count).
 - Terbaik untuk beban sustained dan pipelined di mana ring yang di-batch mengamortisasi syscall. Di loopback setara `.EPOLL` pada throughput dan menang terutama pada cache locality. Di mesin many-core, ring close (`prep_close`, ADR-041, native ke `zix.Http1` untuk saat ini) membuat worker terus memanen completion lewat connection churn, di mana `.URING` mencapai paritas atau lebih baik dengan memori jauh lebih sedikit.
 - Seperti `.EPOLL`, serve per-connection bersifat blocking begitu request siap, jadi tidak cocok untuk SSE atau WebSocket.
-- Saat io_uring sendiri tidak tersedia di host (kernel lama, `RLIMIT_MEMLOCK` rendah, sandbox) engine melipat ke loop `.EPOLL` dengan notice yang dicatat. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
+- Saat io_uring sendiri tidak tersedia di host (kernel lama, `RLIMIT_MEMLOCK` rendah, sandbox) engine melipat ke loop `.EPOLL` dengan notice yang dicatat. Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`: pakai `.ASYNC` di sana.
 
 `zix.Http.Server` menerima nilai `std.Io` yang opak dan tidak memiliki atau memanggil deinit pada backend tersebut. Lihat [`docs/concurrency-id.md`](concurrency-id.md) untuk detail jumlah thread dan perbandingan model.
 
@@ -183,7 +183,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.ASYNC`(0, portabel) `.EPOLL`(1, Linux saja) `.URING`(2, io_uring Linux saja). Di luar Linux `run()` mengembalikan `error.DispatchModelUnsupported` untuk dua yang terakhir |
+| `zix.Tcp.DispatchModel` | enum(u8) | Model dispatch: `.ASYNC`(0, portabel) `.EPOLL`(1, Linux saja) `.URING`(2, io_uring Linux saja). Di luar Linux `run()` mengembalikan `error.ZixDispatchModelUnsupported` untuk dua yang terakhir |
 | `zix.Http.RequestHeaderSize` | union(enum) | Batas header request: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | String user agent client dari `build.zig.zon` (contoh: `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Batas header response: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -303,7 +303,7 @@ View zero-copy atas head request yang sudah di-parse dan fd koneksi, tempat `bod
 
 | Method | Mengembalikan | Catatan |
 | :- | :- | :- |
-| `method()` | `Method.Code` | Diselesaikan oleh request-line parser milik engine ini sendiri. Method yang tidak diimplementasikan tidak pernah sampai ke handler: parse melaporkan `error.UnknownMethod` dan caller menjawab 501 |
+| `method()` | `Method.Code` | Diselesaikan oleh request-line parser milik engine ini sendiri. Method yang tidak diimplementasikan tidak pernah sampai ke handler: parse melaporkan `error.ZixUnknownMethod` dan caller menjawab 501 |
 | `path()` | `[]const u8` | Target tanpa query string |
 | `query()` | `[]const u8` | Raw query string setelah `?` |
 | `queryParam(key)` | `?[]const u8` | Satu key dari query string |
@@ -311,7 +311,7 @@ View zero-copy atas head request yang sudah di-parse dan fd koneksi, tempat `bod
 | `pathSegments(allocator)` | `![][]const u8` | Segmen tidak kosong yang dipisahkan oleh `/` |
 | `pathParam(name)` | `?[]const u8` | Capture bernama dari param route. null bila tidak ditangkap |
 | `header(name)` | `?[]const u8` | Pencarian case-insensitive. Indeks O(1) dibangun pada pemanggilan pertama |
-| `body()` | `![]const u8` | Membaca body: bytes `Content-Length` atau chunked transfer yang sudah di-decode, dibatasi `max_request_body` (`error.RequestBodyTooLarge` dijawab `413`, chunked malformed `error.InvalidChunkedBody` dijawab `400`). Di-cache setelah pemanggilan pertama. |
+| `body()` | `![]const u8` | Membaca body: bytes `Content-Length` atau chunked transfer yang sudah di-decode, dibatasi `max_request_body` (`error.ZixRequestBodyTooLarge` dijawab `413`, chunked malformed `error.ZixInvalidChunkedBody` dijawab `400`). Di-cache setelah pemanggilan pertama. |
 | `bodyReceived()` | `u64` | Byte body yang benar-benar dikonsumsi pembacaan, bukan yang diklaim header |
 | `bodyComplete()` | `bool` | Apakah akhir body yang dideklarasikan atau ter-framing tercapai. False berarti peer memutus body, atau handler tidak pernah membacanya |
 
@@ -352,7 +352,7 @@ Menyangga status response dan menulis saat `send()` atau padanannya dipanggil.
 | `sendCached(req, body, ttl_ms)` | Mengirim `body`, lalu menyimpannya di bawah kunci request untuk hit `sendFromCache` berikutnya |
 | `sendNegotiated(req, body)` | Mengirim `body` terkompresi sesuai `Accept-Encoding` (opt-in lewat `setCompression`), jika tidak identik dengan `send` |
 
-Response ditulis ke `std.Io.Writer` yang mendasarinya. Buffer header 4 KB membatasi ukuran header gabungan. `error.BufferTooSmall` dikembalikan jika terlampaui.
+Response ditulis ke `std.Io.Writer` yang mendasarinya. Buffer header 4 KB membatasi ukuran header gabungan. `error.ZixBufferTooSmall` dikembalikan jika terlampaui.
 
 ### Header otomatis yang dikirim oleh send()
 
@@ -785,9 +785,9 @@ pub const HttpClientConfig = struct {
     allocator:           std.mem.Allocator, // owns response body + head copies
     io:                  std.Io,            // event-loop backend, not owned by client
     connect_timeout_ms:  u32 = 0,          // 0 = no timeout. enforced via connectTcpOptions
-    response_timeout_ms: u32 = 0,          // 0 = no timeout. error.ResponseTimeout when the head never arrives
-    read_timeout_ms:     u32 = 0,          // 0 = no timeout. error.ReadTimeout when the body stalls (Content-Length only)
-    max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
+    response_timeout_ms: u32 = 0,          // 0 = no timeout. error.ZixResponseTimeout when the head never arrives
+    read_timeout_ms:     u32 = 0,          // 0 = no timeout. error.ZixReadTimeout when the body stalls (Content-Length only)
+    max_response_body:   usize = 1024 * 1024 * 4, // error.ZixBodyTooLarge when exceeded
     follow_redirects:    bool = true,
     max_redirects:       u8   = 3,
     h2_max_read_rounds:  usize = 4096,                       // bound read-loop client HTTP/2, max frame-read rounds
@@ -826,11 +826,14 @@ sequenceDiagram
 
 | Error | Kapan |
 | :- | :- |
-| `error.InvalidUrl` | `Uri.parse` gagal, skema tidak didukung, atau host tidak ada |
-| `error.BodyTooLarge` | body response melebihi `max_response_body` bytes |
+| `error.ZixUrlMalformed` | `Uri.parse` gagal |
+| `error.ZixUrlSchemeUnsupported` | skemanya bukan http maupun https |
+| `error.ZixUrlHostMissing` | komponen host-nya tidak ada |
+| `error.ZixUrlPathTooLong` | path dan query-nya tidak muat di buffer request |
+| `error.ZixBodyTooLarge` | body response melebihi `max_response_body` bytes |
 | `error.Timeout` | koneksi TCP melebihi `connect_timeout_ms` (dari `std.Io`) |
-| `error.ResponseTimeout` | server menerima koneksi tapi tidak mengirim head response dalam `response_timeout_ms` |
-| `error.ReadTimeout` | body macet melewati `read_timeout_ms` di tengah transfer (hanya body Content-Length) |
+| `error.ZixResponseTimeout` | server menerima koneksi tapi tidak mengirim head response dalam `response_timeout_ms` |
+| `error.ZixReadTimeout` | body macet melewati `read_timeout_ms` di tengah transfer (hanya body Content-Length) |
 
 Error lain dari `std.http.Client` diteruskan tanpa perubahan (OutOfMemory, ConnectionRefused, dll.).
 

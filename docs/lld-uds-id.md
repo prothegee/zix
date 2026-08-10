@@ -17,7 +17,7 @@ pub const UdsServer = struct {
 // Factory per-connection: handler dibakukan ke tipe, io dari config.io.
 fn UdsServerImpl(comptime handler: HandlerFn) type {
     // config: UdsServerConfig
-    // pub fn init(config) !Self          -> error.PathEmpty jika config.path kosong
+    // pub fn init(config) !Self          -> error.ZixPathEmpty jika config.path kosong
     // pub fn deinit(self) void           -> no-op: resource dibebaskan di dalam run()
     // pub fn run(self) !void             -> membaca config.io, menjalankan accept loop
 }
@@ -90,7 +90,7 @@ pub const UdsClient = struct {
 
 ```
 jika config.send_timeout_ms > 0:
-    poll(fd, POLLOUT, config.send_timeout_ms) -> error.SendTimeout saat 0 ready   // SO_SNDTIMEO tidak dipakai: std.Io.Threaded panic pada EAGAIN
+    poll(fd, POLLOUT, config.send_timeout_ms) -> error.ZixSendTimeout saat 0 ready   // SO_SNDTIMEO tidak dipakai: std.Io.Threaded panic pada EAGAIN
 tulis [u32 len, BE][payload]
 flush
 ```
@@ -101,10 +101,10 @@ Stack write buffer (4096 byte). Blokir sampai frame terkirim.
 
 ```
 jika config.recv_timeout_ms > 0:
-    poll(fd, POLLIN, config.recv_timeout_ms) -> error.RecvTimeout saat 0 ready   // SO_RCVTIMEO tidak dipakai: std.Io.Threaded panic pada EAGAIN
+    poll(fd, POLLIN, config.recv_timeout_ms) -> error.ZixRecvTimeout saat 0 ready   // SO_RCVTIMEO tidak dipakai: std.Io.Threaded panic pada EAGAIN
 baca header 4-byte (loop sampai 4 byte)
 len = readInt(u32, &hdr, .big)
-if len > buf.len: return error.MessageTooLarge
+if len > buf.len: return error.ZixMessageTooLarge
 baca len byte payload ke dalam buf[0..len]
 return buf[0..len]
 ```

@@ -32,7 +32,7 @@ pub const HttpHeader = struct {
 /// max_response_headers in HttpServerConfig sets the cap. The backing buffer is
 /// arena-allocated lazily on the first addHeader() call, requests that add no
 /// custom headers pay zero allocation cost.
-/// Any addHeader() call beyond the cap yields error.TooManyHeaders.
+/// Any addHeader() call beyond the cap yields error.ZixTooManyHeaders.
 ///
 /// - MINIMAL (16): simple APIs, constrained environments
 /// - COMMON (32): most web applications, single proxy/load balancer (default)
@@ -136,16 +136,16 @@ pub const Response = struct {
     /// Allocates the full header buffer on the first call (lazy, capacity = max_headers).
     ///
     /// Return:
-    /// - error.TooManyHeaders if the header cap is exceeded
-    /// - error.InvalidHeaderName or error.InvalidHeaderValue on CR/LF injection
+    /// - error.ZixTooManyHeaders if the header cap is exceeded
+    /// - error.ZixInvalidHeaderName or error.ZixInvalidHeaderValue on CR/LF injection
     pub fn addHeader(self: *Response, name: []const u8, value: []const u8) !void {
-        for (name) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderName;
-        for (value) |c| if (c == '\r' or c == '\n') return error.InvalidHeaderValue;
+        for (name) |c| if (c == '\r' or c == '\n') return error.ZixInvalidHeaderName;
+        for (value) |c| if (c == '\r' or c == '\n') return error.ZixInvalidHeaderValue;
         if (self.extra_buf == null) {
-            if (self.max_headers == 0) return error.TooManyHeaders;
+            if (self.max_headers == 0) return error.ZixTooManyHeaders;
             self.extra_buf = try self.allocator.alloc(HttpHeader, self.max_headers);
         }
-        if (self.extra_len >= self.extra_buf.?.len) return error.TooManyHeaders;
+        if (self.extra_len >= self.extra_buf.?.len) return error.ZixTooManyHeaders;
         self.extra_buf.?[self.extra_len] = .{ .name = name, .value = value };
         self.extra_len += 1;
     }
@@ -194,7 +194,7 @@ pub const Response = struct {
             if (self.content_type) |ct| {
                 const ct_str = ct.asString();
                 const ct_prefix = "Content-Type: ";
-                if (offset + ct_prefix.len + ct_str.len + 2 > fixed.len) return error.BufferTooSmall;
+                if (offset + ct_prefix.len + ct_str.len + 2 > fixed.len) return error.ZixBufferTooSmall;
 
                 @memcpy(fixed[offset..][0..ct_prefix.len], ct_prefix);
                 offset += ct_prefix.len;
@@ -205,7 +205,7 @@ pub const Response = struct {
                 offset += 2;
             }
             const cl_prefix = "Content-Length: ";
-            if (offset + cl_prefix.len + 22 > fixed.len) return error.BufferTooSmall;
+            if (offset + cl_prefix.len + 22 > fixed.len) return error.ZixBufferTooSmall;
             @memcpy(fixed[offset..][0..cl_prefix.len], cl_prefix);
             offset += cl_prefix.len;
             offset += writeDecimal(fixed[offset..], body_data.len);
@@ -218,13 +218,13 @@ pub const Response = struct {
                 "Connection: keep-alive\r\n"
             else
                 "Connection: close\r\n";
-            if (offset + conn.len > fixed.len) return error.BufferTooSmall;
+            if (offset + conn.len > fixed.len) return error.ZixBufferTooSmall;
             @memcpy(fixed[offset..][0..conn.len], conn);
             offset += conn.len;
         }
         if (date_value.len > 0) {
             const date_prefix = "Date: ";
-            if (offset + date_prefix.len + date_value.len + 2 > fixed.len) return error.BufferTooSmall;
+            if (offset + date_prefix.len + date_value.len + 2 > fixed.len) return error.ZixBufferTooSmall;
 
             @memcpy(fixed[offset..][0..date_prefix.len], date_prefix);
             offset += date_prefix.len;
@@ -619,7 +619,7 @@ pub fn setCompression(enabled: bool, min_size: usize, max_out: usize) void {
 /// - []const u8 (a complete response, ready to write)
 pub fn parseErrorResponse(err: anyerror) []const u8 {
     return switch (err) {
-        error.UnknownMethod => "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
+        error.ZixUnknownMethod => "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
         else => "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
     };
 }
@@ -901,8 +901,8 @@ test "zix http: addHeader injection guard" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var res = Response.init(TEST_FD, true, undefined, arena.allocator(), 32);
-    try std.testing.expectError(error.InvalidHeaderName, res.addHeader("X-Bad\r\nInject", "val"));
-    try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Good", "val\r\nInject"));
+    try std.testing.expectError(error.ZixInvalidHeaderName, res.addHeader("X-Bad\r\nInject", "val"));
+    try std.testing.expectError(error.ZixInvalidHeaderValue, res.addHeader("X-Good", "val\r\nInject"));
 }
 
 test "zix http: addHeader TooManyHeaders" {
@@ -911,7 +911,7 @@ test "zix http: addHeader TooManyHeaders" {
     var res = Response.init(TEST_FD, true, undefined, arena.allocator(), 2);
     try res.addHeader("X-A", "1");
     try res.addHeader("X-B", "2");
-    try std.testing.expectError(error.TooManyHeaders, res.addHeader("X-C", "3"));
+    try std.testing.expectError(error.ZixTooManyHeaders, res.addHeader("X-C", "3"));
 }
 
 test "zix http: Response.streaming defaults to false" {
@@ -1265,7 +1265,7 @@ test "zix http: writeNonBlockFD stages a partial write then resumes after drain"
     @memset(payload, 'x');
 
     // First write makes progress but cannot drain the whole payload: a partial.
-    const first = writeNonBlockFD(fds[0], payload) orelse return error.UnexpectedWriteError;
+    const first = writeNonBlockFD(fds[0], payload) orelse return error.ZixUnexpectedWriteError;
     try std.testing.expect(first > 0);
     try std.testing.expect(first < payload.len);
 
@@ -1280,7 +1280,7 @@ test "zix http: writeNonBlockFD stages a partial write then resumes after drain"
     }
 
     // The previously-blocked tail now makes forward progress.
-    const second = writeNonBlockFD(fds[0], payload[first..]) orelse return error.UnexpectedWriteError;
+    const second = writeNonBlockFD(fds[0], payload[first..]) orelse return error.ZixUnexpectedWriteError;
     try std.testing.expect(second > 0);
 }
 

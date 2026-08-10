@@ -37,18 +37,18 @@ pub const ParsedFrame = struct { frame: Frame, len: usize };
 
 /// The framing errors an endpoint MUST raise (RFC 9000 12.4 / 12.5).
 pub const FrameError = error{
-    Truncated,
+    ZixTruncated,
     /// Unknown frame type, or a malformed known frame (e.g. empty NEW_TOKEN): FRAME_ENCODING_ERROR.
-    FrameEncodingError,
+    ZixFrameEncodingError,
     /// A frame type encoded on more bytes than necessary: PROTOCOL_VIOLATION (12.4).
-    ProtocolViolation,
+    ZixProtocolViolation,
 };
 
 /// Parse one frame from the front of a payload (RFC 9000 19). The frame type MUST use its shortest
 /// encoding, and an unknown type is a FRAME_ENCODING_ERROR.
 pub fn parseFrame(data: []const u8) FrameError!ParsedFrame {
-    const type_vi = varint.read(data) catch return error.Truncated;
-    if (type_vi.len != varint.encodedLen(type_vi.value)) return error.ProtocolViolation;
+    const type_vi = varint.read(data) catch return error.ZixTruncated;
+    if (type_vi.len != varint.encodedLen(type_vi.value)) return error.ZixProtocolViolation;
 
     const frame_type = type_vi.value;
     var pos = type_vi.len;
@@ -65,7 +65,7 @@ pub fn parseFrame(data: []const u8) FrameError!ParsedFrame {
         0x06 => {
             const offset = try readField(data, &pos);
             const length = try readField(data, &pos);
-            if (data.len < pos + length) return error.Truncated;
+            if (data.len < pos + length) return error.ZixTruncated;
 
             const body = data[pos .. pos + length];
 
@@ -74,8 +74,8 @@ pub fn parseFrame(data: []const u8) FrameError!ParsedFrame {
         0x07 => {
             // NEW_TOKEN: the token MUST NOT be empty (19.7).
             const length = try readField(data, &pos);
-            if (length == 0) return error.FrameEncodingError;
-            if (data.len < pos + length) return error.Truncated;
+            if (length == 0) return error.ZixFrameEncodingError;
+            if (data.len < pos + length) return error.ZixTruncated;
 
             return .{ .frame = .ping, .len = pos + length };
         },
@@ -88,19 +88,19 @@ pub fn parseFrame(data: []const u8) FrameError!ParsedFrame {
             const offset = if (has_offset) try readField(data, &pos) else 0;
 
             const length = if (has_length) try readField(data, &pos) else data.len - pos;
-            if (data.len < pos + length) return error.Truncated;
+            if (data.len < pos + length) return error.ZixTruncated;
 
             const body = data[pos .. pos + length];
 
             return .{ .frame = .{ .stream = .{ .id = id, .offset = offset, .fin = fin, .data = body } }, .len = pos + length };
         },
-        else => return error.FrameEncodingError,
+        else => return error.ZixFrameEncodingError,
     }
 }
 
 /// Read one variable-length field, advancing the cursor (helper for parseFrame).
 fn readField(data: []const u8, pos: *usize) FrameError!u64 {
-    const vi = varint.read(data[pos.*..]) catch return error.Truncated;
+    const vi = varint.read(data[pos.*..]) catch return error.ZixTruncated;
     pos.* += vi.len;
 
     return vi.value;
@@ -157,9 +157,9 @@ test "zix http3: RFC 9000 19 frame parse" {
 }
 
 test "zix http3: RFC 9000 12.4 frame type rules" {
-    try std.testing.expectError(error.FrameEncodingError, parseFrame(&hexBytes("20")));
-    try std.testing.expectError(error.ProtocolViolation, parseFrame(&hexBytes("4001")));
-    try std.testing.expectError(error.FrameEncodingError, parseFrame(&hexBytes("0700")));
+    try std.testing.expectError(error.ZixFrameEncodingError, parseFrame(&hexBytes("20")));
+    try std.testing.expectError(error.ZixProtocolViolation, parseFrame(&hexBytes("4001")));
+    try std.testing.expectError(error.ZixFrameEncodingError, parseFrame(&hexBytes("0700")));
 }
 
 test "zix http3: RFC 9000 12.5 / Table 3 number-space permission matrix" {

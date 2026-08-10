@@ -103,7 +103,7 @@ sequenceDiagram
     C->>R: HTTP/1.1 POST
     R-->>C: 2xx or error status
     C-->>W: ClientResponse
-    W-->>App: void, or error.RemoteWriteRejected
+    W-->>App: void, or error.PrometheuzRemoteWriteRejected
 ```
 
 Each `Sample` becomes one `TimeSeries`: its name travels as the conventional `__name__` label (the same convention real Prometheus uses), its own labels follow, one `Sample` point carries the value and timestamp (stamped with the current wall-clock time when the sample has none).

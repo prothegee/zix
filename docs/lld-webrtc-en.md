@@ -215,7 +215,7 @@ Traps worth keeping:
 - A missing `a=sctp-port` is an error (RFC 8841 section 5.1). A missing `a=max-message-size` defaults to 64 KB, and a value of 0 means any size.
 - `MAX_SESSION_ID` caps the origin session id at 62 bits, because RFC 8829 section 5.2.1 wants one that fits a **signed** 64-bit integer. A full-range `u64` makes Firefox refuse the whole answer about half the time.
 - **`media_answer.zig` writes `a=candidate` plus `end-of-candidates` in every carried section.** A browser reads remote candidates off the BUNDLE-tagged section, which is a media section when media is offered. Without it the peer has credentials and no address, and ICE fails with zero datagrams sent.
-- `offer.zig` requires a data channel section and answers `error.NoDataChannel` without one, so a browser page must `createDataChannel` alongside its media.
+- `offer.zig` requires a data channel section and answers `error.ZixNoDataChannel` without one, so a browser page must `createDataChannel` alongside its media.
 
 Policy: media is refused by default. Offered formats are **echoed, not chosen between**, because this engine has no codecs and therefore no opinion. `rtx` (RFC 4588) is dropped, because it needs a packet history that does not exist. Feedback is answered only where it is both offered and implemented, which is `nack` and `nack pli` only. `a=rtcp-mux` is required, since there is one socket.
 

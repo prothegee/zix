@@ -21,17 +21,35 @@ const datagram = @import("../../datagram.zig");
 const secure_random = @import("../../../utils/secure_random.zig");
 const srtp = @import("../media/srtp.zig");
 
+const Logger = @import("../../../logger/logger.zig").Logger;
+
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
-/// Emit a server lifecycle line.
+const log = std.log.scoped(.zix_webrtc);
+
+/// Emit a server line at the given level. Routes through config.logger when present.
 ///
 /// Note:
-/// - Silent without a logger. A server that writes to stderr on its own is one a test cannot run
-///   quietly, and the caller who wants these lines is the caller who passed a logger.
-pub fn logSystem(config: WebrtcServerConfig, comptime fmt: []const u8, args: anytype) void {
-    const logger = config.logger orelse return;
+/// - A lifecycle line stays silent without a logger. A server that narrates on its own is one a
+///   test cannot run quietly, and the caller who wants those lines is the caller who passed a
+///   logger.
+/// - A failure does not get that treatment. .ERROR and .WARN reach std.log even with no logger, so
+///   a release build never loses one, and a caller who sets std.options.logFn can still route or
+///   silence them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+pub fn logSystem(config: WebrtcServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
+    if (config.logger) |lg| {
+        lg.system(level, "webrtc", fmt, args);
+        return;
+    }
 
-    logger.system(.INFO, "webrtc", fmt, args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO, .DEBUG => {},
+    }
 }
 
 /// Draw the random values one connection is born with.
@@ -326,6 +344,11 @@ fn testContext(allocator: std.mem.Allocator) !Tls.Context {
     };
 }
 
+/// A logger that writes nowhere: console off and no save_path, so nothing is opened and nothing is
+/// printed. It gives the rejection and drop paths a destination, which keeps a test's expected
+/// failure message out of the runner's logged-error count.
+var quiet_logger = Logger{ .config = .{}, .allocator = std.testing.allocator };
+
 fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context) WebrtcServerConfig {
     return .{
         .io = io,
@@ -337,6 +360,7 @@ fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context) Webrt
         .ice_password = "zixlocalpasswordaaaaaa",
         .peer_ice_ufrag = "peer",
         .tls = tls,
+        .logger = &quiet_logger,
     };
 }
 

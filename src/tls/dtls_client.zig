@@ -65,13 +65,13 @@ const SEQ_SERVER_HELLO_DONE: u16 = 4;
 
 pub const Error = error{
     /// The output buffer cannot hold what had to go in it.
-    NoSpace,
+    ZixNoSpace,
     /// A message from the server did not parse, or said something this client cannot use.
-    ServerFlightInvalid,
+    ZixServerFlightInvalid,
     /// The server's ephemeral point is not on the curve, or the scalar multiply failed.
-    BadKeyExchange,
+    ZixBadKeyExchange,
     /// finish was called before a cookie-bearing ClientHello opened the transcript.
-    NoHandshakeInProgress,
+    ZixNoHandshakeInProgress,
 };
 
 /// What the client brings to a handshake.
@@ -203,7 +203,7 @@ pub fn start(options: Options) State {
 ///
 /// Return:
 /// - []const u8 (one DTLS record, borrowing out)
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeHello(state: *State, cookie: []const u8, out: []u8) Error![]const u8 {
     var body_buf: [MAX_HELLO_BODY]u8 = undefined;
     const body = dtls_hello.writeClientHelloBody(
@@ -213,7 +213,7 @@ pub fn writeHello(state: *State, cookie: []const u8, out: []u8) Error![]const u8
         "",
         cookie,
         &.{CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256},
-    ) catch return error.NoSpace;
+    ) catch return error.ZixNoSpace;
 
     const message_seq: u16 = if (cookie.len == 0) SEQ_CLIENT_HELLO_FIRST else SEQ_CLIENT_HELLO_WITH_COOKIE;
 
@@ -229,10 +229,10 @@ pub fn writeHello(state: *State, cookie: []const u8, out: []u8) Error![]const u8
         .body = body,
         .max_fragment_len = body.len,
     };
-    const message = fragmenter.next(&message_buf) orelse return error.NoSpace;
+    const message = fragmenter.next(&message_buf) orelse return error.ZixNoSpace;
 
     const record = dtls_record.writePlaintext(out, .HANDSHAKE, dtls_connection.EPOCH_HANDSHAKE, state.next_record_seq, message) catch
-        return error.NoSpace;
+        return error.ZixNoSpace;
     state.next_record_seq += 1;
 
     return record;
@@ -255,13 +255,13 @@ pub fn writeHello(state: *State, cookie: []const u8, out: []u8) Error![]const u8
 /// - FinishResult (records to send, the verify data to expect back, and the connection)
 /// - Error
 pub fn finish(state: *State, flight: ServerFlight, out: []u8) Error!FinishResult {
-    if (state.hello_len == 0) return error.NoHandshakeInProgress;
+    if (state.hello_len == 0) return error.ZixNoHandshakeInProgress;
 
     const server_random = try readServerRandom(flight.server_hello);
     const server_point = try readServerPoint(flight.key_exchange);
 
     const client_point = (P256.basePoint.mul(state.client_eph_scalar, .big) catch
-        return error.BadKeyExchange).toUncompressedSec1();
+        return error.ZixBadKeyExchange).toUncompressedSec1();
 
     var key_exchange_body: [1 + 65]u8 = undefined;
     key_exchange_body[0] = @intCast(client_point.len);
@@ -275,7 +275,7 @@ pub fn finish(state: *State, flight: ServerFlight, out: []u8) Error!FinishResult
     updateTranscript(&state.transcript, .SERVER_HELLO_DONE, SEQ_SERVER_HELLO_DONE, flight.hello_done);
     updateTranscript(&state.transcript, .CLIENT_KEY_EXCHANGE, SEQ_CLIENT_KEY_EXCHANGE, &key_exchange_body);
 
-    const pre_master = ecdheSharedX(state.client_eph_scalar, server_point) catch return error.BadKeyExchange;
+    const pre_master = ecdheSharedX(state.client_eph_scalar, server_point) catch return error.ZixBadKeyExchange;
     const master = prf.masterSecret(&pre_master, state.client_random, server_random);
     const km = prf.keyMaterial(master, state.client_random, server_random);
 
@@ -301,16 +301,16 @@ pub fn finish(state: *State, flight: ServerFlight, out: []u8) Error!FinishResult
             .body = &key_exchange_body,
             .max_fragment_len = key_exchange_body.len,
         };
-        const message = fragmenter.next(&message_buf) orelse return error.NoSpace;
+        const message = fragmenter.next(&message_buf) orelse return error.ZixNoSpace;
 
         const record = dtls_record.writePlaintext(out, .HANDSHAKE, dtls_connection.EPOCH_HANDSHAKE, state.next_record_seq, message) catch
-            return error.NoSpace;
+            return error.ZixNoSpace;
         state.next_record_seq += 1;
         cursor += record.len;
     }
 
     const change_cipher = dtls_record.writePlaintext(out[cursor..], .CHANGE_CIPHER_SPEC, dtls_connection.EPOCH_HANDSHAKE, state.next_record_seq, &[_]u8{1}) catch
-        return error.NoSpace;
+        return error.ZixNoSpace;
     state.next_record_seq += 1;
     cursor += change_cipher.len;
 
@@ -322,7 +322,7 @@ pub fn finish(state: *State, flight: ServerFlight, out: []u8) Error!FinishResult
         0,
         km.client_write_key,
         km.client_write_iv,
-    ) catch return error.NoSpace;
+    ) catch return error.ZixNoSpace;
     cursor += finished.len;
 
     // The server hashes the client Finished before computing its own, so this side has to as well.
@@ -355,7 +355,7 @@ pub fn serverFinishedVerifyData(plaintext: []const u8) ?[]const u8 {
 
 /// The 32 random bytes a ServerHello carries, at a fixed offset after the version.
 fn readServerRandom(server_hello: []const u8) Error![32]u8 {
-    if (server_hello.len < 2 + 32) return error.ServerFlightInvalid;
+    if (server_hello.len < 2 + 32) return error.ZixServerFlightInvalid;
 
     return server_hello[2..34].*;
 }
@@ -364,14 +364,14 @@ fn readServerRandom(server_hello: []const u8) Error![32]u8 {
 fn readServerPoint(key_exchange: []const u8) Error![]const u8 {
     var reader = wire.Reader{ .buf = key_exchange };
 
-    const curve_type = reader.readU8() catch return error.ServerFlightInvalid;
-    if (curve_type != 3) return error.ServerFlightInvalid;
+    const curve_type = reader.readU8() catch return error.ZixServerFlightInvalid;
+    if (curve_type != 3) return error.ZixServerFlightInvalid;
 
-    _ = reader.readU16() catch return error.ServerFlightInvalid;
+    _ = reader.readU16() catch return error.ZixServerFlightInvalid;
 
-    const point_len = reader.readU8() catch return error.ServerFlightInvalid;
+    const point_len = reader.readU8() catch return error.ZixServerFlightInvalid;
 
-    return reader.readBytes(point_len) catch error.ServerFlightInvalid;
+    return reader.readBytes(point_len) catch error.ZixServerFlightInvalid;
 }
 
 /// Hash one handshake message the way RFC 6347 4.2.6 requires: the 12-byte header with the
@@ -482,7 +482,7 @@ test "zix dtls: client finish, answering before a cookie hello is refused" {
     var state = start(.{ .client_random = @splat(0x11), .client_eph_secret = @splat(0x44) });
 
     var out: [512]u8 = undefined;
-    try std.testing.expectError(error.NoHandshakeInProgress, finish(&state, .{
+    try std.testing.expectError(error.ZixNoHandshakeInProgress, finish(&state, .{
         .server_hello = "",
         .certificate = "",
         .key_exchange = "",
@@ -499,7 +499,7 @@ test "zix dtls: client finish, a malformed server flight is refused rather than 
     _ = try writeHello(&state, &cookie, &out);
 
     // A ServerHello too short to hold its own random.
-    try std.testing.expectError(error.ServerFlightInvalid, finish(&state, .{
+    try std.testing.expectError(error.ZixServerFlightInvalid, finish(&state, .{
         .server_hello = &[_]u8{ 0xFE, 0xFD },
         .certificate = "",
         .key_exchange = &[_]u8{ 3, 0, 23, 1, 0 },
@@ -508,7 +508,7 @@ test "zix dtls: client finish, a malformed server flight is refused rather than 
 
     // A ServerKeyExchange whose curve type is not the named-curve form.
     var full_hello: [40]u8 = @splat(0);
-    try std.testing.expectError(error.ServerFlightInvalid, finish(&state, .{
+    try std.testing.expectError(error.ZixServerFlightInvalid, finish(&state, .{
         .server_hello = &full_hello,
         .certificate = "",
         .key_exchange = &[_]u8{ 1, 0, 23, 1, 0 },

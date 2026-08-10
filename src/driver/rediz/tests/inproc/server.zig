@@ -265,7 +265,7 @@ const RawClient = struct {
     /// One reply line, CRLF stripped. Aggregate replies need one call per line.
     fn line(self: *RawClient, buf: []u8) ![]const u8 {
         const raw = try self.reader.interface.takeDelimiterInclusive('\n');
-        if (raw.len < 2) return error.ProtocolViolation;
+        if (raw.len < 2) return error.RedizProtocolViolation;
 
         const body = raw[0 .. raw.len - 2];
         @memcpy(buf[0..body.len], body);
@@ -413,7 +413,7 @@ test "rediz inproc: server kill drops the victim connection" {
     // The victim's next command has to find a dead connection. Which error names that is the
     // platform's call: Linux hands back a clean EOF, NetBSD resets the socket and std reports the
     // reset as ReadFailed. A completed round trip is the only wrong outcome here.
-    if (victim.roundTrip(&.{"PING"}, &buf)) |_| return error.VictimSurvivedKill else |_| {}
+    if (victim.roundTrip(&.{"PING"}, &buf)) |_| return error.RedizVictimSurvivedKill else |_| {}
 }
 
 test "rediz inproc: server demands credentials when configured with them" {

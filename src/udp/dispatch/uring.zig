@@ -15,6 +15,7 @@ const core = @import("../core.zig");
 const datagram = @import("../datagram.zig");
 const common = @import("common.zig");
 const reuseport = @import("../../multiplexers/reuseport.zig");
+const listen_report = @import("../../multiplexers/listen_report.zig");
 const epoll = @import("epoll.zig");
 
 /// io_uring submission-queue depth for a raw-UDP .URING worker. The ring carries only recvmsg SQEs
@@ -136,13 +137,13 @@ fn parseMultishotBuf(buf: []const u8, name_reserve: usize, controllen: usize, ma
 /// slot index. Replies go out through the same coalescing SendBatch, flushed once per completion batch.
 /// Shared-nothing: its own ring, socket, and batches, no lock on the hot path. Falls back to the epoll
 /// loop when io_uring is unavailable.
-fn workerLoopUring(comptime handler: core.HandlerFn, config: UdpServerConfig, worker_id: usize, steering: ?reuseport.Steering) void {
+fn workerLoopUring(comptime handler: core.HandlerFn, config: UdpServerConfig, worker_id: usize, steering: ?reuseport.Steering, report: *listen_report.Report) void {
     common.pinToCpu(worker_id);
 
     var ring = initUringRing() catch |err| {
-        common.logSystem(config, "io_uring unavailable ({s}): raw worker {d} falls back to epoll", .{ @errorName(err), worker_id });
+        common.logSystem(config, .WARN, "io_uring unavailable ({s}): raw worker {d} falls back to epoll", .{ @errorName(err), worker_id });
 
-        return epoll.workerLoopEpoll(handler, config, worker_id, steering);
+        return epoll.workerLoopEpoll(handler, config, worker_id, steering, report);
     };
     defer ring.deinit();
 
@@ -151,21 +152,31 @@ fn workerLoopUring(comptime handler: core.HandlerFn, config: UdpServerConfig, wo
     // REUSEPORT skew across workers is measurable. Placed after the ring probe so
     // the epoll fallback reports through its own counter only.
     var datagrams_served: u64 = 0;
-    defer common.logSystem(config, "uring worker {d}: {d} datagrams served", .{ worker_id, datagrams_served });
+    defer common.logSystem(config, .INFO, "uring worker {d}: {d} datagrams served", .{ worker_id, datagrams_served });
 
     // Bind under the order gate: REUSEPORT group index i = worker i,
     // so the cpu-mod-N steering lands on the worker pinned to that slot.
     var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
     defer bind_turn.release();
 
+    // Every exit between here and the ring loop has to reach the group, or the workers that did
+    // bind wait on one that is already gone.
+    var slot = report.slot(config.io, error.ZixUdpWorkerSetupFailed);
+    defer slot.close();
+
     const fd = datagram.open(config.ip, config.port, true) catch |err| {
-        common.logSystem(config, "raw bind error: {}", .{err});
+        slot.fail(err);
+
         return;
     };
     defer datagram.close(fd);
 
-    if (steering) |steer| reuseport.attachCpuSteering(fd, steer.group_size);
+    if (steering) |steer| _ = reuseport.attachCpuSteering(fd, steer.group_size);
     bind_turn.release();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them.
+    slot.ok();
+    if (report.awaitGroup(config.io) != null) return;
 
     common.setBusyPoll(fd, config.busy_poll_us);
 
@@ -203,7 +214,7 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
     msg.namelen = @intCast(mshot_name_reserve);
     armMultishotRecv(ring, &msg, fd);
 
-    common.logSystem(config, "raw io_uring worker {d} up (multishot recvmsg, {d} buffers)", .{ worker_id, uring_ring_bufs });
+    common.logSystem(config, .INFO, "raw io_uring worker {d} up (multishot recvmsg, {d} buffers)", .{ worker_id, uring_ring_bufs });
 
     var cqes: [uring_cqe_batch]linux.io_uring_cqe = undefined;
     while (true) {
@@ -272,7 +283,7 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
         armUringRecv(ring, &msgs[slot], slot, fd);
     }
 
-    common.logSystem(config, "raw io_uring worker {d} up ({d} recv slots, one-shot)", .{ worker_id, uring_recv_slots });
+    common.logSystem(config, .INFO, "raw io_uring worker {d} up ({d} recv slots, one-shot)", .{ worker_id, uring_recv_slots });
 
     var cqes: [uring_cqe_batch]linux.io_uring_cqe = undefined;
     while (true) {
@@ -298,12 +309,11 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
 }
 
 /// Run the raw server with one SO_REUSEPORT io_uring worker per CPU. Linux-only: off Linux this returns
-/// error.DispatchModelUnsupported instead of downgrading (ADR-065), the caller picks .ASYNC there.
+/// error.ZixDispatchModelUnsupported instead of downgrading (ADR-065), the caller picks .ASYNC there.
 pub fn runUring(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
-    if (!datagram.is_linux) return error.DispatchModelUnsupported;
+    if (!datagram.is_linux) return error.ZixDispatchModelUnsupported;
 
     const want = common.effectiveWorkers(config);
-    common.logSystem(config, "raw listening on {s}:{d} ({d} workers, SO_REUSEPORT + io_uring)", .{ config.ip, config.port, want });
 
     const threads = try config.allocator.alloc(std.Thread, want);
     defer config.allocator.free(threads);
@@ -312,11 +322,32 @@ pub fn runUring(comptime handler: core.HandlerFn, config: UdpServerConfig) !void
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = want } else null;
 
+    // What every worker says about its own socket, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(want);
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i, steering }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i, steering, &report }) catch |err| {
+            common.logSystem(config, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ i, want, @errorName(err) });
+            report.abandon(config.io, want - i, err);
+
+            break;
+        };
         spawned += 1;
     }
+
+    if (report.awaitGroup(config.io)) |err| {
+        common.logSystem(config, .ERROR, "raw not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ config.ip, config.port, report.failures(), want, @errorName(err) });
+
+        for (threads[0..spawned]) |thread| thread.join();
+
+        return error.ZixUdpListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a socket that may never have been bound.
+    common.logSystem(config, .INFO, "raw listening on {s}:{d} ({d} workers, SO_REUSEPORT + io_uring)", .{ config.ip, config.port, want });
 
     for (threads[0..spawned]) |thread| thread.join();
 }

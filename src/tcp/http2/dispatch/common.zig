@@ -5,25 +5,39 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 const fd_io = @import("../../../utils/fd_io.zig");
 const core = @import("../core.zig");
 const async_cache = @import("../../../utils/async_cache.zig");
 const frame = @import("../frame.zig");
 const Http2ServerConfig = @import("../config.zig").Http2ServerConfig;
+const Logger = @import("../../../logger/logger.zig").Logger;
+
+const log = std.log.scoped(.zix_http2);
 
 // --------------------------------------------------------- //
 
-/// Emit a server lifecycle line. Routes through cfg.logger when set, otherwise
-/// prints to stderr only in Debug builds (silent in release).
-pub fn logSystem(cfg: Http2ServerConfig, comptime fmt: []const u8, args: anytype) void {
+/// Emit a server line at the given level. Routes through cfg.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+pub fn logSystem(cfg: Http2ServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (cfg.logger) |lg| {
-        lg.system(.INFO, "http2", fmt, args);
+        lg.system(level, "http2", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix http2: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 /// Build the per-connection serve options from the server config.

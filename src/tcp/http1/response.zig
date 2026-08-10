@@ -31,7 +31,7 @@ pub const HttpHeader = struct {
 /// max_response_headers in Http1ServerConfig sets the cap. The backing buffer is
 /// arena-allocated lazily on the first addHeader() call, requests that add no
 /// custom headers pay zero allocation cost.
-/// Any addHeader() call beyond the cap yields error.TooManyHeaders.
+/// Any addHeader() call beyond the cap yields error.ZixTooManyHeaders.
 ///
 /// - MINIMAL (16): simple APIs, constrained environments
 /// - COMMON (32): most web applications, single proxy/load balancer
@@ -154,17 +154,17 @@ pub const Response = struct {
     /// config.max_response_headers via the worker install).
     ///
     /// Return:
-    /// - error.TooManyHeaders if the header cap is exceeded
-    /// - error.InvalidHeaderName or error.InvalidHeaderValue on CR/LF injection
+    /// - error.ZixTooManyHeaders if the header cap is exceeded
+    /// - error.ZixInvalidHeaderName or error.ZixInvalidHeaderValue on CR/LF injection
     pub fn addHeader(self: *Response, name: []const u8, value: []const u8) !void {
-        for (name) |byte| if (byte == '\r' or byte == '\n') return error.InvalidHeaderName;
-        for (value) |byte| if (byte == '\r' or byte == '\n') return error.InvalidHeaderValue;
+        for (name) |byte| if (byte == '\r' or byte == '\n') return error.ZixInvalidHeaderName;
+        for (value) |byte| if (byte == '\r' or byte == '\n') return error.ZixInvalidHeaderValue;
 
         if (self.extra_buf == null) {
-            if (core.tl_max_response_headers == 0) return error.TooManyHeaders;
+            if (core.tl_max_response_headers == 0) return error.ZixTooManyHeaders;
             self.extra_buf = try self.allocator.alloc(HttpHeader, core.tl_max_response_headers);
         }
-        if (self.extra_len >= self.extra_buf.?.len) return error.TooManyHeaders;
+        if (self.extra_len >= self.extra_buf.?.len) return error.ZixTooManyHeaders;
 
         self.extra_buf.?[self.extra_len] = .{ .name = name, .value = value };
         self.extra_len += 1;
@@ -569,14 +569,14 @@ test "zix http1: Response.addHeader rejects CR LF injection and enforces the cap
     defer arena.deinit();
 
     var res = Response.init(TEST_FD, undefined, arena.allocator());
-    try std.testing.expectError(error.InvalidHeaderName, res.addHeader("X\r\nBad", "v"));
-    try std.testing.expectError(error.InvalidHeaderValue, res.addHeader("X-Ok", "v\r\ninjected"));
+    try std.testing.expectError(error.ZixInvalidHeaderName, res.addHeader("X\r\nBad", "v"));
+    try std.testing.expectError(error.ZixInvalidHeaderValue, res.addHeader("X-Ok", "v\r\ninjected"));
 
     core.setMaxResponseHeaders(1);
     defer core.setMaxResponseHeaders(16);
 
     try res.addHeader("X-One", "1");
-    try std.testing.expectError(error.TooManyHeaders, res.addHeader("X-Two", "2"));
+    try std.testing.expectError(error.ZixTooManyHeaders, res.addHeader("X-Two", "2"));
 }
 
 test "zix http1: Response.setKeepAlive false emits Connection close" {

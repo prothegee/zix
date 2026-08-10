@@ -185,16 +185,16 @@ pub fn findMessageEnd(buf: []const u8) ?usize {
 ///
 /// Return:
 /// - !usize (number of fields parsed)
-/// - error.TooManyFields if out is too small
-/// - error.BadTag if a tag cannot be parsed as u16
+/// - error.ZixTooManyFields if out is too small
+/// - error.ZixBadTag if a tag cannot be parsed as u16
 pub fn parseFields(buf: []const u8, out: []Field) !usize {
     var count: usize = 0;
     var i: usize = 0;
     while (i < buf.len) {
-        if (count >= out.len) return error.TooManyFields;
+        if (count >= out.len) return error.ZixTooManyFields;
         const eq = std.mem.indexOfScalarPos(u8, buf, i, '=') orelse break;
         const soh = std.mem.indexOfScalarPos(u8, buf, eq + 1, SOH) orelse break;
-        const tag_num = std.fmt.parseInt(u16, buf[i..eq], 10) catch return error.BadTag;
+        const tag_num = std.fmt.parseInt(u16, buf[i..eq], 10) catch return error.ZixBadTag;
         out[count] = .{ .tag = @enumFromInt(tag_num), .value = buf[eq + 1 .. soh] };
         count += 1;
         i = soh + 1;
@@ -575,7 +575,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             const timeout_ms: i32 = @intCast(@min(opts.heartbeat_timeout_ms, @as(u32, std.math.maxInt(i32))));
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :hb end;
-                if (recv_len >= recv_buf.len) return error.MessageTooLarge;
+                if (recv_len >= recv_buf.len) return error.ZixMessageTooLarge;
                 const nready = pollInFD(fd, timeout_ms) orelse break :outer;
                 if (nready == 0) {
                     if (peer_len > 0) {
@@ -608,7 +608,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
             const timeout_ms: i32 = @intCast(@min(opts.conn_timeout_ms, @as(u32, std.math.maxInt(i32))));
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :conn_to end;
-                if (recv_len >= recv_buf.len) return error.MessageTooLarge;
+                if (recv_len >= recv_buf.len) return error.ZixMessageTooLarge;
                 const nready = pollInFD(fd, timeout_ms) orelse break :outer;
                 if (nready == 0) break :outer;
                 const n = readOnceFD(fd, recv_buf[recv_len..]) catch break :outer;
@@ -619,7 +619,7 @@ pub fn serveConn(stream: std.Io.net.Stream, io: std.Io, comp_id: []const u8, opt
         } else no_hb: {
             while (true) {
                 if (findMessageEnd(recv_buf[0..recv_len])) |end| break :no_hb end;
-                if (recv_len >= recv_buf.len) return error.MessageTooLarge;
+                if (recv_len >= recv_buf.len) return error.ZixMessageTooLarge;
                 const b = reader.interface.takeByte() catch break :outer;
                 recv_buf[recv_len] = b;
                 recv_len += 1;
@@ -984,10 +984,10 @@ test "zix fix: parseFields extracts all tag=value pairs" {
     try std.testing.expectEqualStrings("SERVER", fields[4].value);
 }
 
-test "zix fix: parseFields returns error.BadTag on non-numeric tag" {
+test "zix fix: parseFields returns error.ZixBadTag on non-numeric tag" {
     const msg = "bad=value\x01";
     var fields: [4]Field = undefined;
-    try std.testing.expectError(error.BadTag, parseFields(msg, &fields));
+    try std.testing.expectError(error.ZixBadTag, parseFields(msg, &fields));
 }
 
 test "zix fix: getField finds a tag" {
@@ -1306,7 +1306,7 @@ test "zix fix: invokeHandler builds the trio and reaches the handler" {
 test "zix fix: invokeHandler swallows a handler error silently" {
     const failing = struct {
         fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {
-            return error.HandlerBoom;
+            return error.ZixHandlerBoom;
         }
     };
 

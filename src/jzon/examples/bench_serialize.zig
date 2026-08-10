@@ -94,7 +94,7 @@ fn timeStrategy(io: std.Io, comptime strategy: jzon.SerializeStrategy) !u64 {
         best = @min(best, elapsed);
     }
 
-    if (expected_len == 0) return error.NothingRendered;
+    if (expected_len == 0) return error.JzonNothingRendered;
 
     return best;
 }
@@ -108,7 +108,7 @@ fn assertPathsAgree() !void {
         var buf: [512]u8 = undefined;
         const len = try jzon.serialize(&buf, ORDER, .{ .strategy = strategy });
 
-        if (!std.mem.eql(u8, expected[0..expected_len], buf[0..len])) return error.PathsDisagree;
+        if (!std.mem.eql(u8, expected[0..expected_len], buf[0..len])) return error.JzonPathsDisagree;
     }
 
     std.debug.print("every path renders the same {d} bytes\n\n", .{expected_len});

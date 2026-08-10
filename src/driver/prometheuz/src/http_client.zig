@@ -81,9 +81,9 @@ pub fn post(allocator: std.mem.Allocator, io: std.Io, ip: []const u8, port: u16,
 ///
 /// Return:
 /// - ClientResponse
-/// - error.ConnectionClosed (peer closed before a full head/body arrived)
-/// - error.InvalidResponse (no "\r\n\r\n" found within HEAD_SCAN_BUF)
-/// - error.BodyTooLarge (response body exceeded opts.max_response_body)
+/// - error.PrometheuzConnectionClosed (peer closed before a full head/body arrived)
+/// - error.PrometheuzInvalidResponse (no "\r\n\r\n" found within HEAD_SCAN_BUF)
+/// - error.PrometheuzBodyTooLarge (response body exceeded opts.max_response_body)
 pub fn request(allocator: std.mem.Allocator, io: std.Io, method: []const u8, ip: []const u8, port: u16, path: []const u8, opts: RequestOpts) !ClientResponse {
     const stream = try connectTcp(io, ip, port, opts.connect_timeout_ms);
     defer stream.close(io);
@@ -127,7 +127,7 @@ fn sendRequest(fd: std.posix.fd_t, method: []const u8, ip: []const u8, port: u16
         request_buf[request_len..],
         "{s} {s} HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n",
         .{ method, path, ip, port },
-    ) catch return error.RequestTooLarge;
+    ) catch return error.PrometheuzRequestTooLarge;
     request_len += status_line.len;
 
     for (opts.headers) |field| {
@@ -135,7 +135,7 @@ fn sendRequest(fd: std.posix.fd_t, method: []const u8, ip: []const u8, port: u16
             request_buf[request_len..],
             "{s}: {s}\r\n",
             .{ field.name, field.value },
-        ) catch return error.RequestTooLarge;
+        ) catch return error.PrometheuzRequestTooLarge;
         request_len += header_line.len;
     }
 
@@ -144,7 +144,7 @@ fn sendRequest(fd: std.posix.fd_t, method: []const u8, ip: []const u8, port: u16
         request_buf[request_len..],
         "Content-Length: {d}\r\n\r\n",
         .{body.len},
-    ) catch return error.RequestTooLarge;
+    ) catch return error.PrometheuzRequestTooLarge;
     request_len += content_length_line.len;
 
     try writeAll(fd, request_buf[0..request_len]);
@@ -159,8 +159,8 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
     var header_end: usize = 0;
 
     while (head_scan_len < head_scan_buf.len) {
-        const n = readOnceFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
-        if (n == 0) return error.ConnectionClosed;
+        const n = readOnceFD(fd, head_scan_buf[head_scan_len..]) catch return error.PrometheuzConnectionClosed;
+        if (n == 0) return error.PrometheuzConnectionClosed;
         head_scan_len += n;
         if (std.mem.indexOf(u8, head_scan_buf[0..head_scan_len], "\r\n\r\n")) |pos| {
             header_end = pos + 4;
@@ -168,7 +168,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
         }
     }
 
-    if (header_end == 0) return error.InvalidResponse;
+    if (header_end == 0) return error.PrometheuzInvalidResponse;
 
     const head_raw = head_scan_buf[0..header_end];
     const status_code = parseStatusCode(head_raw);
@@ -193,7 +193,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
     if (is_chunked) {
         try readChunkedBody(allocator, fd, head_scan_buf[header_end..][0..already_read], max_response_body, &body_list);
     } else if (content_length) |body_len| {
-        if (body_len > max_response_body) return error.BodyTooLarge;
+        if (body_len > max_response_body) return error.PrometheuzBodyTooLarge;
         try body_list.resize(allocator, body_len);
         // Explicit usize annotation matters here: @min over comptime-bounded
         // operands can otherwise infer a narrower integer type than usize,
@@ -213,7 +213,7 @@ fn readResponse(allocator: std.mem.Allocator, fd: std.posix.fd_t, max_response_b
         while (true) {
             const n = readOnceFD(fd, &read_chunk) catch break;
             if (n == 0) break;
-            if (body_list.items.len + n > max_response_body) return error.BodyTooLarge;
+            if (body_list.items.len + n > max_response_body) return error.PrometheuzBodyTooLarge;
             try body_list.appendSlice(allocator, read_chunk[0..n]);
         }
     }
@@ -245,10 +245,10 @@ fn readChunkedBody(allocator: std.mem.Allocator, fd: std.posix.fd_t, seed: []con
         defer allocator.free(size_line);
 
         const size_text = if (std.mem.indexOfScalar(u8, size_line, ';')) |semicolon_pos| size_line[0..semicolon_pos] else size_line;
-        const chunk_size = std.fmt.parseInt(usize, std.mem.trim(u8, size_text, " \t"), 16) catch return error.InvalidResponse;
+        const chunk_size = std.fmt.parseInt(usize, std.mem.trim(u8, size_text, " \t"), 16) catch return error.PrometheuzInvalidResponse;
 
         if (chunk_size == 0) return;
-        if (body_list.items.len + chunk_size > max_response_body) return error.BodyTooLarge;
+        if (body_list.items.len + chunk_size > max_response_body) return error.PrometheuzBodyTooLarge;
 
         const chunk_data = try takeExact(&carry, allocator, fd, chunk_size);
         defer allocator.free(chunk_data);
@@ -261,7 +261,7 @@ fn readChunkedBody(allocator: std.mem.Allocator, fd: std.posix.fd_t, seed: []con
 
 fn fillMore(carry: *std.ArrayList(u8), allocator: std.mem.Allocator, fd: std.posix.fd_t) !bool {
     var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
-    const n = readOnceFD(fd, &read_chunk) catch return error.ConnectionClosed;
+    const n = readOnceFD(fd, &read_chunk) catch return error.PrometheuzConnectionClosed;
     if (n == 0) return false;
     try carry.appendSlice(allocator, read_chunk[0..n]);
 
@@ -278,7 +278,7 @@ fn takeLine(carry: *std.ArrayList(u8), allocator: std.mem.Allocator, fd: std.pos
 
             return line;
         }
-        if (!try fillMore(carry, allocator, fd)) return error.InvalidResponse;
+        if (!try fillMore(carry, allocator, fd)) return error.PrometheuzInvalidResponse;
     }
 }
 
@@ -286,7 +286,7 @@ fn takeLine(carry: *std.ArrayList(u8), allocator: std.mem.Allocator, fd: std.pos
 /// needed.
 fn takeExact(carry: *std.ArrayList(u8), allocator: std.mem.Allocator, fd: std.posix.fd_t, count: usize) ![]u8 {
     while (carry.items.len < count) {
-        if (!try fillMore(carry, allocator, fd)) return error.ConnectionClosed;
+        if (!try fillMore(carry, allocator, fd)) return error.PrometheuzConnectionClosed;
     }
 
     const taken = try allocator.dupe(u8, carry.items[0..count]);
@@ -610,7 +610,7 @@ test "prometheuz: http_client rejects a body over max_response_body" {
     const mock = try MockServer.init("HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n");
     defer mock.deinit();
 
-    try testing.expectError(error.BodyTooLarge, readResponse(testing.allocator, mock.client_fd, 16));
+    try testing.expectError(error.PrometheuzBodyTooLarge, readResponse(testing.allocator, mock.client_fd, 16));
 }
 
 test "prometheuz: http_client sendRequest writes a well-formed GET" {

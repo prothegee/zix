@@ -7,21 +7,21 @@ const zix = @import("zix");
 
 test "zix edge: Http1 parseHead missing CRLF terminator returns IncompleteHeader" {
     try std.testing.expectError(
-        error.IncompleteHeader,
+        error.ZixIncompleteHeader,
         zix.Http1.parseHead("GET / HTTP/1.1\r\nHost: localhost"),
     );
 }
 
 test "zix edge: Http1 parseHead empty request line returns InvalidRequest" {
     try std.testing.expectError(
-        error.InvalidRequest,
+        error.ZixInvalidRequest,
         zix.Http1.parseHead("\r\n\r\n"),
     );
 }
 
 test "zix edge: Http1 parseHead missing HTTP version returns InvalidRequest" {
     try std.testing.expectError(
-        error.InvalidRequest,
+        error.ZixInvalidRequest,
         zix.Http1.parseHead("GET /\r\n\r\n"),
     );
 }

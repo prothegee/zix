@@ -120,7 +120,7 @@ fn ecdheSharedX(my_scalar: [32]u8, peer_public: []const u8) ![32]u8 {
 /// plaintext handshake record. The downgrade sentinel is planted when the client was 1.3-capable.
 pub fn serverFlight1(opts: HandshakeOptions, client_hello: []const u8, out: []u8) !Flight1 {
     const parsed = handshake.parseClientHello(client_hello);
-    if (parsed != .ok) return error.ClientHelloInvalid;
+    if (parsed != .ok) return error.ZixClientHelloInvalid;
     const hello = parsed.ok;
 
     var state: State = undefined;
@@ -241,7 +241,7 @@ fn writeServerKeyExchange(writer: *wire.Writer, key: EcdsaP256.KeyPair, client_r
 /// Finished, emit ChangeCipherSpec + the encrypted server Finished, return the Connection.
 pub fn serverFinish(state: *State, client_key_exchange: []const u8, client_finished_record: []const u8, out: []u8) !FinishResult {
     var r = wire.Reader{ .buf = client_key_exchange };
-    if (try r.readU8() != hs_client_key_exchange) return error.UnexpectedMessage;
+    if (try r.readU8() != hs_client_key_exchange) return error.ZixUnexpectedMessage;
     _ = try r.readU24();
     const point_len = try r.readU8();
     const client_point = try r.readBytes(point_len);
@@ -256,8 +256,8 @@ pub fn serverFinish(state: *State, client_key_exchange: []const u8, client_finis
     const expected = prf.finishedFromHash(master, "client finished", transcriptHash(state));
     var cf_plain: [64]u8 = undefined;
     const cf = try record.deprotect(&cf_plain, client_finished_record, km.client_write_key, km.client_write_iv, 0);
-    if (cf.len < 16 or cf[0] != hs_finished) return error.UnexpectedMessage;
-    if (!std.mem.eql(u8, cf[4..16], &expected)) return error.ClientFinishedMismatch;
+    if (cf.len < 16 or cf[0] != hs_finished) return error.ZixUnexpectedMessage;
+    if (!std.mem.eql(u8, cf[4..16], &expected)) return error.ZixClientFinishedMismatch;
 
     state.transcript.update(cf);
 

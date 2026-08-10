@@ -45,14 +45,14 @@ const CERTIFICATE_VERIFY_CONTEXT = "TLS 1.3, server CertificateVerify";
 const MAX_CLIENT_HELLO = 2048;
 
 pub const Error = error{
-    ConnectionClosed,
-    NotClientHello,
-    NoClientKeyShare,
-    UnsupportedCipherSuite,
-    UnexpectedRecord,
-    ClientFinishedMismatch,
-    RecordTooLarge,
-    HandshakeAlert,
+    RedizConnectionClosed,
+    RedizNotClientHello,
+    RedizNoClientKeyShare,
+    RedizUnsupportedCipherSuite,
+    RedizUnexpectedRecord,
+    RedizClientFinishedMismatch,
+    RedizRecordTooLarge,
+    RedizHandshakeAlert,
 };
 
 /// Post-handshake keys and the per-direction sequence numbers. The server
@@ -95,7 +95,7 @@ pub const Session = struct {
             );
             self.write_seq += 1;
 
-            writer.writeAll(protected) catch return error.ConnectionClosed;
+            writer.writeAll(protected) catch return error.RedizConnectionClosed;
             pos += chunk_len;
         }
     }
@@ -116,7 +116,7 @@ pub const Session = struct {
     fn fillPlain(self: *Self, reader: *std.Io.Reader) !void {
         while (true) {
             const rec = try readWireRecord(reader, &self.record_buf);
-            if (rec[0] == ALERT_RECORD) return error.ConnectionClosed;
+            if (rec[0] == ALERT_RECORD) return error.RedizConnectionClosed;
 
             var opened_buf: [record.MAX_PLAINTEXT + 256]u8 = undefined;
             const opened = record.deprotect(
@@ -125,7 +125,7 @@ pub const Session = struct {
                 self.client_app_key,
                 self.client_app_iv,
                 self.read_seq,
-            ) catch return error.ConnectionClosed;
+            ) catch return error.RedizConnectionClosed;
             self.read_seq += 1;
 
             switch (opened.inner_type) {
@@ -138,7 +138,7 @@ pub const Session = struct {
                 },
                 // a post-handshake message from the client, nothing to do
                 .HANDSHAKE => continue,
-                else => return error.ConnectionClosed,
+                else => return error.RedizConnectionClosed,
             }
         }
     }
@@ -154,8 +154,8 @@ pub const Session = struct {
 ///
 /// Return:
 /// - Session ready for application data
-/// - error.ClientFinishedMismatch when the client proved a different transcript
-/// - error.UnsupportedCipherSuite when the client offered nothing usable
+/// - error.RedizClientFinishedMismatch when the client proved a different transcript
+/// - error.RedizUnsupportedCipherSuite when the client offered nothing usable
 pub fn handshake(
     io: std.Io,
     reader: *std.Io.Reader,
@@ -164,7 +164,7 @@ pub fn handshake(
 ) !Session {
     var hello_buf: [MAX_CLIENT_HELLO]u8 = undefined;
     const hello_record = try readWireRecord(reader, &hello_buf);
-    if (hello_record[0] != HANDSHAKE_RECORD) return error.UnexpectedRecord;
+    if (hello_record[0] != HANDSHAKE_RECORD) return error.RedizUnexpectedRecord;
 
     const client_hello_msg = hello_record[5..];
     const client_hello = try parseClientHello(client_hello_msg);
@@ -240,9 +240,9 @@ pub fn handshake(
         0,
     );
 
-    writer.writeAll(hello_wire) catch return error.ConnectionClosed;
-    writer.writeAll(flight_wire) catch return error.ConnectionClosed;
-    writer.flush() catch return error.ConnectionClosed;
+    writer.writeAll(hello_wire) catch return error.RedizConnectionClosed;
+    writer.writeAll(flight_wire) catch return error.RedizConnectionClosed;
+    writer.flush() catch return error.RedizConnectionClosed;
 
     // application keys come from the transcript through the server Finished
     const t_full = transcript.current();
@@ -296,15 +296,15 @@ fn finishedVerifyData(key: Secret, transcript_hash: Secret) Secret {
 
 /// One TLS record off the wire: the 5-byte header, then the framed length.
 fn readWireRecord(reader: *std.Io.Reader, buf: []u8) Error![]const u8 {
-    if (buf.len < 5) return error.RecordTooLarge;
+    if (buf.len < 5) return error.RedizRecordTooLarge;
 
-    reader.readSliceAll(buf[0..5]) catch return error.ConnectionClosed;
+    reader.readSliceAll(buf[0..5]) catch return error.RedizConnectionClosed;
 
     const body_len = std.mem.readInt(u16, buf[3..5], .big);
-    if (body_len > record.MAX_CIPHERTEXT) return error.RecordTooLarge;
-    if (5 + @as(usize, body_len) > buf.len) return error.RecordTooLarge;
+    if (body_len > record.MAX_CIPHERTEXT) return error.RedizRecordTooLarge;
+    if (5 + @as(usize, body_len) > buf.len) return error.RedizRecordTooLarge;
 
-    reader.readSliceAll(buf[5 .. 5 + body_len]) catch return error.ConnectionClosed;
+    reader.readSliceAll(buf[5 .. 5 + body_len]) catch return error.RedizConnectionClosed;
 
     return buf[0 .. 5 + body_len];
 }
@@ -327,37 +327,37 @@ const ClientHelloParsed = struct {
 fn parseClientHello(msg: []const u8) Error!ClientHelloParsed {
     var reader = wire.Reader{ .buf = msg };
 
-    if ((reader.readU8() catch return error.NotClientHello) != 1) return error.NotClientHello;
-    _ = reader.readU24() catch return error.NotClientHello;
-    _ = reader.readU16() catch return error.NotClientHello; // legacy_version
-    _ = reader.readBytes(32) catch return error.NotClientHello; // client_random
+    if ((reader.readU8() catch return error.RedizNotClientHello) != 1) return error.RedizNotClientHello;
+    _ = reader.readU24() catch return error.RedizNotClientHello;
+    _ = reader.readU16() catch return error.RedizNotClientHello; // legacy_version
+    _ = reader.readBytes(32) catch return error.RedizNotClientHello; // client_random
 
-    const session_id_len = reader.readU8() catch return error.NotClientHello;
-    const session_id = reader.readBytes(session_id_len) catch return error.NotClientHello;
+    const session_id_len = reader.readU8() catch return error.RedizNotClientHello;
+    const session_id = reader.readBytes(session_id_len) catch return error.RedizNotClientHello;
 
-    const suites_len = reader.readU16() catch return error.NotClientHello;
-    const suites = reader.readBytes(suites_len) catch return error.NotClientHello;
-    if (!offersCipherSuite(suites, CIPHER_SUITE_AES_128_GCM_SHA256)) return error.UnsupportedCipherSuite;
+    const suites_len = reader.readU16() catch return error.RedizNotClientHello;
+    const suites = reader.readBytes(suites_len) catch return error.RedizNotClientHello;
+    if (!offersCipherSuite(suites, CIPHER_SUITE_AES_128_GCM_SHA256)) return error.RedizUnsupportedCipherSuite;
 
-    const compression_len = reader.readU8() catch return error.NotClientHello;
-    _ = reader.readBytes(compression_len) catch return error.NotClientHello;
+    const compression_len = reader.readU8() catch return error.RedizNotClientHello;
+    _ = reader.readBytes(compression_len) catch return error.RedizNotClientHello;
 
-    const ext_len = reader.readU16() catch return error.NoClientKeyShare;
-    const exts = reader.readBytes(ext_len) catch return error.NoClientKeyShare;
+    const ext_len = reader.readU16() catch return error.RedizNoClientKeyShare;
+    const exts = reader.readBytes(ext_len) catch return error.RedizNoClientKeyShare;
 
     var ext_reader = wire.Reader{ .buf = exts };
     while (ext_reader.remaining() >= 4) {
-        const ext_type = ext_reader.readU16() catch return error.NoClientKeyShare;
-        const ext_data_len = ext_reader.readU16() catch return error.NoClientKeyShare;
-        const ext_data = ext_reader.readBytes(ext_data_len) catch return error.NoClientKeyShare;
+        const ext_type = ext_reader.readU16() catch return error.RedizNoClientKeyShare;
+        const ext_data_len = ext_reader.readU16() catch return error.RedizNoClientKeyShare;
+        const ext_data = ext_reader.readBytes(ext_data_len) catch return error.RedizNoClientKeyShare;
         if (ext_type != 0x0033) continue;
 
         var share_reader = wire.Reader{ .buf = ext_data };
-        _ = share_reader.readU16() catch return error.NoClientKeyShare; // client_shares length
+        _ = share_reader.readU16() catch return error.RedizNoClientKeyShare; // client_shares length
         while (share_reader.remaining() >= 4) {
-            const group = share_reader.readU16() catch return error.NoClientKeyShare;
-            const key_len = share_reader.readU16() catch return error.NoClientKeyShare;
-            const key_bytes = share_reader.readBytes(key_len) catch return error.NoClientKeyShare;
+            const group = share_reader.readU16() catch return error.RedizNoClientKeyShare;
+            const key_len = share_reader.readU16() catch return error.RedizNoClientKeyShare;
+            const key_bytes = share_reader.readBytes(key_len) catch return error.RedizNoClientKeyShare;
             if (group != NAMED_GROUP_X25519 or key_len != 32) continue;
 
             var out: ClientHelloParsed = .{ .client_public = undefined, .session_id = session_id };
@@ -367,7 +367,7 @@ fn parseClientHello(msg: []const u8) Error!ClientHelloParsed {
         }
     }
 
-    return error.NoClientKeyShare;
+    return error.RedizNoClientKeyShare;
 }
 
 fn offersCipherSuite(suites: []const u8, wanted: u16) bool {
@@ -491,26 +491,26 @@ fn readClientFinished(
         const rec = try readWireRecord(reader, &record_buf);
         switch (rec[0]) {
             20 => continue, // ChangeCipherSpec
-            ALERT_RECORD => return error.HandshakeAlert,
+            ALERT_RECORD => return error.RedizHandshakeAlert,
             APPLICATION_DATA_RECORD => {},
-            else => return error.UnexpectedRecord,
+            else => return error.RedizUnexpectedRecord,
         }
 
         var opened_buf: [record.MAX_PLAINTEXT + 256]u8 = undefined;
         const opened = record.deprotect(&opened_buf, rec, client_hs.key, client_hs.iv, 0) catch {
-            return error.ClientFinishedMismatch;
+            return error.RedizClientFinishedMismatch;
         };
-        if (opened.inner_type != .HANDSHAKE) return error.UnexpectedRecord;
+        if (opened.inner_type != .HANDSHAKE) return error.RedizUnexpectedRecord;
 
         var flight_reader = wire.Reader{ .buf = opened.data };
-        const msg_type = flight_reader.readU8() catch return error.ClientFinishedMismatch;
-        const msg_len = flight_reader.readU24() catch return error.ClientFinishedMismatch;
-        const body = flight_reader.readBytes(msg_len) catch return error.ClientFinishedMismatch;
-        if (msg_type != 20) return error.UnexpectedRecord;
+        const msg_type = flight_reader.readU8() catch return error.RedizClientFinishedMismatch;
+        const msg_len = flight_reader.readU24() catch return error.RedizClientFinishedMismatch;
+        const body = flight_reader.readBytes(msg_len) catch return error.RedizClientFinishedMismatch;
+        if (msg_type != 20) return error.RedizUnexpectedRecord;
 
         const expected = finishedVerifyData(client_finished_key, transcript_hash);
         if (body.len != expected.len or !std.mem.eql(u8, body, &expected)) {
-            return error.ClientFinishedMismatch;
+            return error.RedizClientFinishedMismatch;
         }
 
         return;
@@ -573,7 +573,7 @@ test "rediz inproc: tls rejects a hello that offers no usable cipher suite" {
     writer.patchU16(exts);
     writer.patchU24(header);
 
-    try testing.expectError(error.UnsupportedCipherSuite, parseClientHello(writer.slice()));
+    try testing.expectError(error.RedizUnsupportedCipherSuite, parseClientHello(writer.slice()));
 }
 
 test "rediz inproc: tls rejects a hello with no x25519 key share" {
@@ -592,7 +592,7 @@ test "rediz inproc: tls rejects a hello with no x25519 key share" {
     writer.patchU16(exts);
     writer.patchU24(header);
 
-    try testing.expectError(error.NoClientKeyShare, parseClientHello(writer.slice()));
+    try testing.expectError(error.RedizNoClientKeyShare, parseClientHello(writer.slice()));
 }
 
 test "rediz inproc: tls certificate verify content follows the rfc layout" {

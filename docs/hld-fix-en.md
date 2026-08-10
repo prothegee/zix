@@ -16,7 +16,7 @@ Implemented. See ADR-024 for design rationale.
 - SOH-delimited framing: no length prefix, delimiter-based message boundary detection.
 - Session layer built in: Logon / Logout / Heartbeat / TestRequest handled automatically, all other messages are echoed.
 - No heap allocation in `serveConn`: stack buffers throughout.
-- ASYNC, EPOLL, and URING dispatch. Required with no default: ASYNC suits long-lived FIX sessions and is the only portable model. EPOLL and URING run shared-nothing per-core workers on Linux, and `run()` rejects both off Linux with `error.DispatchModelUnsupported` (ADR-065).
+- ASYNC, EPOLL, and URING dispatch. Required with no default: ASYNC suits long-lived FIX sessions and is the only portable model. EPOLL and URING run shared-nothing per-core workers on Linux, and `run()` rejects both off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
 - `io: std.Io` in config (not passed to `run()`).
 
 ---
@@ -85,7 +85,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `ip` | required | Bind address |
 | `port` | required | Bind port. Must be non-zero |
 | `comp_id` | required | Server SenderCompID (tag 49) |
-| `dispatch_model` | `.ASYNC` | ASYNC, EPOLL, or URING (EPOLL and URING are Linux-only: native epoll / io_uring, rejected off Linux with error.DispatchModelUnsupported) |
+| `dispatch_model` | `.ASYNC` | ASYNC, EPOLL, or URING (EPOLL and URING are Linux-only: native epoll / io_uring, rejected off Linux with error.ZixDispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | TCP listen backlog |
 | `workers` | 0 (cpu_count) | Accept thread count. Ignored by ASYNC |
 | `worker_stack_size_bytes` | 512 KiB | Worker thread stack for EPOLL / URING handler threads. Demand-paged, costs little until the depth is used |

@@ -51,7 +51,7 @@ test "zix: unit test" {
 | Function | `camelCase` | `serveDispatch`, `frameRespond`, `uringUnavailableReason` |
 | Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `worker_stack_size_bytes`(gunakan `_var` jika penggunaan dalam hal private) |
 | Enum value domain / publik / config | `UPPER_CASE` | `ASYNC`, `EPOLL`, `URING` |
-| Error | `error.PascalCase` | `error.PortNotConfigured`, `error.ConnectionClosed` |
+| Error | `error.<Product><Domain><Condition>` | `error.ZixPortNotConfigured`, `error.ZixHttp1ListenFailed` (lihat bagian 9) |
 | Konstanta versi comptime | `UPPER_CASE` | `ZIG_SEMVER.MAJOR` |
 
 Enum yang memodelkan pilihan publik, domain, atau config adalah `UPPER_CASE` (`DispatchModel`, content type, status, logger level). Pengecualian sempit yang dipertahankan di tree adalah enum internal control-flow (outcome gaya `keep_alive` / `close`) dan nilai protocol-mirroring (opcode WebSocket `text` / `binary` yang mencerminkan nama wire). Kalau ragu, pakai `UPPER_CASE`.
@@ -152,7 +152,7 @@ Jalankan `zig fmt .` sebelum commit apa pun. Di luar formatting, fase berbeda da
 
 ```zig
 pub fn init(config: TcpServerConfig) !Self {
-    if (config.port == 0) return error.PortNotConfigured;
+    if (config.port == 0) return error.ZixPortNotConfigured;
 
     return .{ .config = config };
 }
@@ -205,7 +205,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
         const Self = @This();
 
         pub fn init(config: TcpServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
+            if (config.port == 0) return error.ZixPortNotConfigured;
 
             return .{ .config = config };
         }
@@ -220,7 +220,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
 }
 ```
 
-- `init` memvalidasi field wajib lebih dulu dan mengembalikan error (`error.PortNotConfigured`) alih-alih panic.
+- `init` memvalidasi field wajib lebih dulu dan mengembalikan error (`error.ZixPortNotConfigured`) alih-alih panic.
 - `deinit` selalu ada bahkan ketika kosong (`pub fn deinit(_: *Self) void {}`), supaya caller bisa `defer server.deinit()` secara seragam.
 - `io` selalu disediakan caller lewat config dan harus outlive server. Zix tidak memiliki event loop.
 
@@ -234,7 +234,7 @@ Concurrency adalah satu enum `DispatchModel` (`ASYNC`, `EPOLL`, `URING`), tiap m
 
 Dua ketidakcocokan berbeda, ditangani dengan dua cara berbeda (ADR-065):
 
-- **Model yang tidak bisa dijalankan OS target** (`.EPOLL` / `.URING` di luar Linux) adalah config error. `run()` mencatat model mana yang ditolak lalu mengembalikan `error.DispatchModelUnsupported`. Ia tidak pernah menurunkan model: pemanggil yang meminta loop per-core lalu diam-diam mendapat sesuatu yang lain tidak punya cara untuk tahu.
+- **Model yang tidak bisa dijalankan OS target** (`.EPOLL` / `.URING` di luar Linux) adalah config error. `run()` mencatat model mana yang ditolak lalu mengembalikan `error.ZixDispatchModelUnsupported`. Ia tidak pernah menurunkan model: pemanggil yang meminta loop per-core lalu diam-diam mendapat sesuatu yang lain tidak punya cara untuk tahu.
 - **Model yang tidak bisa dipakai host saat ini** (io_uring tidak tersedia di Linux, umumnya cap `RLIMIT_MEMLOCK`) adalah capability gap. `.URING` melipat ke loop EPOLL dan mencatat alasannya, sehingga server tidak hilang tepat setelah bind.
 
 Cek platform-nya satu predikat bersama, dikonsultasi sebelum server mem-bind apa pun:
@@ -243,7 +243,7 @@ Cek platform-nya satu predikat bersama, dikonsultasi sebelum server mem-bind apa
 if (!dispatch_support.isSupported(cfg.dispatch_model)) {
     common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-    return error.DispatchModelUnsupported;
+    return error.ZixDispatchModelUnsupported;
 }
 ```
 
@@ -253,7 +253,7 @@ Arm `switch`-nya tetap memakai comptime OS gate juga, karena loop khusus Linux h
 .EPOLL => if (comptime builtin.target.os.tag == .linux)
     epoll_model.runEpoll(cfg, handler)
 else
-    error.DispatchModelUnsupported,
+    error.ZixDispatchModelUnsupported,
 ```
 
 > Pilih comptime gating untuk fakta build-time (`comptime builtin.target.os.tag`), runtime probe hanya untuk fakta host-time (memlock, ketersediaan ring). Selalu catat alasannya. Jangan pernah biarkan server diam-diam hilang setelah bind, dan jangan pernah biarkan ia diam-diam menyajikan model yang tidak diminta pemanggil.
@@ -266,11 +266,51 @@ Guard yang sama berlaku untuk fast path Linux-only manapun yang ditambahkan murn
 
 ## 9. Penanganan error
 
-- Error ber-PascalCase pada `error.` dan mendeskripsikan kondisinya (`error.PortNotConfigured`, `error.ConnectionClosed`, `error.MessageTooLarge`, `error.BufferTooSmall`). Pakai ulang nama yang sudah ada sebelum membuat yang baru.
+Sebuah error punya dua tugas, dan keduanya bukan tugas yang sama. Error VALUE adalah yang dipakai caller untuk bercabang. Log LINE adalah yang dipakai pembaca untuk debug. Nama saja tidak bisa menyebut file mana, port mana, atau field mana yang gagal, jadi aturan di bawah mencakup kedua sisi.
+
+### 9.1 Naming
+
+- Nama error ber-PascalCase pada `error.` dan dibaca `<Product><Domain><Condition>`: `error.ZixPortNotConfigured`, `error.ZixHttp1ListenFailed`, `error.ZixTlsCertFileNotFound`.
+- Prefix product mengikuti siapa yang memiliki file-nya, bukan nama repository. `Zix` di tree engine, `Zixer` di bawah `src/zixer`, dan package standalone memakai namanya sendiri: `Jzon`, `Postgrez`, `Rediz`, `Prometheuz`.
+- Error std yang dilempar ulang apa adanya tetap memakai nama dari std: `OutOfMemory`, `WriteFailed`, `ReadFailed`, `EndOfStream`, `BrokenPipe`, `NoSpaceLeft`, `Overflow`, `Unexpected`. std meneruskan nama tanpa prefix lewat fungsi yang sama, jadi memberi prefix hanya pada raise site lokal akan menyisakan dua nama untuk satu kondisi di error set yang sama.
+- Nama yang bisa diterima caller di luar package harus unik terhadap KONDISI-nya, bukan hanya terhadap subsystem: `error.ZixHttp1RequestLineTruncated`, bukan `error.ZixTruncated` yang dipakai bersama. Pakai ulang nama yang sudah ada hanya kalau kondisinya memang sama, bukan karena mirip.
+- Parser sans-I/O boleh memakai nama sempit yang dipakai bersama di dalam error set-nya sendiri, karena value itu dipetakan ke domain error sebelum sampai ke pembaca.
+- Jangan pernah menaruh `@src().file` atau `@src().line` di pesan. Keduanya menunjuk ke source zix, bukan ke config pembaca. Nama yang unik terhadap kondisinya sudah menunjukkan lokasi raise-nya.
+
+### 9.2 Log line, error value, atau keduanya
+
+Dua pertanyaan yang menentukan: apakah ada caller yang bisa menindaklanjuti, dan apakah pembaca sudah tahu subjeknya.
+
+| Situasi | Yang dikeluarkan | Alasan |
+| :- | :- | :- |
+| Parser sans-I/O atau helper internal, caller sudah memegang input-nya | error value saja | caller sudah punya subjeknya, dan log line di sini akan menyala per paket |
+| Tidak ada error union untuk dikembalikan: fungsi `void`, worker thread yang di-spawn, accept loop | log line saja | tidak ada yang bisa bercabang di atasnya, jadi baris itu SENDIRI adalah laporannya |
+| Entry point publik yang memegang nilai hasil config pembaca: path, port, dir, url | keduanya | value-nya dipakai caller untuk bercabang, baris log-nya membawa subjek yang tidak bisa dibawa namanya |
+
+```zig
+const cert_pem = std.Io.Dir.cwd().readFileAlloc(io, config.cert_path, allocator, .limited(CERT_MAX_BYTES)) catch |err| {
+    logSystem(config, .ERROR, "tls cert read failed: {s} ({})", .{ config.cert_path, err });
+
+    return switch (err) {
+        error.FileNotFound => error.ZixTlsCertFileNotFound,
+        error.AccessDenied => error.ZixTlsCertFileUnreadable,
+        else => error.ZixTlsCertFileReadFailed,
+    };
+};
+```
+
+Dua kesalahan yang dilarang aturan ini:
+
+- Nge-log lalu menelan error di tempat fungsinya MASIH BISA mengembalikan error. Itu menyembunyikan kegagalan yang sebenarnya bisa ditangani caller.
+- Mengembalikan nama telanjang di config boundary. `error.ZixTlsCertFileNotFound` sendirian tetap tidak menyebut file mana, jadi path-nya masuk ke baris log.
+
+### 9.3 Bentuk
+
 - Validasi input di boundary (`init`) dan kembalikan error lebih awal sebagai guard, dengan baris kosong sesudahnya.
 - Pakai `errdefer` untuk membatalkan konstruksi parsial, `defer` untuk cleanup tanpa syarat.
+- Jangan menggabung beberapa penyebab ke satu nama. Switch pada penyebabnya kalau penyebab itu menuntut perbaikan yang berbeda: not-found, permission denied, dan is-a-directory adalah tiga tindakan berbeda bagi pembaca.
 
-> Kembalikan error bernama, jangan panic pada kondisi yang recoverable. Pilih nama error yang sudah ada dan cocok sebelum menambah yang baru.
+> Kembalikan error bernama, jangan panic pada kondisi yang recoverable. Sebut kondisinya, sebut subjeknya di baris log, dan jangan biarkan pembaca menebak sisi mana yang hilang.
 
 ---
 

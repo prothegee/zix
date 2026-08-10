@@ -36,56 +36,56 @@ fn expectRefused(comptime T: type, src: []const u8, failure: anyerror) !void {
 }
 
 test "jzon edge: the generated parser reports a document that ends early" {
-    try expectRefused(u8, "", error.Truncated);
-    try expectRefused(Pair, "{", error.Truncated);
-    try expectRefused(Pair, "{\"id\"", error.Truncated);
-    try expectRefused(Pair, "{\"id\":", error.Truncated);
-    try expectRefused(Pair, "{\"id\":1,", error.Truncated);
-    try expectRefused([]const u32, "[1,2", error.Truncated);
-    try expectRefused([]const u8, "\"unterminated", error.Truncated);
-    try expectRefused(bool, "tru", error.Truncated);
+    try expectRefused(u8, "", error.JzonTruncated);
+    try expectRefused(Pair, "{", error.JzonTruncated);
+    try expectRefused(Pair, "{\"id\"", error.JzonTruncated);
+    try expectRefused(Pair, "{\"id\":", error.JzonTruncated);
+    try expectRefused(Pair, "{\"id\":1,", error.JzonTruncated);
+    try expectRefused([]const u32, "[1,2", error.JzonTruncated);
+    try expectRefused([]const u8, "\"unterminated", error.JzonTruncated);
+    try expectRefused(bool, "tru", error.JzonTruncated);
 }
 
 test "jzon edge: the generated parser reports a document carrying more than one value" {
-    try expectRefused(u8, "1 2", error.Unexpected);
-    try expectRefused(Pair, "{\"id\":1,\"name\":\"x\"}{}", error.Unexpected);
-    try expectRefused([]const u32, "[1][2]", error.Unexpected);
+    try expectRefused(u8, "1 2", error.JzonUnexpected);
+    try expectRefused(Pair, "{\"id\":1,\"name\":\"x\"}{}", error.JzonUnexpected);
+    try expectRefused([]const u32, "[1][2]", error.JzonUnexpected);
 }
 
 test "jzon edge: the generated parser reports the same key twice" {
-    try expectRefused(Pair, "{\"id\":1,\"id\":2,\"name\":\"x\"}", error.Unexpected);
+    try expectRefused(Pair, "{\"id\":1,\"id\":2,\"name\":\"x\"}", error.JzonUnexpected);
 }
 
 test "jzon edge: the generated parser reports a number the field cannot take" {
-    try expectRefused(Pair, "{\"id\":300,\"name\":\"x\"}", error.BadNumber);
-    try expectRefused(Pair, "{\"id\":1.5,\"name\":\"x\"}", error.BadNumber);
-    try expectRefused(Pair, "{\"id\":-1,\"name\":\"x\"}", error.BadNumber);
-    try expectRefused(u64, "18446744073709551616", error.BadNumber);
-    try expectRefused(f64, "1.2.3", error.BadNumber);
+    try expectRefused(Pair, "{\"id\":300,\"name\":\"x\"}", error.JzonBadNumber);
+    try expectRefused(Pair, "{\"id\":1.5,\"name\":\"x\"}", error.JzonBadNumber);
+    try expectRefused(Pair, "{\"id\":-1,\"name\":\"x\"}", error.JzonBadNumber);
+    try expectRefused(u64, "18446744073709551616", error.JzonBadNumber);
+    try expectRefused(f64, "1.2.3", error.JzonBadNumber);
 }
 
 test "jzon edge: the generated parser reports a value of the wrong shape" {
-    try expectRefused(Pair, "{\"id\":null,\"name\":\"x\"}", error.Unexpected);
-    try expectRefused(Pair, "{\"id\":1,\"name\":7}", error.Unexpected);
-    try expectRefused(Pair, "[1,2]", error.Unexpected);
-    try expectRefused([]const u32, "{}", error.Unexpected);
-    try expectRefused(bool, "\"true\"", error.Unexpected);
+    try expectRefused(Pair, "{\"id\":null,\"name\":\"x\"}", error.JzonUnexpected);
+    try expectRefused(Pair, "{\"id\":1,\"name\":7}", error.JzonUnexpected);
+    try expectRefused(Pair, "[1,2]", error.JzonUnexpected);
+    try expectRefused([]const u32, "{}", error.JzonUnexpected);
+    try expectRefused(bool, "\"true\"", error.JzonUnexpected);
 }
 
 test "jzon edge: the generated parser reports a trailing comma" {
-    try expectRefused(Pair, "{\"id\":1,\"name\":\"x\",}", error.Unexpected);
-    try expectRefused([]const u32, "[1,2,]", error.Unexpected);
+    try expectRefused(Pair, "{\"id\":1,\"name\":\"x\",}", error.JzonUnexpected);
+    try expectRefused([]const u32, "[1,2,]", error.JzonUnexpected);
 }
 
 test "jzon edge: the generated parser reports an object owing a field" {
-    try expectRefused(Pair, "{}", error.MissingField);
-    try expectRefused(Pair, "{\"id\":1}", error.MissingField);
+    try expectRefused(Pair, "{}", error.JzonMissingField);
+    try expectRefused(Pair, "{\"id\":1}", error.JzonMissingField);
 }
 
 test "jzon edge: the generated parser reports a name no enum tag carries" {
-    try expectRefused(Status, "\"GONE\"", error.UnknownEnumValue);
-    try expectRefused(Status, "\"pending\"", error.UnknownEnumValue);
-    try expectRefused(Status, "\"\"", error.UnknownEnumValue);
+    try expectRefused(Status, "\"GONE\"", error.JzonUnknownEnumValue);
+    try expectRefused(Status, "\"pending\"", error.JzonUnknownEnumValue);
+    try expectRefused(Status, "\"\"", error.JzonUnknownEnumValue);
 }
 
 test "jzon edge: the generated parser reads the empty string, object and array" {
@@ -161,11 +161,11 @@ test "jzon edge: the generated parser reports an escape the rules do not spell" 
         // This path decodes escapes itself, so it can say which of the two went
         // wrong. The scanner path leaves that to std, which calls a broken
         // escape a syntax error.
-        try std.testing.expectError(error.BadEscape, generated_parser.parse([]const u8, allocator, "\"\\ud83d\"", .{}, shape));
-        try std.testing.expectError(error.BadEscape, generated_parser.parse([]const u8, allocator, "\"\\q\"", .{}, shape));
+        try std.testing.expectError(error.JzonBadEscape, generated_parser.parse([]const u8, allocator, "\"\\ud83d\"", .{}, shape));
+        try std.testing.expectError(error.JzonBadEscape, generated_parser.parse([]const u8, allocator, "\"\\q\"", .{}, shape));
     }
 
-    try std.testing.expectError(error.Unexpected, scanner_parser.parse([]const u8, allocator, "\"\\q\"", .{}));
+    try std.testing.expectError(error.JzonUnexpected, scanner_parser.parse([]const u8, allocator, "\"\\q\"", .{}));
 }
 
 test "jzon edge: the generated parser refuses an array of bytes as a string" {
@@ -179,7 +179,7 @@ test "jzon edge: the generated parser refuses an array of bytes as a string" {
     // fails here.
     inline for (SHAPES) |shape| {
         try std.testing.expectError(
-            error.Unexpected,
+            error.JzonUnexpected,
             generated_parser.parse([]const u8, allocator, "[104,105]", .{}, shape),
         );
     }
@@ -199,7 +199,7 @@ test "jzon edge: the generated parser refuses a signed zero in an unsigned field
     // it are. std reads the digits and lands on zero. Neither serialize path
     // ever writes this, so no round trip crosses the difference.
     inline for (SHAPES) |shape| {
-        try std.testing.expectError(error.BadNumber, generated_parser.parse(Pair, allocator, src, .{}, shape));
+        try std.testing.expectError(error.JzonBadNumber, generated_parser.parse(Pair, allocator, src, .{}, shape));
     }
 
     const theirs = try std_parser.parse(Pair, allocator, src, .{});
@@ -228,7 +228,7 @@ test "jzon edge: an unknown value the parse steps over still has to be a value" 
 
     inline for (SHAPES) |shape| {
         try std.testing.expectError(
-            error.Unexpected,
+            error.JzonUnexpected,
             generated_parser.parse(Pair, arena.allocator(), src, .{ .unknown = .SKIP }, shape),
         );
     }

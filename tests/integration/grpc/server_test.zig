@@ -105,7 +105,7 @@ test "zix integration: GrpcServer.run port zero returns PortNotConfigured" {
     var server = zix.Grpc.Server.init(zix.Grpc.Router(&[_]zix.Grpc.Route{}), .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
-    try std.testing.expectError(error.PortNotConfigured, server.run());
+    try std.testing.expectError(error.ZixPortNotConfigured, server.run());
 }
 
 test "zix integration: gRPC unary returns greeting" {

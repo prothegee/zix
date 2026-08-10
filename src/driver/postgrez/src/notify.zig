@@ -42,7 +42,7 @@ pub fn send(conn: *Conn, channel: []const u8, payload: []const u8) !void {
 ///
 /// Return:
 /// - the notification, slices valid until the following call
-/// - error.ServerError / error.ConnectionClosed
+/// - error.PostgrezServerError / error.PostgrezConnectionClosed
 pub fn next(conn: *Conn) !?conn_mod.OwnedNotification {
     conn.freeCurrentNotification();
 
@@ -77,26 +77,26 @@ pub fn next(conn: *Conn) !?conn_mod.OwnedNotification {
             .error_response => |fields| {
                 conn.last_server_error.capture(fields);
 
-                return error.ServerError;
+                return error.PostgrezServerError;
             },
-            else => return error.ProtocolViolation,
+            else => return error.PostgrezProtocolViolation,
         }
     }
 }
 
 /// "<verb> \"<channel>\"" with identifier quoting.
 fn buildChannelSql(buf: []u8, verb: []const u8, channel: []const u8) ![]const u8 {
-    if (channel.len == 0 or channel.len > MAX_CHANNEL_LEN) return error.BadChannelName;
+    if (channel.len == 0 or channel.len > MAX_CHANNEL_LEN) return error.PostgrezBadChannelName;
 
     var writer = std.Io.Writer.fixed(buf);
-    writer.writeAll(verb) catch return error.BadChannelName;
-    writer.writeAll(" \"") catch return error.BadChannelName;
+    writer.writeAll(verb) catch return error.PostgrezBadChannelName;
+    writer.writeAll(" \"") catch return error.PostgrezBadChannelName;
     for (channel) |char| {
-        if (char == 0) return error.BadChannelName;
-        if (char == '"') writer.writeByte('"') catch return error.BadChannelName;
-        writer.writeByte(char) catch return error.BadChannelName;
+        if (char == 0) return error.PostgrezBadChannelName;
+        if (char == '"') writer.writeByte('"') catch return error.PostgrezBadChannelName;
+        writer.writeByte(char) catch return error.PostgrezBadChannelName;
     }
-    writer.writeAll("\"") catch return error.BadChannelName;
+    writer.writeAll("\"") catch return error.PostgrezBadChannelName;
 
     return writer.buffered();
 }
@@ -114,7 +114,7 @@ test "postgrez: buildChannelSql quotes and escapes" {
 
     const long_channel: [64]u8 = @splat('x');
 
-    try testing.expectError(error.BadChannelName, buildChannelSql(&buf, "LISTEN", ""));
-    try testing.expectError(error.BadChannelName, buildChannelSql(&buf, "LISTEN", &long_channel));
-    try testing.expectError(error.BadChannelName, buildChannelSql(&buf, "LISTEN", "a\x00b"));
+    try testing.expectError(error.PostgrezBadChannelName, buildChannelSql(&buf, "LISTEN", ""));
+    try testing.expectError(error.PostgrezBadChannelName, buildChannelSql(&buf, "LISTEN", &long_channel));
+    try testing.expectError(error.PostgrezBadChannelName, buildChannelSql(&buf, "LISTEN", "a\x00b"));
 }

@@ -32,7 +32,7 @@ pub const DynEntry = struct { name: []const u8, value: []const u8 };
 /// The errors the QPACK dynamic table raises (RFC 9204 3.2.2).
 pub const TableError = error{
     /// Inserting an entry larger than the capacity: QPACK_ENCODER_STREAM_ERROR.
-    EncoderStreamError,
+    ZixEncoderStreamError,
 };
 
 /// The QPACK dynamic table (RFC 9204 3.2): a bounded store, oldest entries evicted from the end to
@@ -48,7 +48,7 @@ pub const DynamicTable = struct {
     /// the capacity is a QPACK_ENCODER_STREAM_ERROR.
     pub fn insert(self: *DynamicTable, name: []const u8, value: []const u8) TableError!void {
         const need = entrySize(name, value);
-        if (need > self.capacity) return error.EncoderStreamError;
+        if (need > self.capacity) return error.ZixEncoderStreamError;
 
         while (self.size + need > self.capacity) self.evictOldest();
 
@@ -90,7 +90,7 @@ pub const DynamicTable = struct {
 /// The errors Required Insert Count reconstruction raises (RFC 9204 4.5.1.1).
 pub const RicError = error{
     /// An EncodedInsertCount no conformant encoder could produce: QPACK_DECOMPRESSION_FAILED.
-    DecompressionFailed,
+    ZixDecompressionFailed,
 };
 
 /// Transform a Required Insert Count for the wire (RFC 9204 4.5.1.1): 0 stays 0, otherwise it is
@@ -107,17 +107,17 @@ pub fn decodeRequiredInsertCount(encoded: u64, total_inserts: u64, max_entries: 
     if (encoded == 0) return 0;
 
     const full_range = 2 * max_entries;
-    if (encoded > full_range) return error.DecompressionFailed;
+    if (encoded > full_range) return error.ZixDecompressionFailed;
 
     const max_value = total_inserts + max_entries;
     const max_wrapped = (max_value / full_range) * full_range;
     var ric = max_wrapped + encoded - 1;
 
     if (ric > max_value) {
-        if (ric <= full_range) return error.DecompressionFailed;
+        if (ric <= full_range) return error.ZixDecompressionFailed;
         ric -= full_range;
     }
-    if (ric == 0) return error.DecompressionFailed;
+    if (ric == 0) return error.ZixDecompressionFailed;
 
     return ric;
 }
@@ -142,9 +142,9 @@ pub const DecoderInstruction = union(enum) {
 
 /// The decoder-instruction errors an encoder raises (RFC 9204 4.4.3).
 pub const InstructionError = error{
-    Truncated,
+    ZixTruncated,
     /// An Insert Count Increment of zero: QPACK_DECODER_STREAM_ERROR.
-    DecoderStreamError,
+    ZixDecoderStreamError,
 };
 
 /// Encode a Section Acknowledgment (RFC 9204 4.4.1): '1' then a 7-bit prefix stream id.
@@ -165,20 +165,20 @@ pub fn encodeInsertCountIncrement(out: []u8, increment: u64) usize {
 /// Decode one decoder-stream instruction (RFC 9204 4.4), told apart by the leading bits. An Insert
 /// Count Increment of zero is a QPACK_DECODER_STREAM_ERROR.
 pub fn decodeDecoderInstruction(data: []const u8) InstructionError!DecoderInstruction {
-    if (data.len == 0) return error.Truncated;
+    if (data.len == 0) return error.ZixTruncated;
 
     const first = data[0];
     if (first & 0x80 != 0) {
-        const int = qpack.decodePrefixedInt(data, 7) catch return error.Truncated;
+        const int = qpack.decodePrefixedInt(data, 7) catch return error.ZixTruncated;
         return .{ .section_ack = int.value };
     }
     if (first & 0x40 != 0) {
-        const int = qpack.decodePrefixedInt(data, 6) catch return error.Truncated;
+        const int = qpack.decodePrefixedInt(data, 6) catch return error.ZixTruncated;
         return .{ .stream_cancel = int.value };
     }
 
-    const int = qpack.decodePrefixedInt(data, 6) catch return error.Truncated;
-    if (int.value == 0) return error.DecoderStreamError;
+    const int = qpack.decodePrefixedInt(data, 6) catch return error.ZixTruncated;
+    if (int.value == 0) return error.ZixDecoderStreamError;
 
     return .{ .insert_count_increment = int.value };
 }
@@ -214,7 +214,7 @@ test "zix http3: RFC 9204 3.2 dynamic table insert and eviction" {
     try table.insert("abc", "def");
     try std.testing.expect(table.count == 2 and std.mem.eql(u8, table.items[0].name, "baz") and table.oldestAbsoluteIndex() == 1 and table.inserts == 3);
 
-    try std.testing.expectError(error.EncoderStreamError, table.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    try std.testing.expectError(error.ZixEncoderStreamError, table.insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
 
     table.setCapacity(38);
     try std.testing.expect(table.count == 1 and table.size == 38);
@@ -231,7 +231,7 @@ test "zix http3: RFC 9204 4.5.1 Required Insert Count and Base" {
 
     try std.testing.expectEqual(@as(u64, 9), try decodeRequiredInsertCount(4, 10, 3));
     try std.testing.expectEqual(@as(u64, 0), try decodeRequiredInsertCount(0, 10, 3));
-    try std.testing.expectError(error.DecompressionFailed, decodeRequiredInsertCount(7, 10, 3));
+    try std.testing.expectError(error.ZixDecompressionFailed, decodeRequiredInsertCount(7, 10, 3));
 
     try std.testing.expectEqual(@as(i64, 9), resolveBase(9, false, 0));
     try std.testing.expectEqual(@as(i64, 6), resolveBase(9, true, 2));
@@ -252,7 +252,7 @@ test "zix http3: RFC 9204 4.4 decoder instructions and section 6 error codes" {
     try std.testing.expect(cancel == .stream_cancel and cancel.stream_cancel == 8);
     const increment = try decodeDecoderInstruction(&hexBytes("0a"));
     try std.testing.expect(increment == .insert_count_increment and increment.insert_count_increment == 10);
-    try std.testing.expectError(error.DecoderStreamError, decodeDecoderInstruction(&hexBytes("00")));
+    try std.testing.expectError(error.ZixDecoderStreamError, decodeDecoderInstruction(&hexBytes("00")));
 
     try std.testing.expectEqual(@as(u16, 0x0200), @intFromEnum(QpackError.decompression_failed));
     try std.testing.expectEqual(@as(u16, 0x0201), @intFromEnum(QpackError.encoder_stream_error));

@@ -42,6 +42,9 @@ const SendStream = @import("../connection.zig").SendStream;
 const SentRangeInfo = @import("../connection.zig").SentRangeInfo;
 const max_sent_ranges = @import("../connection.zig").max_sent_ranges;
 const tls_handshake = @import("../../../tls/handshake.zig");
+const Logger = @import("../../../logger/logger.zig").Logger;
+
+const log = std.log.scoped(.zix_http3);
 
 /// Fill buf with cryptographically secure random bytes.
 fn secureRandom(buf: []u8) void {
@@ -96,15 +99,28 @@ pub fn sendBufBytes(config: Http3ServerConfig) usize {
     return config.send_batch * sendSlotSize(config);
 }
 
-/// Emit a server lifecycle message through the configured logger, or stderr in Debug.
-pub fn logSystem(config: Http3ServerConfig, comptime fmt: []const u8, args: anytype) void {
+/// Emit a server line at the given level. Routes through config.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+pub fn logSystem(config: Http3ServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (config.logger) |lg| {
-        lg.system(.INFO, "http3", fmt, args);
+        lg.system(level, "http3", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix http3: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 /// What processing one datagram produced, for the recv loop to log.
@@ -403,10 +419,16 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
     if (reuse) pinToCpu(worker_id);
 
     const fd = datagram.open(config.ip, config.port, reuse) catch |err| {
-        logSystem(config, "bind error: {}", .{err});
+        logSystem(config, .ERROR, "bind failed on {s}:{d} ({s})", .{ config.ip, config.port, @errorName(err) });
+
         return;
     };
     defer datagram.close(fd);
+
+    // Announced below the bind, not above it: the caller's old line claimed a socket that may
+    // never have been opened. Only the single-worker caller announces here, a REUSEPORT group
+    // has its own line once the whole group reports.
+    if (!reuse) logSystem(config, .INFO, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
 
     setBusyPoll(fd, config.busy_poll_us);
     datagram.setSocketBuffers(fd, config.socket_rcvbuf, config.socket_sndbuf);
@@ -457,7 +479,6 @@ const NO_SOCKET: std.posix.socket_t = if (builtin.os.tag == .windows) std.os.win
 pub fn runSingle(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
     if (!datagram.is_linux) return runFallback(handler, config);
 
-    logSystem(config, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
     workerLoop(handler, config, false, 0);
 }
 
@@ -480,7 +501,7 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: Http3ServerConfig) 
     const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
 
-    logSystem(config, "listening on {s}:{d} (fallback)", .{ config.ip, config.port });
+    logSystem(config, .INFO, "listening on {s}:{d} (fallback)", .{ config.ip, config.port });
 
     const table = config.allocator.create(ConnTable) catch return error.OutOfMemory;
     defer config.allocator.destroy(table);
@@ -526,17 +547,17 @@ pub fn serveDatagram(comptime handler: core.HandlerFn, table: *ConnTable, dg: da
 
     switch (processDatagram(table, dg.data, config.cid_len, config.max_datagram_size, config.initial_window_packets)) {
         .client_hello => |n| {
-            logSystem(config, "decrypted client Initial, parsed ClientHello ({d} bytes)", .{n});
+            logSystem(config, .INFO, "decrypted client Initial, parsed ClientHello ({d} bytes)", .{n});
             sendServerHelloFD(table, dg.data, tx, fd, dg.from, config);
         },
-        .initial_opened => |pn| logSystem(config, "decrypted client Initial, packet number {d} (ClientHello incomplete)", .{pn}),
-        .parse_alert => logSystem(config, "decrypted client Initial but ClientHello parse raised an alert", .{}),
-        .decrypt_failed => logSystem(config, "long-header Initial failed to decrypt under the Initial keys", .{}),
-        .handshake_opened => logSystem(config, "decrypted client Handshake packet (handshake keys correct, validated live)", .{}),
+        .initial_opened => |pn| logSystem(config, .INFO, "decrypted client Initial, packet number {d} (ClientHello incomplete)", .{pn}),
+        .parse_alert => logSystem(config, .INFO, "decrypted client Initial but ClientHello parse raised an alert", .{}),
+        .decrypt_failed => logSystem(config, .INFO, "long-header Initial failed to decrypt under the Initial keys", .{}),
+        .handshake_opened => logSystem(config, .INFO, "decrypted client Handshake packet (handshake keys correct, validated live)", .{}),
         .request_opened => {
             if (stats) |st| st.requests += 1;
 
-            logSystem(config, "decrypted client 1-RTT request (application keys correct, validated live)", .{});
+            logSystem(config, .INFO, "decrypted client 1-RTT request (application keys correct, validated live)", .{});
             sendResponseFD(handler, table, dg.data, tx, fd, dg.from, config.cid_len, config, stats);
         },
         else => {},
@@ -825,7 +846,7 @@ fn sendServerHelloFD(table: *ConnTable, data: []const u8, tx: *datagram.SendBatc
 
     var out: [1500]u8 = undefined;
     const built = serverhello.buildServerHelloInitial(&out, &hello, client_hello, conn.initial_server, hdr.scid, conn.our_scid.slice(), server_random, ephemeral) orelse {
-        logSystem(config, "ServerHello not built (no X25519 share or negotiation declined)", .{});
+        logSystem(config, .WARN, "ServerHello not built (no X25519 share or negotiation declined)", .{});
         return;
     };
 
@@ -837,7 +858,7 @@ fn sendServerHelloFD(table: *ConnTable, data: []const u8, tx: *datagram.SendBatc
 
     _ = tx.queue(peer, built.packet);
     tx.flush(fd) catch {};
-    logSystem(config, "sent ServerHello Initial ({d} bytes), Handshake keys derived", .{built.packet.len});
+    logSystem(config, .INFO, "sent ServerHello Initial ({d} bytes), Handshake keys derived", .{built.packet.len});
 
     // Handshake flight: EncryptedExtensions (ALPN h3 + transport params) + Certificate +
     // CertificateVerify + Finished, sealed into a Handshake packet with the server Handshake keys.
@@ -859,13 +880,13 @@ fn sendServerHelloFD(table: *ConnTable, data: []const u8, tx: *datagram.SendBatc
         config.max_idle_ms,
         config.max_streams,
     ) orelse {
-        logSystem(config, "Handshake flight not built", .{});
+        logSystem(config, .WARN, "Handshake flight not built", .{});
         return;
     };
 
     _ = tx.queue(peer, flight_packet);
     tx.flush(fd) catch {};
-    logSystem(config, "sent Handshake flight ({d} bytes): EE + Cert + CertVerify + Finished", .{flight_packet.len});
+    logSystem(config, .INFO, "sent Handshake flight ({d} bytes): EE + Cert + CertVerify + Finished", .{flight_packet.len});
 
     // 1-RTT application keys, derived from the transcript through the server Finished (which the
     // flight just appended). The client addresses us by our_scid from here on.
@@ -1177,7 +1198,7 @@ fn pumpStream(conn: *Connection, stream: *SendStream, tx: *datagram.SendBatch, f
     // A fully-sent stream is not freed here: it stays active until its packets are acknowledged
     // (Connection.onAckFrame retires it once unacked reaches 0), so a tail packet lost after the last
     // byte went out is still found and retransmitted by the loss rewind.
-    if (stream.complete()) logSystem(config, "stream {d} fully sent ({d} bytes), awaiting ack", .{ stream.stream_id, stream.content_len });
+    if (stream.complete()) logSystem(config, .INFO, "stream {d} fully sent ({d} bytes), awaiting ack", .{ stream.stream_id, stream.content_len });
 
     return sent_any;
 }

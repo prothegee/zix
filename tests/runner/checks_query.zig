@@ -209,7 +209,7 @@ pub fn runHttpQuery(io: std.Io, server_path: []const u8, port: u16) !void {
 
         if (status != case.want_status) {
             std.debug.print("FAIL query case: {s}, got {d} want {d}\n", .{ case.what, status, case.want_status });
-            return error.UnexpectedStatus;
+            return error.ZixUnexpectedStatus;
         }
 
         if (case.want_accept_query and wire.headerValue(headOf(resp), "accept-query") == null) {

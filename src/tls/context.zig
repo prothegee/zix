@@ -22,6 +22,10 @@ const NamedGroup = handshake.NamedGroup;
 const CipherSuite = handshake.CipherSuite;
 const SigningKey = certificate.SigningKey;
 const HandshakeOptions = connection.HandshakeOptions;
+
+/// Widest PEM file the context will read. A certificate chain or a private key past this is a
+/// configuration mistake, not a large key, so the read stops rather than allocating for it.
+const PEM_MAX_BYTES: usize = 1 << 20;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Ed25519 = std.crypto.sign.Ed25519;
 
@@ -57,11 +61,11 @@ pub const Config = struct {
     max_version: Version = .TLS_1_3,
 
     /// ECDHE curves in server-preference order. Validated at init: an unsupported value
-    /// (P384, MLKEM768) returns error.TlsUnsupportedCurve, never a silent drop.
+    /// (P384, MLKEM768) returns error.ZixTlsUnsupportedCurve, never a silent drop.
     curves: []const NamedGroup = default_curves,
     /// AEAD cipher suites in preference order, spanning 1.3 and 1.2. Same validate-or-reject
     /// contract: an unsupported value (AES_256, CHACHA20, any RSA suite) returns
-    /// error.TlsUnsupportedCipher.
+    /// error.ZixTlsUnsupportedCipher.
     ciphers: []const CipherSuite = default_ciphers,
 
     /// Honor server cipher order over the client's (the server-prefers-order policy).
@@ -75,14 +79,14 @@ pub const Config = struct {
 
 /// Errors init can raise from the policy (beyond the I/O / parse errors of loading the PEM files).
 pub const ConfigError = error{
-    TlsNoCurves,
-    TlsNoCiphers,
-    TlsUnsupportedCurve,
-    TlsUnsupportedCipher,
-    TlsInvalidVersionRange,
-    TlsMissingCipherForVersion,
-    TlsMissingCurveForTls12,
-    UnsupportedCertificateKey,
+    ZixTlsNoCurves,
+    ZixTlsNoCiphers,
+    ZixTlsUnsupportedCurve,
+    ZixTlsUnsupportedCipher,
+    ZixTlsInvalidVersionRange,
+    ZixTlsMissingCipherForVersion,
+    ZixTlsMissingCurveForTls12,
+    ZixUnsupportedCertificateKey,
 };
 
 /// The live context: the loaded certificate + signing key and the validated policy the engine
@@ -113,12 +117,23 @@ pub const Context = struct {
     ///
     /// Return:
     /// - Context
-    /// - ConfigError on an unhonorable policy, or the PEM read / parse errors
+    /// - ConfigError on an unhonorable policy, or the PEM parse errors
+    /// - error.ZixTlsCertFileNotFound / error.ZixTlsKeyFileNotFound (no such path)
+    /// - error.ZixTlsCertFileUnreadable / error.ZixTlsKeyFileUnreadable (the path exists and the
+    ///   read still failed, most often permissions)
+    /// - error.ZixTlsCertPathIsDirectory / error.ZixTlsKeyPathIsDirectory (a directory was named)
+    /// - error.ZixTlsCertFileTooLarge / error.ZixTlsKeyFileTooLarge (over PEM_MAX_BYTES)
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) !Context {
         try validate(config);
 
-        const cert_pem = std.Io.Dir.cwd().readFileAlloc(io, config.cert_path, allocator, .limited(1 << 20)) catch {
-            return error.TlsCertFileNotFound;
+        // Four causes, four names. They used to collapse into "not found", so a permission
+        // problem and a typo in the path read the same to whoever had to fix it.
+        const cert_pem = std.Io.Dir.cwd().readFileAlloc(io, config.cert_path, allocator, .limited(PEM_MAX_BYTES)) catch |err| return switch (err) {
+            error.FileNotFound => error.ZixTlsCertFileNotFound,
+            error.IsDir => error.ZixTlsCertPathIsDirectory,
+            error.StreamTooLong => error.ZixTlsCertFileTooLarge,
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.ZixTlsCertFileUnreadable,
         };
         defer allocator.free(cert_pem);
         var cert_der_buf: [4096]u8 = undefined;
@@ -127,8 +142,12 @@ pub const Context = struct {
         const cert_der = try allocator.dupe(u8, cert_der_view);
         errdefer allocator.free(cert_der);
 
-        const key_pem = std.Io.Dir.cwd().readFileAlloc(io, config.key_path, allocator, .limited(1 << 20)) catch {
-            return error.TlsKeyFileNotFound;
+        const key_pem = std.Io.Dir.cwd().readFileAlloc(io, config.key_path, allocator, .limited(PEM_MAX_BYTES)) catch |err| return switch (err) {
+            error.FileNotFound => error.ZixTlsKeyFileNotFound,
+            error.IsDir => error.ZixTlsKeyPathIsDirectory,
+            error.StreamTooLong => error.ZixTlsKeyFileTooLarge,
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.ZixTlsKeyFileUnreadable,
         };
         defer allocator.free(key_pem);
         var key_der_buf: [4096]u8 = undefined; // RSA PKCS#8 DER is far larger than an EC key
@@ -144,11 +163,11 @@ pub const Context = struct {
             .rsaEncryption => blk: {
                 const is_pkcs8 = std.mem.indexOf(u8, key_pem, "BEGIN RSA PRIVATE KEY") == null;
                 const key = try rsa.PrivateKey.fromDer(key_der, is_pkcs8);
-                if (key.size() < 256) return error.RsaKeyTooSmall; // RSA-2048 minimum
+                if (key.size() < 256) return error.ZixRsaKeyTooSmall; // RSA-2048 minimum
 
                 break :blk .{ .rsa = key };
             },
-            else => return error.UnsupportedCertificateKey,
+            else => return error.ZixUnsupportedCertificateKey,
         };
 
         return .{
@@ -199,25 +218,25 @@ pub const Context = struct {
 /// I/O-free policy validation (the honesty boundary). Rejects any curve / cipher the engine cannot
 /// honor and any version range it cannot serve, so a configured field is never silently ignored.
 pub fn validate(config: Config) ConfigError!void {
-    if (config.curves.len == 0) return error.TlsNoCurves;
-    if (config.ciphers.len == 0) return error.TlsNoCiphers;
+    if (config.curves.len == 0) return error.ZixTlsNoCurves;
+    if (config.ciphers.len == 0) return error.ZixTlsNoCiphers;
 
     for (config.curves) |curve| {
-        if (!isImplementedCurve(curve)) return error.TlsUnsupportedCurve;
+        if (!isImplementedCurve(curve)) return error.ZixTlsUnsupportedCurve;
     }
     for (config.ciphers) |cipher| {
-        if (!isImplementedCipher(cipher)) return error.TlsUnsupportedCipher;
+        if (!isImplementedCipher(cipher)) return error.ZixTlsUnsupportedCipher;
     }
 
-    if (@intFromEnum(config.min_version) > @intFromEnum(config.max_version)) return error.TlsInvalidVersionRange;
+    if (@intFromEnum(config.min_version) > @intFromEnum(config.max_version)) return error.ZixTlsInvalidVersionRange;
 
     // Each offered version needs its suite (and 1.2 ECDHE needs secp256r1) present in the lists.
     if (config.max_version == .TLS_1_3 and !contains(CipherSuite, config.ciphers, .AES_128_GCM_SHA256)) {
-        return error.TlsMissingCipherForVersion;
+        return error.ZixTlsMissingCipherForVersion;
     }
     if (config.min_version == .TLS_1_2) {
-        if (!contains(CipherSuite, config.ciphers, .ECDHE_ECDSA_AES128_GCM_SHA256)) return error.TlsMissingCipherForVersion;
-        if (!contains(NamedGroup, config.curves, .SECP256R1)) return error.TlsMissingCurveForTls12;
+        if (!contains(CipherSuite, config.ciphers, .ECDHE_ECDSA_AES128_GCM_SHA256)) return error.ZixTlsMissingCipherForVersion;
+        if (!contains(NamedGroup, config.curves, .SECP256R1)) return error.ZixTlsMissingCurveForTls12;
     }
 }
 
@@ -245,7 +264,7 @@ test "zix tls: context, default config validates" {
 }
 
 test "zix tls: context, unsupported curve is rejected" {
-    try std.testing.expectError(error.TlsUnsupportedCurve, validate(.{
+    try std.testing.expectError(error.ZixTlsUnsupportedCurve, validate(.{
         .cert_path = "c",
         .key_path = "k",
         .curves = &.{ .X25519, @enumFromInt(0x4588) }, // a curve zix does not implement (e.g. MLKEM768)
@@ -253,7 +272,7 @@ test "zix tls: context, unsupported curve is rejected" {
 }
 
 test "zix tls: context, unsupported cipher is rejected" {
-    try std.testing.expectError(error.TlsUnsupportedCipher, validate(.{
+    try std.testing.expectError(error.ZixTlsUnsupportedCipher, validate(.{
         .cert_path = "c",
         .key_path = "k",
         .ciphers = &.{ .AES_128_GCM_SHA256, .CHACHA20_POLY1305_SHA256, .ECDHE_ECDSA_AES128_GCM_SHA256 },
@@ -261,12 +280,12 @@ test "zix tls: context, unsupported cipher is rejected" {
 }
 
 test "zix tls: context, empty curves / ciphers rejected" {
-    try std.testing.expectError(error.TlsNoCurves, validate(.{ .cert_path = "c", .key_path = "k", .curves = &.{} }));
-    try std.testing.expectError(error.TlsNoCiphers, validate(.{ .cert_path = "c", .key_path = "k", .ciphers = &.{} }));
+    try std.testing.expectError(error.ZixTlsNoCurves, validate(.{ .cert_path = "c", .key_path = "k", .curves = &.{} }));
+    try std.testing.expectError(error.ZixTlsNoCiphers, validate(.{ .cert_path = "c", .key_path = "k", .ciphers = &.{} }));
 }
 
 test "zix tls: context, inverted version range rejected" {
-    try std.testing.expectError(error.TlsInvalidVersionRange, validate(.{
+    try std.testing.expectError(error.ZixTlsInvalidVersionRange, validate(.{
         .cert_path = "c",
         .key_path = "k",
         .min_version = .TLS_1_3,
@@ -276,7 +295,7 @@ test "zix tls: context, inverted version range rejected" {
 
 test "zix tls: context, version requires its suite present" {
     // 1.3-only policy missing the 1.3 suite.
-    try std.testing.expectError(error.TlsMissingCipherForVersion, validate(.{
+    try std.testing.expectError(error.ZixTlsMissingCipherForVersion, validate(.{
         .cert_path = "c",
         .key_path = "k",
         .min_version = .TLS_1_3,
@@ -285,7 +304,7 @@ test "zix tls: context, version requires its suite present" {
     }));
 
     // 1.2 floor without secp256r1 (1.2 ECDHE needs it).
-    try std.testing.expectError(error.TlsMissingCurveForTls12, validate(.{
+    try std.testing.expectError(error.ZixTlsMissingCurveForTls12, validate(.{
         .cert_path = "c",
         .key_path = "k",
         .curves = &.{.X25519},

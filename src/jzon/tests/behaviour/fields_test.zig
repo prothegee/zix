@@ -91,5 +91,5 @@ test "jzon behaviour: seen reports a field with nothing to fall back to" {
     var order: Order = undefined;
     order.id = 1;
 
-    try std.testing.expectError(error.MissingField, seen.fill(&order));
+    try std.testing.expectError(error.JzonMissingField, seen.fill(&order));
 }

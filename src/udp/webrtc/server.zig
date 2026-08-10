@@ -74,50 +74,50 @@ fn WebrtcServerImpl(comptime handler: HandlerFn) type {
         ///
         /// Return:
         /// - !void
-        /// - error.PortNotConfigured when config.port is 0
-        /// - error.IceCredentialsRequired when the local ufrag or password is empty
-        /// - error.IceCredentialsInvalid when either is outside what RFC 8445 5.3 allows
-        /// - error.TlsRequired when config.tls is null (WebRTC has no cleartext mode)
-        /// - error.UnsupportedCertificateKey when that context's key is not ECDSA P-256
-        /// - error.DispatchModelUnsupported for .EPOLL or .URING off Linux
+        /// - error.ZixPortNotConfigured when config.port is 0
+        /// - error.ZixIceCredentialsRequired when the local ufrag or password is empty
+        /// - error.ZixIceCredentialsInvalid when either is outside what RFC 8445 5.3 allows
+        /// - error.ZixTlsRequired when config.tls is null (WebRTC has no cleartext mode)
+        /// - error.ZixUnsupportedCertificateKey when that context's key is not ECDSA P-256
+        /// - error.ZixDispatchModelUnsupported for .EPOLL or .URING off Linux
         pub fn run(self: *const Self) !void {
-            if (self.config.port == 0) return error.PortNotConfigured;
+            if (self.config.port == 0) return error.ZixPortNotConfigured;
 
             if (self.config.ice_ufrag.len == 0 or self.config.ice_password.len == 0) {
-                common.logSystem(self.config, "ice_ufrag and ice_password must both be set, a peer's checks cannot be verified without them", .{});
+                common.logSystem(self.config, .ERROR, "ice_ufrag and ice_password must both be set, a peer's checks cannot be verified without them", .{});
 
-                return error.IceCredentialsRequired;
+                return error.ZixIceCredentialsRequired;
             }
 
             // A password below the RFC length is a weak MAC key, and the length is the only signal
             // available that the caller has not generated one properly.
             const local: ice_credentials.Credentials = .{ .ufrag = self.config.ice_ufrag, .password = self.config.ice_password };
             local.validate() catch |err| {
-                common.logSystem(self.config, "ice credentials rejected: {s}", .{@errorName(err)});
+                common.logSystem(self.config, .ERROR, "ice credentials rejected: {s}", .{@errorName(err)});
 
-                return error.IceCredentialsInvalid;
+                return error.ZixIceCredentialsInvalid;
             };
 
             if (self.config.tls == null) {
-                common.logSystem(self.config, "a tls context is required, webrtc has no cleartext mode", .{});
+                common.logSystem(self.config, .ERROR, "a tls context is required, webrtc has no cleartext mode", .{});
 
-                return error.TlsRequired;
+                return error.ZixTlsRequired;
             }
 
             // The one DTLS 1.2 suite this engine implements is ECDHE-ECDSA (RFC 5289), so an
             // Ed25519 or RSA certificate has nothing to sign the ServerKeyExchange with.
             if (common.ecdsaKey(self.config) == null) {
-                common.logSystem(self.config, "the certificate key must be ecdsa p-256, this engine has no other suite", .{});
+                common.logSystem(self.config, .ERROR, "the certificate key must be ecdsa p-256, this engine has no other suite", .{});
 
-                return error.UnsupportedCertificateKey;
+                return error.ZixUnsupportedCertificateKey;
             }
 
             // Reject an unrunnable model before binding, so a rejected config leaves nothing
             // behind (ADR-065).
             if (!dispatch_support.isSupported(self.config.dispatch_model)) {
-                common.logSystem(self.config, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
+                common.logSystem(self.config, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
 
-                return error.DispatchModelUnsupported;
+                return error.ZixDispatchModelUnsupported;
             }
 
             return switch (self.config.dispatch_model) {
@@ -205,6 +205,13 @@ fn testContext(allocator: std.mem.Allocator, key: Tls.SigningKey) Tls.Context {
     };
 }
 
+/// A logger that writes nowhere: console off and no save_path, so nothing is opened and nothing is
+/// printed. It gives the rejection and drop paths a destination, which keeps a test's expected
+/// failure message out of the runner's logged-error count.
+const Logger = @import("../../logger/logger.zig").Logger;
+
+var quiet_logger = Logger{ .config = .{}, .allocator = std.testing.allocator };
+
 fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context) WebrtcServerConfig {
     return .{
         .io = io,
@@ -216,6 +223,7 @@ fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context) Webrt
         .ice_password = TEST_PASSWORD,
         .peer_ice_ufrag = "peer",
         .tls = tls,
+        .logger = &quiet_logger,
     };
 }
 
@@ -230,7 +238,7 @@ test "zix webrtc: server run rejects port zero" {
     var server = Server.init(noopHandler, config);
     defer server.deinit();
 
-    try std.testing.expectError(error.PortNotConfigured, server.run());
+    try std.testing.expectError(error.ZixPortNotConfigured, server.run());
 }
 
 test "zix webrtc: server run rejects missing ice credentials" {
@@ -244,14 +252,14 @@ test "zix webrtc: server run rejects missing ice credentials" {
 
     var without_ufrag = Server.init(noopHandler, no_ufrag);
     defer without_ufrag.deinit();
-    try std.testing.expectError(error.IceCredentialsRequired, without_ufrag.run());
+    try std.testing.expectError(error.ZixIceCredentialsRequired, without_ufrag.run());
 
     var no_password = testConfig(threaded.io(), std.testing.allocator, &tls);
     no_password.ice_password = "";
 
     var without_password = Server.init(noopHandler, no_password);
     defer without_password.deinit();
-    try std.testing.expectError(error.IceCredentialsRequired, without_password.run());
+    try std.testing.expectError(error.ZixIceCredentialsRequired, without_password.run());
 }
 
 test "zix webrtc: server run rejects a password shorter than the rfc allows" {
@@ -265,7 +273,7 @@ test "zix webrtc: server run rejects a password shorter than the rfc allows" {
     var server = Server.init(noopHandler, config);
     defer server.deinit();
 
-    try std.testing.expectError(error.IceCredentialsInvalid, server.run());
+    try std.testing.expectError(error.ZixIceCredentialsInvalid, server.run());
 }
 
 test "zix webrtc: server run rejects a missing tls context" {
@@ -279,7 +287,7 @@ test "zix webrtc: server run rejects a missing tls context" {
     var server = Server.init(noopHandler, config);
     defer server.deinit();
 
-    try std.testing.expectError(error.TlsRequired, server.run());
+    try std.testing.expectError(error.ZixTlsRequired, server.run());
 }
 
 test "zix webrtc: server run rejects a certificate key it cannot sign with" {
@@ -292,7 +300,7 @@ test "zix webrtc: server run rejects a certificate key it cannot sign with" {
     var server = Server.init(noopHandler, testConfig(threaded.io(), std.testing.allocator, &tls));
     defer server.deinit();
 
-    try std.testing.expectError(error.UnsupportedCertificateKey, server.run());
+    try std.testing.expectError(error.ZixUnsupportedCertificateKey, server.run());
 }
 
 test "zix webrtc: server run rejects the per-core models off linux" {
@@ -315,7 +323,7 @@ test "zix webrtc: server run rejects the per-core models off linux" {
         var server = Server.init(noopHandler, config);
         defer server.deinit();
 
-        try std.testing.expectError(error.DispatchModelUnsupported, server.run());
+        try std.testing.expectError(error.ZixDispatchModelUnsupported, server.run());
     }
 }
 
@@ -335,7 +343,7 @@ test "zix webrtc: server run checks the config before it looks at the model" {
         var server = Server.init(noopHandler, config);
         defer server.deinit();
 
-        try std.testing.expectError(error.PortNotConfigured, server.run());
+        try std.testing.expectError(error.ZixPortNotConfigured, server.run());
     }
 }
 

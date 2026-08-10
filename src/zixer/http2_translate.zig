@@ -19,10 +19,10 @@ const NAME_LOWER_MAX: usize = 128;
 pub const Error = error{
     /// The request breaks an rfc 9113 8.2 or 8.3 rule: the stream answers
     /// a protocol error, never the pool.
-    Malformed,
+    ZixerMalformed,
     /// CONNECT without the rfc 8441 websocket extension. zixer only
     /// tunnels websocket.
-    UnsupportedConnect,
+    ZixerUnsupportedConnect,
 };
 
 /// One h2 request after pseudo-header validation. Slices borrow the decode
@@ -54,28 +54,28 @@ pub fn assemble(headers: []const Http2.Header, end_stream: bool) Error!Request {
     var seen_regular = false;
 
     for (headers) |header| {
-        if (header.name.len == 0) return error.Malformed;
+        if (header.name.len == 0) return error.ZixerMalformed;
 
         if (header.name[0] == ':') {
-            if (seen_regular) return error.Malformed;
+            if (seen_regular) return error.ZixerMalformed;
 
             if (std.mem.eql(u8, header.name, ":method")) {
-                if (method != null) return error.Malformed;
+                if (method != null) return error.ZixerMalformed;
                 method = header.value;
             } else if (std.mem.eql(u8, header.name, ":path")) {
-                if (target != null) return error.Malformed;
+                if (target != null) return error.ZixerMalformed;
                 target = header.value;
             } else if (std.mem.eql(u8, header.name, ":scheme")) {
-                if (scheme != null) return error.Malformed;
+                if (scheme != null) return error.ZixerMalformed;
                 scheme = header.value;
             } else if (std.mem.eql(u8, header.name, ":authority")) {
-                if (authority != null) return error.Malformed;
+                if (authority != null) return error.ZixerMalformed;
                 authority = header.value;
             } else if (std.mem.eql(u8, header.name, ":protocol")) {
-                if (protocol != null) return error.Malformed;
+                if (protocol != null) return error.ZixerMalformed;
                 protocol = header.value;
             } else {
-                return error.Malformed;
+                return error.ZixerMalformed;
             }
             continue;
         }
@@ -84,11 +84,11 @@ pub fn assemble(headers: []const Http2.Header, end_stream: bool) Error!Request {
         try validateRegularName(header.name);
 
         if (std.mem.eql(u8, header.name, "te")) {
-            if (!std.ascii.eqlIgnoreCase(header.value, "trailers")) return error.Malformed;
+            if (!std.ascii.eqlIgnoreCase(header.value, "trailers")) return error.ZixerMalformed;
         } else if (std.mem.eql(u8, header.name, "content-length")) {
-            const parsed = std.fmt.parseInt(u64, header.value, 10) catch return error.Malformed;
+            const parsed = std.fmt.parseInt(u64, header.value, 10) catch return error.ZixerMalformed;
             if (content_length) |seen| {
-                if (seen != parsed) return error.Malformed;
+                if (seen != parsed) return error.ZixerMalformed;
             }
             content_length = parsed;
         } else if (std.mem.eql(u8, header.name, "host")) {
@@ -98,20 +98,20 @@ pub fn assemble(headers: []const Http2.Header, end_stream: bool) Error!Request {
         }
     }
 
-    const method_value = method orelse return error.Malformed;
-    if (method_value.len == 0) return error.Malformed;
+    const method_value = method orelse return error.ZixerMalformed;
+    if (method_value.len == 0) return error.ZixerMalformed;
 
     const final_authority = authority orelse host_value;
 
     if (std.mem.eql(u8, method_value, "CONNECT")) {
         // rfc 8441 5: extended CONNECT carries :protocol plus the full
         // :scheme / :path / :authority set. Plain CONNECT stays unsupported.
-        const protocol_value = protocol orelse return error.UnsupportedConnect;
-        if (!std.mem.eql(u8, protocol_value, "websocket")) return error.UnsupportedConnect;
-        if (scheme == null) return error.Malformed;
-        const connect_target = target orelse return error.Malformed;
-        if (connect_target.len == 0) return error.Malformed;
-        if (final_authority.len == 0) return error.Malformed;
+        const protocol_value = protocol orelse return error.ZixerUnsupportedConnect;
+        if (!std.mem.eql(u8, protocol_value, "websocket")) return error.ZixerUnsupportedConnect;
+        if (scheme == null) return error.ZixerMalformed;
+        const connect_target = target orelse return error.ZixerMalformed;
+        if (connect_target.len == 0) return error.ZixerMalformed;
+        if (final_authority.len == 0) return error.ZixerMalformed;
 
         return .{
             .method = method_value,
@@ -125,14 +125,14 @@ pub fn assemble(headers: []const Http2.Header, end_stream: bool) Error!Request {
         };
     }
 
-    if (protocol != null) return error.Malformed;
-    if (scheme == null) return error.Malformed;
-    const target_value = target orelse return error.Malformed;
-    if (target_value.len == 0) return error.Malformed;
-    if (final_authority.len == 0) return error.Malformed;
+    if (protocol != null) return error.ZixerMalformed;
+    if (scheme == null) return error.ZixerMalformed;
+    const target_value = target orelse return error.ZixerMalformed;
+    if (target_value.len == 0) return error.ZixerMalformed;
+    if (final_authority.len == 0) return error.ZixerMalformed;
 
     // A body promised by content-length cannot ride a closed stream.
-    if (end_stream and (content_length orelse 0) != 0) return error.Malformed;
+    if (end_stream and (content_length orelse 0) != 0) return error.ZixerMalformed;
 
     return .{
         .method = method_value,
@@ -150,12 +150,12 @@ pub fn assemble(headers: []const Http2.Header, end_stream: bool) Error!Request {
 /// headers make the whole request malformed.
 fn validateRegularName(name: []const u8) Error!void {
     for (name) |char| {
-        if (char >= 'A' and char <= 'Z') return error.Malformed;
+        if (char >= 'A' and char <= 'Z') return error.ZixerMalformed;
     }
 
     const forbidden = [_][]const u8{ "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade" };
     for (forbidden) |bad| {
-        if (std.mem.eql(u8, name, bad)) return error.Malformed;
+        if (std.mem.eql(u8, name, bad)) return error.ZixerMalformed;
     }
 }
 
@@ -302,7 +302,7 @@ pub fn encodeLocalBlock(block_buf: []u8, status: u16, proxy_error: ?[]const u8, 
 
     if (proxy_error) |token| {
         var value_buf: [96]u8 = undefined;
-        const value = std.fmt.bufPrint(&value_buf, "zixer; error=\"{s}\"", .{token}) catch return error.BufferFull;
+        const value = std.fmt.bufPrint(&value_buf, "zixer; error=\"{s}\"", .{token}) catch return error.ZixerBufferFull;
         try encoder.writeHeader("proxy-status", value);
     }
 
@@ -447,7 +447,7 @@ test "zix zixer: http2 translate, body flags follow end stream and content lengt
     try testing.expectEqual(@as(?u64, 12), with_body.content_length);
 
     // A promised body on a closed stream is malformed.
-    try testing.expectError(error.Malformed, assemble(&posted, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&posted, true));
 
     const head_request = [_]Http2.Header{
         makeHeader(":method", "HEAD"),
@@ -460,55 +460,55 @@ test "zix zixer: http2 translate, body flags follow end stream and content lengt
 
 test "zix zixer: http2 translate, rfc 9113 malformed shapes are refused" {
     const no_path = [_]Http2.Header{ makeHeader(":method", "GET"), makeHeader(":scheme", "http"), makeHeader(":authority", "a") };
-    try testing.expectError(error.Malformed, assemble(&no_path, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&no_path, true));
 
     const no_scheme = [_]Http2.Header{ makeHeader(":method", "GET"), makeHeader(":path", "/"), makeHeader(":authority", "a") };
-    try testing.expectError(error.Malformed, assemble(&no_scheme, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&no_scheme, true));
 
     const no_authority = [_]Http2.Header{ makeHeader(":method", "GET"), makeHeader(":scheme", "http"), makeHeader(":path", "/") };
-    try testing.expectError(error.Malformed, assemble(&no_authority, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&no_authority, true));
 
     const connection_header = [_]Http2.Header{
         makeHeader(":method", "GET"),           makeHeader(":scheme", "http"), makeHeader(":path", "/"), makeHeader(":authority", "a"),
         makeHeader("connection", "keep-alive"),
     };
-    try testing.expectError(error.Malformed, assemble(&connection_header, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&connection_header, true));
 
     const te_gzip = [_]Http2.Header{
         makeHeader(":method", "GET"), makeHeader(":scheme", "http"), makeHeader(":path", "/"), makeHeader(":authority", "a"),
         makeHeader("te", "gzip"),
     };
-    try testing.expectError(error.Malformed, assemble(&te_gzip, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&te_gzip, true));
 
     const uppercase_name = [_]Http2.Header{
         makeHeader(":method", "GET"), makeHeader(":scheme", "http"), makeHeader(":path", "/"), makeHeader(":authority", "a"),
         makeHeader("X-Custom", "1"),
     };
-    try testing.expectError(error.Malformed, assemble(&uppercase_name, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&uppercase_name, true));
 
     const pseudo_after_regular = [_]Http2.Header{
         makeHeader(":method", "GET"),  makeHeader(":scheme", "http"), makeHeader("accept", "*/*"), makeHeader(":path", "/"),
         makeHeader(":authority", "a"),
     };
-    try testing.expectError(error.Malformed, assemble(&pseudo_after_regular, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&pseudo_after_regular, true));
 
     const duplicate_method = [_]Http2.Header{
         makeHeader(":method", "GET"),  makeHeader(":method", "POST"), makeHeader(":scheme", "http"), makeHeader(":path", "/"),
         makeHeader(":authority", "a"),
     };
-    try testing.expectError(error.Malformed, assemble(&duplicate_method, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&duplicate_method, true));
 
     const protocol_on_get = [_]Http2.Header{
         makeHeader(":method", "GET"),         makeHeader(":scheme", "http"), makeHeader(":path", "/"), makeHeader(":authority", "a"),
         makeHeader(":protocol", "websocket"),
     };
-    try testing.expectError(error.Malformed, assemble(&protocol_on_get, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&protocol_on_get, true));
 
     const conflicting_lengths = [_]Http2.Header{
         makeHeader(":method", "POST"),     makeHeader(":scheme", "http"),     makeHeader(":path", "/"), makeHeader(":authority", "a"),
         makeHeader("content-length", "4"), makeHeader("content-length", "9"),
     };
-    try testing.expectError(error.Malformed, assemble(&conflicting_lengths, false));
+    try testing.expectError(error.ZixerMalformed, assemble(&conflicting_lengths, false));
 }
 
 test "zix zixer: http2 translate, extended connect takes websocket only" {
@@ -526,19 +526,19 @@ test "zix zixer: http2 translate, extended connect takes websocket only" {
     try testing.expectEqualStrings("/chat", request.target);
 
     const plain_connect = [_]Http2.Header{ makeHeader(":method", "CONNECT"), makeHeader(":authority", "app.example:443") };
-    try testing.expectError(error.UnsupportedConnect, assemble(&plain_connect, false));
+    try testing.expectError(error.ZixerUnsupportedConnect, assemble(&plain_connect, false));
 
     const other_protocol = [_]Http2.Header{
         makeHeader(":method", "CONNECT"), makeHeader(":protocol", "webtransport"), makeHeader(":scheme", "https"),
         makeHeader(":path", "/wt"),       makeHeader(":authority", "app.example"),
     };
-    try testing.expectError(error.UnsupportedConnect, assemble(&other_protocol, false));
+    try testing.expectError(error.ZixerUnsupportedConnect, assemble(&other_protocol, false));
 
     const missing_path = [_]Http2.Header{
         makeHeader(":method", "CONNECT"),        makeHeader(":protocol", "websocket"), makeHeader(":scheme", "https"),
         makeHeader(":authority", "app.example"),
     };
-    try testing.expectError(error.Malformed, assemble(&missing_path, false));
+    try testing.expectError(error.ZixerMalformed, assemble(&missing_path, false));
 }
 
 test "zix zixer: http2 translate, upstream head carries host via forwarded and framing" {

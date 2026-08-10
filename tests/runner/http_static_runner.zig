@@ -99,7 +99,7 @@ fn run(
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
 
     // Multipart upload round trip (http1_static only): POST to the upload route, then GET the
     // saved file back through the engine static fallback at /u/<name>.

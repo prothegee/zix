@@ -17,8 +17,8 @@ const lib = @import("lib.zig");
 ///
 /// Return:
 /// - lib.Config on success
-/// - error.UnsupportedScheme (not redis:// or rediss://)
-/// - error.InvalidUrl on a malformed host, port or db segment
+/// - error.RedizUnsupportedScheme (not redis:// or rediss://)
+/// - error.RedizInvalidUrl on a malformed host, port or db segment
 pub fn parseUrl(url: []const u8) !lib.Config {
     var config = lib.Config{};
     var rest = url;
@@ -29,7 +29,7 @@ pub fn parseUrl(url: []const u8) !lib.Config {
     } else if (std.mem.startsWith(u8, rest, "redis://")) {
         rest = rest["redis://".len..];
     } else {
-        return error.UnsupportedScheme;
+        return error.RedizUnsupportedScheme;
     }
 
     if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at_pos| {
@@ -49,16 +49,16 @@ pub fn parseUrl(url: []const u8) !lib.Config {
         rest = rest[0..slash_pos];
 
         if (db_text.len > 0) {
-            config.database = std.fmt.parseInt(u32, db_text, 10) catch return error.InvalidUrl;
+            config.database = std.fmt.parseInt(u32, db_text, 10) catch return error.RedizInvalidUrl;
         }
     }
 
     if (std.mem.indexOfScalar(u8, rest, ':')) |colon_pos| {
-        config.port = std.fmt.parseInt(u16, rest[colon_pos + 1 ..], 10) catch return error.InvalidUrl;
+        config.port = std.fmt.parseInt(u16, rest[colon_pos + 1 ..], 10) catch return error.RedizInvalidUrl;
         rest = rest[0..colon_pos];
     }
 
-    if (rest.len == 0) return error.InvalidUrl;
+    if (rest.len == 0) return error.RedizInvalidUrl;
     config.ip = rest;
 
     return config;
@@ -111,9 +111,9 @@ test "rediz: url trailing slash keeps db 0" {
 }
 
 test "rediz: url rejects malformed input" {
-    try testing.expectError(error.UnsupportedScheme, parseUrl("http://localhost"));
-    try testing.expectError(error.UnsupportedScheme, parseUrl("localhost:6379"));
-    try testing.expectError(error.InvalidUrl, parseUrl("redis://"));
-    try testing.expectError(error.InvalidUrl, parseUrl("redis://localhost:notaport"));
-    try testing.expectError(error.InvalidUrl, parseUrl("redis://localhost:6379/notadb"));
+    try testing.expectError(error.RedizUnsupportedScheme, parseUrl("http://localhost"));
+    try testing.expectError(error.RedizUnsupportedScheme, parseUrl("localhost:6379"));
+    try testing.expectError(error.RedizInvalidUrl, parseUrl("redis://"));
+    try testing.expectError(error.RedizInvalidUrl, parseUrl("redis://localhost:notaport"));
+    try testing.expectError(error.RedizInvalidUrl, parseUrl("redis://localhost:6379/notadb"));
 }

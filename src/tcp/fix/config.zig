@@ -19,7 +19,7 @@ pub const FixServerConfig = struct {
     /// Server SenderCompID (tag 49). Caller-provided. Must outlive the server.
     comp_id: []const u8,
     /// Connection dispatch model. Selects between .ASYNC, .EPOLL, and .URING (.EPOLL and .URING are
-    /// Linux-only, run() rejects them elsewhere with error.DispatchModelUnsupported).
+    /// Linux-only, run() rejects them elsewhere with error.ZixDispatchModelUnsupported).
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// TCP listen backlog: pending connections queued by the kernel before accept().

@@ -30,9 +30,9 @@ pub const ENTRY_LEN: usize = 4;
 /// Everything that stops a FORWARD TSN from being read or built.
 pub const Error = error{
     /// Fewer bytes than the new cumulative TSN needs, or a half entry at the end.
-    Truncated,
+    ZixTruncated,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// One ordered stream and the sequence it was skipped to.
@@ -111,13 +111,13 @@ pub fn valueLen(entry_count: usize) usize {
 ///
 /// Return:
 /// - ForwardTsn borrowing `value`
-/// - error.Truncated if the body is short or ends mid-entry
+/// - error.ZixTruncated if the body is short or ends mid-entry
 pub fn read(value: []const u8) Error!ForwardTsn {
-    if (value.len < FIXED_LEN) return error.Truncated;
+    if (value.len < FIXED_LEN) return error.ZixTruncated;
 
     const entries = value[FIXED_LEN..];
 
-    if (entries.len % ENTRY_LEN != 0) return error.Truncated;
+    if (entries.len % ENTRY_LEN != 0) return error.ZixTruncated;
 
     return .{
         .new_cumulative_tsn = std.mem.readInt(u32, value[0..4], .big),
@@ -134,11 +134,11 @@ pub fn read(value: []const u8) Error!ForwardTsn {
 ///
 /// Return:
 /// - []const u8 chunk value
-/// - error.NoSpace if the buffer cannot hold the TSN and every entry
+/// - error.ZixNoSpace if the buffer cannot hold the TSN and every entry
 pub fn write(out: []u8, new_cumulative_tsn: u32, entries: []const StreamEntry) Error![]const u8 {
     const total = valueLen(entries.len);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     std.mem.writeInt(u32, out[0..4], new_cumulative_tsn, .big);
 
@@ -203,19 +203,19 @@ test "zix sctp: forward tsn read, a named stream is found and an unnamed one is 
 test "zix sctp: forward tsn read, a body shorter than the TSN errors" {
     const short: [3]u8 = @splat(0);
 
-    try std.testing.expectError(error.Truncated, read(&short));
+    try std.testing.expectError(error.ZixTruncated, read(&short));
 }
 
 test "zix sctp: forward tsn read, a body ending mid-entry errors" {
     const ragged: [6]u8 = .{ 0, 0, 0, 5, 0, 1 };
 
-    try std.testing.expectError(error.Truncated, read(&ragged));
+    try std.testing.expectError(error.ZixTruncated, read(&ragged));
 }
 
 test "zix sctp: forward tsn write, a buffer too small errors" {
     var buf: [6]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, 5, &.{
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, 5, &.{
         .{ .stream_identifier = 1, .stream_sequence = 1 },
     }));
 }

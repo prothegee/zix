@@ -1,7 +1,7 @@
 //! postgrez example: server errors through the full SQLSTATE enum.
 //!
 //! Note:
-//! - error.ServerError signals a server-reported failure, lastServerError()
+//! - error.PostgrezServerError signals a server-reported failure, lastServerError()
 //!   carries the mapped enum, the raw 5-char code, severity, and message.
 //!   The connection stays usable afterwards.
 //! - Needs the PostgreSQL 18 container on 127.0.0.1:54180.
@@ -46,7 +46,7 @@ pub fn main(process: std.process.Init) !void {
         "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
         .{ "Alice2", "alice@errors.example", @as(i16, 31) },
     ) catch |err| {
-        if (err != error.ServerError) return err;
+        if (err != error.PostgrezServerError) return err;
 
         const server_error = conn.lastServerError();
         switch (server_error.state) {
@@ -59,7 +59,7 @@ pub fn main(process: std.process.Init) !void {
 
     // syntax error: SYNTAX_ERROR, and the connection recovers
     _ = conn.exec("SELEC 1", .{}) catch |err| {
-        if (err != error.ServerError) return err;
+        if (err != error.PostgrezServerError) return err;
 
         std.debug.print("state: {s}\n", .{@tagName(conn.lastServerError().state)});
     };

@@ -68,7 +68,7 @@ fn stageB(cap: StageBCap) void {
 
     while (true) {
         const raw = cap.in.recv(cap.io) catch |err| {
-            if (err != error.Closed) std.debug.print("stage_b: recv error: {}\n", .{err});
+            if (err != error.ZixClosed) std.debug.print("stage_b: recv error: {}\n", .{err});
             break;
         };
         const doubled: u64 = @as(u64, raw) * 2;
@@ -92,7 +92,7 @@ fn stageC(cap: StageCCap) void {
     var total: u64 = 0;
     while (true) {
         const result = cap.in.recv(cap.io) catch |err| {
-            if (err != error.Closed) std.debug.print("stage_c: recv error: {}\n", .{err});
+            if (err != error.ZixClosed) std.debug.print("stage_c: recv error: {}\n", .{err});
             break;
         };
         total += result;

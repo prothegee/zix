@@ -12,6 +12,12 @@
     <img src="zix-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="512px">
 </div>
 
+<p align="center">
+    <b>
+        <i>A high-performance network backend library & http engine written in Zig</i>
+    </b>
+</p>
+
 <hr>
 
 <h4 align="center">
@@ -90,7 +96,10 @@
 <hr>
 
 <h4 align="center">
-    <b><i>Benchmark by HttpArena:</i></b>
+    <b><i>Benchmark</i></b>
+</h4>
+<h4 align="center">
+    <b><i>HttpArena</i></b>
 </h4>
 <br>
 <div align="center">
@@ -121,11 +130,21 @@
 
 <!-- <br> -->
 
-<!-- RESERVED localbench -->
+<!--
+RESERVED localbench
+-->
 
 <!-- <br> -->
 
-<!-- RESERVED sponsor -->
+<!--
+RESERVED sponsor
+
+kofi: https://ko-fi.com/prothegee
+paypal: https://paypal.me/prothegee
+saweria: https://saweria.co/prothegee
+
+RESERVED patrons
+-->
 
 <br>
 

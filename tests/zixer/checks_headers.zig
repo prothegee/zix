@@ -35,7 +35,7 @@ pub fn runHeaders(io: std.Io, port: u16) !void {
     var reply_buf: [REPLY_MAX]u8 = undefined;
     const reply = try wire.readUntilClose(stream.socket.handle, &reply_buf);
 
-    if (!std.mem.startsWith(u8, reply, "HTTP/1.1 200")) return error.UnexpectedStatus;
+    if (!std.mem.startsWith(u8, reply, "HTTP/1.1 200")) return error.ZixUnexpectedStatus;
 
     const split = std.mem.indexOf(u8, reply, "\r\n\r\n") orelse return error.NoHeadEnd;
     const head = reply[0..split];

@@ -36,7 +36,7 @@ The trio surface is caller-identical across both engines (a compile-time parity 
 
 ## Runtime Model
 
-Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.DispatchModelUnsupported` rather than silently serving a different model (ADR-065).
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.ZixDispatchModelUnsupported` rather than silently serving a different model (ADR-065).
 
 ### .ASYNC: Single Accept, io.async() Dispatch
 
@@ -76,12 +76,12 @@ flowchart TD
 
 - Each worker owns a private listener, epoll instance, and connection table. The kernel load-balances new connections across the per-worker listeners (`SO_REUSEPORT`), so there is no accept thread, no shared queue, and no cross-thread fd handoff.
 - Pipelined requests arriving in one readable event are all parsed and dispatched in that pass, and their responses are coalesced into a single `write()` via a per-event response sink.
-- Off Linux, `run()` returns `error.DispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
+- Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
 - This is the only model that honors engine-owned WebSocket promotion (see WebSocket section).
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
-`zix.Http1` is the reference engine for the io_uring path (ADR-037). Same shared-nothing, thread-per-core topology as `.EPOLL` (private `SO_REUSEPORT` listener and one ring per worker), but completion-based: accept, recv, send, and close are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring. The WebSocket pump also runs natively on the ring (BufferGroup). Off Linux, `run()` returns `error.DispatchModelUnsupported`, and when io_uring itself is unavailable on a Linux host the engine folds to the `.EPOLL` loop with a logged notice. On loopback it matches `.EPOLL` on throughput and wins mainly on per-request cache locality.
+`zix.Http1` is the reference engine for the io_uring path (ADR-037). Same shared-nothing, thread-per-core topology as `.EPOLL` (private `SO_REUSEPORT` listener and one ring per worker), but completion-based: accept, recv, send, and close are submitted as SQEs and reaped as CQEs, so most syscall transitions are batched into the ring. The WebSocket pump also runs natively on the ring (BufferGroup). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`, and when io_uring itself is unavailable on a Linux host the engine folds to the `.EPOLL` loop with a logged notice. On loopback it matches `.EPOLL` on throughput and wins mainly on per-request cache locality.
 
 Teardown also rings the close (`prep_close`, ADR-041) instead of a synchronous `linux.close`, so the worker keeps reaping completions across connection teardowns. On the 64-core box this is the difference under connection churn: with the synchronous close the ring barely engaged its cores under reconnect storms, with the ring close it fills them and reaches parity or better on every cell at a fraction of the memory. The shared io_uring `OpKind` and ring helpers live in `src/multiplexers/ring.zig`. See ADR-041 for the measurement.
 
@@ -137,8 +137,8 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.WsFrameFn` | type | Per-frame callback for an engine-owned WebSocket |
 | `zix.Http1.setTimeout` | fn | Arm or shorten the per-handler deadline (thread-local) |
 | `zix.Http1.isExpired` | fn | Whether the current handler's deadline has passed |
-| `zix.Http1.parseHead` | fn | Parse a complete request head from a buffer (zero copy). `error.UnknownMethod` for a method this engine does not implement, `error.InvalidRequest` for a malformed request line |
-| `zix.Http1.parseErrorResponse` | fn | The response bytes for a failed parse: 501 for `error.UnknownMethod`, 400 otherwise |
+| `zix.Http1.parseHead` | fn | Parse a complete request head from a buffer (zero copy). `error.ZixUnknownMethod` for a method this engine does not implement, `error.ZixInvalidRequest` for a malformed request line |
+| `zix.Http1.parseErrorResponse` | fn | The response bytes for a failed parse: 501 for `error.ZixUnknownMethod`, 400 otherwise |
 | `zix.Http1.getHeader` | fn | Case-insensitive header lookup on a ParsedHead |
 | `zix.Http1.acceptEncoding` | fn | Accept-Encoding value for a ParsedHead: O(1) from the parse-pass span, getHeader fallback otherwise |
 | `zix.Http1.setCache` | fn | Install or clear the per-worker response cache |

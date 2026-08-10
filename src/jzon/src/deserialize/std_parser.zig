@@ -35,9 +35,9 @@ const StdError = std.json.ParseError(std.json.Scanner);
 ///
 /// Return:
 /// - T (the parsed value)
-/// - error.UnknownField, error.MissingField, error.UnknownEnumValue when the
+/// - error.JzonUnknownField, error.JzonMissingField, error.JzonUnknownEnumValue when the
 ///   document and the type disagree
-/// - error.Truncated, error.Unexpected, error.BadNumber when the document is not
+/// - error.JzonTruncated, error.JzonUnexpected, error.JzonBadNumber when the document is not
 ///   what it claims
 /// - error.OutOfMemory when the allocator runs out
 pub fn parse(
@@ -66,12 +66,12 @@ pub fn parse(
 fn translate(failure: StdError) Error {
     return switch (failure) {
         error.OutOfMemory => error.OutOfMemory,
-        error.UnknownField => error.UnknownField,
-        error.MissingField => error.MissingField,
-        error.InvalidEnumTag => error.UnknownEnumValue,
-        error.UnexpectedEndOfInput, error.BufferUnderrun => error.Truncated,
-        error.Overflow, error.InvalidCharacter, error.InvalidNumber => error.BadNumber,
-        else => error.Unexpected,
+        error.UnknownField => error.JzonUnknownField,
+        error.MissingField => error.JzonMissingField,
+        error.InvalidEnumTag => error.JzonUnknownEnumValue,
+        error.UnexpectedEndOfInput, error.BufferUnderrun => error.JzonTruncated,
+        error.Overflow, error.InvalidCharacter, error.InvalidNumber => error.JzonBadNumber,
+        else => error.JzonUnexpected,
     };
 }
 
@@ -143,12 +143,12 @@ test "jzon: std parser maps std's failures onto the shared set" {
     const allocator = arena.allocator();
     const Pair = struct { id: u8, name: []const u8 };
 
-    try std.testing.expectError(error.UnknownField, parse(Pair, allocator, "{\"id\":1,\"name\":\"x\",\"other\":2}", .{}));
-    try std.testing.expectError(error.MissingField, parse(Pair, allocator, "{\"id\":1}", .{}));
-    try std.testing.expectError(error.BadNumber, parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}));
-    try std.testing.expectError(error.Truncated, parse(Pair, allocator, "{\"id\":1,", .{}));
-    try std.testing.expectError(error.Unexpected, parse(Pair, allocator, "{\"id\":true,\"name\":\"x\"}", .{}));
-    try std.testing.expectError(error.UnknownEnumValue, parse(Status, allocator, "\"GONE\"", .{}));
+    try std.testing.expectError(error.JzonUnknownField, parse(Pair, allocator, "{\"id\":1,\"name\":\"x\",\"other\":2}", .{}));
+    try std.testing.expectError(error.JzonMissingField, parse(Pair, allocator, "{\"id\":1}", .{}));
+    try std.testing.expectError(error.JzonBadNumber, parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonTruncated, parse(Pair, allocator, "{\"id\":1,", .{}));
+    try std.testing.expectError(error.JzonUnexpected, parse(Pair, allocator, "{\"id\":true,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonUnknownEnumValue, parse(Status, allocator, "\"GONE\"", .{}));
 }
 
 test "jzon: std parser steps over an unknown key when asked to" {

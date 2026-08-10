@@ -16,6 +16,7 @@ const EPOLL_OUT_BUF_SIZE = common.EPOLL_OUT_BUF_SIZE;
 const parser = @import("../parser.zig");
 const rcache = @import("../../../utils/response_cache.zig");
 const reuseport = @import("../../../multiplexers/reuseport.zig");
+const listen_report = @import("../../../multiplexers/listen_report.zig");
 const resp_mod = @import("../response.zig");
 const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
@@ -74,7 +75,7 @@ fn serveTlsEvent(comptime TlsWorker: type, tls_conns: *TlsWorker.ConnTable, epfd
     }
 }
 
-fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reuseport.Steering) void {
+fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reuseport.Steering, report: *listen_report.Report) void {
     const linux = std.os.linux;
     const cfg = server.config;
 
@@ -84,15 +85,21 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
     // increment (no contention), reported through the system logger at worker
     // exit so REUSEPORT skew across workers is measurable.
     var requests_served: u64 = 0;
-    defer logSystem(cfg, "epoll worker {d}: {d} requests served", .{ worker_id, requests_served });
+    defer logSystem(cfg, .INFO, "epoll worker {d}: {d} requests served", .{ worker_id, requests_served });
 
     // Bind under the order gate: REUSEPORT group index i = worker i,
     // so the cpu-mod-N steering lands on the worker pinned to that slot.
     var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
     defer bind_turn.release();
 
+    // Every exit between here and the event loop has to reach the group, or the workers that
+    // did bind wait on one that is already gone.
+    var slot = report.slot(io, error.ZixHttpWorkerSetupFailed);
+    defer slot.close();
+
     const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
-        logSystem(cfg, "epoll worker resolve error: {}", .{err});
+        slot.fail(err);
+
         return;
     };
     var net_server = addr.listen(io, .{
@@ -100,13 +107,14 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
         .kernel_backlog = @intCast(cfg.kernel_backlog),
         .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT: each worker binds the same port
     }) catch |err| {
-        logSystem(cfg, "epoll worker listen error: {}", .{err});
+        slot.fail(err);
+
         return;
     };
     defer net_server.deinit(io);
     const listener_fd = net_server.socket.handle;
 
-    if (steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+    if (steering) |steer| _ = reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
     // Non-blocking listener so epollAcceptAll drains to EAGAIN without blocking.
     const cur_flags = linux.fcntl(listener_fd, std.posix.F.GETFL, 0);
@@ -139,14 +147,22 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
     defer if (tls_ctx != null and tls_listener_fd != -1) tls_srv.deinit(io);
 
     if (tls_ctx != null) {
-        const tls_addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.tls_port) catch return;
+        const tls_addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.tls_port) catch |err| {
+            slot.fail(err);
+
+            return;
+        };
         tls_srv = tls_addr.listen(io, .{
             .mode = .stream,
             .kernel_backlog = @intCast(cfg.kernel_backlog),
             .reuse_address = true,
-        }) catch return;
+        }) catch |err| {
+            slot.fail(err);
+
+            return;
+        };
         tls_listener_fd = tls_srv.socket.handle;
-        if (steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
+        if (steering) |steer| _ = reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
 
         const tls_cur_flags = linux.fcntl(tls_listener_fd, std.posix.F.GETFL, 0);
         _ = linux.fcntl(tls_listener_fd, std.posix.F.SETFL, tls_cur_flags | @as(usize, nonblock_bit));
@@ -162,6 +178,11 @@ fn epollWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
 
     // Both groups joined: release the bind turn to the next worker.
     bind_turn.release();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them
+    // and the caller gets one honest failure.
+    slot.ok();
+    if (report.awaitGroup(io) != null) return;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -393,12 +414,6 @@ pub fn runEpoll(server: anytype, io: std.Io) !void {
     const cfg = server.config;
     const worker_count = if (cfg.workers == 0) getAvailableCpuCount() else cfg.workers;
 
-    logSystem(cfg, "listening on {s}:{d} (epoll, {d} workers, shared-nothing)", .{
-        cfg.ip, cfg.port, worker_count,
-    });
-    if (cfg.tls != null and cfg.tls_port != 0)
-        logSystem(cfg, "dual listener: https/1.1 TLS on {s}:{d} (same workers)", .{ cfg.ip, cfg.tls_port });
-
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
 
@@ -412,9 +427,36 @@ pub fn runEpoll(server: anytype, io: std.Io) !void {
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
+    // What every worker says about its own listeners, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(worker_count);
+
     for (threads, 0..) |*thread, idx| {
-        thread.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, epollWorker, .{ server, io, idx, steering });
+        thread.* = std.Thread.spawn(.{ .stack_size = worker_stack }, epollWorker, .{ server, io, idx, steering, &report }) catch |err| {
+            logSystem(cfg, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ idx, worker_count, @errorName(err) });
+            report.abandon(io, worker_count - idx, err);
+
+            for (threads[0..idx]) |spawned| spawned.join();
+
+            return error.ZixHttpListenFailed;
+        };
     }
+
+    if (report.awaitGroup(io)) |err| {
+        logSystem(cfg, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ cfg.ip, cfg.port, report.failures(), worker_count, @errorName(err) });
+
+        for (threads) |thread| thread.join();
+
+        return error.ZixHttpListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a listener that may never have come up.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (epoll, {d} workers, shared-nothing)", .{
+        cfg.ip, cfg.port, worker_count,
+    });
+    if (cfg.tls != null and cfg.tls_port != 0)
+        logSystem(cfg, .INFO, "dual listener: https/1.1 TLS on {s}:{d} (same workers)", .{ cfg.ip, cfg.tls_port });
 
     for (threads) |thread| thread.join();
 }

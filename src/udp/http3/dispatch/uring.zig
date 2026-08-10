@@ -16,6 +16,7 @@ const datagram = @import("../../datagram.zig");
 const recovery = @import("../recovery.zig");
 const common = @import("common.zig");
 const reuseport = @import("../../../multiplexers/reuseport.zig");
+const listen_report = @import("../../../multiplexers/listen_report.zig");
 const epoll = @import("epoll.zig");
 
 /// io_uring submission-queue depth for an HTTP/3 .URING worker. The ring carries only recvmsg SQEs
@@ -245,33 +246,43 @@ fn parseMultishotBuf(buf: []const u8, name_reserve: usize, controllen: usize, ma
 /// io_uring is unavailable entirely (old kernel, seccomp, RLIMIT_MEMLOCK), the worker folds to the epoll
 /// loop so .URING never strands a core (a capability fold, not model-mixing). Shared-nothing: its own
 /// ring, socket, CID table, and batches, no lock on the hot path.
-fn workerLoopUring(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize, steering: ?reuseport.Steering) void {
+fn workerLoopUring(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize, steering: ?reuseport.Steering, report: *listen_report.Report) void {
     common.pinToCpu(worker_id);
 
     var ring = initUringRing() catch |err| {
-        common.logSystem(config, "io_uring unavailable ({s}): worker {d} folds to epoll", .{ @errorName(err), worker_id });
+        common.logSystem(config, .WARN, "io_uring unavailable ({s}): worker {d} folds to epoll", .{ @errorName(err), worker_id });
 
-        return epoll.workerLoopEpoll(handler, config, worker_id, steering);
+        return epoll.workerLoopEpoll(handler, config, worker_id, steering, report);
     };
     defer ring.deinit();
 
     // Skew report at worker exit: requests this worker served (common.tl_requests_served).
     // Placed after the ring probe so the epoll fold reports through its own line only.
-    defer common.logSystem(config, "uring worker {d}: {d} requests served", .{ worker_id, common.tl_requests_served });
+    defer common.logSystem(config, .INFO, "uring worker {d}: {d} requests served", .{ worker_id, common.tl_requests_served });
 
     // Bind under the order gate: REUSEPORT group index i = worker i,
     // so the cpu-mod-N steering lands on the worker pinned to that slot.
     var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
     defer bind_turn.release();
 
+    // Every exit between here and the receive loop has to reach the group, or the workers that
+    // did bind wait on one that is already gone.
+    var slot = report.slot(config.io, error.ZixHttp3WorkerSetupFailed);
+    defer slot.close();
+
     const fd = datagram.open(config.ip, config.port, true) catch |err| {
-        common.logSystem(config, "bind error: {}", .{err});
+        slot.fail(err);
+
         return;
     };
     defer datagram.close(fd);
 
-    if (steering) |steer| reuseport.attachCpuSteering(fd, steer.group_size);
+    if (steering) |steer| _ = reuseport.attachCpuSteering(fd, steer.group_size);
     bind_turn.release();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them.
+    slot.ok();
+    if (report.awaitGroup(config.io) != null) return;
 
     common.setBusyPoll(fd, config.busy_poll_us);
     datagram.setSocketBuffers(fd, config.socket_rcvbuf, config.socket_sndbuf);
@@ -318,7 +329,7 @@ fn runRecvLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posix.s
     // flag carries it across passes and the loop retries once a submit frees SQ space.
     var recv_unarmed = !armMultishotRecv(ring, &msg, fd);
 
-    common.logSystem(config, "io_uring worker {d} up (multishot recvmsg, {d} buffers)", .{ worker_id, uring_ring_bufs });
+    common.logSystem(config, .INFO, "io_uring worker {d} up (multishot recvmsg, {d} buffers)", .{ worker_id, uring_ring_bufs });
 
     var stats = common.WorkerStats{ .worker_id = worker_id };
     common.registerWorkerStats(&stats);
@@ -439,7 +450,7 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
         }
     }
 
-    common.logSystem(config, "io_uring worker {d} up ({d} recv slots, one-shot)", .{ worker_id, uring_recv_slots });
+    common.logSystem(config, .INFO, "io_uring worker {d} up ({d} recv slots, one-shot)", .{ worker_id, uring_recv_slots });
 
     var stats = common.WorkerStats{ .worker_id = worker_id };
     common.registerWorkerStats(&stats);
@@ -520,12 +531,11 @@ fn runOneShotLoop(comptime handler: core.HandlerFn, ring: *IoUring, fd: std.posi
 /// io_uring recv backend, so .URING is a genuine io_uring path, not the recvmmsg fold.
 pub fn runUring(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
     if (!datagram.is_linux) {
-        common.logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
+        common.logSystem(config, .ERROR, "HTTP/3 requires the Linux datagram path", .{});
         return;
     }
 
     const want = common.effectiveWorkers(config);
-    common.logSystem(config, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + io_uring)", .{ config.ip, config.port, want });
 
     common.installDiagnosticDump();
 
@@ -536,11 +546,32 @@ pub fn runUring(comptime handler: core.HandlerFn, config: Http3ServerConfig) !vo
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = want } else null;
 
+    // What every worker says about its own socket, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(want);
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i, steering }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopUring, .{ handler, config, i, steering, &report }) catch |err| {
+            common.logSystem(config, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ i, want, @errorName(err) });
+            report.abandon(config.io, want - i, err);
+
+            break;
+        };
         spawned += 1;
     }
+
+    if (report.awaitGroup(config.io)) |err| {
+        common.logSystem(config, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ config.ip, config.port, report.failures(), want, @errorName(err) });
+
+        for (threads[0..spawned]) |thread| thread.join();
+
+        return error.ZixHttp3ListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a socket that may never have been bound.
+    common.logSystem(config, .INFO, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + io_uring)", .{ config.ip, config.port, want });
 
     for (threads[0..spawned]) |thread| thread.join();
 }

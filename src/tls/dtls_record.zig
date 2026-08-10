@@ -60,11 +60,11 @@ const AAD_LEN: usize = 13;
 
 pub const Error = error{
     /// Fewer bytes than the header, or a length field reaching past the datagram.
-    Truncated,
+    ZixTruncated,
     /// A body too short to hold an explicit nonce and a tag, or a plaintext over the ceiling.
-    BadRecord,
+    ZixBadRecord,
     /// The AEAD tag did not verify. Discard the record and keep the association.
-    AuthenticationFailed,
+    ZixAuthenticationFailed,
 };
 
 /// One DTLS record header (RFC 6347 4.1).
@@ -90,9 +90,9 @@ pub const Opened = struct {
 ///
 /// Return:
 /// - Header
-/// - error.Truncated when fewer than HEADER_LEN bytes are present
+/// - error.ZixTruncated when fewer than HEADER_LEN bytes are present
 pub fn parseHeader(bytes: []const u8) Error!Header {
-    if (bytes.len < HEADER_LEN) return error.Truncated;
+    if (bytes.len < HEADER_LEN) return error.ZixTruncated;
 
     return .{
         .content_type = @enumFromInt(bytes[0]),
@@ -128,7 +128,7 @@ pub const RecordIterator = struct {
         const header = try parseHeader(self.datagram[self.pos..]);
         const total = HEADER_LEN + header.length;
 
-        if (self.pos + total > self.datagram.len) return error.Truncated;
+        if (self.pos + total > self.datagram.len) return error.ZixTruncated;
 
         const bytes = self.datagram[self.pos..][0..total];
         self.pos += total;
@@ -154,7 +154,7 @@ pub const RecordIterator = struct {
 ///
 /// Return:
 /// - []const u8 (the record, borrowing out)
-/// - error.BadRecord when the plaintext is over MAX_PLAINTEXT
+/// - error.ZixBadRecord when the plaintext is over MAX_PLAINTEXT
 pub fn protect(
     out: []u8,
     plaintext: []const u8,
@@ -164,7 +164,7 @@ pub fn protect(
     key: [16]u8,
     salt: [SALT_LEN]u8,
 ) Error![]const u8 {
-    if (plaintext.len > MAX_PLAINTEXT) return error.BadRecord;
+    if (plaintext.len > MAX_PLAINTEXT) return error.ZixBadRecord;
 
     const combined = combinedSequence(epoch, sequence_number);
     const body_len = EXPLICIT_NONCE_LEN + plaintext.len + TAG_LEN;
@@ -207,19 +207,19 @@ pub fn protect(
 ///
 /// Return:
 /// - Opened (header plus plaintext borrowing out)
-/// - error.Truncated, error.BadRecord, error.AuthenticationFailed
+/// - error.ZixTruncated, error.ZixBadRecord, error.ZixAuthenticationFailed
 pub fn deprotect(out: []u8, bytes: []const u8, key: [16]u8, salt: [SALT_LEN]u8) Error!Opened {
     const header = try parseHeader(bytes);
 
-    if (bytes.len < HEADER_LEN + header.length) return error.Truncated;
+    if (bytes.len < HEADER_LEN + header.length) return error.ZixTruncated;
 
     const body = bytes[HEADER_LEN..][0..header.length];
 
-    if (body.len < EXPLICIT_NONCE_LEN + TAG_LEN) return error.BadRecord;
+    if (body.len < EXPLICIT_NONCE_LEN + TAG_LEN) return error.ZixBadRecord;
 
     const ciphertext = body[EXPLICIT_NONCE_LEN .. body.len - TAG_LEN];
 
-    if (ciphertext.len > MAX_PLAINTEXT) return error.BadRecord;
+    if (ciphertext.len > MAX_PLAINTEXT) return error.ZixBadRecord;
 
     var nonce: [12]u8 = undefined;
     @memcpy(nonce[0..SALT_LEN], &salt);
@@ -232,7 +232,7 @@ pub fn deprotect(out: []u8, bytes: []const u8, key: [16]u8, salt: [SALT_LEN]u8) 
     const aad = buildAad(combined, header.content_type, @intCast(ciphertext.len));
 
     Aes128Gcm.decrypt(out[0..ciphertext.len], ciphertext, tag, &aad, nonce, key) catch
-        return error.AuthenticationFailed;
+        return error.ZixAuthenticationFailed;
 
     return .{ .header = header, .data = out[0..ciphertext.len] };
 }
@@ -249,7 +249,7 @@ pub fn deprotect(out: []u8, bytes: []const u8, key: [16]u8, salt: [SALT_LEN]u8) 
 ///
 /// Return:
 /// - []const u8 (the record, borrowing out)
-/// - error.BadRecord when the fragment is over MAX_PLAINTEXT
+/// - error.ZixBadRecord when the fragment is over MAX_PLAINTEXT
 pub fn writePlaintext(
     out: []u8,
     content_type: ContentType,
@@ -257,7 +257,7 @@ pub fn writePlaintext(
     sequence_number: u48,
     fragment: []const u8,
 ) Error![]const u8 {
-    if (fragment.len > MAX_PLAINTEXT) return error.BadRecord;
+    if (fragment.len > MAX_PLAINTEXT) return error.ZixBadRecord;
 
     writeHeader(out, .{
         .content_type = content_type,
@@ -275,7 +275,7 @@ pub fn writePlaintext(
 pub fn plaintextFragment(bytes: []const u8) Error![]const u8 {
     const header = try parseHeader(bytes);
 
-    if (bytes.len < HEADER_LEN + header.length) return error.Truncated;
+    if (bytes.len < HEADER_LEN + header.length) return error.ZixTruncated;
 
     return bytes[HEADER_LEN..][0..header.length];
 }
@@ -407,7 +407,7 @@ test "zix dtls: record header, the 48-bit sequence number spans its full range" 
         try std.testing.expectEqual(@as(u16, 0xFFFF), header.epoch);
     }
 
-    try std.testing.expectError(error.Truncated, parseHeader(&[_]u8{ 22, 0xFE }));
+    try std.testing.expectError(error.ZixTruncated, parseHeader(&[_]u8{ 22, 0xFE }));
 }
 
 test "zix dtls: record aad, epoch and sequence share the tls sequence slot" {
@@ -467,13 +467,13 @@ test "zix dtls: record deprotect, any tampering fails authentication" {
     const authenticated_offsets = [_]usize{ 0, 3, 5, 10, HEADER_LEN, HEADER_LEN + 9 };
     for (authenticated_offsets) |offset| {
         wire[offset] ^= 0x01;
-        try std.testing.expectError(error.AuthenticationFailed, deprotect(&plain, wire[0..length], TEST_KEY, TEST_SALT));
+        try std.testing.expectError(error.ZixAuthenticationFailed, deprotect(&plain, wire[0..length], TEST_KEY, TEST_SALT));
         wire[offset] ^= 0x01;
     }
 
     // And so is the tag itself.
     wire[length - 1] ^= 0x80;
-    try std.testing.expectError(error.AuthenticationFailed, deprotect(&plain, wire[0..length], TEST_KEY, TEST_SALT));
+    try std.testing.expectError(error.ZixAuthenticationFailed, deprotect(&plain, wire[0..length], TEST_KEY, TEST_SALT));
     wire[length - 1] ^= 0x80;
 
     // Restored, it opens again.
@@ -488,14 +488,14 @@ test "zix dtls: record deprotect, a wrong key or salt fails rather than returnin
     const other_key: [16]u8 = @splat(0xCD);
     const other_salt: [SALT_LEN]u8 = .{ 1, 2, 3, 4 };
 
-    try std.testing.expectError(error.AuthenticationFailed, deprotect(&plain, bytes, other_key, TEST_SALT));
-    try std.testing.expectError(error.AuthenticationFailed, deprotect(&plain, bytes, TEST_KEY, other_salt));
+    try std.testing.expectError(error.ZixAuthenticationFailed, deprotect(&plain, bytes, other_key, TEST_SALT));
+    try std.testing.expectError(error.ZixAuthenticationFailed, deprotect(&plain, bytes, TEST_KEY, other_salt));
 }
 
 test "zix dtls: record deprotect, a short or truncated record is rejected" {
     var plain: [128]u8 = undefined;
 
-    try std.testing.expectError(error.Truncated, deprotect(&plain, &[_]u8{ 23, 0xFE }, TEST_KEY, TEST_SALT));
+    try std.testing.expectError(error.ZixTruncated, deprotect(&plain, &[_]u8{ 23, 0xFE }, TEST_KEY, TEST_SALT));
 
     // A body shorter than an explicit nonce plus a tag cannot hold a record.
     var stub: [HEADER_LEN + 8]u8 = @splat(0);
@@ -506,12 +506,12 @@ test "zix dtls: record deprotect, a short or truncated record is rejected" {
         .sequence_number = 0,
         .length = 8,
     });
-    try std.testing.expectError(error.BadRecord, deprotect(&plain, &stub, TEST_KEY, TEST_SALT));
+    try std.testing.expectError(error.ZixBadRecord, deprotect(&plain, &stub, TEST_KEY, TEST_SALT));
 
     // A length field promising more than the datagram holds.
     var wire: [128]u8 = undefined;
     const bytes = try protect(&wire, "payload", .APPLICATION_DATA, 0, 0, TEST_KEY, TEST_SALT);
-    try std.testing.expectError(error.Truncated, deprotect(&plain, bytes[0 .. bytes.len - 1], TEST_KEY, TEST_SALT));
+    try std.testing.expectError(error.ZixTruncated, deprotect(&plain, bytes[0 .. bytes.len - 1], TEST_KEY, TEST_SALT));
 }
 
 test "zix dtls: record iterator, several records ride one datagram" {
@@ -545,7 +545,7 @@ test "zix dtls: record iterator, a length past the end stops the walk" {
     const bytes = try protect(&datagram, "payload", .HANDSHAKE, 0, 0, TEST_KEY, TEST_SALT);
 
     var iterator: RecordIterator = .{ .datagram = datagram[0 .. bytes.len - 2] };
-    try std.testing.expectError(error.Truncated, iterator.next());
+    try std.testing.expectError(error.ZixTruncated, iterator.next());
 
     var empty: RecordIterator = .{ .datagram = datagram[0..0] };
     try std.testing.expectEqual(@as(?[]const u8, null), try empty.next());
@@ -563,7 +563,7 @@ test "zix dtls: record plaintext, epoch 0 carries the handshake in the clear" {
     try std.testing.expectEqual(@as(u48, 3), header.sequence_number);
     try std.testing.expectEqualStrings("flight", try plaintextFragment(bytes));
 
-    try std.testing.expectError(error.Truncated, plaintextFragment(bytes[0 .. bytes.len - 1]));
+    try std.testing.expectError(error.ZixTruncated, plaintextFragment(bytes[0 .. bytes.len - 1]));
 
     // A ChangeCipherSpec record is one byte of body, and still epoch 0. Its own buffer, since
     // reusing the one above would leave the slice taken from it pointing at these bytes.

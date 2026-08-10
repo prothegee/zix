@@ -41,15 +41,15 @@ pub const ROC_LEN: usize = 4;
 /// What stops a tag from being produced.
 pub const Error = error{
     /// A tag length neither profile uses.
-    BadTagLength,
+    ZixBadTagLength,
 };
 
 /// What stops a tag from being accepted.
 pub const VerifyError = error{
     /// A tag length neither profile uses.
-    BadTagLength,
+    ZixBadTagLength,
     /// The tag does not match what the key and the bytes produce.
-    AuthenticationFailed,
+    ZixAuthenticationFailed,
 };
 
 /// Tag an SRTP packet (RFC 3711 4.2.1).
@@ -62,7 +62,7 @@ pub const VerifyError = error{
 ///
 /// Return:
 /// - void
-/// - error.BadTagLength
+/// - error.ZixBadTagLength
 pub fn tagRtp(out: []u8, key: [KEY_LEN]u8, authenticated: []const u8, roc: u32) Error!void {
     return compute(out, key, authenticated, roc);
 }
@@ -76,7 +76,7 @@ pub fn tagRtp(out: []u8, key: [KEY_LEN]u8, authenticated: []const u8, roc: u32) 
 ///
 /// Return:
 /// - void
-/// - error.BadTagLength
+/// - error.ZixBadTagLength
 pub fn tagRtcp(out: []u8, key: [KEY_LEN]u8, authenticated: []const u8) Error!void {
     return compute(out, key, authenticated, null);
 }
@@ -91,7 +91,7 @@ pub fn tagRtcp(out: []u8, key: [KEY_LEN]u8, authenticated: []const u8) Error!voi
 ///
 /// Return:
 /// - void
-/// - error.BadTagLength, error.AuthenticationFailed
+/// - error.ZixBadTagLength, error.ZixAuthenticationFailed
 pub fn verifyRtp(candidate: []const u8, key: [KEY_LEN]u8, authenticated: []const u8, roc: u32) VerifyError!void {
     return check(candidate, key, authenticated, roc);
 }
@@ -105,7 +105,7 @@ pub fn verifyRtp(candidate: []const u8, key: [KEY_LEN]u8, authenticated: []const
 ///
 /// Return:
 /// - void
-/// - error.BadTagLength, error.AuthenticationFailed
+/// - error.ZixBadTagLength, error.ZixAuthenticationFailed
 pub fn verifyRtcp(candidate: []const u8, key: [KEY_LEN]u8, authenticated: []const u8) VerifyError!void {
     return check(candidate, key, authenticated, null);
 }
@@ -123,7 +123,7 @@ pub fn isTagLength(len: usize) bool {
 
 /// Compute a tag over the bytes and, for SRTP, the rollover counter behind them.
 fn compute(out: []u8, key: [KEY_LEN]u8, authenticated: []const u8, roc: ?u32) Error!void {
-    if (!isTagLength(out.len)) return error.BadTagLength;
+    if (!isTagLength(out.len)) return error.ZixBadTagLength;
 
     var mac = HmacSha1.init(&key);
     mac.update(authenticated);
@@ -143,7 +143,7 @@ fn compute(out: []u8, key: [KEY_LEN]u8, authenticated: []const u8, roc: ?u32) Er
 
 /// Recompute and compare in constant time.
 fn check(candidate: []const u8, key: [KEY_LEN]u8, authenticated: []const u8, roc: ?u32) VerifyError!void {
-    if (!isTagLength(candidate.len)) return error.BadTagLength;
+    if (!isTagLength(candidate.len)) return error.ZixBadTagLength;
 
     var expected: [LONG_TAG_LEN]u8 = undefined;
     try compute(expected[0..candidate.len], key, authenticated, roc);
@@ -154,7 +154,7 @@ fn check(candidate: []const u8, key: [KEY_LEN]u8, authenticated: []const u8, roc
         else => false,
     };
 
-    if (!same) return error.AuthenticationFailed;
+    if (!same) return error.ZixAuthenticationFailed;
 }
 
 // --------------------------------------------------------------------------------------- //
@@ -243,20 +243,20 @@ test "zix media: srtp auth verifyRtp, a changed byte anywhere is refused" {
     try tagRtp(&tag, TEST_KEY, packet, 5);
 
     // A different counter.
-    try std.testing.expectError(error.AuthenticationFailed, verifyRtp(&tag, TEST_KEY, packet, 6));
+    try std.testing.expectError(error.ZixAuthenticationFailed, verifyRtp(&tag, TEST_KEY, packet, 6));
 
     // A different key.
     var other_key = TEST_KEY;
     other_key[0] ^= 0x01;
-    try std.testing.expectError(error.AuthenticationFailed, verifyRtp(&tag, other_key, packet, 5));
+    try std.testing.expectError(error.ZixAuthenticationFailed, verifyRtp(&tag, other_key, packet, 5));
 
     // A different packet.
-    try std.testing.expectError(error.AuthenticationFailed, verifyRtp(&tag, TEST_KEY, "the payload the tag coverz", 5));
+    try std.testing.expectError(error.ZixAuthenticationFailed, verifyRtp(&tag, TEST_KEY, "the payload the tag coverz", 5));
 
     // A changed tag.
     var tampered = tag;
     tampered[LONG_TAG_LEN - 1] ^= 0x01;
-    try std.testing.expectError(error.AuthenticationFailed, verifyRtp(&tampered, TEST_KEY, packet, 5));
+    try std.testing.expectError(error.ZixAuthenticationFailed, verifyRtp(&tampered, TEST_KEY, packet, 5));
 }
 
 test "zix media: srtp auth verifyRtcp, it is a different check from the rtp one" {
@@ -266,15 +266,15 @@ test "zix media: srtp auth verifyRtcp, it is a different check from the rtp one"
     try tagRtcp(&tag, TEST_KEY, packet);
 
     try verifyRtcp(&tag, TEST_KEY, packet);
-    try std.testing.expectError(error.AuthenticationFailed, verifyRtp(&tag, TEST_KEY, packet, 0));
+    try std.testing.expectError(error.ZixAuthenticationFailed, verifyRtp(&tag, TEST_KEY, packet, 0));
 }
 
 test "zix media: srtp auth, a tag length neither profile uses is refused" {
     var wrong: [8]u8 = undefined;
 
-    try std.testing.expectError(error.BadTagLength, tagRtp(&wrong, TEST_KEY, "bytes", 0));
-    try std.testing.expectError(error.BadTagLength, tagRtcp(&wrong, TEST_KEY, "bytes"));
-    try std.testing.expectError(error.BadTagLength, tagRtp(&[_]u8{}, TEST_KEY, "bytes", 0));
+    try std.testing.expectError(error.ZixBadTagLength, tagRtp(&wrong, TEST_KEY, "bytes", 0));
+    try std.testing.expectError(error.ZixBadTagLength, tagRtcp(&wrong, TEST_KEY, "bytes"));
+    try std.testing.expectError(error.ZixBadTagLength, tagRtp(&[_]u8{}, TEST_KEY, "bytes", 0));
 }
 
 test "zix media: srtp auth verify, a short tag is refused rather than compared short" {
@@ -285,8 +285,8 @@ test "zix media: srtp auth verify, a short tag is refused rather than compared s
 
     // The first four bytes really are the short tag, and offering them where a long one is
     // expected must not pass. Accepting it would let a peer choose its own tag length.
-    try std.testing.expectError(error.BadTagLength, verifyRtp(tag[0..3], TEST_KEY, packet, 0));
-    try std.testing.expectError(error.BadTagLength, verifyRtp(tag[0..9], TEST_KEY, packet, 0));
+    try std.testing.expectError(error.ZixBadTagLength, verifyRtp(tag[0..3], TEST_KEY, packet, 0));
+    try std.testing.expectError(error.ZixBadTagLength, verifyRtp(tag[0..9], TEST_KEY, packet, 0));
 }
 
 test "zix media: srtp auth isTagLength, only the two profile lengths are tags" {
@@ -303,5 +303,5 @@ test "zix media: srtp auth, an empty message still tags" {
 
     try tagRtp(&tag, TEST_KEY, &.{}, 0);
     try verifyRtp(&tag, TEST_KEY, &.{}, 0);
-    try std.testing.expectError(error.AuthenticationFailed, verifyRtp(&tag, TEST_KEY, &.{}, 1));
+    try std.testing.expectError(error.ZixAuthenticationFailed, verifyRtp(&tag, TEST_KEY, &.{}, 1));
 }

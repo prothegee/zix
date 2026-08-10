@@ -24,7 +24,7 @@ const Sample = sample_mod.Sample;
 ///
 /// Return:
 /// - void on a 2xx response
-/// - error.RemoteWriteRejected (non-2xx response)
+/// - error.PrometheuzRemoteWriteRejected (non-2xx response)
 /// - error.OutOfMemory
 pub fn remoteWrite(allocator: std.mem.Allocator, io: std.Io, config: WriteConfig, samples: []const Sample) !void {
     if (samples.len == 0) return;
@@ -53,7 +53,7 @@ pub fn remoteWrite(allocator: std.mem.Allocator, io: std.Io, config: WriteConfig
 }
 
 fn checkStatus(status_code: u16) !void {
-    if (status_code < 200 or status_code >= 300) return error.RemoteWriteRejected;
+    if (status_code < 200 or status_code >= 300) return error.PrometheuzRemoteWriteRejected;
 }
 
 // --------------------------------------------------------- //
@@ -277,6 +277,6 @@ test "prometheuz: remoteWrite surfaces a connection failure" {
 test "prometheuz: checkStatus accepts 2xx and rejects others" {
     try checkStatus(200);
     try checkStatus(204);
-    try testing.expectError(error.RemoteWriteRejected, checkStatus(400));
-    try testing.expectError(error.RemoteWriteRejected, checkStatus(500));
+    try testing.expectError(error.PrometheuzRemoteWriteRejected, checkStatus(400));
+    try testing.expectError(error.PrometheuzRemoteWriteRejected, checkStatus(500));
 }

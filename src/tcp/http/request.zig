@@ -151,11 +151,11 @@ pub const Request = struct {
         // allocate by claiming a size it never sends.
         const content_len = std.math.cast(usize, declared) orelse {
             self.body_too_large = true;
-            return error.RequestBodyTooLarge;
+            return error.ZixRequestBodyTooLarge;
         };
         if (self.body_limit != 0 and content_len > self.body_limit) {
             self.body_too_large = true;
-            return error.RequestBodyTooLarge;
+            return error.ZixRequestBodyTooLarge;
         }
 
         // Bytes already pulled into buf during the header read loop.
@@ -224,7 +224,7 @@ pub const Request = struct {
                 self.body_received = raw_total;
                 self.body_cache = "";
 
-                return error.InvalidChunkedBody;
+                return error.ZixInvalidChunkedBody;
             };
             if (body_end != null) break;
 
@@ -234,7 +234,7 @@ pub const Request = struct {
                     self.body_received = raw_total;
                     self.body_cache = "";
 
-                    return error.RequestBodyTooLarge;
+                    return error.ZixRequestBodyTooLarge;
                 }
 
                 cap = @min(cap * 2, cap_limit);
@@ -329,7 +329,7 @@ pub const Request = struct {
     /// Parse a complete raw HTTP/1.1 head buffer into a Request.
     /// Useful for tests and offline parsing. buf must contain a full head (\r\n\r\n).
     pub fn fromRaw(buf: []const u8, allocator: std.mem.Allocator) !Request {
-        const head = (try parser.parse(buf, parser.MAX_HEADERS_U8)) orelse return error.Incomplete;
+        const head = (try parser.parse(buf, parser.MAX_HEADERS_U8)) orelse return error.ZixIncomplete;
         return .{
             .buf = buf,
             .head = head,

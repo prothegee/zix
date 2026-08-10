@@ -34,9 +34,9 @@ pub const MAX_BLOCKS: usize = 31;
 /// What stops a report from being read.
 pub const Error = error{
     /// The body is shorter than the header's block count says.
-    Truncated,
+    ZixTruncated,
     /// The packet is not the report kind that was asked for.
-    WrongType,
+    ZixWrongType,
 };
 
 /// A 64-bit NTP timestamp, split the way RFC 3550 6.4.1 writes it.
@@ -151,9 +151,9 @@ pub const ReceiverReport = struct {
 ///
 /// Return:
 /// - SenderReport borrowing the packet
-/// - error.WrongType, error.Truncated
+/// - error.ZixWrongType, error.ZixTruncated
 pub fn readSenderReport(packet: rtcp.Packet) Error!SenderReport {
-    if (packet.packet_type != .SR) return error.WrongType;
+    if (packet.packet_type != .SR) return error.ZixWrongType;
 
     const fixed = SSRC_LEN + SENDER_INFO_LEN;
     const blocks = try blocksOf(packet, fixed);
@@ -181,9 +181,9 @@ pub fn readSenderReport(packet: rtcp.Packet) Error!SenderReport {
 ///
 /// Return:
 /// - ReceiverReport borrowing the packet
-/// - error.WrongType, error.Truncated
+/// - error.ZixWrongType, error.ZixTruncated
 pub fn readReceiverReport(packet: rtcp.Packet) Error!ReceiverReport {
-    if (packet.packet_type != .RR) return error.WrongType;
+    if (packet.packet_type != .RR) return error.ZixWrongType;
 
     // Measured before anything is read. A report packet may legally be four bytes of header with
     // no body at all, and reaching for the identifier first walks off the end of it.
@@ -219,15 +219,15 @@ pub fn receiverReportLen(block_count: usize) usize {
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace, error.TooManyBlocks
-pub fn writeReceiverReport(out: []u8, ssrc: u32, blocks: []const ReportBlock) error{ NoSpace, TooManyBlocks }![]const u8 {
-    if (blocks.len > MAX_BLOCKS) return error.TooManyBlocks;
+/// - error.ZixNoSpace, error.ZixTooManyBlocks
+pub fn writeReceiverReport(out: []u8, ssrc: u32, blocks: []const ReportBlock) error{ ZixNoSpace, ZixTooManyBlocks }![]const u8 {
+    if (blocks.len > MAX_BLOCKS) return error.ZixTooManyBlocks;
 
     const total = receiverReportLen(blocks.len);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
-    rtcp.writeHeader(out, .RR, @intCast(blocks.len), total - rtcp.HEADER_LEN) catch return error.NoSpace;
+    rtcp.writeHeader(out, .RR, @intCast(blocks.len), total - rtcp.HEADER_LEN) catch return error.ZixNoSpace;
     std.mem.writeInt(u32, out[rtcp.HEADER_LEN..][0..4], ssrc, .big);
 
     var at = rtcp.HEADER_LEN + SSRC_LEN;
@@ -250,7 +250,7 @@ pub fn writeReceiverReport(out: []u8, ssrc: u32, blocks: []const ReportBlock) er
 fn blocksOf(packet: rtcp.Packet, fixed: usize) Error!Blocks {
     const wanted = fixed + @as(usize, packet.count) * REPORT_BLOCK_LEN;
 
-    if (packet.body.len < wanted) return error.Truncated;
+    if (packet.body.len < wanted) return error.ZixTruncated;
 
     return .{ .bytes = packet.body[fixed..wanted] };
 }
@@ -371,7 +371,7 @@ test "zix media: report, cumulative packets lost is signed" {
 test "zix media: report readSenderReport, a wrong packet type is refused" {
     const receiver_report = [_]u8{ 0x80, 201, 0x00, 0x01, 0xDE, 0xAD, 0xBE, 0xEF };
 
-    try std.testing.expectError(error.WrongType, readSenderReport(try firstPacket(&receiver_report)));
+    try std.testing.expectError(error.ZixWrongType, readSenderReport(try firstPacket(&receiver_report)));
 }
 
 test "zix media: report readSenderReport, a block count the body cannot hold is refused" {
@@ -381,7 +381,7 @@ test "zix media: report readSenderReport, a block count the body cannot hold is 
     // The header claims two blocks and the packet carries one.
     buf[0] = 0x82;
 
-    try std.testing.expectError(error.Truncated, readSenderReport(try firstPacket(&buf)));
+    try std.testing.expectError(error.ZixTruncated, readSenderReport(try firstPacket(&buf)));
 }
 
 test "zix media: report, a report packet with no body at all is refused, not read" {
@@ -390,8 +390,8 @@ test "zix media: report, a report packet with no body at all is refused, not rea
     const header_only = [_]u8{ 0x80, 201, 0x00, 0x00 };
     const sender_header_only = [_]u8{ 0x80, 200, 0x00, 0x00 };
 
-    try std.testing.expectError(error.Truncated, readReceiverReport(try firstPacket(&header_only)));
-    try std.testing.expectError(error.Truncated, readSenderReport(try firstPacket(&sender_header_only)));
+    try std.testing.expectError(error.ZixTruncated, readReceiverReport(try firstPacket(&header_only)));
+    try std.testing.expectError(error.ZixTruncated, readSenderReport(try firstPacket(&sender_header_only)));
 }
 
 test "zix media: report readReceiverReport, a report with no blocks is legal" {
@@ -457,8 +457,8 @@ test "zix media: report writeReceiverReport, the limits are refused" {
         .delay_since_last_sender_report = 0,
     });
 
-    try std.testing.expectError(error.TooManyBlocks, writeReceiverReport(&buf, 1, &too_many));
-    try std.testing.expectError(error.NoSpace, writeReceiverReport(buf[0..7], 1, &.{}));
+    try std.testing.expectError(error.ZixTooManyBlocks, writeReceiverReport(&buf, 1, &too_many));
+    try std.testing.expectError(error.ZixNoSpace, writeReceiverReport(buf[0..7], 1, &.{}));
 }
 
 test "zix media: report writeReceiverReport, a loss count past the field saturates" {

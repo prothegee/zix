@@ -18,7 +18,7 @@ pub const Server = struct {
 };
 
 // Per-connection factory: handler baked into the type, run() takes only io.
-fn TcpServerImpl(comptime handler: HandlerFn) type        // .init(config) -> error.PortNotConfigured if port == 0; .deinit() no-op; .run() reads config.io
+fn TcpServerImpl(comptime handler: HandlerFn) type        // .init(config) -> error.ZixPortNotConfigured if port == 0; .deinit() no-op; .run() reads config.io
 fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type   // .init(config); .deinit(); .run() -> ring on .URING, else frameAdapter fallback
 
 // Free dispatch workers (handler kept as a runtime value, same shape as zix.Http1):
@@ -183,7 +183,7 @@ pub const TcpClient = struct {
 ### connect()
 
 ```
-if config.port == 0: return error.PortNotConfigured
+if config.port == 0: return error.ZixPortNotConfigured
 addr = IpAddress.resolve(io, config.ip, config.port)
 stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp })
 ```
@@ -191,7 +191,7 @@ stream = addr.connect(io, .{ .mode = .stream, .protocol = .tcp })
 ### sendMsg()
 
 ```
-if msg.len > config.max_recv_buf: return error.MessageTooLarge
+if msg.len > config.max_recv_buf: return error.ZixMessageTooLarge
 var wbuf [4096+4]u8 = undefined
 wtr = stream.writer(io, &wbuf)
 writeInt(u32, &hdr, msg.len, .big)
@@ -207,9 +207,9 @@ Stack write buffer (4100 bytes). All writes are buffered and sent in a single fl
 ```
 var rbuf [4096+4]u8 = undefined
 rdr = stream.reader(io, &rbuf)
-len = rdr.interface.takeVarInt(u32, .big, 4) catch return error.ConnectionClosed
-if len > buf.len: return error.MessageTooLarge
-rdr.interface.readSliceAll(buf[0..len]) catch return error.ConnectionClosed
+len = rdr.interface.takeVarInt(u32, .big, 4) catch return error.ZixConnectionClosed
+if len > buf.len: return error.ZixMessageTooLarge
+rdr.interface.readSliceAll(buf[0..len]) catch return error.ZixConnectionClosed
 return buf[0..len]
 ```
 

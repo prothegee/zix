@@ -78,8 +78,8 @@ graph LR
 | :- | :- | :- |
 | `io` | required | caller-provided `std.Io` backend |
 | `ip` | required | bind address |
-| `port` | required | listen port, 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.EPOLL`, or `.URING` (the last two Linux-only, native, rejected off Linux with error.DispatchModelUnsupported) |
+| `port` | required | listen port, 0 -> `error.ZixPortNotConfigured` |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.EPOLL`, or `.URING` (the last two Linux-only, native, rejected off Linux with error.ZixDispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | `listen()` backlog |
 | `workers` | 0 | 0 -> cpu_count multiplexing workers for EPOLL and URING. Ignored by ASYNC |
 | `max_streams` | 128 | max concurrent HTTP/2 streams per connection (advertised SETTINGS_MAX_CONCURRENT_STREAMS) |
@@ -320,7 +320,7 @@ When the handler calls `res.finish(status, msg)` without sending any data, the s
 | `.EPOLL` | per worker | multiplexed event loop (Linux only) | highest throughput, see below |
 | `.URING` | per worker | multiplexed io_uring loop (Linux only) | same shape as `.EPOLL`, completion-based |
 
-`.EPOLL` is Linux-specific. Off Linux, `run()` returns `error.DispatchModelUnsupported` after logging which model was rejected, so pick `.ASYNC` there. `.URING` is the same shared-nothing multiplexed design on the io_uring ring (`runUring`, ADR-037 Phase 4): completion-based instead of readiness-based, `workers` workers (0 = cpu_count), Linux-only, and rejected off Linux the same way. When io_uring itself is unavailable on a Linux host, `.URING` folds to the `.EPOLL` loop with a logged notice.
+`.EPOLL` is Linux-specific. Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected, so pick `.ASYNC` there. `.URING` is the same shared-nothing multiplexed design on the io_uring ring (`runUring`, ADR-037 Phase 4): completion-based instead of readiness-based, `workers` workers (0 = cpu_count), Linux-only, and rejected off Linux the same way. When io_uring itself is unavailable on a Linux host, `.URING` folds to the `.EPOLL` loop with a logged notice.
 
 ### `.EPOLL` is multiplexed and shared-nothing
 

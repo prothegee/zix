@@ -5,7 +5,7 @@
 //! handler cares about. The `unknown` option decides what that means.
 //!
 //! .REJECT calls the document wrong for this type and fails with
-//! error.UnknownField. .SKIP steps over the key and its whole value, however deep
+//! error.JzonUnknownField. .SKIP steps over the key and its whole value, however deep
 //! it nests, and reads the rest.
 //!
 //! Note:
@@ -15,7 +15,7 @@
 //! - Skipping costs a walk over the value being stepped over, not a parse of it.
 //!   Nothing inside an unknown key is built.
 //! - A missing key is a different question. .SKIP forgives keys the type does not
-//!   want, never keys it is owed, so error.MissingField stands either way.
+//!   want, never keys it is owed, so error.JzonMissingField stands either way.
 //! - Build it from this package with `zig build example-unknown_keys`, then run
 //!   ./zig-out/bin/jzon-example-unknown_keys-<arch>-<os>.
 

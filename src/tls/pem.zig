@@ -10,7 +10,7 @@
 
 const std = @import("std");
 
-pub const Error = error{ InvalidPem, InvalidKey, BufferTooSmall };
+pub const Error = error{ ZixInvalidPem, ZixInvalidKey, ZixBufferTooSmall };
 
 /// Base64 accumulation buffer: caps the max PEM cert or key document size.
 const MAX_PEM_BYTES: usize = 16384;
@@ -26,16 +26,16 @@ pub fn pemToDer(out: []u8, pem: []const u8) ![]const u8 {
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \r\t");
         if (line.len == 0 or std.mem.startsWith(u8, line, "-----")) continue;
-        if (n + line.len > b64.len) return error.BufferTooSmall;
+        if (n + line.len > b64.len) return error.ZixBufferTooSmall;
 
         @memcpy(b64[n..][0..line.len], line);
         n += line.len;
     }
 
     const decoder = std.base64.standard.Decoder;
-    const der_len = decoder.calcSizeForSlice(b64[0..n]) catch return error.InvalidPem;
-    if (der_len > out.len) return error.BufferTooSmall;
-    decoder.decode(out[0..der_len], b64[0..n]) catch return error.InvalidPem;
+    const der_len = decoder.calcSizeForSlice(b64[0..n]) catch return error.ZixInvalidPem;
+    if (der_len > out.len) return error.ZixBufferTooSmall;
+    decoder.decode(out[0..der_len], b64[0..n]) catch return error.ZixInvalidPem;
 
     return out[0..der_len];
 }
@@ -50,7 +50,7 @@ pub fn ecdsaScalarFromSec1(der: []const u8) ![32]u8 {
     try r.expectTag(0x02); // INTEGER version
     try r.skip(try r.readLen());
     try r.expectTag(0x04); // OCTET STRING privateKey
-    if (try r.readLen() != 32) return error.InvalidKey;
+    if (try r.readLen() != 32) return error.ZixInvalidKey;
 
     var out: [32]u8 = undefined;
     @memcpy(&out, try r.read(32));
@@ -73,7 +73,7 @@ pub fn ed25519SeedFromPkcs8(der: []const u8) ![32]u8 {
     try r.expectTag(0x04); // OCTET STRING privateKey
     _ = try r.readLen();
     try r.expectTag(0x04); // inner OCTET STRING CurvePrivateKey
-    if (try r.readLen() != 32) return error.InvalidKey;
+    if (try r.readLen() != 32) return error.ZixInvalidKey;
 
     var out: [32]u8 = undefined;
     @memcpy(&out, try r.read(32));
@@ -86,7 +86,7 @@ const DerReader = struct {
     pos: usize = 0,
 
     fn byte(self: *DerReader) Error!u8 {
-        if (self.pos >= self.buf.len) return error.InvalidKey;
+        if (self.pos >= self.buf.len) return error.ZixInvalidKey;
 
         const b = self.buf[self.pos];
         self.pos += 1;
@@ -95,7 +95,7 @@ const DerReader = struct {
     }
 
     fn expectTag(self: *DerReader, tag: u8) Error!void {
-        if (try self.byte() != tag) return error.InvalidKey;
+        if (try self.byte() != tag) return error.ZixInvalidKey;
     }
 
     fn readLen(self: *DerReader) Error!usize {
@@ -103,7 +103,7 @@ const DerReader = struct {
         if (first < 0x80) return first;
 
         const count = first & 0x7f;
-        if (count == 0 or count > 2) return error.InvalidKey;
+        if (count == 0 or count > 2) return error.ZixInvalidKey;
 
         var len: usize = 0;
         var i: usize = 0;
@@ -113,12 +113,12 @@ const DerReader = struct {
     }
 
     fn skip(self: *DerReader, n: usize) Error!void {
-        if (self.pos + n > self.buf.len) return error.InvalidKey;
+        if (self.pos + n > self.buf.len) return error.ZixInvalidKey;
         self.pos += n;
     }
 
     fn read(self: *DerReader, n: usize) Error![]const u8 {
-        if (self.pos + n > self.buf.len) return error.InvalidKey;
+        if (self.pos + n > self.buf.len) return error.ZixInvalidKey;
 
         const s = self.buf[self.pos .. self.pos + n];
         self.pos += n;

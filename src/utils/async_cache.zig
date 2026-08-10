@@ -130,8 +130,8 @@ test "zix utils: async_cache effectiveEntries honors the memory ceiling and neve
 test "zix utils: async_cache forThisThread reuses one cache per thread and reclaim frees them all" {
     const config = Config{ .max_entries = 8, .max_value_bytes = 1024 };
 
-    const first = forThisThread(config) orelse return error.CacheBuildFailed;
-    const second = forThisThread(config) orelse return error.CacheBuildFailed;
+    const first = forThisThread(config) orelse return error.ZixCacheBuildFailed;
+    const second = forThisThread(config) orelse return error.ZixCacheBuildFailed;
 
     // the same thread must get the same cache back, else it would never hit
     try std.testing.expectEqual(first, second);

@@ -7,6 +7,7 @@
 //!   than once per parser.
 
 const std = @import("std");
+const diagnostic = @import("diagnostic.zig");
 
 const reflect = @import("../reflect.zig");
 
@@ -48,9 +49,9 @@ pub fn Seen(comptime T: type) type {
         ///
         /// Return:
         /// - void
-        /// - error.Unexpected when that field was already read
+        /// - error.JzonUnexpected when that field was already read
         pub fn mark(self: *Self, index: usize) Error!void {
-            if (self.marked[index]) return error.Unexpected;
+            if (self.marked[index]) return error.JzonUnexpected;
 
             self.marked[index] = true;
         }
@@ -74,11 +75,15 @@ pub fn Seen(comptime T: type) type {
         ///
         /// Return:
         /// - void
-        /// - error.MissingField when an unread field declares no default
+        /// - error.JzonMissingField when an unread field declares no default
         pub fn fill(self: Self, target: *T) Error!void {
             inline for (comptime std.meta.fieldNames(T), 0..) |name, index| {
                 if (!self.marked[index]) {
-                    const declared = reflect.defaultOf(T, index) orelse return error.MissingField;
+                    const declared = reflect.defaultOf(T, index) orelse {
+                        diagnostic.noteField(name);
+
+                        return error.JzonMissingField;
+                    };
 
                     @field(target, name) = declared;
                 }
@@ -115,7 +120,7 @@ test "jzon: seen refuses the same field twice" {
     var seen: Seen(Record) = .{};
 
     try seen.mark(0);
-    try std.testing.expectError(error.Unexpected, seen.mark(0));
+    try std.testing.expectError(error.JzonUnexpected, seen.mark(0));
 }
 
 test "jzon: seen fills the fields a document left out" {
@@ -142,5 +147,5 @@ test "jzon: seen reports a field the document owed and the type does not default
     var record: Record = undefined;
     record.id = 7;
 
-    try std.testing.expectError(error.MissingField, seen.fill(&record));
+    try std.testing.expectError(error.JzonMissingField, seen.fill(&record));
 }

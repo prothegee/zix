@@ -66,6 +66,6 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (resp.body().len == 0) return error.EmptyBody;
 }

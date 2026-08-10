@@ -154,7 +154,7 @@ __*Platform Development Status:*__ <br>
 <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 
 > hijau: tervalidasi di hardware native. <br>
-> kuning: terverifikasi cross-build (module, examples, test suite, dan runner ter-compile, EPOLL / URING ditolak di run() dengan error.DispatchModelUnsupported, jadi target tersebut memakai ASYNC).
+> kuning: terverifikasi cross-build (module, examples, test suite, dan runner ter-compile, EPOLL / URING ditolak di run() dengan error.ZixDispatchModelUnsupported, jadi target tersebut memakai ASYNC).
 
 __*Maintained Platforms:*__
 - x86_64-linux:
@@ -873,7 +873,7 @@ var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
 
 **`.EPOLL` (shared-nothing epoll worker, khusus Linux):**
 
-Setiap worker memiliki `SO_REUSEPORT` listener dan satu `epoll` instance tersendiri. Kernel mendistribusikan koneksi baru ke worker. Tidak ada antrian bersama, tidak ada mutex, tidak ada handoff fd antar thread. Level-triggered `EPOLLIN` menjaga koneksi tetap terdaftar setelah setiap request tanpa re-arm eksplisit. Koneksi keep-alive yang idle tidak menahan thread. Terbaik untuk request berumur pendek throughput tinggi di Linux. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
+Setiap worker memiliki `SO_REUSEPORT` listener dan satu `epoll` instance tersendiri. Kernel mendistribusikan koneksi baru ke worker. Tidak ada antrian bersama, tidak ada mutex, tidak ada handoff fd antar thread. Level-triggered `EPOLLIN` menjaga koneksi tetap terdaftar setelah setiap request tanpa re-arm eksplisit. Koneksi keep-alive yang idle tidak menahan thread. Terbaik untuk request berumur pendek throughput tinggi di Linux. Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`: pakai `.ASYNC` di sana.
 
 ```zig
 var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
@@ -887,7 +887,7 @@ var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
 
 **`.URING` (shared-nothing io_uring worker, khusus Linux):**
 
-Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa antrian bersama), tetapi completion-based alih-alih readiness-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Accept, recv, send, dan close semuanya berjalan di ring (`zix.Http1` me-ring close-nya via `prep_close`, jadi worker terus memanen completion lintas teardown koneksi di bawah churn). Diimplementasikan secara native oleh `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, dan `zix.Http2`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat (fold) ke `.EPOLL` (jalur per-frame `initFramed`-nya memang berjalan di ring). Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
+Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REUSEPORT` listener dan satu ring per worker, tanpa antrian bersama), tetapi completion-based alih-alih readiness-based, sehingga sebagian besar transisi syscall di-batch ke dalam ring. Accept, recv, send, dan close semuanya berjalan di ring (`zix.Http1` me-ring close-nya via `prep_close`, jadi worker terus memanen completion lintas teardown koneksi di bawah churn). Diimplementasikan secara native oleh `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, dan `zix.Http2`. Handler per-connection `zix.Tcp` tidak punya ring native dan melipat (fold) ke `.EPOLL` (jalur per-frame `initFramed`-nya memang berjalan di ring). Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`: pakai `.ASYNC` di sana.
 
 ```zig
 var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
@@ -1182,7 +1182,7 @@ var client = zix.Http.Client.init(.{
     .allocator         = arena.allocator(),
     .io                = process.io,
     .connect_timeout_ms = 5000,       // error.Timeout jika koneksi TCP memakan waktu > 5 detik
-    .max_response_body  = 64 * 1024,  // error.BodyTooLarge jika body melebihi 64 KB
+    .max_response_body  = 64 * 1024,  // error.ZixBodyTooLarge jika body melebihi 64 KB
 });
 defer client.deinit();
 
@@ -1225,8 +1225,12 @@ defer fast.deinit();
 
 | Error | Kondisi |
 | :- | :- |
-| `error.InvalidUrl` | URL tidak valid, skema tidak didukung, atau host tidak ada |
-| `error.BodyTooLarge` | body respons melebihi `max_response_body` |
+| `error.ZixUrlMalformed` | URL-nya tidak bisa di-parse |
+| `error.ZixUrlSchemeUnsupported` | skemanya bukan yang dipahami transport ini |
+| `error.ZixUrlHostMissing` | URL-nya tidak membawa host |
+| `error.ZixUrlPortInvalid` | port-nya bukan angka dalam rentang |
+| `error.ZixUrlPathTooLong` | path dan query-nya tidak muat di buffer request |
+| `error.ZixBodyTooLarge` | body respons melebihi `max_response_body` |
 | `error.Timeout` | koneksi TCP melebihi `connect_timeout_ms` |
 
 Redirect diikuti secara otomatis hingga `max_redirects` (default 3). Atur `follow_redirects = false` untuk menerima respons 3xx secara langsung.
@@ -1245,7 +1249,7 @@ Redirect diikuti secara otomatis hingga `max_redirects` (default 3). Atur `follo
 
 ### File Statis & Unggah
 
-Atur `public_dir` di `HttpServerConfig` untuk mengaktifkan static file serving. `server.run()` mengembalikan `error.PublicDirNotFound` jika direktori tidak ada. Gunakan helper `createInitDirs` untuk membuat semua direktori yang diperlukan sebelum `Server.init`:
+Atur `public_dir` di `HttpServerConfig` untuk mengaktifkan static file serving. `server.run()` mengembalikan `error.ZixPublicDirNotFound` jika direktori tidak ada. Gunakan helper `createInitDirs` untuk membuat semua direktori yang diperlukan sebelum `Server.init`:
 
 ```zig
 fn createInitDirs(io: std.Io) void {
@@ -1328,7 +1332,7 @@ var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
 });
 ```
 
-`addHeader()` mengembalikan `error.TooManyHeaders` ketika cap tercapai dan `error.InvalidHeaderName` / `error.InvalidHeaderValue` jika nama atau nilai mengandung CR atau LF (penjaga injeksi header).
+`addHeader()` mengembalikan `error.ZixTooManyHeaders` ketika cap tercapai dan `error.ZixInvalidHeaderName` / `error.ZixInvalidHeaderValue` jika nama atau nilai mengandung CR atau LF (penjaga injeksi header).
 
 `.{ .CUSTOM = N }` mengalokasikan tepat N slot dari arena per-permintaan (tanpa ceiling, tanpa clamping).
 
@@ -1621,7 +1625,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // kirim out[0..pos] sebagai payload pesan gRPC
 ```
 
-**Model dispatch:** `.ASYNC`, `.EPOLL`, `.URING` (dua terakhir khusus Linux, field-nya wajib tanpa default). Model gRPC EPOLL dan URING adalah multiplexed event loop shared-nothing: setiap worker memiliki `SO_REUSEPORT` listener dan satu epoll instance tersendiri, dan menjalankan banyak koneksi h2 non-blocking melalui resumable HTTP/2 state machine. `workers` adalah jumlah worker (0 = cpu_count). Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
+**Model dispatch:** `.ASYNC`, `.EPOLL`, `.URING` (dua terakhir khusus Linux, field-nya wajib tanpa default). Model gRPC EPOLL dan URING adalah multiplexed event loop shared-nothing: setiap worker memiliki `SO_REUSEPORT` listener dan satu epoll instance tersendiri, dan menjalankan banyak koneksi h2 non-blocking melalui resumable HTTP/2 state machine. `workers` adalah jumlah worker (0 = cpu_count). Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`: pakai `.ASYNC` di sana. Lihat [`docs/concurrency-id.md`](docs/concurrency-id.md) untuk detail.
 
 **Timeout context:** Tiga input, yang paling ketat menang:
 
@@ -1873,7 +1877,7 @@ try client.logout(io);
 
 **`zix.Fix.MsgType`**: namespace struct berisi 47 konstanta string compile-time untuk nilai MsgType FIX (FIX 4.0-4.4). Gunakan konstanta bernama daripada string mentah: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), dll.
 
-**Model dispatch:** `.ASYNC` (cocok untuk sesi FIX long-lived dan satu-satunya model portabel), `.EPOLL`, `.URING` (keduanya khusus Linux: worker per-core shared-nothing). Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`: pakai `.ASYNC` di sana.
+**Model dispatch:** `.ASYNC` (cocok untuk sesi FIX long-lived dan satu-satunya model portabel), `.EPOLL`, `.URING` (keduanya khusus Linux: worker per-core shared-nothing). Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`: pakai `.ASYNC` di sana.
 
 **Kapan digunakan:** pakai `zix.Fix` saat kamu berintegrasi dengan counterparty finansial melalui FIX 4.x: order entry, execution report, sesi market-data. Mekanika sesi (Logon/Logout/Heartbeat/TestRequest, penanganan sequence) sudah built-in, jadi kamu hanya menulis handler pesan aplikasi. Pakai mode echo untuk harness konformansi dan mode router untuk logika trading nyata. Untuk protokol non-finansial pakai `zix.Tcp`.
 
@@ -1961,11 +1965,11 @@ defer ch.deinit();
 
 // producer (berjalan di thread/task-nya sendiri)
 try ch.send(io, 42);
-ch.close(io); // sinyal selesai: receiver menguras, lalu mendapatkan error.Closed
+ch.close(io); // sinyal selesai: receiver menguras, lalu mendapatkan error.ZixClosed
 
 // consumer (berjalan di thread/task-nya sendiri)
 while (true) {
-    const v = ch.recv(io) catch break; // error.Closed ketika channel dikuras dan ditutup
+    const v = ch.recv(io) catch break; // error.ZixClosed ketika channel dikuras dan ditutup
     // proses v
 }
 ```
@@ -2140,7 +2144,7 @@ curl --http3-only -k https://127.0.0.1:9063/
 - `req.method` dan `req.path` diisi dari wire. Body response yang diserahkan ke `res.send` disalin setelah handler kembali, jadi boleh menunjuk ke memori static atau milik handler.
 - `req.accept_encoding` membawa Accept-Encoding klien (kosong jika tidak ada). Handler menegosiasi body pre-compressed terhadapnya lalu memanggil `res.setContentEncoding(.br)` (atau `.gzip`), yang memancarkan header response `content-encoding`. Engine tidak pernah mengompresi di jalur kirim: `res.body` harus sudah ter-encode (menyajikan file `.br` / `.gz` yang sudah jadi), jadi tidak ada biaya codec per-request.
 - `ctx` membawa `stream_id` (raw escape hatch, QUIC tidak punya fd per-request), `io`, allocator arena per-request, dan helper timeout (`withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`), bentuk yang sama seperti engine lainnya. Error handler otomatis diselesaikan sebagai satu 500 ketika belum ada yang terkirim (`res.sent`).
-- `run()` membutuhkan port non-zero dan TLS context: ia mengembalikan `error.PortNotConfigured` atau `error.TlsRequired` jika tidak (`init` hanya menyimpan config).
+- `run()` membutuhkan port non-zero dan TLS context: ia mengembalikan `error.ZixPortNotConfigured` atau `error.ZixTlsRequired` jika tidak (`init` hanya menyimpan config).
 
 **Dispatch model:** `.ASYNC` menjalankan satu loop recv single-worker dengan connection-id demux internal (migration-safe). `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per core dengan readiness epoll atau completion io_uring di atasnya (`.URING` fold ke loop worker epoll saat io_uring tidak tersedia), dan keduanya khusus Linux. Connection-id steering per-core ditunda (fase 3).
 
@@ -2196,7 +2200,7 @@ pub fn main(process: std.process.Init) !void {
 
 - Tiga event: `CHANNEL_OPEN` dan `CHANNEL_CLOSED` membawa stream identifier, `MESSAGE` membawa `channel`, `kind` dan `payload`. Sebuah `payload` dipinjam selama panggilan itu saja dan mati pada panggilan berikutnya, jadi apa pun yang perlu disimpan harus disalin keluar.
 - `ctx` adalah tempat menjawab: `send(channel, kind, bytes)`, `broadcast(kind, bytes)`, `openChannel(request)`, `close(channel)`, `channelCount()`. Jangkauan `broadcast` adalah satu worker, yang berarti seluruh room di bawah `.ASYNC` dan bagian room milik core ini di bawah `.EPOLL` atau `.URING`.
-- `run()` memvalidasi sebelum bind: `error.PortNotConfigured`, `error.IceCredentialsRequired`, `error.IceCredentialsInvalid`, `error.TlsRequired`, `error.UnsupportedCertificateKey` (kuncinya harus ECDSA P-256), dan `error.DispatchModelUnsupported` di luar Linux.
+- `run()` memvalidasi sebelum bind: `error.ZixPortNotConfigured`, `error.ZixIceCredentialsRequired`, `error.ZixIceCredentialsInvalid`, `error.ZixTlsRequired`, `error.ZixUnsupportedCertificateKey` (kuncinya harus ECDSA P-256), dan `error.ZixDispatchModelUnsupported` di luar Linux.
 - Browser menarik ufrag ICE baru untuk setiap peer connection, jadi server yang menghadap browser mengisi `accept_any_peer_ice_ufrag = true` lalu membiarkan `ice_password` menjadi gerbangnya.
 
 **Dispatch model:** `.ASYNC` menjalankan satu worker dan berjalan di mana saja. `.EPOLL` dan `.URING` menjalankan satu worker SO_REUSEPORT per core dan khusus Linux. Di sini sengaja tidak ada knob steering CPU: satu peer WebRTC adalah 4-tuple-nya, dan steering akan memecah satu sesi ke dua worker di tengah handshake.

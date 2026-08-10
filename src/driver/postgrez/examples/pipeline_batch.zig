@@ -4,7 +4,7 @@
 //! - add() only queues, sync() sends the batch behind one Sync barrier and
 //!   collects one result per statement in order.
 //! - config.max_pending_replies bounds the queue (0 = no bound): beyond it
-//!   add() sheds with error.QueueFull instead of growing memory.
+//!   add() sheds with error.PostgrezQueueFull instead of growing memory.
 //! - Needs the PostgreSQL 18 container on 127.0.0.1:54180.
 
 const std = @import("std");

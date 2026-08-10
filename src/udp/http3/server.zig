@@ -63,36 +63,48 @@ fn Http3ServerImpl(comptime handler: HandlerFn) type {
         ///
         /// Return:
         /// - !void
-        /// - error.PortNotConfigured if config.port is 0
-        /// - error.TlsRequired if config.tls is null (QUIC has no cleartext mode)
-        /// - error.DispatchModelUnsupported if dispatch_model is .EPOLL or .URING off Linux
+        /// - error.ZixPortNotConfigured if config.port is 0
+        /// - error.ZixTlsRequired if config.tls is null (QUIC has no cleartext mode)
+        /// - error.ZixDispatchModelUnsupported if dispatch_model is .EPOLL or .URING off Linux
         pub fn run(self: *const Self) !void {
-            if (self.config.port == 0) return error.PortNotConfigured;
-            if (self.config.tls == null) return error.TlsRequired;
+            if (self.config.port == 0) return error.ZixPortNotConfigured;
+            if (self.config.tls == null) return error.ZixTlsRequired;
 
             // Reject an unrunnable model before binding, so a rejected config leaves nothing
             // behind (ADR-065).
             if (!dispatch_support.isSupported(self.config.dispatch_model)) {
-                common.logSystem(self.config, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
+                common.logSystem(self.config, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
 
-                return error.DispatchModelUnsupported;
+                return error.ZixDispatchModelUnsupported;
             }
 
             // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
             // rather than 404-ing every file request at runtime. Mirrors zix.Http1.Server.run.
             if (self.config.public_dir.len > 0) {
-                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), self.config.io, self.config.public_dir, .{}) catch return error.PublicDirNotFound;
+                // One name used to cover missing, not-a-directory and permission-denied alike, so
+                // a public_dir the process cannot enter reported as one that is not there.
+                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), self.config.io, self.config.public_dir, .{}) catch |err| return switch (err) {
+                    error.FileNotFound => error.ZixPublicDirNotFound,
+                    error.NotDir => error.ZixPublicDirNotADirectory,
+                    else => error.ZixPublicDirUnreadable,
+                };
                 dir.close(self.config.io);
 
                 // Unlike the other engines this is not just an optimization: an HTTP/3 response body
                 // outlives its handler, so a static file can only be served out of the cache. With
                 // caching off, the router falls through to 404 instead.
-                const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch .DISABLED;
+                // A failed install used to look exactly like caching being off, so a box out of
+                // memory served every static file through the slow path and said nothing.
+                const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch |err| downgrade: {
+                    common.logSystem(self.config, .WARN, "the static cache could not be installed ({s}), every static request re-opens its file", .{@errorName(err)});
+
+                    break :downgrade .DISABLED;
+                };
                 if (installed == .DISABLED) {
-                    std.log.info("zix http3: public_dir is set but public_dir_cache_ttl_ms is 0, so static serving stays off", .{});
+                    common.logSystem(self.config, .WARN, "public_dir is set but public_dir_cache_ttl_ms is 0, so static serving stays off", .{});
                 }
                 if (installed == .MISMATCHED) {
-                    std.log.info("zix http3: a static cache is already installed in this process with different settings, keeping it", .{});
+                    common.logSystem(self.config, .WARN, "a static cache is already installed in this process with different settings, keeping it", .{});
                 }
             }
 
@@ -162,7 +174,7 @@ test "zix http3: run rejects port zero and missing TLS" {
     });
     defer no_port.deinit();
 
-    try std.testing.expectError(error.PortNotConfigured, no_port.run());
+    try std.testing.expectError(error.ZixPortNotConfigured, no_port.run());
 
     var no_tls = Server.init(noopHandler, .{
         .io = threaded.io(),
@@ -173,7 +185,7 @@ test "zix http3: run rejects port zero and missing TLS" {
     });
     defer no_tls.deinit();
 
-    try std.testing.expectError(error.TlsRequired, no_tls.run());
+    try std.testing.expectError(error.ZixTlsRequired, no_tls.run());
 }
 
 comptime {

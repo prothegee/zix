@@ -19,8 +19,8 @@ pub const FlowLimit = struct {
 
     /// Account data arriving up to absolute offset `end` (RFC 9000 4.1). Exceeding the limit is a
     /// FLOW_CONTROL_ERROR.
-    pub fn consume(self: *FlowLimit, end: u64) error{FlowControlError}!void {
-        if (end > self.limit) return error.FlowControlError;
+    pub fn consume(self: *FlowLimit, end: u64) error{ZixFlowControlError}!void {
+        if (end > self.limit) return error.ZixFlowControlError;
         if (end > self.used) self.used = end;
     }
 
@@ -52,9 +52,9 @@ pub const Ack = struct {
 
 /// The ACK errors an endpoint MUST raise (RFC 9000 19.3.1).
 pub const AckError = error{
-    Truncated,
+    ZixTruncated,
     /// A computed packet number went negative, or too many ranges for the buffer: FRAME_ENCODING_ERROR.
-    FrameEncodingError,
+    ZixFrameEncodingError,
 };
 
 /// Parse an ACK frame including its type byte (RFC 9000 19.3), resolving the relative range encoding
@@ -70,7 +70,7 @@ pub fn parseAck(data: []const u8, ack_delay_exponent: u6) AckError!Ack {
 
     var ack: Ack = .{ .largest = largest, .delay_us = delay << ack_delay_exponent, .ranges = undefined, .range_len = 0, .ecn = null, .consumed = 0 };
 
-    if (first_ack_range > largest) return error.FrameEncodingError;
+    if (first_ack_range > largest) return error.ZixFrameEncodingError;
 
     var cur_smallest = largest - first_ack_range;
     ack.ranges[0] = .{ .smallest = cur_smallest, .largest = largest };
@@ -80,13 +80,13 @@ pub fn parseAck(data: []const u8, ack_delay_exponent: u6) AckError!Ack {
         const gap = try field(data, &pos);
         const range_len = try field(data, &pos);
 
-        if (cur_smallest < gap + 2) return error.FrameEncodingError;
+        if (cur_smallest < gap + 2) return error.ZixFrameEncodingError;
 
         const next_largest = cur_smallest - gap - 2;
-        if (range_len > next_largest) return error.FrameEncodingError;
+        if (range_len > next_largest) return error.ZixFrameEncodingError;
 
         const next_smallest = next_largest - range_len;
-        if (ack.range_len >= ack.ranges.len) return error.FrameEncodingError;
+        if (ack.range_len >= ack.ranges.len) return error.ZixFrameEncodingError;
 
         ack.ranges[ack.range_len] = .{ .smallest = next_smallest, .largest = next_largest };
         ack.range_len += 1;
@@ -107,7 +107,7 @@ pub fn parseAck(data: []const u8, ack_delay_exponent: u6) AckError!Ack {
 
 /// Read one variable-length field, advancing the cursor (helper for parseAck).
 fn field(data: []const u8, pos: *usize) AckError!u64 {
-    const vi = varint.read(data[pos.*..]) catch return error.Truncated;
+    const vi = varint.read(data[pos.*..]) catch return error.ZixTruncated;
     pos.* += vi.len;
 
     return vi.value;
@@ -117,9 +117,9 @@ fn field(data: []const u8, pos: *usize) AckError!u64 {
 
 /// Parse a PATH_CHALLENGE (0x1a) or PATH_RESPONSE (0x1b) frame and return its 8-byte data field
 /// (RFC 9000 19.17 / 19.18).
-pub fn parsePathData(data: []const u8) error{ Truncated, WrongType }![8]u8 {
-    if (data.len < 9) return error.Truncated;
-    if (data[0] != 0x1a and data[0] != 0x1b) return error.WrongType;
+pub fn parsePathData(data: []const u8) error{ ZixTruncated, ZixWrongType }![8]u8 {
+    if (data.len < 9) return error.ZixTruncated;
+    if (data[0] != 0x1a and data[0] != 0x1b) return error.ZixWrongType;
 
     return data[1..9].*;
 }
@@ -144,7 +144,7 @@ test "zix http3: RFC 9000 4.1 stream and connection flow control" {
     var stream_flow = FlowLimit{ .limit = 100 };
     try stream_flow.consume(80);
     try std.testing.expectEqual(@as(u64, 80), stream_flow.used);
-    try std.testing.expectError(error.FlowControlError, stream_flow.consume(120));
+    try std.testing.expectError(error.ZixFlowControlError, stream_flow.consume(120));
 
     stream_flow.advertise(200);
     try stream_flow.consume(150);
@@ -155,7 +155,7 @@ test "zix http3: RFC 9000 4.1 stream and connection flow control" {
 
     var conn_flow = FlowLimit{ .limit = 1000 };
     try conn_flow.consume(1000);
-    try std.testing.expectError(error.FlowControlError, conn_flow.consume(1001));
+    try std.testing.expectError(error.ZixFlowControlError, conn_flow.consume(1001));
 }
 
 test "zix http3: RFC 9000 19.3 ACK frame parse and range arithmetic" {
@@ -177,7 +177,7 @@ test "zix http3: RFC 9000 19.3 ACK frame parse and range arithmetic" {
     const ack_delay = try parseAck(&hexBytes("020a" ++ "4064" ++ "0000"), 3);
     try std.testing.expectEqual(@as(u64, 800), ack_delay.delay_us);
 
-    try std.testing.expectError(error.FrameEncodingError, parseAck(&hexBytes("0202000005"), 0));
+    try std.testing.expectError(error.ZixFrameEncodingError, parseAck(&hexBytes("0202000005"), 0));
 }
 
 test "zix http3: RFC 9000 19.17 / 19.18 path validation" {
@@ -190,5 +190,5 @@ test "zix http3: RFC 9000 19.17 / 19.18 path validation" {
     const wrong = try parsePathData(&hexBytes("1b01020304050607ff"));
     try std.testing.expect(!pathValidates(challenge, wrong));
 
-    try std.testing.expectError(error.WrongType, parsePathData(&hexBytes("0c0102030405060708")));
+    try std.testing.expectError(error.ZixWrongType, parsePathData(&hexBytes("0c0102030405060708")));
 }

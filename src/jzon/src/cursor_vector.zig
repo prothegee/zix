@@ -75,8 +75,8 @@ pub fn skipSpace(cursor: *Cursor) void {
 ///
 /// Return:
 /// - StringSpan (the undecoded body, plus whether it holds an escape)
-/// - error.Truncated when the closing quote never arrives
-/// - error.Unexpected when the token does not open with a quote, or carries a
+/// - error.JzonTruncated when the closing quote never arrives
+/// - error.JzonUnexpected when the token does not open with a quote, or carries a
 ///   raw control byte
 pub fn stringSpan(cursor: *Cursor) Error!StringSpan {
     try cursor.expect('"');
@@ -97,7 +97,7 @@ pub fn stringSpan(cursor: *Cursor) Error!StringSpan {
             }
         }
 
-        if (cursor.pos == cursor.src.len) return error.Truncated;
+        if (cursor.pos == cursor.src.len) return error.JzonTruncated;
 
         const byte = cursor.src[cursor.pos];
 
@@ -108,10 +108,10 @@ pub fn stringSpan(cursor: *Cursor) Error!StringSpan {
             return .{ .raw = raw, .escaped = escaped };
         }
 
-        if (byte < 0x20) return error.Unexpected;
+        if (byte < 0x20) return error.JzonUnexpected;
 
         if (byte == '\\') {
-            if (cursor.pos + 1 == cursor.src.len) return error.Truncated;
+            if (cursor.pos + 1 == cursor.src.len) return error.JzonTruncated;
 
             escaped = true;
             cursor.pos += 2;

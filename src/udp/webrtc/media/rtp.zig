@@ -49,15 +49,15 @@ const TIMESTAMP_AT: usize = 4;
 /// What stops a packet from being read.
 pub const Error = error{
     /// Fewer bytes than the header fields say the packet has.
-    Truncated,
+    ZixTruncated,
     /// A version other than 2.
-    UnsupportedVersion,
+    ZixUnsupportedVersion,
 };
 
 /// What stops padding from being stripped.
 pub const PaddingError = error{
     /// The pad count is zero, or claims more bytes than the payload holds.
-    BadPadding,
+    ZixBadPadding,
 };
 
 /// The header fields a forwarder reads.
@@ -100,14 +100,14 @@ pub const Packet = struct {
     ///
     /// Return:
     /// - []const u8
-    /// - error.BadPadding for a zero count or one longer than the payload
+    /// - error.ZixBadPadding for a zero count or one longer than the payload
     pub fn unpadded(self: Packet) PaddingError![]const u8 {
         if (!self.header.has_padding) return self.payload;
-        if (self.payload.len == 0) return error.BadPadding;
+        if (self.payload.len == 0) return error.ZixBadPadding;
 
         const count = self.payload[self.payload.len - 1];
 
-        if (count == 0 or count > self.payload.len) return error.BadPadding;
+        if (count == 0 or count > self.payload.len) return error.ZixBadPadding;
 
         return self.payload[0 .. self.payload.len - count];
     }
@@ -142,19 +142,19 @@ pub const Fields = struct {
 ///
 /// Return:
 /// - Packet borrowing `packet`
-/// - error.Truncated, error.UnsupportedVersion
+/// - error.ZixTruncated, error.ZixUnsupportedVersion
 pub fn read(packet: []const u8) Error!Packet {
-    if (packet.len < FIXED_HEADER_LEN) return error.Truncated;
+    if (packet.len < FIXED_HEADER_LEN) return error.ZixTruncated;
 
     const version: u2 = @intCast(packet[0] >> 6);
 
-    if (version != VERSION) return error.UnsupportedVersion;
+    if (version != VERSION) return error.ZixUnsupportedVersion;
 
     const csrc_count: u4 = @intCast(packet[0] & 0x0F);
     const csrc_at = FIXED_HEADER_LEN;
     const csrc_len = @as(usize, csrc_count) * CSRC_LEN;
 
-    if (packet.len < csrc_at + csrc_len) return error.Truncated;
+    if (packet.len < csrc_at + csrc_len) return error.ZixTruncated;
 
     const header: Header = .{
         .has_padding = packet[0] & 0x20 != 0,
@@ -172,13 +172,13 @@ pub fn read(packet: []const u8) Error!Packet {
     var extension_profile: ?u16 = null;
 
     if (header.has_extension) {
-        if (packet.len < header_len + EXTENSION_HEADER_LEN) return error.Truncated;
+        if (packet.len < header_len + EXTENSION_HEADER_LEN) return error.ZixTruncated;
 
         const words = std.mem.readInt(u16, packet[header_len + 2 ..][0..2], .big);
         const body_at = header_len + EXTENSION_HEADER_LEN;
         const body_len = @as(usize, words) * 4;
 
-        if (packet.len < body_at + body_len) return error.Truncated;
+        if (packet.len < body_at + body_len) return error.ZixTruncated;
 
         extension_profile = std.mem.readInt(u16, packet[header_len..][0..2], .big);
         extension = packet[body_at..][0..body_len];
@@ -205,7 +205,7 @@ pub fn read(packet: []const u8) Error!Packet {
 ///
 /// Return:
 /// - usize
-/// - error.Truncated, error.UnsupportedVersion
+/// - error.ZixTruncated, error.ZixUnsupportedVersion
 pub fn headerLen(packet: []const u8) Error!usize {
     return (try read(packet)).header_len;
 }
@@ -223,11 +223,11 @@ pub fn headerLen(packet: []const u8) Error!usize {
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace
-pub fn write(out: []u8, fields: Fields, payload: []const u8) error{NoSpace}![]const u8 {
+/// - error.ZixNoSpace
+pub fn write(out: []u8, fields: Fields, payload: []const u8) error{ZixNoSpace}![]const u8 {
     const total = FIXED_HEADER_LEN + payload.len;
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     out[0] = @as(u8, VERSION) << 6;
     out[1] = (@as(u8, @intFromBool(fields.marker)) << 7) | @as(u8, fields.payload_type);
@@ -248,9 +248,9 @@ pub fn write(out: []u8, fields: Fields, payload: []const u8) error{NoSpace}![]co
 ///
 /// Return:
 /// - void
-/// - error.Truncated
+/// - error.ZixTruncated
 pub fn setSsrc(packet: []u8, ssrc: u32) Error!void {
-    if (packet.len < FIXED_HEADER_LEN) return error.Truncated;
+    if (packet.len < FIXED_HEADER_LEN) return error.ZixTruncated;
 
     std.mem.writeInt(u32, packet[SSRC_AT..][0..4], ssrc, .big);
 }
@@ -263,9 +263,9 @@ pub fn setSsrc(packet: []u8, ssrc: u32) Error!void {
 ///
 /// Return:
 /// - void
-/// - error.Truncated
+/// - error.ZixTruncated
 pub fn setSequence(packet: []u8, sequence: u16) Error!void {
-    if (packet.len < FIXED_HEADER_LEN) return error.Truncated;
+    if (packet.len < FIXED_HEADER_LEN) return error.ZixTruncated;
 
     std.mem.writeInt(u16, packet[SEQUENCE_AT..][0..2], sequence, .big);
 }
@@ -282,9 +282,9 @@ pub fn setSequence(packet: []u8, sequence: u16) Error!void {
 ///
 /// Return:
 /// - void
-/// - error.Truncated
+/// - error.ZixTruncated
 pub fn setTimestamp(packet: []u8, timestamp: u32) Error!void {
-    if (packet.len < FIXED_HEADER_LEN) return error.Truncated;
+    if (packet.len < FIXED_HEADER_LEN) return error.ZixTruncated;
 
     std.mem.writeInt(u32, packet[TIMESTAMP_AT..][0..4], timestamp, .big);
 }
@@ -330,12 +330,12 @@ test "zix media: rtp read, a version other than two is refused" {
     var wrong = sample;
     wrong[0] = 0x40;
 
-    try std.testing.expectError(error.UnsupportedVersion, read(&wrong));
+    try std.testing.expectError(error.ZixUnsupportedVersion, read(&wrong));
 }
 
 test "zix media: rtp read, a packet shorter than the fixed header is refused" {
-    try std.testing.expectError(error.Truncated, read(sample[0..11]));
-    try std.testing.expectError(error.Truncated, read(&[_]u8{}));
+    try std.testing.expectError(error.ZixTruncated, read(sample[0..11]));
+    try std.testing.expectError(error.ZixTruncated, read(&[_]u8{}));
 }
 
 test "zix media: rtp read, a header with no payload is legal" {
@@ -366,7 +366,7 @@ test "zix media: rtp read, a csrc list running past the packet is refused" {
     var packet: [16]u8 = sample;
     packet[0] = 0x8F;
 
-    try std.testing.expectError(error.Truncated, read(&packet));
+    try std.testing.expectError(error.ZixTruncated, read(&packet));
 }
 
 test "zix media: rtp read, an extension is measured in 32-bit words" {
@@ -397,10 +397,10 @@ test "zix media: rtp read, an extension running past the packet is refused" {
     std.mem.writeInt(u16, packet[12..14], 0xBEDE, .big);
     std.mem.writeInt(u16, packet[14..16], 4, .big);
 
-    try std.testing.expectError(error.Truncated, read(&packet));
+    try std.testing.expectError(error.ZixTruncated, read(&packet));
 
     // The extension header itself can also be cut short.
-    try std.testing.expectError(error.Truncated, read(packet[0..14]));
+    try std.testing.expectError(error.ZixTruncated, read(packet[0..14]));
 }
 
 test "zix media: rtp read, a csrc list and an extension both count" {
@@ -436,16 +436,16 @@ test "zix media: rtp unpadded, a bad count is refused" {
 
     // Zero is never a legal count, the byte itself is part of the padding.
     packet[15] = 0;
-    try std.testing.expectError(error.BadPadding, (try read(&packet)).unpadded());
+    try std.testing.expectError(error.ZixBadPadding, (try read(&packet)).unpadded());
 
     // Longer than the payload.
     packet[15] = 5;
-    try std.testing.expectError(error.BadPadding, (try read(&packet)).unpadded());
+    try std.testing.expectError(error.ZixBadPadding, (try read(&packet)).unpadded());
 
     // Padding claimed with no payload at all.
     var empty: [12]u8 = sample[0..12].*;
     empty[0] = 0xA0;
-    try std.testing.expectError(error.BadPadding, (try read(&empty)).unpadded());
+    try std.testing.expectError(error.ZixBadPadding, (try read(&empty)).unpadded());
 }
 
 test "zix media: rtp unpadded, a packet without the flag is handed back whole" {
@@ -496,7 +496,7 @@ test "zix media: rtp write, the first two bytes are built bit by bit" {
 test "zix media: rtp write, a short buffer errors" {
     var buf: [11]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, .{
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, .{
         .payload_type = 96,
         .sequence = 1,
         .timestamp = 0,
@@ -553,7 +553,7 @@ test "zix media: rtp setTimestamp, a forwarder shifts the clock in place" {
 test "zix media: rtp setSsrc, a packet too short to hold one is refused" {
     var packet: [11]u8 = @splat(0);
 
-    try std.testing.expectError(error.Truncated, setSsrc(&packet, 1));
-    try std.testing.expectError(error.Truncated, setSequence(&packet, 1));
-    try std.testing.expectError(error.Truncated, setTimestamp(&packet, 1));
+    try std.testing.expectError(error.ZixTruncated, setSsrc(&packet, 1));
+    try std.testing.expectError(error.ZixTruncated, setSequence(&packet, 1));
+    try std.testing.expectError(error.ZixTruncated, setTimestamp(&packet, 1));
 }

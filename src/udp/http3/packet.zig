@@ -65,13 +65,13 @@ pub fn decodePacketNumber(largest_pn: u64, truncated_pn: u64, pn_nbits: u6) u64 
 
 /// The errors a version-1 header parse can raise (RFC 9000 17.2 / 17.3 invariants).
 pub const ParseError = error{
-    Truncated,
+    ZixTruncated,
     /// Header Form bit says this is not the expected header shape.
-    WrongHeaderForm,
+    ZixWrongHeaderForm,
     /// Fixed Bit is 0: not a valid version-1 packet, MUST be discarded.
-    FixedBitZero,
+    ZixFixedBitZero,
     /// A connection ID length exceeds the 20-byte version-1 maximum, MUST drop the packet.
-    ConnectionIdTooLong,
+    ZixConnectionIdTooLong,
 };
 
 /// A version-1 long header packet split into its fields (RFC 9000 17.2).
@@ -86,27 +86,27 @@ pub const LongHeader = struct {
 /// Parse a version-1 long header (RFC 9000 17.2). Validates Header Form, Fixed Bit, and the 20-byte
 /// connection ID ceiling.
 pub fn parseLongHeader(data: []const u8) ParseError!LongHeader {
-    if (data.len < 6) return error.Truncated;
+    if (data.len < 6) return error.ZixTruncated;
 
     const first = data[0];
-    if (first & 0x80 == 0) return error.WrongHeaderForm;
-    if (first & 0x40 == 0) return error.FixedBitZero;
+    if (first & 0x80 == 0) return error.ZixWrongHeaderForm;
+    if (first & 0x40 == 0) return error.ZixFixedBitZero;
 
     const version = std.mem.readInt(u32, data[1..5], .big);
 
     var pos: usize = 5;
     const dcid_len = data[pos];
-    if (dcid_len > 20) return error.ConnectionIdTooLong;
+    if (dcid_len > 20) return error.ZixConnectionIdTooLong;
     pos += 1;
-    if (data.len < pos + dcid_len) return error.Truncated;
+    if (data.len < pos + dcid_len) return error.ZixTruncated;
     const dcid = data[pos .. pos + dcid_len];
     pos += dcid_len;
 
-    if (data.len < pos + 1) return error.Truncated;
+    if (data.len < pos + 1) return error.ZixTruncated;
     const scid_len = data[pos];
-    if (scid_len > 20) return error.ConnectionIdTooLong;
+    if (scid_len > 20) return error.ZixConnectionIdTooLong;
     pos += 1;
-    if (data.len < pos + scid_len) return error.Truncated;
+    if (data.len < pos + scid_len) return error.ZixTruncated;
     const scid = data[pos .. pos + scid_len];
     pos += scid_len;
 
@@ -132,11 +132,11 @@ pub const ShortHeader = struct {
 /// Parse a version-1 short header (RFC 9000 17.3) given the locally issued connection ID length.
 /// Validates Header Form and Fixed Bit.
 pub fn parseShortHeader(data: []const u8, dcid_len: usize) ParseError!ShortHeader {
-    if (data.len < 1 + dcid_len) return error.Truncated;
+    if (data.len < 1 + dcid_len) return error.ZixTruncated;
 
     const first = data[0];
-    if (first & 0x80 != 0) return error.WrongHeaderForm;
-    if (first & 0x40 == 0) return error.FixedBitZero;
+    if (first & 0x80 != 0) return error.ZixWrongHeaderForm;
+    if (first & 0x40 == 0) return error.ZixFixedBitZero;
 
     return .{
         .spin_bit = first & 0x20 != 0,
@@ -184,8 +184,8 @@ test "zix http3: RFC 9000 17.2 long header parse and invariants" {
     try std.testing.expectEqualSlices(u8, &hexBytes("11223344"), header.scid);
     try std.testing.expectEqualSlices(u8, &hexBytes("00"), header.rest);
 
-    try std.testing.expectError(error.FixedBitZero, parseLongHeader(&hexBytes("830000000100")));
-    try std.testing.expectError(error.ConnectionIdTooLong, parseLongHeader(&hexBytes("c30000000115")));
+    try std.testing.expectError(error.ZixFixedBitZero, parseLongHeader(&hexBytes("830000000100")));
+    try std.testing.expectError(error.ZixConnectionIdTooLong, parseLongHeader(&hexBytes("c30000000115")));
 }
 
 test "zix http3: RFC 9000 17.3 short header parse and invariants" {
@@ -197,5 +197,5 @@ test "zix http3: RFC 9000 17.3 short header parse and invariants" {
     try std.testing.expectEqualSlices(u8, &hexBytes("cafebabe11223344"), sh.dcid);
     try std.testing.expectEqualSlices(u8, &hexBytes("aabbcc"), sh.rest);
 
-    try std.testing.expectError(error.FixedBitZero, parseShortHeader(&hexBytes("03cafebabe11223344"), 8));
+    try std.testing.expectError(error.ZixFixedBitZero, parseShortHeader(&hexBytes("03cafebabe11223344"), 8));
 }

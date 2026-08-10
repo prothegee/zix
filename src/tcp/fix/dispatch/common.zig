@@ -3,22 +3,35 @@
 //! by every model (routes ride inside the runtime FixServeOpts).
 
 const std = @import("std");
-const builtin = @import("builtin");
-const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 const core = @import("../core.zig");
 const FixServerConfig = @import("../config.zig").FixServerConfig;
+const Logger = @import("../../../logger/logger.zig").Logger;
+
+const log = std.log.scoped(.zix_fix);
 const FixServeOpts = core.FixServeOpts;
 
-/// Emit a server lifecycle line. Routes through cfg.logger when present.
-/// Without a logger it prints to stderr only in Debug builds (silent in release).
-pub fn logSystem(cfg: FixServerConfig, comptime fmt: []const u8, args: anytype) void {
+/// Emit a server line at the given level. Routes through cfg.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+pub fn logSystem(cfg: FixServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (cfg.logger) |lg| {
-        lg.system(.INFO, "fix", fmt, args);
+        lg.system(level, "fix", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix fix: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 // --------------------------------------------------------- //

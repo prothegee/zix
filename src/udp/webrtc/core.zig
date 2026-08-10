@@ -89,8 +89,8 @@ pub const Context = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSuchChannel, error.ChannelClosed when the channel is not usable
-    /// - error.NotEstablished, error.NoSpace, error.OutOfMemory
+    /// - error.ZixNoSuchChannel, error.ZixChannelClosed when the channel is not usable
+    /// - error.ZixNotEstablished, error.ZixNoSpace, error.OutOfMemory
     pub fn send(self: *Context, stream_identifier: u16, kind: Kind, bytes: []const u8) Error!void {
         return self.channels.sendMessage(stream_identifier, kind, bytes, self.now_ms);
     }
@@ -129,7 +129,7 @@ pub const Context = struct {
     ///
     /// Return:
     /// - u16 (the stream identifier the channel took)
-    /// - error.NoStreamAvailable, error.TooManyChannels, error.NotEstablished
+    /// - error.ZixNoStreamAvailable, error.ZixTooManyChannels, error.ZixNotEstablished
     pub fn openChannel(self: *Context, request: OpenRequest) Error!u16 {
         return self.channels.openChannel(request, self.now_ms);
     }
@@ -145,7 +145,7 @@ pub const Context = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSuchChannel
+    /// - error.ZixNoSuchChannel
     pub fn close(self: *Context, stream_identifier: u16) Error!void {
         return self.channels.closeChannel(stream_identifier);
     }
@@ -193,8 +193,8 @@ test "zix webrtc: core context, a send before the association is up is refused" 
 
     var ctx: Context = .{ .channels = &peer.channels, .address = TEST_ADDRESS, .now_ms = 1000 };
 
-    try std.testing.expectError(error.NoSuchChannel, ctx.send(1, .STRING, "hello"));
-    try std.testing.expectError(error.NoSuchChannel, ctx.close(1));
+    try std.testing.expectError(error.ZixNoSuchChannel, ctx.send(1, .STRING, "hello"));
+    try std.testing.expectError(error.ZixNoSuchChannel, ctx.close(1));
     try std.testing.expectEqual(@as(usize, 0), ctx.channelCount());
 }
 
@@ -204,7 +204,7 @@ test "zix webrtc: core context, opening a channel needs an established associati
 
     var ctx: Context = .{ .channels = &peer.channels, .address = TEST_ADDRESS, .now_ms = 1000 };
 
-    try std.testing.expectError(error.NotEstablished, ctx.openChannel(.{ .label = "chat" }));
+    try std.testing.expectError(error.ZixNotEstablished, ctx.openChannel(.{ .label = "chat" }));
 }
 
 test "zix webrtc: core context, the address and clock are carried through untouched" {

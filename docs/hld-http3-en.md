@@ -106,7 +106,7 @@ Low-level primitives, exposed so a peer can build the other side of the wire: `c
 | Method | Description |
 | :- | :- |
 | `init(handler, config)` | Stores the config, no validation and no error. Mirrors `zix.Http1.Server.init`. |
-| `run()` | Validates first (`error.PortNotConfigured` on a zero port, `error.TlsRequired` on a null TLS context), then binds and serves on the model in `config.dispatch_model`. Blocks until an error. Linux-only. |
+| `run()` | Validates first (`error.ZixPortNotConfigured` on a zero port, `error.ZixTlsRequired` on a null TLS context), then binds and serves on the model in `config.dispatch_model`. Blocks until an error. Linux-only. |
 | `deinit()` | Release resources (no-op today, kept for API symmetry). |
 
 ---
@@ -183,7 +183,7 @@ The query string is stripped before matching (matching sees the path up to `?`),
 
 ## Static File Serving
 
-`public_dir` (ADR-064) serves an unmatched route as a file before the 404, with `..` rejected. A missing directory fails at `run()` with `error.PublicDirNotFound`.
+`public_dir` (ADR-064) serves an unmatched route as a file before the 404, with `..` rejected. A missing directory fails at `run()` with `error.ZixPublicDirNotFound`.
 
 **This engine differs from the other three, and the difference is not an optimization.** On `zix.Http`, `zix.Http1`, and `zix.Http2` the response is written inside the handler call, so a body can come from a descriptor that is only open for that call. Here it cannot: `Response` is a value holder, and a body too large for one packet is parked in a send-stream slot, fragmented by the pump across many packets, held until every range is acknowledged, and rewound and re-sent on loss or on a probe timeout. The body has to be stable, randomly readable memory that outlives the handler.
 

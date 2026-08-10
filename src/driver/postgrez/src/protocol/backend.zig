@@ -13,8 +13,8 @@ const frontend = @import("frontend.zig");
 pub const Format = frontend.Format;
 
 pub const DecodeError = error{
-    Truncated,
-    BadMessage,
+    PostgrezTruncated,
+    PostgrezBadMessage,
 };
 
 /// Wire framing: tag + length. `payload_len` already excludes the length
@@ -28,10 +28,10 @@ pub const Header = struct {
 ///
 /// Return:
 /// - Header on success
-/// - error.BadMessage when the length field is below its own 4 bytes
+/// - error.PostgrezBadMessage when the length field is below its own 4 bytes
 pub fn parseHeader(bytes: [5]u8) DecodeError!Header {
     const wire_len = std.mem.readInt(u32, bytes[1..5], .big);
-    if (wire_len < 4) return error.BadMessage;
+    if (wire_len < 4) return error.PostgrezBadMessage;
 
     return .{ .tag = bytes[0], .payload_len = wire_len - 4 };
 }
@@ -44,7 +44,7 @@ const Cursor = struct {
     pos: usize = 0,
 
     fn readInt(self: *Cursor, comptime T: type) DecodeError!T {
-        if (self.pos + @sizeOf(T) > self.buf.len) return error.Truncated;
+        if (self.pos + @sizeOf(T) > self.buf.len) return error.PostgrezTruncated;
 
         const value = std.mem.readInt(T, self.buf[self.pos..][0..@sizeOf(T)], .big);
         self.pos += @sizeOf(T);
@@ -53,7 +53,7 @@ const Cursor = struct {
     }
 
     fn readCstr(self: *Cursor) DecodeError![]const u8 {
-        const end = std.mem.indexOfScalarPos(u8, self.buf, self.pos, 0) orelse return error.Truncated;
+        const end = std.mem.indexOfScalarPos(u8, self.buf, self.pos, 0) orelse return error.PostgrezTruncated;
 
         const text = self.buf[self.pos..end];
         self.pos = end + 1;
@@ -62,7 +62,7 @@ const Cursor = struct {
     }
 
     fn take(self: *Cursor, n: usize) DecodeError![]const u8 {
-        if (self.pos + n > self.buf.len) return error.Truncated;
+        if (self.pos + n > self.buf.len) return error.PostgrezTruncated;
 
         const bytes = self.buf[self.pos..][0..n];
         self.pos += n;
@@ -233,7 +233,7 @@ pub const RowDescription = struct {
             const type_len = try self.cursor.readInt(i16);
             const type_mod = try self.cursor.readInt(i32);
             const format_code = try self.cursor.readInt(i16);
-            if (format_code != 0 and format_code != 1) return error.BadMessage;
+            if (format_code != 0 and format_code != 1) return error.PostgrezBadMessage;
 
             return .{
                 .name = name,
@@ -269,7 +269,7 @@ pub const DataRow = struct {
 
             const cell_len = try self.cursor.readInt(i32);
             if (cell_len == -1) return @as(?[]const u8, null);
-            if (cell_len < 0) return error.BadMessage;
+            if (cell_len < 0) return error.PostgrezBadMessage;
 
             return try self.cursor.take(@intCast(cell_len));
         }
@@ -366,7 +366,7 @@ pub const BackendMessage = union(enum) {
 ///
 /// Return:
 /// - BackendMessage view over `payload` (zero copy)
-/// - error.Truncated / error.BadMessage on malformed input
+/// - error.PostgrezTruncated / error.PostgrezBadMessage on malformed input
 pub fn decode(tag: u8, payload: []const u8) DecodeError!BackendMessage {
     var cursor = Cursor{ .buf = payload };
 
@@ -401,7 +401,7 @@ pub fn decode(tag: u8, payload: []const u8) DecodeError!BackendMessage {
         },
         'Z' => {
             const status = (try cursor.take(1))[0];
-            if (status != 'I' and status != 'T' and status != 'E') return error.BadMessage;
+            if (status != 'I' and status != 'T' and status != 'E') return error.PostgrezBadMessage;
 
             return .{ .ready_for_query = @enumFromInt(status) };
         },
@@ -431,7 +431,7 @@ pub fn decode(tag: u8, payload: []const u8) DecodeError!BackendMessage {
         },
         'G', 'H' => {
             const overall = try cursor.readInt(i8);
-            if (overall != 0 and overall != 1) return error.BadMessage;
+            if (overall != 0 and overall != 1) return error.PostgrezBadMessage;
             const column_count = try cursor.readInt(u16);
 
             const response = CopyResponse{
@@ -489,7 +489,7 @@ test "postgrez protocol: parseHeader splits tag and payload length" {
 }
 
 test "postgrez protocol: parseHeader rejects a length below 4" {
-    try testing.expectError(error.BadMessage, parseHeader(.{ 'Z', 0, 0, 0, 3 }));
+    try testing.expectError(error.PostgrezBadMessage, parseHeader(.{ 'Z', 0, 0, 0, 3 }));
 }
 
 test "postgrez protocol: auth ok, cleartext, md5 decode" {
@@ -547,7 +547,7 @@ test "postgrez protocol: ready_for_query maps transaction status" {
     const in_transaction = try decode('Z', "T");
     try testing.expectEqual(TransactionStatus.IN_TRANSACTION, in_transaction.ready_for_query);
 
-    try testing.expectError(error.BadMessage, decode('Z', "X"));
+    try testing.expectError(error.PostgrezBadMessage, decode('Z', "X"));
 }
 
 test "postgrez protocol: error_response fields are reachable by code" {
@@ -671,7 +671,7 @@ test "postgrez protocol: unknown tag is preserved" {
 }
 
 test "postgrez protocol: truncated payloads error instead of overread" {
-    try testing.expectError(error.Truncated, decode('R', &.{ 0, 0 }));
-    try testing.expectError(error.Truncated, decode('S', "no_terminator"));
-    try testing.expectError(error.Truncated, decode('A', &.{ 0, 0, 0, 1 }));
+    try testing.expectError(error.PostgrezTruncated, decode('R', &.{ 0, 0 }));
+    try testing.expectError(error.PostgrezTruncated, decode('S', "no_terminator"));
+    try testing.expectError(error.PostgrezTruncated, decode('A', &.{ 0, 0, 0, 1 }));
 }

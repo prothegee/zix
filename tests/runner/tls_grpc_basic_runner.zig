@@ -77,7 +77,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 
     var fin_buf: [256]u8 = undefined;
     var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
-    if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+    if (finished.alpn != Tls.Alpn.H2) return error.ZixAlpnNotH2;
 
     try verifyServerTrust(io, &finished);
 

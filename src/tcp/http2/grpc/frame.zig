@@ -30,8 +30,8 @@ pub const GrpcPrefix = struct {
 };
 
 /// Parse the 5-byte gRPC prefix from the start of body.
-pub fn readGrpcPrefix(body: []const u8) error{TooShort}!GrpcPrefix {
-    if (body.len < grpc_prefix_len) return error.TooShort;
+pub fn readGrpcPrefix(body: []const u8) error{ZixTooShort}!GrpcPrefix {
+    if (body.len < grpc_prefix_len) return error.ZixTooShort;
     const msg_len = std.mem.readInt(u32, body[1..grpc_prefix_len], .big);
     return .{ .compress = body[0] != 0, .msg_len = msg_len };
 }
@@ -170,9 +170,9 @@ pub fn buildGrpcHeadersGzip(out: []u8, stream_id: u31, content_type: []const u8)
 ///
 /// Return:
 /// - byte count written into out_buf
-/// - error.TruncatedBody if the body is malformed
-/// - error.DecompressFailed if gzip decompression fails
-/// - error.BufferTooSmall if out_buf cannot hold the decompressed result
+/// - error.ZixTruncatedBody if the body is malformed
+/// - error.ZixDecompressFailed if gzip decompression fails
+/// - error.ZixBufferTooSmall if out_buf cannot hold the decompressed result
 pub fn decompressGrpcBody(body: []const u8, out_buf: []u8) !usize {
     const flate = std.compress.flate;
 
@@ -184,22 +184,22 @@ pub fn decompressGrpcBody(body: []const u8, out_buf: []u8) !usize {
         const msg_len = std.mem.readInt(u32, body[in_pos + 1 ..][0..4], .big);
         const total = grpc_prefix_len + @as(usize, msg_len);
 
-        if (in_pos + total > body.len) return error.TruncatedBody;
+        if (in_pos + total > body.len) return error.ZixTruncatedBody;
 
         if (compress_flag) {
-            if (out_pos + grpc_prefix_len > out_buf.len) return error.BufferTooSmall;
+            if (out_pos + grpc_prefix_len > out_buf.len) return error.ZixBufferTooSmall;
 
             const compressed = body[in_pos + grpc_prefix_len ..][0..msg_len];
             var in_reader = std.Io.Reader.fixed(compressed);
             var decomp = flate.Decompress.init(&in_reader, .gzip, &.{});
             var out_writer = std.Io.Writer.fixed(out_buf[out_pos + grpc_prefix_len ..]);
-            const decomp_len = decomp.reader.stream(&out_writer, .unlimited) catch return error.DecompressFailed;
+            const decomp_len = decomp.reader.stream(&out_writer, .unlimited) catch return error.ZixDecompressFailed;
 
             out_buf[out_pos] = 0;
             std.mem.writeInt(u32, out_buf[out_pos + 1 ..][0..4], @intCast(decomp_len), .big);
             out_pos += grpc_prefix_len + decomp_len;
         } else {
-            if (out_pos + total > out_buf.len) return error.BufferTooSmall;
+            if (out_pos + total > out_buf.len) return error.ZixBufferTooSmall;
             @memcpy(out_buf[out_pos..][0..total], body[in_pos..][0..total]);
             out_pos += total;
         }
@@ -216,7 +216,7 @@ pub fn decompressGrpcBody(body: []const u8, out_buf: []u8) !usize {
 ///
 /// Return:
 /// - compressed byte count
-/// - error.CompressFailed if gzip compression fails or out_buf is too small
+/// - error.ZixCompressFailed if gzip compression fails or out_buf is too small
 pub fn compressGrpcMessage(data: []const u8, out_buf: []u8) !usize {
     const flate = std.compress.flate;
 
@@ -227,9 +227,9 @@ pub fn compressGrpcMessage(data: []const u8, out_buf: []u8) !usize {
     defer std.heap.smp_allocator.destroy(comp);
 
     var out_writer = std.Io.Writer.fixed(out_buf);
-    comp.* = flate.Compress.init(&out_writer, work_buf, .gzip, flate.Compress.Options.level_1) catch return error.CompressFailed;
-    comp.writer.writeAll(data) catch return error.CompressFailed;
-    comp.finish() catch return error.CompressFailed;
+    comp.* = flate.Compress.init(&out_writer, work_buf, .gzip, flate.Compress.Options.level_1) catch return error.ZixCompressFailed;
+    comp.writer.writeAll(data) catch return error.ZixCompressFailed;
+    comp.finish() catch return error.ZixCompressFailed;
 
     return out_writer.end;
 }
@@ -431,12 +431,12 @@ test "zix grpc: decompressGrpcBody truncated body returns error" {
     var body: [5]u8 = undefined;
     writeGrpcPrefix(&body, false, 100);
     var out_buf: [256]u8 = undefined;
-    try std.testing.expectError(error.TruncatedBody, decompressGrpcBody(&body, &out_buf));
+    try std.testing.expectError(error.ZixTruncatedBody, decompressGrpcBody(&body, &out_buf));
 }
 
 test "zix grpc: readGrpcPrefix too short" {
     const body = [_]u8{ 0, 0, 0 };
-    try std.testing.expectError(error.TooShort, readGrpcPrefix(&body));
+    try std.testing.expectError(error.ZixTooShort, readGrpcPrefix(&body));
 }
 
 test "zix grpc: readGrpcPrefix and writeGrpcPrefix roundtrip" {

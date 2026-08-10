@@ -77,7 +77,7 @@ const CliArgs = struct {
 ///
 /// Return:
 /// - CliArgs
-/// - error.MissingDirValue when --dir is the last argument
+/// - error.ZixerMissingDirValue when --dir is the last argument
 fn parseArgs(arena: std.mem.Allocator, arg_iter: anytype) !CliArgs {
     var cli = CliArgs{};
     var filters: std.ArrayList([]const u8) = .empty;
@@ -86,7 +86,7 @@ fn parseArgs(arena: std.mem.Allocator, arg_iter: anytype) !CliArgs {
 
     while (arg_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--dir")) {
-            cli.dir_arg = arg_iter.next() orelse return error.MissingDirValue;
+            cli.dir_arg = arg_iter.next() orelse return error.ZixerMissingDirValue;
         } else if (cli.command == null) {
             cli.command = arg;
         } else {
@@ -315,7 +315,7 @@ test "zix zixer: cli args, bare zixer and dangling --dir" {
     try std.testing.expectEqual(@as(?[]const u8, null), bare_cli.command);
 
     var dangling = FakeArgs{ .items = &.{ "zixer", "--dir" } };
-    try std.testing.expectError(error.MissingDirValue, parseArgs(arena.allocator(), &dangling));
+    try std.testing.expectError(error.ZixerMissingDirValue, parseArgs(arena.allocator(), &dangling));
 }
 
 test "zix zixer: cli help, every command is documented" {

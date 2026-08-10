@@ -153,8 +153,8 @@ pub fn priorityOf(kind: Type, local_preference: u16, component: Component) u32 {
 ///
 /// Return:
 /// - []const u8 (the foundation, borrowing out)
-/// - error.NoSpace when out is too small
-pub fn writeFoundation(out: []u8, candidate: Candidate) error{NoSpace}![]const u8 {
+/// - error.ZixNoSpace when out is too small
+pub fn writeFoundation(out: []u8, candidate: Candidate) error{ZixNoSpace}![]const u8 {
     var hash = std.hash.Fnv1a_32.init();
     hash.update(&.{@intFromEnum(candidate.kind)});
     hash.update(&.{@intFromEnum(candidate.transport)});
@@ -173,7 +173,7 @@ pub fn writeFoundation(out: []u8, candidate: Candidate) error{NoSpace}![]const u
     var digits: [10]u8 = undefined;
     const text = std.fmt.bufPrint(&digits, "{d}", .{hash.final()}) catch unreachable;
 
-    if (text.len > out.len) return error.NoSpace;
+    if (text.len > out.len) return error.ZixNoSpace;
 
     @memcpy(out[0..text.len], text);
 
@@ -304,5 +304,5 @@ test "zix ice: candidate foundation, the value is ice-chars and fits the publish
     for (foundation) |char| try std.testing.expect(char >= '0' and char <= '9');
 
     var too_small: [MAX_FOUNDATION_LEN]u8 = undefined;
-    try std.testing.expectError(error.NoSpace, writeFoundation(too_small[0 .. foundation.len - 1], candidate));
+    try std.testing.expectError(error.ZixNoSpace, writeFoundation(too_small[0 .. foundation.len - 1], candidate));
 }

@@ -64,7 +64,7 @@ pub const Snapshot = struct {
 /// Return:
 /// - *Snapshot (refcount 1, caller owns)
 /// - error.OutOfMemory
-/// - error.InvalidSample (malformed text 0.0.4 body)
+/// - error.PrometheuzInvalidSample (malformed text 0.0.4 body)
 pub fn fromText(allocator: std.mem.Allocator, timestamp_ms: i64, duration_ms: u64, text: []const u8) !*Snapshot {
     const self = try allocator.create(Snapshot);
     errdefer allocator.destroy(self);

@@ -5,10 +5,10 @@
 //! - Columns bind by NAME (RowDescription) to field names, order
 //!   independent.
 //! - NULL is only legal into an optional field, otherwise
-//!   error.NullIntoNonOptional.
+//!   error.PostgrezNullIntoNonOptional.
 //! - Unknown result columns are an error unless ignore_unknown_columns.
 //! - A field the result set does not cover falls back to its default value,
-//!   no default is error.MissingColumn.
+//!   no default is error.PostgrezMissingColumn.
 //! - A struct or union field on a json/jsonb column goes through std.json
 //!   with ignore_unknown_fields.
 //! - String results are duplicated from `allocator` (arena intended), so
@@ -90,12 +90,12 @@ pub const ParseRowOptions = struct {
 ///
 /// Return:
 /// - T on success
-/// - error.UnknownColumn / error.MissingColumn / error.NullIntoNonOptional
+/// - error.PostgrezUnknownColumn / error.PostgrezMissingColumn / error.PostgrezNullIntoNonOptional
 /// - decode errors (TypeMismatch, ValueOutOfRange, BadCell) per cell
 pub fn parseRow(comptime T: type, allocator: std.mem.Allocator, columns: []const ColumnInfo, cells: []const ?[]const u8, options: ParseRowOptions) !T {
     const field_count = comptime fieldCount(T);
 
-    if (columns.len != cells.len) return error.BadCell;
+    if (columns.len != cells.len) return error.PostgrezBadCell;
 
     var result: T = undefined;
     var seen: [field_count]bool = @splat(false);
@@ -113,7 +113,7 @@ pub fn parseRow(comptime T: type, allocator: std.mem.Allocator, columns: []const
             }
         }
 
-        if (!matched and !options.ignore_unknown_columns) return error.UnknownColumn;
+        if (!matched and !options.ignore_unknown_columns) return error.PostgrezUnknownColumn;
     }
 
     inline for (0..field_count) |field_index| {
@@ -121,7 +121,7 @@ pub fn parseRow(comptime T: type, allocator: std.mem.Allocator, columns: []const
             if (comptime fieldDefault(T, field_index)) |default_value| {
                 @field(result, fieldName(T, field_index)) = default_value;
             } else {
-                return error.MissingColumn;
+                return error.PostgrezMissingColumn;
             }
         }
     }
@@ -138,7 +138,7 @@ pub fn decodeField(comptime FieldT: type, allocator: std.mem.Allocator, column: 
             return try decodeValue(optional_info.child, allocator, column, bytes);
         },
         else => {
-            const bytes = cell orelse return error.NullIntoNonOptional;
+            const bytes = cell orelse return error.PostgrezNullIntoNonOptional;
 
             return try decodeValue(FieldT, allocator, column, bytes);
         },
@@ -163,17 +163,17 @@ fn decodeValue(comptime ValueT: type, allocator: std.mem.Allocator, column: Colu
         .@"enum" => {
             const raw = try rawDecode([]const u8, oid, column.format, bytes);
 
-            return std.meta.stringToEnum(ValueT, raw) orelse error.BadCell;
+            return std.meta.stringToEnum(ValueT, raw) orelse error.PostgrezBadCell;
         },
         .@"struct", .@"union" => {
-            if (!oid_mod.isJson(oid)) return error.TypeMismatch;
+            if (!oid_mod.isJson(oid)) return error.PostgrezTypeMismatch;
 
             const raw = try rawDecode([]const u8, oid, column.format, bytes);
 
             return std.json.parseFromSliceLeaky(ValueT, allocator, raw, .{
                 .ignore_unknown_fields = true,
                 .allocate = .alloc_always,
-            }) catch error.BadCell;
+            }) catch error.PostgrezBadCell;
         },
         else => @compileError("postgrez parseRow: unsupported field type " ++ @typeName(ValueT)),
     }
@@ -244,7 +244,7 @@ test "postgrez types: parseRow null into non-optional errors" {
         null,
     };
 
-    try testing.expectError(error.NullIntoNonOptional, parseRow(User, arena.allocator(), &SAMPLE_COLUMNS, &cells, .{}));
+    try testing.expectError(error.PostgrezNullIntoNonOptional, parseRow(User, arena.allocator(), &SAMPLE_COLUMNS, &cells, .{}));
 }
 
 test "postgrez types: parseRow unknown column errors unless opted out" {
@@ -262,7 +262,7 @@ test "postgrez types: parseRow unknown column errors unless opted out" {
         null,
     };
 
-    try testing.expectError(error.UnknownColumn, parseRow(Narrow, arena.allocator(), &SAMPLE_COLUMNS, &cells, .{}));
+    try testing.expectError(error.PostgrezUnknownColumn, parseRow(Narrow, arena.allocator(), &SAMPLE_COLUMNS, &cells, .{}));
 
     const narrow = try parseRow(Narrow, arena.allocator(), &SAMPLE_COLUMNS, &cells, .{ .ignore_unknown_columns = true });
     try testing.expectEqual(@as(i64, 7), narrow.id);
@@ -291,7 +291,7 @@ test "postgrez types: parseRow missing column falls back to default" {
     const with_default = try parseRow(WithDefault, arena.allocator(), &columns, &cells, .{});
     try testing.expectEqual(@as(f64, 0.5), with_default.score);
 
-    try testing.expectError(error.MissingColumn, parseRow(WithoutDefault, arena.allocator(), &columns, &cells, .{}));
+    try testing.expectError(error.PostgrezMissingColumn, parseRow(WithoutDefault, arena.allocator(), &columns, &cells, .{}));
 }
 
 test "postgrez types: parseRow struct field parses json and jsonb" {
@@ -334,7 +334,7 @@ test "postgrez types: parseRow struct field on a non-json column errors" {
     };
     const cells = [_]?[]const u8{"{\"theme\":\"dark\"}"};
 
-    try testing.expectError(error.TypeMismatch, parseRow(User, arena.allocator(), &columns, &cells, .{}));
+    try testing.expectError(error.PostgrezTypeMismatch, parseRow(User, arena.allocator(), &columns, &cells, .{}));
 }
 
 test "postgrez types: parseRow enum field from text content" {
@@ -353,7 +353,7 @@ test "postgrez types: parseRow enum field from text content" {
     try testing.expectEqual(Kind.rollback, event.kind);
 
     const bad_cells = [_]?[]const u8{"unknown_kind"};
-    try testing.expectError(error.BadCell, parseRow(Event, arena.allocator(), &columns, &bad_cells, .{}));
+    try testing.expectError(error.PostgrezBadCell, parseRow(Event, arena.allocator(), &columns, &bad_cells, .{}));
 }
 
 test "postgrez types: parseRow duplicates strings off the receive buffer" {

@@ -26,14 +26,14 @@ pub const ATTRIBUTE: []const u8 = "setup";
 /// What stops a setup role from being read.
 pub const Error = error{
     /// A value outside the four RFC 4145 4 defines.
-    UnknownRole,
+    ZixUnknownRole,
 };
 
 /// What stops a role from being taken. Separate from `Error` because reading an offer and
 /// answering it fail for different reasons, and a caller handles them at different points.
 pub const RoleError = error{
     /// A role this endpoint cannot take.
-    UnsupportedRole,
+    ZixUnsupportedRole,
 };
 
 /// Who starts the handshake (RFC 4145 4).
@@ -68,14 +68,14 @@ pub const Role = enum {
 ///
 /// Return:
 /// - Role
-/// - error.UnknownRole
+/// - error.ZixUnknownRole
 pub fn read(value: []const u8) Error!Role {
     if (std.mem.eql(u8, value, "active")) return .ACTIVE;
     if (std.mem.eql(u8, value, "passive")) return .PASSIVE;
     if (std.mem.eql(u8, value, "actpass")) return .ACTPASS;
     if (std.mem.eql(u8, value, "holdconn")) return .HOLDCONN;
 
-    return error.UnknownRole;
+    return error.ZixUnknownRole;
 }
 
 /// The role to answer an offer with.
@@ -90,7 +90,7 @@ pub fn read(value: []const u8) Error!Role {
 ///
 /// Return:
 /// - Role, always PASSIVE
-/// - error.UnsupportedRole when the offer leaves this endpoint no role it can take
+/// - error.ZixUnsupportedRole when the offer leaves this endpoint no role it can take
 pub fn answerFor(offered: Role) RoleError!Role {
     return switch (offered) {
         // Either is allowed, so take the one there is an implementation for.
@@ -98,8 +98,8 @@ pub fn answerFor(offered: Role) RoleError!Role {
         // The offerer will start the handshake, which is exactly what a passive answer wants.
         .ACTIVE => .PASSIVE,
         // The offerer will wait, so answering means being the client, and there is none.
-        .PASSIVE => error.UnsupportedRole,
-        .HOLDCONN => error.UnsupportedRole,
+        .PASSIVE => error.ZixUnsupportedRole,
+        .HOLDCONN => error.ZixUnsupportedRole,
     };
 }
 
@@ -110,12 +110,12 @@ pub fn answerFor(offered: Role) RoleError!Role {
 ///
 /// Return:
 /// - stream_id.Role
-/// - error.UnsupportedRole for a role that names no side of the handshake
+/// - error.ZixUnsupportedRole for a role that names no side of the handshake
 pub fn streamRole(role: Role) RoleError!stream_id.Role {
     return switch (role) {
         .ACTIVE => .DTLS_CLIENT,
         .PASSIVE => .DTLS_SERVER,
-        .ACTPASS, .HOLDCONN => error.UnsupportedRole,
+        .ACTPASS, .HOLDCONN => error.ZixUnsupportedRole,
     };
 }
 
@@ -130,9 +130,9 @@ test "zix sdp: setup read, the four values resolve" {
 }
 
 test "zix sdp: setup read, anything else is refused" {
-    try std.testing.expectError(error.UnknownRole, read("ACTPASS"));
-    try std.testing.expectError(error.UnknownRole, read("act"));
-    try std.testing.expectError(error.UnknownRole, read(""));
+    try std.testing.expectError(error.ZixUnknownRole, read("ACTPASS"));
+    try std.testing.expectError(error.ZixUnknownRole, read("act"));
+    try std.testing.expectError(error.ZixUnknownRole, read(""));
 }
 
 test "zix sdp: setup name, what was read writes back the same" {
@@ -154,11 +154,11 @@ test "zix sdp: setup answerFor, an active offer is answered passive" {
 
 test "zix sdp: setup answerFor, a passive offer cannot be answered" {
     // Answering would mean starting the handshake, and there is no DTLS client to start it.
-    try std.testing.expectError(error.UnsupportedRole, answerFor(.PASSIVE));
+    try std.testing.expectError(error.ZixUnsupportedRole, answerFor(.PASSIVE));
 }
 
 test "zix sdp: setup answerFor, holdconn cannot be answered" {
-    try std.testing.expectError(error.UnsupportedRole, answerFor(.HOLDCONN));
+    try std.testing.expectError(error.ZixUnsupportedRole, answerFor(.HOLDCONN));
 }
 
 test "zix sdp: setup streamRole, passive opens on the odd identifiers" {
@@ -173,8 +173,8 @@ test "zix sdp: setup streamRole, active opens on the even identifiers" {
 }
 
 test "zix sdp: setup streamRole, a role that names no side is refused" {
-    try std.testing.expectError(error.UnsupportedRole, streamRole(.ACTPASS));
-    try std.testing.expectError(error.UnsupportedRole, streamRole(.HOLDCONN));
+    try std.testing.expectError(error.ZixUnsupportedRole, streamRole(.ACTPASS));
+    try std.testing.expectError(error.ZixUnsupportedRole, streamRole(.HOLDCONN));
 }
 
 test "zix sdp: setup, answering an offer settles which identifiers zix opens on" {

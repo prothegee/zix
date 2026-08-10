@@ -33,11 +33,11 @@ pub const MAX_FRAME_PAYLOAD: usize = 1024 * 1024;
 
 pub const Error = error{
     /// A frame payload longer than MAX_FRAME_PAYLOAD.
-    FrameTooLarge,
+    ZixerFrameTooLarge,
     /// A varint that does not decode, or a length past what the type allows.
-    Malformed,
+    ZixerMalformed,
     /// The output buffer has no room for the frame.
-    BufferFull,
+    ZixerBufferFull,
 };
 
 /// One parsed frame, its payload borrowing the caller's stream buffer.
@@ -60,7 +60,7 @@ pub const Frame = struct {
 /// Return:
 /// - Frame when one is complete
 /// - null when more stream bytes are needed
-/// - Error.FrameTooLarge past MAX_FRAME_PAYLOAD, Error.Malformed on a bad varint
+/// - Error.ZixerFrameTooLarge past MAX_FRAME_PAYLOAD, Error.ZixerMalformed on a bad varint
 pub fn nextFrame(buf: []const u8) Error!?Frame {
     if (buf.len == 0) return null;
 
@@ -71,7 +71,7 @@ pub fn nextFrame(buf: []const u8) Error!?Frame {
     const length = varint.read(buf[pos..]) catch return null;
     pos += length.len;
 
-    if (length.value > MAX_FRAME_PAYLOAD) return error.FrameTooLarge;
+    if (length.value > MAX_FRAME_PAYLOAD) return error.ZixerFrameTooLarge;
 
     const payload_len: usize = @intCast(length.value);
     if (buf.len < pos + payload_len) return null;
@@ -107,7 +107,7 @@ pub fn headerLen(kind: u64, payload_len: u64) usize {
 /// Write a frame header (type then length). The caller appends the payload.
 pub fn writeHeader(out: []u8, kind: u64, payload_len: u64) Error!usize {
     const needed = headerLen(kind, payload_len);
-    if (out.len < needed) return error.BufferFull;
+    if (out.len < needed) return error.ZixerBufferFull;
 
     var pos = varint.write(out, kind);
     pos += varint.write(out[pos..], payload_len);
@@ -118,7 +118,7 @@ pub fn writeHeader(out: []u8, kind: u64, payload_len: u64) Error!usize {
 /// Write a whole frame: header then payload.
 pub fn writeFrame(out: []u8, kind: u64, payload: []const u8) Error!usize {
     const header = try writeHeader(out, kind, payload.len);
-    if (out.len < header + payload.len) return error.BufferFull;
+    if (out.len < header + payload.len) return error.ZixerBufferFull;
 
     @memcpy(out[header..][0..payload.len], payload);
 
@@ -159,11 +159,11 @@ pub fn parseSettings(payload: []const u8) Error!Settings {
     var pos: usize = 0;
 
     while (pos < payload.len) {
-        const id = varint.read(payload[pos..]) catch return error.Malformed;
+        const id = varint.read(payload[pos..]) catch return error.ZixerMalformed;
         pos += id.len;
-        if (pos >= payload.len) return error.Malformed;
+        if (pos >= payload.len) return error.ZixerMalformed;
 
-        const value = varint.read(payload[pos..]) catch return error.Malformed;
+        const value = varint.read(payload[pos..]) catch return error.ZixerMalformed;
         pos += value.len;
 
         switch (id.value) {
@@ -230,7 +230,7 @@ test "zix zixer: h3 frames, a payload past the bound is refused" {
     buf[0] = 0x00;
     const written = zix.Http3.varint.write(buf[1..], 2 * 1024 * 1024);
 
-    try testing.expectError(error.FrameTooLarge, nextFrame(buf[0 .. 1 + written]));
+    try testing.expectError(error.ZixerFrameTooLarge, nextFrame(buf[0 .. 1 + written]));
 }
 
 test "zix zixer: h3 frames, settings round trip and unknown ids are ignored" {
@@ -278,6 +278,6 @@ test "zix zixer: h3 frames, a uni stream leads with its type" {
 
 test "zix zixer: h3 frames, a header write refuses a buffer with no room" {
     var tiny: [1]u8 = undefined;
-    try testing.expectError(error.BufferFull, writeHeader(&tiny, HEADERS, 4096));
-    try testing.expectError(error.BufferFull, writeFrame(&tiny, DATA, "xy"));
+    try testing.expectError(error.ZixerBufferFull, writeHeader(&tiny, HEADERS, 4096));
+    try testing.expectError(error.ZixerBufferFull, writeFrame(&tiny, DATA, "xy"));
 }

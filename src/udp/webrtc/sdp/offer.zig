@@ -35,23 +35,23 @@ pub const DEFAULT_MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 /// Everything that stops an offer from being read.
 pub const Error = error{
     /// A line without a type character followed by an equals sign.
-    Malformed,
+    ZixMalformed,
     /// A version this parser does not implement.
-    UnsupportedVersion,
+    ZixUnsupportedVersion,
     /// One of the four fields RFC 8866 5 makes mandatory is missing.
-    MissingField,
+    ZixMissingField,
     /// No media section describing a WebRTC data channel.
-    NoDataChannel,
+    ZixNoDataChannel,
     /// The data channel section was offered with a port of zero.
-    Rejected,
+    ZixRejected,
     /// A port that is not a number, or one that does not fit.
-    BadPort,
+    ZixBadPort,
     /// A hash function this endpoint does not implement.
-    UnsupportedFunction,
+    ZixUnsupportedFunction,
     /// A fingerprint whose hex is not pairs, or is the wrong length for its function.
-    BadDigest,
+    ZixBadDigest,
     /// A setup value outside the four RFC 4145 4 defines.
-    UnknownRole,
+    ZixUnknownRole,
 };
 
 /// A data channel offer, read down to what an answer needs.
@@ -97,25 +97,25 @@ pub const Offer = struct {
 ///
 /// Return:
 /// - Offer borrowing `text`
-/// - error.Malformed, error.UnsupportedVersion, error.MissingField
-/// - error.NoDataChannel if no section describes a WebRTC data channel
-/// - error.Rejected if the data channel section was offered with a port of zero
-/// - error.MissingField if the ICE credentials, the fingerprint, the setup role, or the SCTP
+/// - error.ZixMalformed, error.ZixUnsupportedVersion, error.ZixMissingField
+/// - error.ZixNoDataChannel if no section describes a WebRTC data channel
+/// - error.ZixRejected if the data channel section was offered with a port of zero
+/// - error.ZixMissingField if the ICE credentials, the fingerprint, the setup role, or the SCTP
 ///   port is not there
 pub fn read(text: []const u8) Error!Offer {
     const description = try session.parse(text);
-    const section = description.dataChannelSection() orelse return error.NoDataChannel;
+    const section = description.dataChannelSection() orelse return error.ZixNoDataChannel;
     const media_line = try section.mediaLine();
 
-    if (media_line.isRejected()) return error.Rejected;
+    if (media_line.isRejected()) return error.ZixRejected;
 
     const scope = scopeOf(description, section);
 
-    const ufrag = scope.find("ice-ufrag") orelse return error.MissingField;
-    const password = scope.find("ice-pwd") orelse return error.MissingField;
-    const fingerprint_value = scope.find(fingerprint.ATTRIBUTE) orelse return error.MissingField;
-    const setup_value = scope.find(setup.ATTRIBUTE) orelse return error.MissingField;
-    const sctp_port = scope.find("sctp-port") orelse return error.MissingField;
+    const ufrag = scope.find("ice-ufrag") orelse return error.ZixMissingField;
+    const password = scope.find("ice-pwd") orelse return error.ZixMissingField;
+    const fingerprint_value = scope.find(fingerprint.ATTRIBUTE) orelse return error.ZixMissingField;
+    const setup_value = scope.find(setup.ATTRIBUTE) orelse return error.ZixMissingField;
+    const sctp_port = scope.find("sctp-port") orelse return error.ZixMissingField;
 
     return .{
         .text = text,
@@ -131,7 +131,7 @@ pub fn read(text: []const u8) Error!Offer {
         .mid = attribute.findValue(section.text, "mid"),
         .bundle = attribute.findValue(description.session, "group"),
         .tls_id = scope.find("tls-id"),
-        .sctp_port = std.fmt.parseInt(u16, sctp_port, 10) catch return error.BadPort,
+        .sctp_port = std.fmt.parseInt(u16, sctp_port, 10) catch return error.ZixBadPort,
         .max_message_size = try readMaxMessageSize(scope),
     };
 }
@@ -212,7 +212,7 @@ fn hasIce2(scope: Scope) bool {
 fn readMaxMessageSize(scope: Scope) Error!u32 {
     const value = scope.find("max-message-size") orelse return DEFAULT_MAX_MESSAGE_SIZE;
 
-    return std.fmt.parseInt(u32, value, 10) catch error.BadPort;
+    return std.fmt.parseInt(u32, value, 10) catch error.ZixBadPort;
 }
 
 // --------------------------------------------------------------------------------------- //
@@ -353,7 +353,7 @@ test "zix sdp: offer read, a missing SCTP port is refused" {
         "a=setup:actpass\r\n";
 
     // RFC 8841 5.1: with no sctp-port the section is invalid, so there is nothing to default to.
-    try std.testing.expectError(error.MissingField, read(without));
+    try std.testing.expectError(error.ZixMissingField, read(without));
 }
 
 test "zix sdp: offer read, a missing fingerprint is refused" {
@@ -370,7 +370,7 @@ test "zix sdp: offer read, a missing fingerprint is refused" {
 
     // Without it there is nothing to check the peer's certificate against, and the handshake
     // would complete against whoever answered.
-    try std.testing.expectError(error.MissingField, read(without));
+    try std.testing.expectError(error.ZixMissingField, read(without));
 }
 
 test "zix sdp: offer read, a missing ICE password is refused" {
@@ -385,7 +385,7 @@ test "zix sdp: offer read, a missing ICE password is refused" {
         "a=setup:actpass\r\n" ++
         "a=sctp-port:5000\r\n";
 
-    try std.testing.expectError(error.MissingField, read(without));
+    try std.testing.expectError(error.ZixMissingField, read(without));
 }
 
 test "zix sdp: offer read, a session with no data channel is refused" {
@@ -397,7 +397,7 @@ test "zix sdp: offer read, a session with no data channel is refused" {
         "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" ++
         "a=mid:0\r\n";
 
-    try std.testing.expectError(error.NoDataChannel, read(audio_only));
+    try std.testing.expectError(error.ZixNoDataChannel, read(audio_only));
 }
 
 test "zix sdp: offer read, a data channel section offered with port zero is refused" {
@@ -407,7 +407,7 @@ test "zix sdp: offer read, a data channel section offered with port zero is refu
     const at = std.mem.indexOf(u8, &text, "m=application 9").?;
     @memcpy(text[at..][0.."m=application 0".len], "m=application 0");
 
-    try std.testing.expectError(error.Rejected, read(&text));
+    try std.testing.expectError(error.ZixRejected, read(&text));
 }
 
 test "zix sdp: offer read, the data channel section of a bundle is the one read" {
@@ -493,8 +493,8 @@ test "zix sdp: offer read, a tls-id is carried when there is one" {
 }
 
 test "zix sdp: offer read, a malformed description is refused" {
-    try std.testing.expectError(error.Malformed, read("v=0\r\nbroken\r\n"));
-    try std.testing.expectError(error.MissingField, read("v=0\r\n"));
+    try std.testing.expectError(error.ZixMalformed, read("v=0\r\nbroken\r\n"));
+    try std.testing.expectError(error.ZixMissingField, read("v=0\r\n"));
 }
 
 test "zix sdp: offer read, an unreadable fingerprint is refused" {
@@ -504,7 +504,7 @@ test "zix sdp: offer read, an unreadable fingerprint is refused" {
     const at = std.mem.indexOf(u8, &text, "sha-256").?;
     @memcpy(text[at..][0.."sha-xxx".len], "sha-xxx");
 
-    try std.testing.expectError(error.UnsupportedFunction, read(&text));
+    try std.testing.expectError(error.ZixUnsupportedFunction, read(&text));
 }
 
 test "zix sdp: offer read, an unreadable setup role is refused" {
@@ -514,7 +514,7 @@ test "zix sdp: offer read, an unreadable setup role is refused" {
     const at = std.mem.indexOf(u8, &text, "setup:actpass").?;
     @memcpy(text[at..][0.."setup:actxxxx".len], "setup:actxxxx");
 
-    try std.testing.expectError(error.UnknownRole, read(&text));
+    try std.testing.expectError(error.ZixUnknownRole, read(&text));
 }
 
 test "zix sdp: offer read, an offer terminated with bare newlines is accepted" {
@@ -609,7 +609,7 @@ test "zix sdp: offer read, a group that is not BUNDLE names no tagged section" {
         "a=mid:1\r\n" ++
         "a=sctp-port:5000\r\n";
 
-    try std.testing.expectError(error.MissingField, read(other_group));
+    try std.testing.expectError(error.ZixMissingField, read(other_group));
 }
 
 test "zix sdp: offer read, a bundle tag naming no section falls through to session level" {

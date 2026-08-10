@@ -57,8 +57,8 @@ fn runCommand(io: std.Io, argv: []const []const u8) !void {
     const term = try child.wait(io);
 
     switch (term) {
-        .exited => |code| if (code != 0) return error.CommandFailed,
-        else => return error.CommandFailed,
+        .exited => |code| if (code != 0) return error.PrometheuzCommandFailed,
+        else => return error.PrometheuzCommandFailed,
     }
 }
 

@@ -21,9 +21,9 @@ test "jzon edge: std parser reports a document that ends early" {
 
     const allocator = arena.allocator();
 
-    try std.testing.expectError(error.Truncated, std_parser.parse(u8, allocator, "", .{}));
-    try std.testing.expectError(error.Truncated, std_parser.parse(Pair, allocator, "{", .{}));
-    try std.testing.expectError(error.Truncated, std_parser.parse(Pair, allocator, "{\"id\":1,", .{}));
+    try std.testing.expectError(error.JzonTruncated, std_parser.parse(u8, allocator, "", .{}));
+    try std.testing.expectError(error.JzonTruncated, std_parser.parse(Pair, allocator, "{", .{}));
+    try std.testing.expectError(error.JzonTruncated, std_parser.parse(Pair, allocator, "{\"id\":1,", .{}));
 }
 
 test "jzon edge: std parser reports a document carrying more than one value" {
@@ -32,9 +32,9 @@ test "jzon edge: std parser reports a document carrying more than one value" {
 
     const allocator = arena.allocator();
 
-    try std.testing.expectError(error.Unexpected, std_parser.parse(u8, allocator, "1 2", .{}));
+    try std.testing.expectError(error.JzonUnexpected, std_parser.parse(u8, allocator, "1 2", .{}));
     try std.testing.expectError(
-        error.Unexpected,
+        error.JzonUnexpected,
         std_parser.parse(Pair, allocator, "{\"id\":1,\"name\":\"x\"}{}", .{}),
     );
 }
@@ -44,7 +44,7 @@ test "jzon edge: std parser reports the same key twice" {
     defer arena.deinit();
 
     try std.testing.expectError(
-        error.Unexpected,
+        error.JzonUnexpected,
         std_parser.parse(Pair, arena.allocator(), "{\"id\":1,\"id\":2,\"name\":\"x\"}", .{}),
     );
 }
@@ -55,9 +55,9 @@ test "jzon edge: std parser reports a number the field cannot take" {
 
     const allocator = arena.allocator();
 
-    try std.testing.expectError(error.BadNumber, std_parser.parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}));
-    try std.testing.expectError(error.BadNumber, std_parser.parse(Pair, allocator, "{\"id\":1.5,\"name\":\"x\"}", .{}));
-    try std.testing.expectError(error.BadNumber, std_parser.parse(Pair, allocator, "{\"id\":-1,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonBadNumber, std_parser.parse(Pair, allocator, "{\"id\":300,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonBadNumber, std_parser.parse(Pair, allocator, "{\"id\":1.5,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonBadNumber, std_parser.parse(Pair, allocator, "{\"id\":-1,\"name\":\"x\"}", .{}));
 }
 
 test "jzon edge: std parser reports a value of the wrong shape" {
@@ -66,16 +66,16 @@ test "jzon edge: std parser reports a value of the wrong shape" {
 
     const allocator = arena.allocator();
 
-    try std.testing.expectError(error.Unexpected, std_parser.parse(Pair, allocator, "{\"id\":null,\"name\":\"x\"}", .{}));
-    try std.testing.expectError(error.Unexpected, std_parser.parse(Pair, allocator, "{\"id\":1,\"name\":7}", .{}));
-    try std.testing.expectError(error.Unexpected, std_parser.parse(Pair, allocator, "[1,2]", .{}));
+    try std.testing.expectError(error.JzonUnexpected, std_parser.parse(Pair, allocator, "{\"id\":null,\"name\":\"x\"}", .{}));
+    try std.testing.expectError(error.JzonUnexpected, std_parser.parse(Pair, allocator, "{\"id\":1,\"name\":7}", .{}));
+    try std.testing.expectError(error.JzonUnexpected, std_parser.parse(Pair, allocator, "[1,2]", .{}));
 }
 
 test "jzon edge: std parser reports an object owing every field" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
-    try std.testing.expectError(error.MissingField, std_parser.parse(Pair, arena.allocator(), "{}", .{}));
+    try std.testing.expectError(error.JzonMissingField, std_parser.parse(Pair, arena.allocator(), "{}", .{}));
 }
 
 test "jzon edge: std parser reports a name no enum tag carries" {
@@ -84,8 +84,8 @@ test "jzon edge: std parser reports a name no enum tag carries" {
 
     const allocator = arena.allocator();
 
-    try std.testing.expectError(error.UnknownEnumValue, std_parser.parse(Status, allocator, "\"GONE\"", .{}));
-    try std.testing.expectError(error.UnknownEnumValue, std_parser.parse(Status, allocator, "\"pending\"", .{}));
+    try std.testing.expectError(error.JzonUnknownEnumValue, std_parser.parse(Status, allocator, "\"GONE\"", .{}));
+    try std.testing.expectError(error.JzonUnknownEnumValue, std_parser.parse(Status, allocator, "\"pending\"", .{}));
 }
 
 test "jzon edge: std parser decodes a surrogate pair and refuses a lone half" {
@@ -99,8 +99,8 @@ test "jzon edge: std parser decodes a surrogate pair and refuses a lone half" {
 
     // std reports a broken escape as a syntax error rather than as its own kind,
     // so it lands on Unexpected here.
-    try std.testing.expectError(error.Unexpected, std_parser.parse([]const u8, allocator, "\"\\ud83d\"", .{}));
-    try std.testing.expectError(error.Unexpected, std_parser.parse([]const u8, allocator, "\"\\q\"", .{}));
+    try std.testing.expectError(error.JzonUnexpected, std_parser.parse([]const u8, allocator, "\"\\ud83d\"", .{}));
+    try std.testing.expectError(error.JzonUnexpected, std_parser.parse([]const u8, allocator, "\"\\q\"", .{}));
 }
 
 test "jzon edge: std parser reads the empty string, object and array" {
@@ -143,5 +143,5 @@ test "jzon edge: std parser reads the extremes of a width" {
 
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), try std_parser.parse(u64, allocator, "18446744073709551615", .{}));
     try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), try std_parser.parse(i64, allocator, "-9223372036854775808", .{}));
-    try std.testing.expectError(error.BadNumber, std_parser.parse(u64, allocator, "18446744073709551616", .{}));
+    try std.testing.expectError(error.JzonBadNumber, std_parser.parse(u64, allocator, "18446744073709551616", .{}));
 }

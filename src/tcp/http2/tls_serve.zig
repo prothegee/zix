@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const fd_io = @import("../../utils/fd_io.zig");
 const core = @import("core.zig");
+const Logger = @import("../../logger/logger.zig").Logger;
 const Http2ServerConfig = @import("config.zig").Http2ServerConfig;
 const common = @import("dispatch/common.zig");
 const terminator = @import("../tls/h2_terminator.zig");
@@ -144,12 +145,18 @@ const TlsConn = struct {
         handler: core.HandlerFn,
         io: std.Io,
         ctx: *const @import("../../tls/Tls.zig").Context,
+        /// The server's logger, borrowed, so a handshake that fails is not simply a closed socket.
+        logger: ?*Logger = null,
     };
 
     fn entry(conn_ctx: Ctx) void {
         defer fd_io.close(conn_ctx.fd);
 
-        terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, conn_ctx.io, MuxDriver{ .opts = conn_ctx.opts, .handler = conn_ctx.handler, .io = conn_ctx.io }) catch {};
+        // A failed handshake used to close the socket with nothing said. It files at DEBUG rather
+        // than WARN because one remote peer drives it, and a scanner would otherwise flood.
+        terminator.serveConnTls(conn_ctx.fd, conn_ctx.ctx, conn_ctx.io, MuxDriver{ .opts = conn_ctx.opts, .handler = conn_ctx.handler, .io = conn_ctx.io }) catch |err| {
+            if (conn_ctx.logger) |lg| lg.system(.DEBUG, "http2", "tls connection ended: {s}", .{@errorName(err)});
+        };
     }
 };
 
@@ -162,7 +169,7 @@ pub fn runTls(handler: core.HandlerFn, config: Http2ServerConfig) !void {
     const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
     var srv = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = config.kernel_backlog });
 
-    common.logSystem(config, "listening on {s}:{d} (h2, TLS)", .{ config.ip, config.port });
+    common.logSystem(config, .INFO, "listening on {s}:{d} (h2, TLS)", .{ config.ip, config.port });
 
     const opts = common.serveOpts(config);
 
@@ -171,7 +178,7 @@ pub fn runTls(handler: core.HandlerFn, config: Http2ServerConfig) !void {
         const conn_fd = stream.socket.handle;
 
         const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, TlsConn.entry, .{
-            TlsConn.Ctx{ .fd = conn_fd, .opts = opts, .handler = handler, .io = io, .ctx = ctx },
+            TlsConn.Ctx{ .fd = conn_fd, .opts = opts, .handler = handler, .io = io, .ctx = ctx, .logger = config.logger },
         }) catch {
             // Spawn failed (thread / pids limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole

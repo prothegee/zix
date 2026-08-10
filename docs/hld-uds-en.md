@@ -124,15 +124,15 @@ sequenceDiagram
 
 | Error | Source | Meaning |
 | :- | :- | :- |
-| `error.PathEmpty` | `Server.init()` | `config.path` is empty |
-| `error.MessageTooLarge` | `Client.recvMsg()` | server frame payload exceeds caller's `buf.len` |
-| `error.ConnectionClosed` | `Client.recvMsg()` | server closed the connection mid-frame |
+| `error.ZixPathEmpty` | `Server.init()` | `config.path` is empty |
+| `error.ZixMessageTooLarge` | `Client.recvMsg()` | server frame payload exceeds caller's `buf.len` |
+| `error.ZixConnectionClosed` | `Client.recvMsg()` | server closed the connection mid-frame |
 
 ---
 
 ## Timeouts and Limitations
 
-`recv_timeout_ms` / `send_timeout_ms` (both configs, default 0 = disabled) bound the socket, not the connect call. On the server, `applyConnTimeout` sets `SO_RCVTIMEO` / `SO_SNDTIMEO` on each accepted connection before the handler runs. On the client, `recvMsg` / `sendMsg` each poll (`POLLIN` / `POLLOUT`) ahead of the read or write, returning `error.RecvTimeout` / `error.SendTimeout` on expiry, rather than `SO_RCVTIMEO` / `SO_SNDTIMEO`, since `std.Io.Threaded` panics on `EAGAIN`.
+`recv_timeout_ms` / `send_timeout_ms` (both configs, default 0 = disabled) bound the socket, not the connect call. On the server, `applyConnTimeout` sets `SO_RCVTIMEO` / `SO_SNDTIMEO` on each accepted connection before the handler runs. On the client, `recvMsg` / `sendMsg` each poll (`POLLIN` / `POLLOUT`) ahead of the read or write, returning `error.ZixRecvTimeout` / `error.ZixSendTimeout` on expiry, rather than `SO_RCVTIMEO` / `SO_SNDTIMEO`, since `std.Io.Threaded` panics on `EAGAIN`.
 
 `std.Io.net.UnixAddress.connect` takes no timeout parameter. Unlike TCP's `IpAddress.connect`, which accepts `ConnectOptions.timeout`, the UDS connect path has no stdlib hook for a deadline, so a connect-time timeout is not implementable without a stdlib change. This limitation is stdlib-imposed, not a zix design decision, and will be revisited when the stdlib exposes the necessary primitive.
 

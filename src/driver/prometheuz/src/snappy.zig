@@ -77,7 +77,7 @@ fn decodeLiteralsOnly(allocator: std.mem.Allocator, block: []const u8) ![]u8 {
     while (pos < block.len) {
         const tag = block[pos];
         pos += 1;
-        if (tag & 0x3 != 0) return error.UnsupportedTag; // only literals (00) expected
+        if (tag & 0x3 != 0) return error.PrometheuzUnsupportedTag; // only literals (00) expected
 
         const chunk_len: usize = (tag >> 2) + 1;
         @memcpy(out[written..][0..chunk_len], block[pos..][0..chunk_len]);

@@ -36,7 +36,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `tcp/config.zig` | `refAllDecls` + behavioral: `TcpServerConfig` defaults (kernel_backlog=4096, max_recv_buf=4096, workers=0) with dispatch_model required (set explicitly), `DispatchModel` gapless backing values with only the three maintained models, the dropped POOL / MIXED names resolving to nothing, `TcpClientConfig` defaults (max_recv_buf=4096) |
-| `tcp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
+| `tcp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.ZixPortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
 ### zix.Http
@@ -76,7 +76,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | :- | :- |
 | `udp/config.zig` | `refAllDecls` + defaults: `UdpServerConfig`, `UdpClientConfig`, `allow_args` default, and `Endianness` enum backing values |
 | `udp/packet.zig` | `refAllDecls` + behavioral: NATIVE no-op, u8 array not swapped, LITTLE/BIG round-trip, non-native swaps integers and float array elements, `FeedbackResult` all variants |
-| `udp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, nonzero port succeeds, config fields preserved |
+| `udp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.ZixPortNotConfigured`, nonzero port succeeds, config fields preserved |
 | `udp/client.zig` | `refAllDecls` |
 
 ### zix.Uds
@@ -84,7 +84,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `uds/config.zig` | `refAllDecls` + defaults: `UdsServerConfig` (kernel_backlog=128, max_recv_buf=4096), `UdsClientConfig` |
-| `uds/server.zig` | `refAllDecls` + behavioral: empty path -> `error.PathEmpty`, valid path succeeds and deinit is safe |
+| `uds/server.zig` | `refAllDecls` + behavioral: empty path -> `error.ZixPathEmpty`, valid path succeeds and deinit is safe |
 | `uds/client.zig` | `refAllDecls` |
 
 ### zix.Http.Client
@@ -109,8 +109,8 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | :- | :- |
 | `tcp/fix/config.zig` | `refAllDecls` + behavioral: `FixServerConfig` required fields (ip, port, comp_id), dispatch_model required (set explicitly), workers defaults to 0, kernel_backlog default 1024, heartbeat_timeout_ms defaults to 0, `FixClientConfig` required fields (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + behavioral: `parseFields` round-trip, `getField` lookup and null case, `computeChecksum` known vector, `verifyChecksum` valid/truncated/bad, `findMessageEnd` complete/partial/no-terminator, `buildMessage` produces valid checksum |
-| `tcp/fix/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
-| `tcp/fix/client.zig` | `refAllDecls` + behavioral: `FixClient.connect` port zero -> `error.PortNotConfigured` |
+| `tcp/fix/server.zig` | `refAllDecls` + behavioral: port zero -> `error.ZixPortNotConfigured`, valid config succeeds, deinit is safe |
+| `tcp/fix/client.zig` | `refAllDecls` + behavioral: `FixClient.connect` port zero -> `error.ZixPortNotConfigured` |
 | `tcp/fix/router.zig` | `refAllDecls` + behavioral: dispatch calls the matching handler, no match leaves the handler uncalled, route timeout sets `deadline_ns` |
 
 ### zix.Http2
@@ -121,7 +121,7 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http2/hpack.zig` | `refAllDecls` + behavioral: Huffman encode/decode roundtrip, `HpackEncoder.writeHeader` produces indexed entry from static table, `HpackDecoder.decode` decodes indexed `:method GET`, dynamic table eviction respects max_size, `HPACK_STATIC` index 8 is `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
 | `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers defaults to 0, max_streams=128 and max_frame_size=16384 |
-| `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds and deinit is safe |
+| `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.ZixPortNotConfigured`, valid config succeeds and deinit is safe |
 | `tcp/http2/static.zig` | `refAllDecls` + behavioral: zero copy is refused for a coalescing batch and the sentinel fd, a file is framed as HEADERS plus DATA with END_STREAM, traversal / a missing file / an oversize path are rejected, a body past the max frame size is chunked, an empty file closes the stream on HEADERS, the brotli sibling is picked from the cache |
 
 ### zix.Grpc
@@ -134,8 +134,8 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/http2/grpc/timeout.zig` | `refAllDecls` + behavioral: H/M/S/m/u/n units convert correctly, single-char returns null, empty returns null |
 | `tcp/http2/grpc/core.zig` | `refAllDecls` + behavioral: `parsePath` valid and invalid inputs, `detectContentType` proto/json/unknown, `GrpcContext.recvMessage` empty body returns null, `Route.timeout_ms` defaults to zero, `GrpcContext.isExpired` null/past/future deadline, `GrpcServeOpts.handler_timeout_ms` defaults to zero, Router dispatches to matching handler |
 | `tcp/http2/grpc/config.zig` | `refAllDecls` + behavioral: `GrpcServerConfig` required fields and defaults (handler_timeout_ms=0), `GrpcClientConfig` required fields |
-| `tcp/http2/grpc/server.zig` | `refAllDecls` + behavioral: port zero -> `error.PortNotConfigured`, valid config succeeds, deinit is safe |
-| `tcp/http2/grpc/client.zig` | `refAllDecls` + behavioral: `GrpcClient.connect` port zero -> `error.PortNotConfigured` |
+| `tcp/http2/grpc/server.zig` | `refAllDecls` + behavioral: port zero -> `error.ZixPortNotConfigured`, valid config succeeds, deinit is safe |
+| `tcp/http2/grpc/client.zig` | `refAllDecls` + behavioral: `GrpcClient.connect` port zero -> `error.ZixPortNotConfigured` |
 
 ### zix.Http3
 
@@ -215,9 +215,9 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | :- | :- |
 | `TcpServer.init` valid config | init with real ip and port succeeds, deinit is safe |
 | `TcpServer.init` EPOLL dispatch model | init with `.EPOLL` dispatch model succeeds, deinit is safe |
-| `TcpServer.init` port zero | returns `error.PortNotConfigured` |
+| `TcpServer.init` port zero | returns `error.ZixPortNotConfigured` |
 | `HandlerFn` type check | `zix.Tcp.echoHandler` satisfies `zix.Tcp.HandlerFn` |
-| `TcpClient.connect` port zero | returns `error.PortNotConfigured` before any socket call |
+| `TcpClient.connect` port zero | returns `error.ZixPortNotConfigured` before any socket call |
 
 ### tests/integration/http/
 
@@ -291,7 +291,7 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | Dual listener URING serves TLS on-ring on tls_port | the TLS leg runs on the ring |
 | Dual listener ASYNC serves cleartext on port | cleartext leg answers on the thread model |
 | Dual listener ASYNC serves TLS via the extra accept thread | the TLS leg gets its own accept thread |
-| `tls_port` equal to `port` is rejected at run | returns `error.TlsPortConflict` |
+| `tls_port` equal to `port` is rejected at run | returns `error.ZixTlsPortConflict` |
 
 #### `static_cache_test.zig`
 
@@ -325,8 +325,8 @@ Drives the real router path over a socketpair, so what is asserted is the bytes 
 | Test | What it verifies |
 | :- | :- |
 | `UdpServer.init` valid config | init with real ip and port succeeds |
-| `UdpServer.init` port zero | returns `error.PortNotConfigured` |
-| `UdpClient.init` zero bind_port | returns `error.PortNotConfigured` before any socket call |
+| `UdpServer.init` port zero | returns `error.ZixPortNotConfigured` |
+| `UdpClient.init` zero bind_port | returns `error.ZixPortNotConfigured` before any socket call |
 
 #### `packet_test.zig`
 
@@ -376,7 +376,7 @@ Drives the real router path over a socketpair, so what is asserted is the bytes 
 | Test | What it verifies |
 | :- | :- |
 | `FixServer` init and deinit do not error | valid config succeeds, deinit is safe |
-| `FixServer` init port zero | returns `error.PortNotConfigured` |
+| `FixServer` init port zero | returns `error.ZixPortNotConfigured` |
 | Logon handshake and echo round-trip succeed | send Logon, receive Logon reply with MsgType=A send NewOrderSingle, receive echo, send Logout, receive Logout reply |
 | Multiple sequential messages are all echoed | three NewOrderSingle messages echoed with ClOrdID preserved across all |
 
@@ -389,7 +389,7 @@ Ports: 18082-18085.
 | Test | What it verifies |
 | :- | :- |
 | `Http2Server.init` and deinit do not error | valid config succeeds, deinit is safe |
-| `Http2Server.init` port zero | returns `error.PortNotConfigured` |
+| `Http2Server.init` port zero | returns `error.ZixPortNotConfigured` |
 | `Http2 HandlerFn` type is a function pointer | `zix.Http2.HandlerFn` assignment compiles |
 | Http2 GET / returns Hello World over h2c direct | h2c PRI preface + HEADERS + DATA round-trip returns response body |
 | Http2 POST /echo returns request body | POST with body DATA frame, server echoes body back |
@@ -434,7 +434,7 @@ Ports: 18200-18206.
 | Test | What it verifies |
 | :- | :- |
 | `GrpcServer.init` and deinit do not error | valid config succeeds, deinit is safe |
-| `GrpcServer.init` port zero | returns `error.PortNotConfigured` |
+| `GrpcServer.init` port zero | returns `error.ZixPortNotConfigured` |
 | gRPC unary returns greeting | `greetHandler` reads one message, replies `"Hello, world!"` |
 | gRPC server streaming sends multiple responses | `echoHandler` sends two messages, client receives both in order |
 | gRPC client streaming collects all messages | `collectHandler` buffers three messages, replies with count `"got 3"` |
@@ -453,7 +453,7 @@ Ports: 18200-18206.
 | `Channel([]const u8)` compiles | slice element type accepted |
 | `Channel(struct)` compiles | struct element type accepted |
 | `Channel(u32)` send and recv round-trip | send then recv returns the sent value |
-| `Channel(u32)` drain after close | send two items, close, recv both, third recv returns `error.Closed` |
+| `Channel(u32)` drain after close | send two items, close, recv both, third recv returns `error.ZixClosed` |
 
 ---
 
@@ -785,7 +785,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 
 | Test | What it verifies |
 | :- | :- |
-| `TcpServer.init` port zero | returns `error.PortNotConfigured` |
+| `TcpServer.init` port zero | returns `error.ZixPortNotConfigured` |
 | `DispatchModel` backing values stable | ASYNC=0, EPOLL=1, URING=2 |
 | `DispatchModel` dropped names gone | `stringToEnum` returns null for POOL and MIXED |
 | TCP frame max u32 length | `maxInt(u32)` encodes and decodes correctly via big-endian |
@@ -799,7 +799,7 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `queryParam` key present with empty value | `"?k="` -> `""` (not null) |
 | `queryParam` key absent returns null | key not in query string |
 | `queryParam` no query string at all returns null | target has no `?` |
-| `body()` chunked invalid hex is an error, not an empty body | `"zz"` chunk size -> `error.InvalidChunkedBody`, `bodyComplete()` false (the engine answers 400) |
+| `body()` chunked invalid hex is an error, not an empty body | `"zz"` chunk size -> `error.ZixInvalidChunkedBody`, `bodyComplete()` false (the engine answers 400) |
 | `body()` chunked missing terminal chunk returns partial data | no `0\r\n\r\n` -> partial data returned |
 | `body()` chunked single-byte chunks | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
 
@@ -858,7 +858,7 @@ QUERY boundary conditions on the `zix.Http` engine.
 | 1 byte -> null | fewer than 2 bytes |
 | Truncated payload -> null | header says 5 bytes but only 3 present |
 | Extended 16-bit length (126-tier) | 130-byte payload: byte[1] carries 126 marker |
-| `acceptKey` key too long -> `error.KeyTooLong` | key >= 93 bytes exceeds 128-byte hash_input |
+| `acceptKey` key too long -> `error.ZixKeyTooLong` | key >= 93 bytes exceeds 128-byte hash_input |
 
 ### tests/edge/udp/
 
@@ -866,7 +866,7 @@ QUERY boundary conditions on the `zix.Http` engine.
 
 | Test | What it verifies |
 | :- | :- |
-| Port zero | `UdpServer.init` returns `error.PortNotConfigured` |
+| Port zero | `UdpServer.init` returns `error.ZixPortNotConfigured` |
 | Non-zero port | `UdpServer.init` succeeds |
 
 #### `packet_test.zig`
@@ -882,9 +882,9 @@ QUERY boundary conditions on the `zix.Http` engine.
 
 | Test | What it verifies |
 | :- | :- |
-| Unsupported scheme -> `error.InvalidUrl` | `ftp://` scheme not accepted |
-| Missing host -> `error.InvalidUrl` | `http://` with no host |
-| Malformed URL -> `error.InvalidUrl` | `:::bad` fails at parse |
+| Unsupported scheme -> `error.ZixUrlSchemeUnsupported` | `ftp://` scheme not accepted |
+| Missing host -> `error.ZixUrlHostMissing` | `http://` with no host |
+| Malformed URL -> `error.ZixUrlMalformed` | `:::bad` fails at parse |
 | `ClientResponse.header()` absent name | returns null |
 | `RequestOpts.connect_timeout_ms` override | null, 0, and non-zero are distinct values |
 
@@ -894,7 +894,7 @@ QUERY boundary conditions on the `zix.Http` engine.
 
 | Test | What it verifies |
 | :- | :- |
-| Empty path -> `error.PathEmpty` | `UdsServer.init(.{ .path = "" })` returns PathEmpty |
+| Empty path -> `error.ZixPathEmpty` | `UdsServer.init(.{ .path = "" })` returns PathEmpty |
 
 ### tests/edge/logger/
 
@@ -1009,7 +1009,7 @@ Port: 18100.
 | :- | :- |
 | bad PRI preface causes server to close connection | malformed preface bytes -> server closes the connection cleanly |
 | client sends GOAWAY and server connection loop exits | GOAWAY frame -> server exits the frame loop without error |
-| `Http2Server.init` rejects port zero | returns `error.PortNotConfigured` |
+| `Http2Server.init` rejects port zero | returns `error.ZixPortNotConfigured` |
 | `HpackDecoder` decode of empty block returns zero headers | `decode(&.{}, ...)` returns 0 headers without error |
 | `writeFrameHeader` stream_id high bit is cleared on read | `stream_id = 0x7FFF_FFFF` roundtrips correctly via pipe |
 
@@ -1054,8 +1054,8 @@ Ports: 18220-18221.
 
 | Test | What it verifies |
 | :- | :- |
-| `readGrpcPrefix` with 4 bytes | returns `error.TooShort` |
-| `readGrpcPrefix` with empty slice | returns `error.TooShort` |
+| `readGrpcPrefix` with 4 bytes | returns `error.ZixTooShort` |
+| `readGrpcPrefix` with empty slice | returns `error.ZixTooShort` |
 | `GrpcContext.recvMessage` body shorter than prefix | body has 3 bytes (need 5 for prefix): returns null |
 | `GrpcContext.recvMessage` msg_len exceeds body | prefix claims 100 bytes but body has only 5: returns null |
 | `parsePath` empty string | returns null |
@@ -1064,7 +1064,7 @@ Ports: 18220-18221.
 | `detectContentType` no header | returns UNKNOWN |
 | `detectContentType` text/plain | returns UNKNOWN |
 | `parseTimeout` single character | returns null |
-| `GrpcClient.connect` port zero | returns `error.PortNotConfigured` |
+| `GrpcClient.connect` port zero | returns `error.ZixPortNotConfigured` |
 | `serveConn` closes cleanly on immediate client disconnect | server accepts, client disconnects immediately, no crash or error |
 | gRPC finish-only handler delivers error status to client | handler calls `res.finish(INVALID_ARGUMENT, ...)` only, client receives the error status without any data frames |
 
@@ -1077,8 +1077,8 @@ Ports: 18220-18221.
 | Capacity 1 allocates exactly one slot | `buf.len == 1`, `count == 0` |
 | Ring head wraps at `buf.len` | `(3+1) % 4 == 0` |
 | Full boundary: `count == buf.len` | tail index wraps back to head |
-| `send` after close | returns `error.Closed` |
-| `recv` on empty closed channel | returns `error.Closed` |
+| `send` after close | returns `error.ZixClosed` |
+| `recv` on empty closed channel | returns `error.ZixClosed` |
 
 ---
 

@@ -399,7 +399,7 @@ pub fn cacheLookup(head: *const ParsedHead) ?[]const u8 {
 /// - []const u8 (a complete response, ready to write)
 pub fn parseErrorResponse(err: anyerror) []const u8 {
     return switch (err) {
-        error.UnknownMethod => "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
+        error.ZixUnknownMethod => "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
         else => "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
     };
 }
@@ -1234,7 +1234,7 @@ fn buildGzipResponse(status: u16, content_type: []const u8, body: []const u8) ![
         std.compress.flate.Compress.Options.default,
     );
 
-    const comp: *std.compress.flate.Compress = if (scratch.comp) |*payload| payload else |_| return error.CompressFailed;
+    const comp: *std.compress.flate.Compress = if (scratch.comp) |*payload| payload else |_| return error.ZixCompressFailed;
     try comp.writer.writeAll(body);
     try comp.finish();
 
@@ -1387,7 +1387,7 @@ pub fn sendNegotiateCachedFD(
     // reserve, so the response never repeats a pass over the encoded bytes. An encoded result too
     // large for the buffer streams in two parts instead (the rare oversized path).
     const encoded_len = compression.encodeInto(arena.allocator(), encoding, body, scratch.neg_resp[HEADER_BUF_SIZE..], .DEFAULT) catch |err| switch (err) {
-        error.BufferTooSmall => return sendNegotiateOversized(fd, head, encoding, token, status, content_type, body),
+        error.ZixBufferTooSmall => return sendNegotiateOversized(fd, head, encoding, token, status, content_type, body),
         else => return sendSimpleFD(fd, status, content_type, body),
     };
 
@@ -1596,9 +1596,9 @@ fn recvHead(fd: std.posix.fd_t, buf: []u8, pre_filled: usize) !RecvHeadResult {
     }
 
     while (true) {
-        if (filled >= buf.len) return error.HeaderTooLarge;
-        const n = readOnceFD(fd, buf[filled..]) catch return error.Closed;
-        if (n == 0) return error.Closed;
+        if (filled >= buf.len) return error.ZixHeaderTooLarge;
+        const n = readOnceFD(fd, buf[filled..]) catch return error.ZixClosed;
+        if (n == 0) return error.ZixClosed;
         const search_from = if (filled > 3) filled - 3 else 0;
         filled += n;
         if (std.mem.indexOfPos(u8, buf[0..filled], search_from, "\r\n\r\n")) |pos| {
@@ -1878,7 +1878,7 @@ pub fn serveConn(fd: std.posix.fd_t, handler: HandlerFn, opts: ServeOpts, io: st
 
     while (true) {
         const hdr = recvHead(fd, recv_buf, leftover) catch |err| {
-            if (err == error.HeaderTooLarge) {
+            if (err == error.ZixHeaderTooLarge) {
                 writeAllFD(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n") catch {};
             }
             return;
@@ -2147,7 +2147,7 @@ test "zix http1: responseReserve renders in place and responseCommit stages head
     tl_resp_sink = &sink;
     defer tl_resp_sink = null;
 
-    const region = responseReserve(fds[1], 32) orelse return error.ReserveUnavailable;
+    const region = responseReserve(fds[1], 32) orelse return error.ZixReserveUnavailable;
     const body = "{\"ok\":true}";
     @memcpy(region[0..body.len], body);
     try responseCommit(fds[1], 200, "application/json", body.len);
@@ -2954,7 +2954,7 @@ fn testServeConnThread(args: TestServeArgs) void {
 
 fn testTcpSocket() !std.posix.fd_t {
     const rc = std.os.linux.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
-    if (std.posix.errno(rc) != .SUCCESS) return error.SocketFailed;
+    if (std.posix.errno(rc) != .SUCCESS) return error.ZixSocketFailed;
 
     return @intCast(rc);
 }
@@ -2973,7 +2973,7 @@ fn testTcpSocket() !std.posix.fd_t {
 ///   the caller two descriptors it never opened. Every caller guards the
 ///   platform first, so the error is unreachable at runtime.
 pub fn testTcpPair() ![2]std.posix.fd_t {
-    if (comptime @import("builtin").target.os.tag != .linux) return error.TcpPairNeedsLinux;
+    if (comptime @import("builtin").target.os.tag != .linux) return error.ZixTcpPairNeedsLinux;
 
     const linux = std.os.linux;
 
@@ -2985,16 +2985,16 @@ pub fn testTcpPair() ![2]std.posix.fd_t {
         .addr = std.mem.nativeToBig(u32, 0x7F000001),
     };
     var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
-    if (std.posix.errno(linux.bind(listener, @ptrCast(&addr), addr_len)) != .SUCCESS) return error.BindFailed;
-    if (std.posix.errno(linux.listen(listener, 1)) != .SUCCESS) return error.ListenFailed;
-    if (std.posix.errno(linux.getsockname(listener, @ptrCast(&addr), &addr_len)) != .SUCCESS) return error.SockNameFailed;
+    if (std.posix.errno(linux.bind(listener, @ptrCast(&addr), addr_len)) != .SUCCESS) return error.ZixBindFailed;
+    if (std.posix.errno(linux.listen(listener, 1)) != .SUCCESS) return error.ZixListenFailed;
+    if (std.posix.errno(linux.getsockname(listener, @ptrCast(&addr), &addr_len)) != .SUCCESS) return error.ZixSockNameFailed;
 
     const client = try testTcpSocket();
     errdefer _ = linux.close(client);
-    if (std.posix.errno(linux.connect(client, @ptrCast(&addr), addr_len)) != .SUCCESS) return error.ConnectFailed;
+    if (std.posix.errno(linux.connect(client, @ptrCast(&addr), addr_len)) != .SUCCESS) return error.ZixConnectFailed;
 
     const accepted = linux.accept4(listener, null, null, 0);
-    if (std.posix.errno(accepted) != .SUCCESS) return error.AcceptFailed;
+    if (std.posix.errno(accepted) != .SUCCESS) return error.ZixAcceptFailed;
 
     return .{ client, @intCast(accepted) };
 }

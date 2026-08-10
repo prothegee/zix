@@ -36,7 +36,7 @@ fn hasControlChar(str: []const u8) bool {
 // through res.raw so the wire bytes carry every custom header.
 //
 // Note:
-// - error.TooManyHeaders when headers.len exceeds MAX_XTRA_HEADERS.
+// - error.ZixTooManyHeaders when headers.len exceeds MAX_XTRA_HEADERS.
 // - error.HeaderInjection when a name or value contains CR or LF.
 fn sendWithHeaders(
     res: *zix.Http1.Response,
@@ -45,7 +45,7 @@ fn sendWithHeaders(
     headers: []const Hdr,
     body: []const u8,
 ) !void {
-    if (headers.len > MAX_XTRA_HEADERS) return error.TooManyHeaders;
+    if (headers.len > MAX_XTRA_HEADERS) return error.ZixTooManyHeaders;
 
     for (headers) |header| {
         if (hasControlChar(header.name) or hasControlChar(header.value)) return error.HeaderInjection;

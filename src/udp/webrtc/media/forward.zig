@@ -28,17 +28,17 @@ const srtp = @import("srtp.zig");
 /// What stops a packet from being forwarded.
 pub const Error = error{
     /// Too short to hold an RTP header, or a tag, or both.
-    Truncated,
+    ZixTruncated,
     /// An RTP version other than 2.
-    UnsupportedVersion,
+    ZixUnsupportedVersion,
     /// No room in the buffer for the outgoing tag.
-    NoSpace,
+    ZixNoSpace,
     /// An index already accepted on the way in, or too old to tell apart from one.
-    Replayed,
+    ZixReplayed,
     /// The incoming tag does not match, so the packet is not from the peer that holds the key.
-    AuthenticationFailed,
+    ZixAuthenticationFailed,
     /// A payload past what one counter block may cover.
-    SegmentTooLong,
+    ZixSegmentTooLong,
 };
 
 /// How one source's numbering is presented to one destination.
@@ -139,8 +139,8 @@ pub const Mapping = struct {
 ///
 /// Return:
 /// - []const u8, the packet to send to the destination
-/// - error.Truncated, error.UnsupportedVersion, error.NoSpace, error.Replayed,
-///   error.AuthenticationFailed, error.SegmentTooLong
+/// - error.ZixTruncated, error.ZixUnsupportedVersion, error.ZixNoSpace, error.ZixReplayed,
+///   error.ZixAuthenticationFailed, error.ZixSegmentTooLong
 pub fn relay(
     source: *srtp.Session,
     destination: *srtp.Session,
@@ -165,10 +165,10 @@ pub fn relay(
 ///
 /// Return:
 /// - []const u8, the plain packet, borrowing `buffer`
-/// - error.Truncated, error.UnsupportedVersion, error.Replayed, error.AuthenticationFailed,
-///   error.SegmentTooLong
+/// - error.ZixTruncated, error.ZixUnsupportedVersion, error.ZixReplayed, error.ZixAuthenticationFailed,
+///   error.ZixSegmentTooLong
 pub fn open(source: *srtp.Session, buffer: []u8, packet_len: usize) Error![]const u8 {
-    if (packet_len > buffer.len) return error.Truncated;
+    if (packet_len > buffer.len) return error.ZixTruncated;
 
     return source.unprotect(buffer[0..packet_len]);
 }
@@ -188,14 +188,14 @@ pub fn open(source: *srtp.Session, buffer: []u8, packet_len: usize) Error![]cons
 ///
 /// Return:
 /// - []const u8, the packet to send to the destination
-/// - error.Truncated, error.UnsupportedVersion, error.NoSpace, error.SegmentTooLong
+/// - error.ZixTruncated, error.ZixUnsupportedVersion, error.ZixNoSpace, error.ZixSegmentTooLong
 pub fn reseal(
     destination: *srtp.Session,
     mapping: Mapping,
     buffer: []u8,
     body_len: usize,
 ) Error![]const u8 {
-    if (body_len > buffer.len) return error.Truncated;
+    if (body_len > buffer.len) return error.ZixTruncated;
 
     const header = (try rtp.read(buffer[0..body_len])).header;
 
@@ -301,7 +301,7 @@ test "zix media: forward relay, the receiving peer cannot open the sender's own 
     @memcpy(received[0..protected.len], protected);
 
     try std.testing.expectError(
-        error.AuthenticationFailed,
+        error.ZixAuthenticationFailed,
         pair.receiver.unprotect(received[0..protected.len]),
     );
 }
@@ -345,7 +345,7 @@ test "zix media: forward relay, a forged packet never reaches the destination" {
 
     @memset(buffer[written.len..][0..10], 0xFF);
 
-    try std.testing.expectError(error.AuthenticationFailed, relay(
+    try std.testing.expectError(error.ZixAuthenticationFailed, relay(
         &pair.inbound,
         &pair.outbound,
         .{ .ssrc = 0x2222_2222 },
@@ -369,7 +369,7 @@ test "zix media: forward relay, a replayed packet is stopped at the inbound side
 
     _ = try relay(&pair.inbound, &pair.outbound, .{ .ssrc = 0x2222_2222 }, &buffer, packet_len);
 
-    try std.testing.expectError(error.Replayed, relay(
+    try std.testing.expectError(error.ZixReplayed, relay(
         &pair.inbound,
         &pair.outbound,
         .{ .ssrc = 0x2222_2222 },
@@ -547,7 +547,7 @@ test "zix media: forward relay, a buffer with no room for the outgoing tag is re
     var tight: [128]u8 = undefined;
     @memcpy(tight[0..packet_len], buffer[0..packet_len]);
 
-    try std.testing.expectError(error.Truncated, relay(
+    try std.testing.expectError(error.ZixTruncated, relay(
         &pair.inbound,
         &pair.outbound,
         .{ .ssrc = 0x2222_2222 },
@@ -645,7 +645,7 @@ test "zix media: forward open, a packet opened twice is refused the second time"
 
     _ = try open(&pair.inbound, &buffer, packet_len);
 
-    try std.testing.expectError(error.Replayed, open(&pair.inbound, &again, packet_len));
+    try std.testing.expectError(error.ZixReplayed, open(&pair.inbound, &again, packet_len));
 }
 
 test "zix media: forward bufferLenFor, it covers what relay writes" {

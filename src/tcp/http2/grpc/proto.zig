@@ -32,9 +32,9 @@ pub fn encodeVarint(buf: []u8, value: u64) usize {
 ///
 /// Return:
 /// - !struct{ value: u64, consumed: usize }
-/// - error.UnexpectedEOF if buf ends before the varint terminates
-/// - error.VarintOverflow if the encoded value exceeds 64 bits
-pub fn decodeVarint(buf: []const u8) error{ UnexpectedEOF, VarintOverflow }!struct { value: u64, consumed: usize } {
+/// - error.ZixUnexpectedEOF if buf ends before the varint terminates
+/// - error.ZixVarintOverflow if the encoded value exceeds 64 bits
+pub fn decodeVarint(buf: []const u8) error{ ZixUnexpectedEOF, ZixVarintOverflow }!struct { value: u64, consumed: usize } {
     var val: u64 = 0;
     var shift: u6 = 0;
     var i: usize = 0;
@@ -43,10 +43,10 @@ pub fn decodeVarint(buf: []const u8) error{ UnexpectedEOF, VarintOverflow }!stru
         i += 1;
         val |= (@as(u64, b & 0x7F)) << shift;
         if ((b & 0x80) == 0) return .{ .value = val, .consumed = i };
-        if (shift > 56) return error.VarintOverflow;
+        if (shift > 56) return error.ZixVarintOverflow;
         shift += 7;
     }
-    return error.UnexpectedEOF;
+    return error.ZixUnexpectedEOF;
 }
 
 /// Encode a LEN field (string or bytes).
@@ -129,7 +129,7 @@ pub const MessageReader = struct {
                 return .{ .field_number = field_number, .wire_type = wire_type, .payload = &.{}, .value_u64 = r.value };
             },
             WT_I64 => {
-                if (self.pos + 8 > self.buf.len) return error.UnexpectedEOF;
+                if (self.pos + 8 > self.buf.len) return error.ZixUnexpectedEOF;
                 const data = self.buf[self.pos..][0..8];
                 self.pos += 8;
                 return .{ .field_number = field_number, .wire_type = wire_type, .payload = data, .value_u64 = 0 };
@@ -138,18 +138,18 @@ pub const MessageReader = struct {
                 const len_r = try decodeVarint(self.buf[self.pos..]);
                 self.pos += len_r.consumed;
                 const data_len: usize = @intCast(len_r.value);
-                if (self.pos + data_len > self.buf.len) return error.UnexpectedEOF;
+                if (self.pos + data_len > self.buf.len) return error.ZixUnexpectedEOF;
                 const data = self.buf[self.pos..][0..data_len];
                 self.pos += data_len;
                 return .{ .field_number = field_number, .wire_type = wire_type, .payload = data, .value_u64 = 0 };
             },
             WT_I32 => {
-                if (self.pos + 4 > self.buf.len) return error.UnexpectedEOF;
+                if (self.pos + 4 > self.buf.len) return error.ZixUnexpectedEOF;
                 const data = self.buf[self.pos..][0..4];
                 self.pos += 4;
                 return .{ .field_number = field_number, .wire_type = wire_type, .payload = data, .value_u64 = 0 };
             },
-            else => return error.UnknownWireType,
+            else => return error.ZixUnknownWireType,
         }
     }
 };

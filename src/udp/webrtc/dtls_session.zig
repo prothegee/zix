@@ -63,9 +63,9 @@ pub const State = enum {
 pub const Error = error{
     OutOfMemory,
     /// A buffer handed in is too small for what had to go in it.
-    NoSpace,
+    ZixNoSpace,
     /// Application data was asked for before the handshake finished.
-    NotEstablished,
+    ZixNotEstablished,
 };
 
 /// What one datagram did to the session.
@@ -243,7 +243,7 @@ pub const Session = struct {
     ///
     /// Return:
     /// - Outcome
-    /// - error.NoSpace, error.OutOfMemory
+    /// - error.ZixNoSpace, error.OutOfMemory
     pub fn handle(self: *Session, datagram: []const u8, now_ms: u64) Error!Outcome {
         self.resetAppData();
 
@@ -363,12 +363,12 @@ pub const Session = struct {
     ///
     /// Return:
     /// - []const u8 (one record, borrowing out)
-    /// - error.NotEstablished before the handshake finishes
-    /// - error.NoSpace when out cannot hold the record
+    /// - error.ZixNotEstablished before the handshake finishes
+    /// - error.ZixNoSpace when out cannot hold the record
     pub fn writeAppData(self: *Session, plaintext: []const u8, out: []u8) Error![]const u8 {
-        if (self.connection) |*live| return live.writeAppData(plaintext, out) catch error.NoSpace;
+        if (self.connection) |*live| return live.writeAppData(plaintext, out) catch error.ZixNoSpace;
 
-        return error.NotEstablished;
+        return error.ZixNotEstablished;
     }
 
     /// Drop what the last datagram left behind, so the buffers can be filled again.
@@ -523,7 +523,7 @@ pub const Session = struct {
             self.pending,
         ) catch |err| switch (err) {
             // A Finished that does not match is the end of the handshake, not a retry.
-            error.ClientFinishedMismatch => {
+            error.ZixClientFinishedMismatch => {
                 self.state = .FAILED;
                 outcome.failed = true;
 
@@ -888,7 +888,7 @@ test "zix webrtc: dtls session, application data before the handshake is refused
     defer session.deinit();
 
     var out: [128]u8 = undefined;
-    try std.testing.expectError(error.NotEstablished, session.writeAppData("too early", &out));
+    try std.testing.expectError(error.ZixNotEstablished, session.writeAppData("too early", &out));
 }
 
 test "zix webrtc: dtls session, a datagram that is not a record at all is ignored" {

@@ -18,7 +18,7 @@ fn runServer(ctx: *ServerCtx, io: std.Io) void {
         return;
     };
     zix.Fix.serveConn(stream, io, "SERVER", .{}) catch |e| {
-        if (e != error.ConnectionClosed and e != error.BrokenPipe) ctx.err = e;
+        if (e != error.ZixConnectionClosed and e != error.BrokenPipe) ctx.err = e;
     };
 }
 
@@ -69,7 +69,7 @@ fn recvMsg(
             recv_len.* = remaining;
             return field_count;
         }
-        if (recv_len.* >= recv_buf.len) return error.MessageTooLarge;
+        if (recv_len.* >= recv_buf.len) return error.ZixMessageTooLarge;
         const byte = try reader.takeByte();
         recv_buf[recv_len.*] = byte;
         recv_len.* += 1;
@@ -110,7 +110,7 @@ test "zix integration: FixServer init, port zero returns PortNotConfigured" {
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         zix.Fix.Server.init(null, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER", .dispatch_model = .ASYNC }),
     );
 }

@@ -35,13 +35,13 @@ pub const Limits = struct {
 pub const Error = error{
     OutOfMemory,
     /// The table is at `max_channels`.
-    TooManyChannels,
+    ZixTooManyChannels,
     /// A channel already sits on that identifier.
-    StreamInUse,
+    ZixStreamInUse,
     /// A label or protocol longer than this endpoint accepts.
-    FieldTooLong,
+    ZixFieldTooLong,
     /// The identifier belongs to the other side, or is outside what the association negotiated.
-    BadStreamIdentifier,
+    ZixBadStreamIdentifier,
 };
 
 /// The channels on one association.
@@ -131,16 +131,16 @@ pub const Registry = struct {
     ///
     /// Return:
     /// - *channel.Channel, valid until the next `add` or `remove`
-    /// - error.TooManyChannels, error.StreamInUse, error.BadStreamIdentifier, error.FieldTooLong
+    /// - error.ZixTooManyChannels, error.ZixStreamInUse, error.ZixBadStreamIdentifier, error.ZixFieldTooLong
     /// - error.OutOfMemory
     pub fn add(self: *Registry, fields: channel.Fields, negotiated_streams: u16) Error!*channel.Channel {
-        if (self.entries.items.len >= self.limits.max_channels) return error.TooManyChannels;
-        if (fields.label.len > self.limits.max_label_bytes) return error.FieldTooLong;
-        if (fields.protocol.len > self.limits.max_protocol_bytes) return error.FieldTooLong;
+        if (self.entries.items.len >= self.limits.max_channels) return error.ZixTooManyChannels;
+        if (fields.label.len > self.limits.max_label_bytes) return error.ZixFieldTooLong;
+        if (fields.protocol.len > self.limits.max_protocol_bytes) return error.ZixFieldTooLong;
         if (!self.mayOpen(fields.stream_identifier, fields.opener, negotiated_streams)) {
-            return error.BadStreamIdentifier;
+            return error.ZixBadStreamIdentifier;
         }
-        if (self.find(fields.stream_identifier) != null) return error.StreamInUse;
+        if (self.find(fields.stream_identifier) != null) return error.ZixStreamInUse;
 
         const opened = try channel.Channel.init(self.allocator, fields);
         errdefer {
@@ -254,7 +254,7 @@ test "zix datachannel: registry add, the same identifier twice is refused" {
     _ = try channels.add(.{ .stream_identifier = 0, .opener = true }, NEGOTIATED);
 
     try std.testing.expectError(
-        error.StreamInUse,
+        error.ZixStreamInUse,
         channels.add(.{ .stream_identifier = 0, .opener = true }, NEGOTIATED),
     );
 }
@@ -264,7 +264,7 @@ test "zix datachannel: registry add, this endpoint cannot open on the peer's hal
     defer channels.deinit();
 
     try std.testing.expectError(
-        error.BadStreamIdentifier,
+        error.ZixBadStreamIdentifier,
         channels.add(.{ .stream_identifier = 1, .opener = true }, NEGOTIATED),
     );
 }
@@ -275,7 +275,7 @@ test "zix datachannel: registry add, the peer cannot open on this endpoint's hal
 
     // Accepting this would let the peer take an identifier this endpoint is about to hand out.
     try std.testing.expectError(
-        error.BadStreamIdentifier,
+        error.ZixBadStreamIdentifier,
         channels.add(.{ .stream_identifier = 2, .opener = false }, NEGOTIATED),
     );
 }
@@ -285,7 +285,7 @@ test "zix datachannel: registry add, an identifier past the negotiated streams i
     defer channels.deinit();
 
     try std.testing.expectError(
-        error.BadStreamIdentifier,
+        error.ZixBadStreamIdentifier,
         channels.add(.{ .stream_identifier = 128, .opener = true }, NEGOTIATED),
     );
 }
@@ -298,7 +298,7 @@ test "zix datachannel: registry add, the table stops at its ceiling" {
     _ = try channels.add(.{ .stream_identifier = 2, .opener = true }, NEGOTIATED);
 
     try std.testing.expectError(
-        error.TooManyChannels,
+        error.ZixTooManyChannels,
         channels.add(.{ .stream_identifier = 4, .opener = true }, NEGOTIATED),
     );
 }
@@ -308,7 +308,7 @@ test "zix datachannel: registry add, a label past the ceiling is refused" {
     defer channels.deinit();
 
     try std.testing.expectError(
-        error.FieldTooLong,
+        error.ZixFieldTooLong,
         channels.add(.{ .stream_identifier = 0, .label = "far too long", .opener = true }, NEGOTIATED),
     );
 }
@@ -318,7 +318,7 @@ test "zix datachannel: registry add, a protocol past the ceiling is refused" {
     defer channels.deinit();
 
     try std.testing.expectError(
-        error.FieldTooLong,
+        error.ZixFieldTooLong,
         channels.add(.{ .stream_identifier = 0, .protocol = "zix", .opener = true }, NEGOTIATED),
     );
 }

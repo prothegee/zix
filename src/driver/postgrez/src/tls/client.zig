@@ -9,7 +9,7 @@
 //! - Differences against the zix original: no ALPN (the SSLRequest upgrade
 //!   never negotiates one), the ChangeCipherSpec record is optional, the
 //!   encrypted server flight may span several records (real servers split
-//!   it), and finish() reports error.NeedMoreRecords when the Finished
+//!   it), and finish() reports error.PostgrezNeedMoreRecords when the Finished
 //!   message has not arrived yet, so the caller reads record by record.
 //! - Offers x25519, TLS_AES_128_GCM_SHA256, and the ecdsa_secp256r1_sha256 +
 //!   ed25519 signature schemes: the server certificate must match (the
@@ -126,13 +126,13 @@ pub fn start(opts: HandshakeOptions, out: []u8) !StartResult {
 ///
 /// Return:
 /// - FinishResult on a complete flight
-/// - error.NeedMoreRecords when Finished has not arrived yet: append the
+/// - error.PostgrezNeedMoreRecords when Finished has not arrived yet: append the
 ///   next record and call again on a fresh copy of the start() state
 pub fn finish(state: *State, server_records: []const u8, out: []u8) !FinishResult {
     var reader = wire.Reader{ .buf = server_records };
 
     // record 1: ServerHello (plaintext handshake).
-    if (try reader.readU8() != 22) return error.UnexpectedRecord;
+    if (try reader.readU8() != 22) return error.PostgrezUnexpectedRecord;
     _ = try reader.readU16();
     const sh_len = try reader.readU16();
     const sh_msg = try reader.readBytes(sh_len);
@@ -177,17 +177,17 @@ pub fn finish(state: *State, server_records: []const u8, out: []u8) !FinishResul
         switch (rec_type) {
             20 => continue, // ChangeCipherSpec, middlebox compat, ignored
             23 => {
-                if (flight_len + rec_len > flight_plain.len) return error.FlightTooLarge;
+                if (flight_len + rec_len > flight_plain.len) return error.PostgrezFlightTooLarge;
 
                 const opened = try record.deprotect(flight_plain[flight_len..], rec, server_hs_key, server_hs_iv, hs_seq);
                 hs_seq += 1;
-                if (opened.inner_type == .ALERT) return error.HandshakeAlert;
-                if (opened.inner_type != .HANDSHAKE) return error.UnexpectedRecord;
+                if (opened.inner_type == .ALERT) return error.PostgrezHandshakeAlert;
+                if (opened.inner_type != .HANDSHAKE) return error.PostgrezUnexpectedRecord;
 
                 flight_len += opened.data.len;
             },
-            21 => return error.HandshakeAlert,
-            else => return error.UnexpectedRecord,
+            21 => return error.PostgrezHandshakeAlert,
+            else => return error.PostgrezUnexpectedRecord,
         }
     }
 
@@ -203,7 +203,7 @@ pub fn finish(state: *State, server_records: []const u8, out: []u8) !FinishResul
         const msg_type = try flight_reader.readU8();
         const msg_len = try flight_reader.readU24();
         const msg_start = flight_reader.pos - 4;
-        const msg_body = flight_reader.readBytes(msg_len) catch return error.NeedMoreRecords;
+        const msg_body = flight_reader.readBytes(msg_len) catch return error.PostgrezNeedMoreRecords;
         switch (msg_type) {
             11 => cert_msg = msg_body, // Certificate
             15 => certverify_msg = msg_body, // CertificateVerify
@@ -218,7 +218,7 @@ pub fn finish(state: *State, server_records: []const u8, out: []u8) !FinishResul
         if (msg_type == 11) t_after_cert = state.transcript.current();
         if (finished_seen) break;
     }
-    if (!finished_seen) return error.NeedMoreRecords;
+    if (!finished_seen) return error.PostgrezNeedMoreRecords;
 
     // CertificateVerify (RFC 8446 4.4.3): the peer signed the transcript
     // with the end-entity cert's private key.
@@ -228,7 +228,7 @@ pub fn finish(state: *State, server_records: []const u8, out: []u8) !FinishResul
     const server_finished_key = finishedKey(server_hs_traffic);
     const expected = finishedVerifyData(server_finished_key, transcript_before_finished.current());
     if (server_finished_vd.len != key_schedule.HASH_LENGTH or !std.mem.eql(u8, server_finished_vd, &expected)) {
-        return error.ServerFinishedMismatch;
+        return error.PostgrezServerFinishedMismatch;
     }
 
     // application key schedule from the transcript through the server Finished.
@@ -258,7 +258,7 @@ pub fn finish(state: *State, server_records: []const u8, out: []u8) !FinishResul
 
     // surface the server end-entity cert for channel binding.
     const leaf = try leafCertDer(cert_msg);
-    if (leaf.len > MAX_SERVER_CERT_DER) return error.CertificateTooLarge;
+    if (leaf.len > MAX_SERVER_CERT_DER) return error.PostgrezCertificateTooLarge;
 
     var result: FinishResult = .{ .client_finished = client_finished, .connection = connection };
     @memcpy(result.server_cert[0..leaf.len], leaf);
@@ -351,15 +351,15 @@ fn verifyCertificateVerify(cert_msg: []const u8, certverify_msg: []const u8, tra
         },
         0x0807 => { // ed25519
             const Ed25519 = std.crypto.sign.Ed25519;
-            if (sig_bytes.len != Ed25519.Signature.encoded_length) return error.InvalidSignature;
+            if (sig_bytes.len != Ed25519.Signature.encoded_length) return error.PostgrezInvalidSignature;
             const pub_raw = parsed.pubKey();
-            if (pub_raw.len != 32) return error.UnsupportedSignatureScheme;
+            if (pub_raw.len != 32) return error.PostgrezUnsupportedSignatureScheme;
 
             const pub_key = try Ed25519.PublicKey.fromBytes(pub_raw[0..32].*);
             const sig = Ed25519.Signature.fromBytes(sig_bytes[0..64].*);
             try sig.verify(content, pub_key);
         },
-        else => return error.UnsupportedSignatureScheme,
+        else => return error.PostgrezUnsupportedSignatureScheme,
     }
 }
 
@@ -370,7 +370,7 @@ const ServerHelloParsed = struct {
 
 fn parseServerHello(sh_msg: []const u8) !ServerHelloParsed {
     var hello_reader = wire.Reader{ .buf = sh_msg };
-    if (try hello_reader.readU8() != 2) return error.NotServerHello;
+    if (try hello_reader.readU8() != 2) return error.PostgrezNotServerHello;
     _ = try hello_reader.readU24();
     _ = try hello_reader.readU16(); // legacy_version
     var out: ServerHelloParsed = undefined;
@@ -397,7 +397,7 @@ fn parseServerHello(sh_msg: []const u8) !ServerHelloParsed {
         }
     }
 
-    return error.NoServerKeyShare;
+    return error.PostgrezNoServerKeyShare;
 }
 
 // certificate helpers inlined from the zix certificate layer (the only
@@ -490,7 +490,7 @@ test "postgrez tls: tls client finish reports NeedMoreRecords on a bare ServerHe
 
     var state = started.state;
     var fin_buf: [256]u8 = undefined;
-    try testing.expectError(error.NeedMoreRecords, finish(&state, records_buf[0 .. 5 + sh_msg.len], &fin_buf));
+    try testing.expectError(error.PostgrezNeedMoreRecords, finish(&state, records_buf[0 .. 5 + sh_msg.len], &fin_buf));
 }
 
 test "postgrez tls: tls ClientConnection round trip and readRecord types" {

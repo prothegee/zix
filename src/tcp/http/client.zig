@@ -155,23 +155,26 @@ pub const HttpClient = struct {
     ///
     /// Note:
     /// - HTTP_2 (config.version) takes the native h2-over-TLS path (requestHttp2), https only.
-    ///   HTTP_3 returns error.UnsupportedVersion.
+    ///   HTTP_3 returns error.ZixUnsupportedVersion.
     ///
     /// Errors (named):
-    /// error.InvalidUrl          - malformed URL, unsupported scheme, or missing host
-    /// error.BodyTooLarge        - response body exceeded config.max_response_body bytes
-    /// error.ResponseTimeout     - no first response byte within config.response_timeout_ms
-    /// error.ReadTimeout         - response body went quiet for config.read_timeout_ms
-    /// error.UnsupportedVersion  - config.version is HTTP_3
-    /// error.UnsupportedScheme   - HTTP_2 was requested for a non-https URL
-    /// error.TlsNoTrustAnchor    - HTTP_2 with tls_verify set but no tls_ca_path
+    /// error.ZixUrlMalformed        - the URL does not parse
+    /// error.ZixUrlSchemeUnsupported - the scheme is not one this transport speaks
+    /// error.ZixUrlHostMissing      - the URL carries no host
+    /// error.ZixUrlPathTooLong      - the path and query do not fit the request buffer
+    /// error.ZixBodyTooLarge        - response body exceeded config.max_response_body bytes
+    /// error.ZixResponseTimeout     - no first response byte within config.response_timeout_ms
+    /// error.ZixReadTimeout         - response body went quiet for config.read_timeout_ms
+    /// error.ZixUnsupportedVersion  - config.version is HTTP_3
+    /// error.ZixUnsupportedScheme   - HTTP_2 was requested for a non-https URL
+    /// error.ZixTlsNoTrustAnchor    - HTTP_2 with tls_verify set but no tls_ca_path
     ///
     /// Other errors propagate from std.http.Client (network failures, protocol errors, OOM).
     pub fn request(self: *Self, method: Method.Code, url: []const u8, opts: RequestOpts) !ClientResponse {
         switch (self.config.version) {
             .HTTP_1 => {},
             .HTTP_2 => return self.requestHttp2(method, url, opts),
-            .HTTP_3 => return error.UnsupportedVersion,
+            .HTTP_3 => return error.ZixUnsupportedVersion,
         }
 
         // Settled before anything is opened, so a method this transport cannot put
@@ -180,14 +183,14 @@ pub const HttpClient = struct {
 
         const gpa = self.config.allocator;
 
-        const uri = std.Uri.parse(url) catch return error.InvalidUrl;
-        const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.InvalidUrl;
+        const uri = std.Uri.parse(url) catch return error.ZixUrlMalformed;
+        const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.ZixUrlSchemeUnsupported;
 
         var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
         const host_name = (if (ZIG_SEMVER.MINOR == 16)
             uri.getHost(&host_buf)
         else
-            std.Io.net.HostName.fromUri(uri, &host_buf)) catch return error.InvalidUrl;
+            std.Io.net.HostName.fromUri(uri, &host_buf)) catch return error.ZixUrlHostMissing;
         const port = uri.port orelse switch (protocol) {
             .plain => @as(u16, 80),
             .tls => @as(u16, 443),
@@ -207,10 +210,28 @@ pub const HttpClient = struct {
         // the configured extra CA (tls_ca_path). Done once.
         if (protocol == .tls and self.inner.now == null) {
             const now = std.Io.Clock.real.now(self.config.io);
-            self.inner.ca_bundle.rescan(gpa, self.config.io, now) catch {};
+
+            // A failed rescan is not fatal: a caller who named tls_ca_path may not want the system
+            // roots at all. It is not nothing either, so it comes back as its own name rather than
+            // being dropped, and the caller decides.
+            var roots_loaded = true;
+            self.inner.ca_bundle.rescan(gpa, self.config.io, now) catch {
+                roots_loaded = false;
+            };
+
             if (self.config.tls_ca_path) |ca_path| {
-                self.inner.ca_bundle.addCertsFromFilePath(gpa, self.config.io, now, std.Io.Dir.cwd(), ca_path) catch return error.TlsCaLoadFailed;
+                self.inner.ca_bundle.addCertsFromFilePath(gpa, self.config.io, now, std.Io.Dir.cwd(), ca_path) catch |err| return switch (err) {
+                    error.FileNotFound => error.ZixTlsCaFileNotFound,
+                    error.IsDir => error.ZixTlsCaPathIsDirectory,
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ZixTlsCaLoadFailed,
+                };
+            } else if (!roots_loaded) {
+                // No configured anchor and no system roots, so every verification below would fail
+                // for a reason that had already been thrown away.
+                return error.ZixTlsSystemRootsUnavailable;
             }
+
             self.inner.now = now;
         }
 
@@ -256,7 +277,7 @@ pub const HttpClient = struct {
 
         // The request is out, so everything below waits on the peer. A server that accepts and then
         // never answers parks receiveHead forever without this gate.
-        if (!readableWithin(conn_handle, self.config.response_timeout_ms)) return error.ResponseTimeout;
+        if (!readableWithin(conn_handle, self.config.response_timeout_ms)) return error.ZixResponseTimeout;
 
         var redirect_buf: [REDIRECT_HEAD_BUF]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
@@ -275,16 +296,16 @@ pub const HttpClient = struct {
         const declared: ?usize = if (self.config.read_timeout_ms == 0)
             null
         else if (response.head.content_length) |len|
-            std.math.cast(usize, len) orelse return error.BodyTooLarge
+            std.math.cast(usize, len) orelse return error.ZixBodyTooLarge
         else
             null;
 
         const body_bytes = if (declared) |expected| blk: {
-            if (expected > self.config.max_response_body) return error.BodyTooLarge;
+            if (expected > self.config.max_response_body) return error.ZixBodyTooLarge;
 
             break :blk try readBodyBounded(gpa, body_reader, conn, self.config.read_timeout_ms, expected);
         } else body_reader.allocRemaining(gpa, .limited(self.config.max_response_body)) catch |err| switch (err) {
-            error.StreamTooLong => return error.BodyTooLarge,
+            error.StreamTooLong => return error.ZixBodyTooLarge,
             else => |e| return e,
         };
 
@@ -304,19 +325,19 @@ pub const HttpClient = struct {
     fn requestHttp2(self: *Self, method: Method.Code, url: []const u8, opts: RequestOpts) !ClientResponse {
         const gpa = self.config.allocator;
 
-        const uri = std.Uri.parse(url) catch return error.InvalidUrl;
-        if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) return error.UnsupportedScheme;
+        const uri = std.Uri.parse(url) catch return error.ZixUrlMalformed;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) return error.ZixUnsupportedScheme;
 
         var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
         const host_name = (if (ZIG_SEMVER.MINOR == 16)
             uri.getHost(&host_buf)
         else
-            std.Io.net.HostName.fromUri(uri, &host_buf)) catch return error.InvalidUrl;
+            std.Io.net.HostName.fromUri(uri, &host_buf)) catch return error.ZixUrlHostMissing;
         const port = uri.port orelse 443;
 
         // origin-form request target (:path), the path plus any query, e.g. "/echo?foo=bar".
         var path_buf: [REQUEST_PATH_BUF]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "{f}", .{uri.fmt(.{ .path = true, .query = true })}) catch return error.InvalidUrl;
+        const path = std.fmt.bufPrint(&path_buf, "{f}", .{uri.fmt(.{ .path = true, .query = true })}) catch return error.ZixUrlPathTooLong;
 
         const parts = try h2_client.fetch(self.config, method, host_name, port, path, opts.headers, opts.body);
 
@@ -339,8 +360,8 @@ pub const HttpClient = struct {
     ///
     /// Return:
     /// - ClientResponse
-    /// - error.UdsNotSupported (non-Unix platform)
-    /// - error.InvalidPath (path rejected by the OS)
+    /// - error.ZixUdsNotSupported (non-Unix platform)
+    /// - error.ZixInvalidPath (path rejected by the OS)
     pub fn getUds(self: *Self, socket_path: []const u8, http_path: []const u8, opts: RequestOpts) !ClientResponse {
         return self.requestUds(.GET, socket_path, http_path, opts);
     }
@@ -373,16 +394,16 @@ pub const HttpClient = struct {
     ///
     /// Return:
     /// - ClientResponse
-    /// - error.UdsNotSupported (non-Unix platform)
-    /// - error.InvalidPath (socket path longer than 108 bytes or rejected by OS)
-    /// - error.BodyTooLarge (response body exceeded config.max_response_body)
+    /// - error.ZixUdsNotSupported (non-Unix platform)
+    /// - error.ZixInvalidPath (socket path longer than 108 bytes or rejected by OS)
+    /// - error.ZixBodyTooLarge (response body exceeded config.max_response_body)
     pub fn requestUds(self: *Self, method: Method.Code, socket_path: []const u8, http_path: []const u8, opts: RequestOpts) !ClientResponse {
-        if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
-        if (socket_path.len > UDS_PATH_MAX) return error.InvalidPath;
+        if (comptime !std.Io.net.has_unix_sockets) return error.ZixUdsNotSupported;
+        if (socket_path.len > UDS_PATH_MAX) return error.ZixInvalidPath;
 
         const gpa = self.config.allocator;
 
-        const unix_addr = std.Io.net.UnixAddress.init(socket_path) catch return error.InvalidPath;
+        const unix_addr = std.Io.net.UnixAddress.init(socket_path) catch return error.ZixInvalidPath;
         const uds_stream = try unix_addr.connect(self.config.io);
         defer uds_stream.close(self.config.io);
         const fd = uds_stream.socket.handle;
@@ -396,7 +417,7 @@ pub const HttpClient = struct {
             req_buf[req_len..],
             "{s} {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n",
             .{ method_name, http_path },
-        ) catch return error.InvalidPath;
+        ) catch return error.ZixInvalidPath;
         req_len += status_line.len;
 
         for (opts.headers) |hdr| {
@@ -405,12 +426,12 @@ pub const HttpClient = struct {
         }
 
         if (opts.body) |body| {
-            const cl_line = std.fmt.bufPrint(req_buf[req_len..], "Content-Length: {d}\r\n\r\n", .{body.len}) catch return error.InvalidPath;
+            const cl_line = std.fmt.bufPrint(req_buf[req_len..], "Content-Length: {d}\r\n\r\n", .{body.len}) catch return error.ZixInvalidPath;
             req_len += cl_line.len;
             try udsWriteAll(fd, req_buf[0..req_len]);
             try udsWriteAll(fd, body);
         } else {
-            const end = std.fmt.bufPrint(req_buf[req_len..], "\r\n", .{}) catch return error.InvalidPath;
+            const end = std.fmt.bufPrint(req_buf[req_len..], "\r\n", .{}) catch return error.ZixInvalidPath;
             req_len += end.len;
             try udsWriteAll(fd, req_buf[0..req_len]);
         }
@@ -420,10 +441,10 @@ pub const HttpClient = struct {
         var header_end: usize = 0;
 
         while (head_scan_len < head_scan_buf.len) {
-            if (!readableWithin(fd, self.config.response_timeout_ms)) return error.ResponseTimeout;
+            if (!readableWithin(fd, self.config.response_timeout_ms)) return error.ZixResponseTimeout;
 
-            const n = readOnceFD(fd, head_scan_buf[head_scan_len..]) catch return error.ConnectionClosed;
-            if (n == 0) return error.ConnectionClosed;
+            const n = readOnceFD(fd, head_scan_buf[head_scan_len..]) catch return error.ZixConnectionClosed;
+            if (n == 0) return error.ZixConnectionClosed;
             head_scan_len += n;
             if (std.mem.indexOf(u8, head_scan_buf[0..head_scan_len], "\r\n\r\n")) |pos| {
                 header_end = pos + 4;
@@ -431,7 +452,7 @@ pub const HttpClient = struct {
             }
         }
 
-        if (header_end == 0) return error.InvalidResponse;
+        if (header_end == 0) return error.ZixInvalidResponse;
 
         const head_raw = head_scan_buf[0..header_end];
 
@@ -458,13 +479,13 @@ pub const HttpClient = struct {
         errdefer body_list.deinit(gpa);
 
         if (content_length) |cl| {
-            if (cl > self.config.max_response_body) return error.BodyTooLarge;
+            if (cl > self.config.max_response_body) return error.ZixBodyTooLarge;
             try body_list.resize(gpa, cl);
             const initial = @min(already_read, cl);
             @memcpy(body_list.items[0..initial], head_scan_buf[header_end..][0..initial]);
             var body_received = initial;
             while (body_received < cl) {
-                if (!readableWithin(fd, self.config.read_timeout_ms)) return error.ReadTimeout;
+                if (!readableWithin(fd, self.config.read_timeout_ms)) return error.ZixReadTimeout;
 
                 const n = readOnceFD(fd, body_list.items[body_received..]) catch break;
                 if (n == 0) break;
@@ -474,11 +495,11 @@ pub const HttpClient = struct {
             if (already_read > 0) try body_list.appendSlice(gpa, head_scan_buf[header_end..][0..already_read]);
             var read_chunk: [BODY_READ_CHUNK]u8 = undefined;
             while (true) {
-                if (!readableWithin(fd, self.config.read_timeout_ms)) return error.ReadTimeout;
+                if (!readableWithin(fd, self.config.read_timeout_ms)) return error.ZixReadTimeout;
 
                 const n = readOnceFD(fd, &read_chunk) catch break;
                 if (n == 0) break;
-                if (body_list.items.len + n > self.config.max_response_body) return error.BodyTooLarge;
+                if (body_list.items.len + n > self.config.max_response_body) return error.ZixBodyTooLarge;
                 try body_list.appendSlice(gpa, read_chunk[0..n]);
             }
         }
@@ -590,7 +611,7 @@ fn anyBuffered(body_reader: *std.Io.Reader, conn: *std.http.Client.Connection) b
 ///
 /// Return:
 /// - the body bytes, owned by gpa
-/// - error.ReadTimeout when no byte arrives inside idle_ms
+/// - error.ZixReadTimeout when no byte arrives inside idle_ms
 fn readBodyBounded(
     gpa: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -605,7 +626,7 @@ fn readBodyBounded(
 
     while (body.items.len < expected) {
         if (!anyBuffered(reader, conn)) {
-            if (!readableWithin(conn.stream_reader.stream.socket.handle, idle_ms)) return error.ReadTimeout;
+            if (!readableWithin(conn.stream_reader.stream.socket.handle, idle_ms)) return error.ZixReadTimeout;
         }
 
         // A peer that closes early ends the body short rather than hanging the caller. The status
@@ -675,7 +696,7 @@ test "zix http: http client, HTTP_2 over a non-https URL is rejected before conn
     });
     defer client.deinit();
 
-    try std.testing.expectError(error.UnsupportedScheme, client.get("http://localhost:9061/", .{}));
+    try std.testing.expectError(error.ZixUnsupportedScheme, client.get("http://localhost:9061/", .{}));
 }
 
 test "zix http: http client, HTTP_3 still yields UnsupportedVersion" {
@@ -686,7 +707,7 @@ test "zix http: http client, HTTP_3 still yields UnsupportedVersion" {
     });
     defer client.deinit();
 
-    try std.testing.expectError(error.UnsupportedVersion, client.get("https://localhost:9061/", .{}));
+    try std.testing.expectError(error.ZixUnsupportedVersion, client.get("https://localhost:9061/", .{}));
 }
 
 test "zix http: http client, a server that never answers yields ResponseTimeout" {
@@ -709,7 +730,7 @@ test "zix http: http client, a server that never answers yields ResponseTimeout"
     });
     defer client.deinit();
 
-    try std.testing.expectError(error.ResponseTimeout, client.get("http://127.0.0.1:9066/", .{}));
+    try std.testing.expectError(error.ZixResponseTimeout, client.get("http://127.0.0.1:9066/", .{}));
 }
 
 test "zix http: http client, a complete reply is not cut short by an idle bound" {
@@ -821,7 +842,7 @@ test "zix http: http client, a body that goes quiet mid-transfer yields ReadTime
     const outcome = client.get("http://127.0.0.1:9068/", .{});
     release.store(true, .release);
 
-    try std.testing.expectError(error.ReadTimeout, outcome);
+    try std.testing.expectError(error.ZixReadTimeout, outcome);
 }
 
 test "zix http: http client, QUERY is refused before a socket is opened" {

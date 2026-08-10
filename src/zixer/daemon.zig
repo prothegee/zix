@@ -4,6 +4,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const control = @import("control.zig");
+const daemon_log = @import("daemon_log.zig");
 const fault = @import("fault.zig");
 const bind_options = @import("bind_options.zig");
 const main_cfg = @import("main_cfg.zig");
@@ -34,6 +35,10 @@ pub const Daemon = struct {
     /// running daemon, and two sites must not disagree about it.
     workers: usize,
     socket_path: []const u8,
+    /// Where every runtime line goes: the log file under logs_dir and the
+    /// console, both at cfg.log_level. Owned here because the daemon outlives
+    /// every site that writes through it.
+    logger: zix.Logger,
     sites: std.ArrayList(site_runtime.SiteRuntime) = .empty,
     stop_requested: bool = false,
 
@@ -47,16 +52,19 @@ pub const Daemon = struct {
     ///
     /// Return:
     /// - Daemon ready for run()
-    /// - error.NotInitialized when main.cfg is missing
-    /// - error.MainCfgInvalid when main.cfg carries faults
+    /// - error.ZixerNotInitialized when main.cfg is missing
+    /// - error.ZixerMainCfgInvalid when main.cfg carries faults
     pub fn init(allocator: std.mem.Allocator, io: std.Io, arena: std.mem.Allocator, root: root_dir.RootDir) !Daemon {
         const main_cfg_path = try std.fs.path.join(arena, &.{ root.path, "main.cfg" });
-        const content = zix.utils.file.load(io, arena, main_cfg_path, MAX_CFG_BYTES) catch return error.NotInitialized;
+        const content = zix.utils.file.load(io, arena, main_cfg_path, MAX_CFG_BYTES) catch |err| switch (err) {
+            error.ZixFileNotFound => return error.ZixerNotInitialized,
+            else => return err,
+        };
 
         const available_threads = worker_count.available();
         var faults = fault.FaultList.init(arena);
         const cfg = try main_cfg.parse(arena, content, root.path, available_threads, &faults);
-        if (faults.slice().len != 0) return error.MainCfgInvalid;
+        if (faults.slice().len != 0) return error.ZixerMainCfgInvalid;
 
         const socket_path = try control.socketPath(io, arena, root.path);
 
@@ -66,13 +74,20 @@ pub const Daemon = struct {
             .cfg = cfg,
             .workers = worker_count.resolve(cfg.workers, available_threads),
             .socket_path = socket_path,
+            .logger = try daemon_log.build(allocator, cfg),
         };
     }
 
     /// Unbind whatever is still started and drop the registry.
+    ///
+    /// Note:
+    /// - The logger goes last. Every site writes through it, so it has to
+    ///   outlive the unbind that may still report a failure.
     pub fn deinit(self: *Daemon) void {
         self.unbindAll();
         self.sites.deinit(self.allocator);
+
+        self.logger.deinit();
     }
 
     /// Bind the control socket and serve request lines until shutdown.
@@ -83,13 +98,13 @@ pub const Daemon = struct {
     ///
     /// Return:
     /// - void after a clean shutdown request
-    /// - error.ControlPathTooLong when the root dir cannot host a socket
-    /// - error.ControlSocketBroken when accept keeps failing
+    /// - error.ZixerControlPathTooLong when the root dir cannot host a socket
+    /// - error.ZixerControlSocketBroken when accept keeps failing
     pub fn run(self: *Daemon) !void {
         zix.utils.ignore_sigpipe.ignoreSigpipe();
 
-        if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
-        if (!control.fitsSocket(self.socket_path)) return error.ControlPathTooLong;
+        if (comptime !std.Io.net.has_unix_sockets) return error.ZixerUdsNotSupported;
+        if (!control.fitsSocket(self.socket_path)) return error.ZixerControlPathTooLong;
 
         const io = self.io;
 
@@ -106,7 +121,7 @@ pub const Daemon = struct {
         while (!self.stop_requested) {
             const stream = server.accept(io) catch {
                 accept_failures += 1;
-                if (accept_failures >= MAX_ACCEPT_FAILURES) return error.ControlSocketBroken;
+                if (accept_failures >= MAX_ACCEPT_FAILURES) return error.ZixerControlSocketBroken;
                 continue;
             };
             accept_failures = 0;
@@ -184,8 +199,15 @@ pub const Daemon = struct {
 
         const site_path = std.fs.path.join(arena, &.{ self.cfg.sites_dir, name }) catch
             return print(reply_buf, "error: out of memory", .{});
-        const content = zix.utils.file.load(self.io, arena, site_path, MAX_CFG_BYTES) catch
-            return print(reply_buf, "error: cannot read {s}, run: zixer list", .{name});
+        // One message used to cover missing, unreadable and oversize alike, so an operator with a
+        // permission problem was sent to `zixer list` to look for a file that is right there.
+        const content = zix.utils.file.load(self.io, arena, site_path, MAX_CFG_BYTES) catch |err| switch (err) {
+            error.ZixFileNotFound => return print(reply_buf, "error: no site named {s} in {s}, run: zixer list", .{ name, self.cfg.sites_dir }),
+            error.ZixFilePathIsDirectory => return print(reply_buf, "error: {s} is a directory, a site is one cfg file", .{site_path}),
+            error.ZixFileTooLarge => return print(reply_buf, "error: {s} is larger than {d} bytes", .{ site_path, MAX_CFG_BYTES }),
+            error.OutOfMemory => return print(reply_buf, "error: out of memory", .{}),
+            else => return print(reply_buf, "error: cannot read {s}, check its permissions", .{site_path}),
+        };
 
         var faults = fault.FaultList.init(arena);
         const cfg = site_cfg.parse(arena, content, &faults) catch
@@ -220,12 +242,19 @@ pub const Daemon = struct {
             .process_queue_timeout_ms = self.cfg.process_queue_timeout_ms,
             .public_dir_cache_ttl_ms = self.cfg.public_dir_cache_ttl_ms,
             .public_dir_cache_max_entries = self.cfg.public_dir_cache_max_entries,
+            .logger = &self.logger,
         };
         const runtime = site_runtime.SiteRuntime.bind(self.allocator, self.io, name, cfg, options) catch |err| switch (err) {
             error.AddressInUse => return print(reply_buf, "error: {s} port {d} is already in use", .{ name, cfg.port.? }),
-            error.ChallengePortInUse => return print(reply_buf, "error: {s} challenge port {d} is already in use", .{ name, site_runtime.ACME_HTTP_PORT }),
-            error.TlsCertFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_cert file", .{name}),
-            error.TlsKeyFileNotFound => return print(reply_buf, "error: {s} cannot read the tls_key file", .{name}),
+            error.ZixerChallengePortInUse => return print(reply_buf, "error: {s} challenge port {d} is already in use", .{ name, site_runtime.ACME_HTTP_PORT }),
+            error.ZixTlsCertFileNotFound => return print(reply_buf, "error: {s} tls_cert does not exist: {s}", .{ name, cfg.tls_cert orelse "" }),
+            error.ZixTlsCertPathIsDirectory => return print(reply_buf, "error: {s} tls_cert names a directory: {s}", .{ name, cfg.tls_cert orelse "" }),
+            error.ZixTlsCertFileTooLarge => return print(reply_buf, "error: {s} tls_cert is larger than 1 MiB: {s}", .{ name, cfg.tls_cert orelse "" }),
+            error.ZixTlsCertFileUnreadable => return print(reply_buf, "error: {s} cannot read tls_cert, check its permissions: {s}", .{ name, cfg.tls_cert orelse "" }),
+            error.ZixTlsKeyFileNotFound => return print(reply_buf, "error: {s} tls_key does not exist: {s}", .{ name, cfg.tls_key orelse "" }),
+            error.ZixTlsKeyPathIsDirectory => return print(reply_buf, "error: {s} tls_key names a directory: {s}", .{ name, cfg.tls_key orelse "" }),
+            error.ZixTlsKeyFileTooLarge => return print(reply_buf, "error: {s} tls_key is larger than 1 MiB: {s}", .{ name, cfg.tls_key orelse "" }),
+            error.ZixTlsKeyFileUnreadable => return print(reply_buf, "error: {s} cannot read tls_key, check its permissions: {s}", .{ name, cfg.tls_key orelse "" }),
             else => {
                 if (site_runtime.companionPort(&cfg) != null)
                     return print(reply_buf, "error: {s} bind failed ({s}), the acme challenge listener needs port 80", .{ name, @errorName(err) });
@@ -339,7 +368,7 @@ test "zix zixer: daemon init, missing root and broken main.cfg both refuse" {
     defer arena.deinit();
 
     try std.testing.expectError(
-        error.NotInitialized,
+        error.ZixerNotInitialized,
         Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = "tmp/zixer_daemon_absent/root", .source = .ARG }),
     );
 
@@ -359,7 +388,7 @@ test "zix zixer: daemon init, missing root and broken main.cfg both refuse" {
     file.close(io);
 
     try std.testing.expectError(
-        error.MainCfgInvalid,
+        error.ZixerMainCfgInvalid,
         Daemon.init(std.testing.allocator, io, arena.allocator(), .{ .path = test_root, .source = .ARG }),
     );
 }
@@ -463,10 +492,9 @@ test "zix zixer: daemon handleLine, missing site and broken site refuse to start
     defer daemon.deinit();
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "error: cannot read absent.cfg, run: zixer list",
-        daemon.handleLine("start absent.cfg", &reply_buf),
-    );
+    const missing = daemon.handleLine("start absent.cfg", &reply_buf);
+    try std.testing.expect(std.mem.startsWith(u8, missing, "error: no site named absent.cfg in "));
+    try std.testing.expect(std.mem.endsWith(u8, missing, "run: zixer list"));
 
     try writeSiteFile(io, arena.allocator(), test_root, "broken.cfg", "engine: http1\n");
     try std.testing.expectEqualStrings(
@@ -854,7 +882,10 @@ test "zix zixer: daemon handleLine, tls site with a missing cert file refuses" {
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     const reply = daemon.handleLine("start tls_bad.cfg", &reply_buf);
-    try std.testing.expect(std.mem.indexOf(u8, reply, "cannot read the tls_cert file") != null);
+
+    // The cause and the path both, so the operator does not have to guess which file or why.
+    try std.testing.expect(std.mem.indexOf(u8, reply, "tls_cert does not exist") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "examples/certs/absent.pem") != null);
 }
 
 /// True when this process may bind the privileged http-01 port. Probed

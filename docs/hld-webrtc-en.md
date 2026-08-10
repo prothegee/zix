@@ -114,12 +114,12 @@ Low-level primitives, exposed so a peer or a test harness can build the other si
 
 | Error | Cause |
 | :- | :- |
-| `error.PortNotConfigured` | `config.port` is 0 |
-| `error.IceCredentialsRequired` | the local ufrag or password is empty |
-| `error.IceCredentialsInvalid` | either is outside what RFC 8445 section 5.3 allows |
-| `error.TlsRequired` | `config.tls` is null, and WebRTC has no cleartext mode |
-| `error.UnsupportedCertificateKey` | that context's key is not ECDSA P-256 |
-| `error.DispatchModelUnsupported` | `.EPOLL` or `.URING` off Linux |
+| `error.ZixPortNotConfigured` | `config.port` is 0 |
+| `error.ZixIceCredentialsRequired` | the local ufrag or password is empty |
+| `error.ZixIceCredentialsInvalid` | either is outside what RFC 8445 section 5.3 allows |
+| `error.ZixTlsRequired` | `config.tls` is null, and WebRTC has no cleartext mode |
+| `error.ZixUnsupportedCertificateKey` | that context's key is not ECDSA P-256 |
+| `error.ZixDispatchModelUnsupported` | `.EPOLL` or `.URING` off Linux |
 
 ### Context methods
 

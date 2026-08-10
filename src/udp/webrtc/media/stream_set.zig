@@ -28,9 +28,9 @@ pub const MAX_STREAMS: usize = 8;
 /// What stops a stream from being opened.
 pub const Error = error{
     /// A profile with no keys to run on, including the NULL ciphers.
-    UnsupportedProfile,
+    ZixUnsupportedProfile,
     /// This direction already holds MAX_STREAMS identifiers.
-    TooManyStreams,
+    ZixTooManyStreams,
 };
 
 /// One stream, and the session protecting it.
@@ -69,13 +69,13 @@ pub const StreamSet = struct {
     ///
     /// Return:
     /// - StreamSet holding no streams yet
-    /// - error.UnsupportedProfile
+    /// - error.ZixUnsupportedProfile
     pub fn init(
         negotiated: exporter.SrtpProfile,
         master_key: [srtp_key.MASTER_KEY_LEN]u8,
         master_salt: [srtp_key.MASTER_SALT_LEN]u8,
     ) Error!StreamSet {
-        _ = profile.parametersFor(negotiated) catch return error.UnsupportedProfile;
+        _ = profile.parametersFor(negotiated) catch return error.ZixUnsupportedProfile;
 
         return .{
             .negotiated = negotiated,
@@ -93,11 +93,11 @@ pub const StreamSet = struct {
     ///
     /// Return:
     /// - *srtp.Session, valid until this set is written over
-    /// - error.TooManyStreams, error.UnsupportedProfile
+    /// - error.ZixTooManyStreams, error.ZixUnsupportedProfile
     pub fn sessionFor(self: *StreamSet, ssrc: u32) Error!*srtp.Session {
         if (self.find(ssrc)) |known| return known;
 
-        if (self.live == MAX_STREAMS) return error.TooManyStreams;
+        if (self.live == MAX_STREAMS) return error.ZixTooManyStreams;
 
         const opened = try srtp.Session.init(self.negotiated, self.master_key, self.master_salt);
 
@@ -159,7 +159,7 @@ fn protectedPacket(stream: *srtp.Session, buffer: []u8, ssrc: u32, sequence: u16
 
 test "zix media: stream set init, a profile with no cipher is refused up front" {
     try std.testing.expectError(
-        error.UnsupportedProfile,
+        error.ZixUnsupportedProfile,
         StreamSet.init(.SRTP_NULL_HMAC_SHA1_80, TEST_KEY, TEST_SALT),
     );
 }
@@ -218,7 +218,7 @@ test "zix media: stream set, one identifier through one session still refuses a 
     _ = try (try receiver.sessionFor(0xAAAA_AAAA)).unprotect(first[0..packet.len]);
 
     try std.testing.expectError(
-        error.Replayed,
+        error.ZixReplayed,
         (try receiver.sessionFor(0xAAAA_AAAA)).unprotect(again[0..packet.len]),
     );
 }
@@ -231,7 +231,7 @@ test "zix media: stream set, a peer past the ceiling is refused rather than give
     }
 
     try std.testing.expectEqual(MAX_STREAMS, streams.live);
-    try std.testing.expectError(error.TooManyStreams, streams.sessionFor(0xFFFF_FFFF));
+    try std.testing.expectError(error.ZixTooManyStreams, streams.sessionFor(0xFFFF_FFFF));
 
     // A stream already open still answers, so a peer at the ceiling keeps what it had.
     try std.testing.expect(streams.find(1) != null);

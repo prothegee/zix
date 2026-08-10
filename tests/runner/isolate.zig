@@ -92,13 +92,13 @@ pub const Verdict = enum {
 pub fn isRetriable(err: anyerror) bool {
     return switch (err) {
         error.ServerStartTimeout,
-        error.ConnectFailed,
+        error.ZixConnectFailed,
         error.ConnectionRefused,
         error.ConnectionResetByPeer,
         error.ConnectionTimedOut,
         error.BrokenPipe,
-        error.ResponseTimeout,
-        error.ReadTimeout,
+        error.ZixResponseTimeout,
+        error.ZixReadTimeout,
         => true,
         else => false,
     };
@@ -309,12 +309,12 @@ test "zix runner: isRetriable accepts a connection-establishment error" {
 }
 
 test "zix runner: isRetriable accepts a server that accepted then went quiet" {
-    try std.testing.expect(isRetriable(error.ResponseTimeout));
-    try std.testing.expect(isRetriable(error.ReadTimeout));
+    try std.testing.expect(isRetriable(error.ZixResponseTimeout));
+    try std.testing.expect(isRetriable(error.ZixReadTimeout));
 }
 
 test "zix runner: isRetriable refuses an assertion failure" {
-    try std.testing.expect(!isRetriable(error.UnexpectedStatus));
+    try std.testing.expect(!isRetriable(error.ZixUnexpectedStatus));
     try std.testing.expect(!isRetriable(error.UnexpectedBody));
     try std.testing.expect(!isRetriable(error.MissingExpectedSubstring));
 }

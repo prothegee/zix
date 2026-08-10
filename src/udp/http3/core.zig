@@ -197,14 +197,14 @@ fn erroringHandler(req: *const Request, res: *Response, ctx: *Context) !void {
     _ = req;
     _ = res;
     _ = ctx;
-    return error.Boom;
+    return error.ZixBoom;
 }
 
 fn erroringAfterSendHandler(req: *const Request, res: *Response, ctx: *Context) !void {
     _ = req;
     _ = ctx;
     res.send("partial");
-    return error.Boom;
+    return error.ZixBoom;
 }
 
 test "zix http3: Response setters and handler shape" {

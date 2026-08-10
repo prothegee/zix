@@ -13,7 +13,7 @@ pub const tag_len: usize = Aes128Gcm.tag_length;
 const aad_len: usize = 13;
 const version_tls_1_2: u16 = 0x0303;
 
-pub const Error = error{ BadRecord, AuthenticationFailed };
+pub const Error = error{ ZixBadRecord, ZixAuthenticationFailed };
 
 /// 13-byte TLS 1.2 AEAD additional data (RFC 5246 6.2.3.3): seq ++ type ++ version ++ length, big-endian.
 fn buildAad(seq: u64, content_type: u8, plaintext_len: u16) [aad_len]u8 {
@@ -53,11 +53,11 @@ pub fn protect(out: []u8, plaintext: []const u8, content_type: u8, key: [16]u8, 
 ///
 /// Return:
 /// - the plaintext slice
-/// - error.BadRecord if the body is too short, error.AuthenticationFailed if the tag is wrong
+/// - error.ZixBadRecord if the body is too short, error.ZixAuthenticationFailed if the tag is wrong
 pub fn deprotect(out: []u8, record: []const u8, key: [16]u8, salt: [salt_len]u8, seq: u64) Error![]const u8 {
     const content_type = record[0];
     const body = record[5..];
-    if (body.len < explicit_nonce_len + tag_len) return error.BadRecord;
+    if (body.len < explicit_nonce_len + tag_len) return error.ZixBadRecord;
 
     var nonce: [12]u8 = undefined;
     @memcpy(nonce[0..salt_len], &salt);
@@ -68,7 +68,7 @@ pub fn deprotect(out: []u8, record: []const u8, key: [16]u8, salt: [salt_len]u8,
     @memcpy(&tag, body[body.len - tag_len ..]);
 
     const aad = buildAad(seq, content_type, @intCast(ct.len));
-    Aes128Gcm.decrypt(out[0..ct.len], ct, tag, &aad, nonce, key) catch return error.AuthenticationFailed;
+    Aes128Gcm.decrypt(out[0..ct.len], ct, tag, &aad, nonce, key) catch return error.ZixAuthenticationFailed;
 
     return out[0..ct.len];
 }
@@ -105,7 +105,7 @@ test "zix tls: tls12 record, tampered tag fails auth" {
     rec_buf[rec.len - 1] ^= 0x01;
 
     var plain_buf: [128]u8 = undefined;
-    try std.testing.expectError(error.AuthenticationFailed, deprotect(&plain_buf, rec, key, salt, 0));
+    try std.testing.expectError(error.ZixAuthenticationFailed, deprotect(&plain_buf, rec, key, salt, 0));
 }
 
 test "zix tls: tls12 record, AEAD matches NIST AES-128-GCM test case 4" {

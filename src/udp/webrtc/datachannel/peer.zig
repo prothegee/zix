@@ -54,39 +54,39 @@ pub const Config = struct {
 pub const Error = error{
     OutOfMemory,
     /// A buffer handed in, or one in here, is too small for what had to go in it.
-    NoSpace,
+    ZixNoSpace,
     /// A parameter region that ends mid-parameter.
-    Truncated,
+    ZixTruncated,
     /// A parameter length below the parameter header size.
-    BadLength,
+    ZixBadLength,
     /// The association is not up.
-    NotEstablished,
+    ZixNotEstablished,
     /// The peer did something the protocol does not allow.
-    ProtocolViolation,
+    ZixProtocolViolation,
     /// A message grew past the reassembly limit.
-    MessageTooLarge,
+    ZixMessageTooLarge,
     /// SCTP cannot carry a chunk with no payload.
-    NoUserData,
+    ZixNoUserData,
     /// No channel on that stream identifier.
-    NoSuchChannel,
+    ZixNoSuchChannel,
     /// The channel is closing or already closed.
-    ChannelClosed,
+    ZixChannelClosed,
     /// Every identifier this endpoint owns is taken.
-    NoStreamAvailable,
+    ZixNoStreamAvailable,
     /// The channel table is at its ceiling.
-    TooManyChannels,
+    ZixTooManyChannels,
     /// A channel already sits on that identifier.
-    StreamInUse,
+    ZixStreamInUse,
     /// A label or protocol longer than this endpoint accepts.
-    FieldTooLong,
+    ZixFieldTooLong,
     /// The identifier belongs to the other side, or is outside what the association negotiated.
-    BadStreamIdentifier,
+    ZixBadStreamIdentifier,
     /// A retransmission limit and a lifetime were both asked for.
-    ConflictingReliability,
+    ZixConflictingReliability,
     /// A channel type outside the six RFC 8832 5.1 defines.
-    UnknownChannelType,
+    ZixUnknownChannelType,
     /// A DCEP message type this endpoint does not implement.
-    UnknownMessageType,
+    ZixUnknownMessageType,
 };
 
 /// What to open a channel with.
@@ -220,18 +220,18 @@ pub const Peer = struct {
     ///
     /// Return:
     /// - u16, the stream identifier the channel took
-    /// - error.NotEstablished if the association is not up
-    /// - error.NoStreamAvailable, error.TooManyChannels, error.FieldTooLong
-    /// - error.ConflictingReliability if a retransmission limit and a lifetime were both asked for
-    /// - error.NoSpace if the label and protocol do not fit MAX_OPEN_BYTES
+    /// - error.ZixNotEstablished if the association is not up
+    /// - error.ZixNoStreamAvailable, error.ZixTooManyChannels, error.ZixFieldTooLong
+    /// - error.ZixConflictingReliability if a retransmission limit and a lifetime were both asked for
+    /// - error.ZixNoSpace if the label and protocol do not fit MAX_OPEN_BYTES
     /// - error.OutOfMemory
     pub fn openChannel(self: *Peer, request: OpenRequest, now_ms: u64) Error!u16 {
-        if (self.association.state != .ESTABLISHED) return error.NotEstablished;
+        if (self.association.state != .ESTABLISHED) return error.ZixNotEstablished;
 
         self.ensureStarted();
 
         const streams = self.negotiatedStreams();
-        const identifier = self.channels.availableIdentifier(streams) orelse return error.NoStreamAvailable;
+        const identifier = self.channels.availableIdentifier(streams) orelse return error.ZixNoStreamAvailable;
 
         const open: dcep.Open = .{
             .channel_type = try channel.channelTypeFor(request.options),
@@ -273,8 +273,8 @@ pub const Peer = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSuchChannel, error.ChannelClosed
-    /// - error.NotEstablished, error.NoSpace, error.OutOfMemory
+    /// - error.ZixNoSuchChannel, error.ZixChannelClosed
+    /// - error.ZixNotEstablished, error.ZixNoSpace, error.OutOfMemory
     pub fn sendMessage(
         self: *Peer,
         stream_identifier: u16,
@@ -282,9 +282,9 @@ pub const Peer = struct {
         bytes: []const u8,
         now_ms: u64,
     ) Error!void {
-        const found = self.channels.find(stream_identifier) orelse return error.NoSuchChannel;
+        const found = self.channels.find(stream_identifier) orelse return error.ZixNoSuchChannel;
 
-        if (!found.isSendable()) return error.ChannelClosed;
+        if (!found.isSendable()) return error.ZixChannelClosed;
 
         const identifier = payload.identifierFor(kind, bytes.len);
 
@@ -307,9 +307,9 @@ pub const Peer = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSuchChannel
+    /// - error.ZixNoSuchChannel
     pub fn closeChannel(self: *Peer, stream_identifier: u16) Error!void {
-        const found = self.channels.find(stream_identifier) orelse return error.NoSuchChannel;
+        const found = self.channels.find(stream_identifier) orelse return error.ZixNoSuchChannel;
 
         found.requestClose();
     }
@@ -327,7 +327,7 @@ pub const Peer = struct {
     ///
     /// Return:
     /// - association.Outcome, whose reply borrows `out`
-    /// - error.ProtocolViolation, error.MessageTooLarge, error.NoSpace, error.OutOfMemory
+    /// - error.ZixProtocolViolation, error.ZixMessageTooLarge, error.ZixNoSpace, error.OutOfMemory
     pub fn handle(self: *Peer, datagram: []const u8, now_ms: u64, out: []u8) Error!association.Outcome {
         const outcome = try self.association.handle(datagram, now_ms, out);
 
@@ -353,7 +353,7 @@ pub const Peer = struct {
     ///
     /// Return:
     /// - ?Event
-    /// - error.ProtocolViolation, error.MessageTooLarge, error.NoSpace, error.OutOfMemory
+    /// - error.ZixProtocolViolation, error.ZixMessageTooLarge, error.ZixNoSpace, error.OutOfMemory
     pub fn nextEvent(self: *Peer, now_ms: u64) Error!?Event {
         // Messages first. A stream reset waits for everything sent before it (RFC 6525 5.2.2),
         // so reporting the close ahead of them would lose the last message on the channel.
@@ -378,7 +378,7 @@ pub const Peer = struct {
     ///
     /// Return:
     /// - ?[]const u8, a packet to send, borrowing `out`
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn nextOutbound(self: *Peer, now_ms: u64, out: []u8) Error!?[]const u8 {
         self.ensureStarted();
 
@@ -396,7 +396,7 @@ pub const Peer = struct {
     ///
     /// Return:
     /// - ?[]const u8, null when no reset is outstanding
-    /// - error.NoSpace, error.NotEstablished, error.ProtocolViolation
+    /// - error.ZixNoSpace, error.ZixNotEstablished, error.ZixProtocolViolation
     pub fn retransmitReset(self: *Peer, out: []u8) Error!?[]const u8 {
         const value = self.resets.retransmit() orelse return null;
 
@@ -766,7 +766,7 @@ test "zix datachannel: peer openChannel, an association that is not up refuses" 
     try fixture.setUp(std.testing.allocator);
     defer fixture.tearDown();
 
-    try std.testing.expectError(error.NotEstablished, fixture.client.openChannel(.{}, NOW));
+    try std.testing.expectError(error.ZixNotEstablished, fixture.client.openChannel(.{}, NOW));
 }
 
 test "zix datachannel: peer openChannel, a limit and a lifetime together are refused" {
@@ -776,7 +776,7 @@ test "zix datachannel: peer openChannel, a limit and a lifetime together are ref
 
     try fixture.connect();
 
-    try std.testing.expectError(error.ConflictingReliability, fixture.client.openChannel(.{
+    try std.testing.expectError(error.ZixConflictingReliability, fixture.client.openChannel(.{
         .options = .{ .max_retransmits = 2, .max_lifetime_ms = 500 },
     }, NOW));
 }
@@ -935,7 +935,7 @@ test "zix datachannel: peer sendMessage, an unknown channel is refused" {
 
     try fixture.connect();
 
-    try std.testing.expectError(error.NoSuchChannel, fixture.client.sendMessage(4, .STRING, "x", NOW));
+    try std.testing.expectError(error.ZixNoSuchChannel, fixture.client.sendMessage(4, .STRING, "x", NOW));
 }
 
 test "zix datachannel: peer sendMessage, a closing channel takes nothing more" {
@@ -949,7 +949,7 @@ test "zix datachannel: peer sendMessage, a closing channel takes nothing more" {
     try fixture.client.closeChannel(identifier);
 
     try std.testing.expectError(
-        error.ChannelClosed,
+        error.ZixChannelClosed,
         fixture.client.sendMessage(identifier, .STRING, "x", NOW),
     );
 }
@@ -1019,7 +1019,7 @@ test "zix datachannel: peer closeChannel, an unknown channel is refused" {
 
     try fixture.connect();
 
-    try std.testing.expectError(error.NoSuchChannel, fixture.client.closeChannel(6));
+    try std.testing.expectError(error.ZixNoSuchChannel, fixture.client.closeChannel(6));
 }
 
 test "zix datachannel: peer closeChannel, the peer closing it reaches the same place" {

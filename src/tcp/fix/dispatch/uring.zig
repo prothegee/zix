@@ -10,6 +10,7 @@ const FixServerConfig = @import("../config.zig").FixServerConfig;
 const FixServeOpts = core.FixServeOpts;
 const common = @import("common.zig");
 const reuseport = @import("../../../multiplexers/reuseport.zig");
+const listen_report = @import("../../../multiplexers/listen_report.zig");
 const epoll_model = @import("epoll.zig");
 const logSystem = common.logSystem;
 const uring = @import("../../../multiplexers/ring.zig");
@@ -81,6 +82,8 @@ const UringFixCtx = struct {
     worker_id: usize,
     /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
     steering: ?reuseport.Steering = null,
+    /// Where this worker says whether its listener came up, shared with the whole group.
+    report: *listen_report.Report,
 };
 
 fn uringFixWorker(ctx: UringFixCtx) void {
@@ -379,17 +382,35 @@ fn uringFixWorker(ctx: UringFixCtx) void {
     var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
     defer bind_turn.release();
 
-    const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
+    // Every exit between here and the ring loop has to reach the group, or the workers that did
+    // bind wait on one that is already gone.
+    var slot = ctx.report.slot(ctx.io, error.ZixFixWorkerSetupFailed);
+    defer slot.close();
+
+    const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
     var net_server = addr.listen(ctx.io, .{
         .mode = .stream,
         .reuse_address = true,
         .kernel_backlog = ctx.kernel_backlog,
-    }) catch return;
+    }) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
     defer net_server.deinit(ctx.io);
     const listener_fd = net_server.socket.handle;
 
-    if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+    if (ctx.steering) |steer| _ = reuseport.attachCpuSteering(listener_fd, steer.group_size);
     bind_turn.release();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them
+    // and the caller gets one honest failure.
+    slot.ok();
+    if (ctx.report.awaitGroup(ctx.io) != null) return;
 
     const slots = slab.mapZeroedSlots(?*UringFixConn, ctx.max_conns) catch return;
 
@@ -423,7 +444,7 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     // setup, return, and the server would vanish right after binding (a confusing
     // ServerStartTimeout downstream). Fall back to the EPOLL shared-nothing loop.
     var probe = initUringRing() catch |err| {
-        logSystem(cfg, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
+        logSystem(cfg, .WARN, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
 
         return epoll_model.runEpoll(cfg, conn_opts);
     };
@@ -432,8 +453,6 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     const cpu = common.getAvailableCpuCount();
     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-    logSystem(cfg, "listening on {s}:{d} (io_uring/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
-
     const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(workers);
 
@@ -441,8 +460,12 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
+    // What every worker says about its own listener, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(worker_count);
+
     for (workers, 0..) |*thread, worker_id|
-        thread.* = try std.Thread.spawn(
+        thread.* = std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             uringFixWorker,
             .{UringFixCtx{
@@ -456,8 +479,28 @@ pub fn runUring(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
                 .max_conns = cfg.uring_max_conns_per_worker,
                 .worker_id = worker_id,
                 .steering = steering,
+                .report = &report,
             }},
-        );
+        ) catch |err| {
+            logSystem(cfg, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ worker_id, worker_count, @errorName(err) });
+            report.abandon(cfg.io, worker_count - worker_id, err);
+
+            for (workers[0..worker_id]) |spawned| spawned.join();
+
+            return error.ZixFixListenFailed;
+        };
+
+    if (report.awaitGroup(cfg.io)) |err| {
+        logSystem(cfg, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ cfg.ip, cfg.port, report.failures(), worker_count, @errorName(err) });
+
+        for (workers) |thread| thread.join();
+
+        return error.ZixFixListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a listener that may never have come up.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (io_uring/{d}, shared-nothing)", .{ cfg.ip, cfg.port, worker_count });
 
     for (workers) |thread| thread.join();
 }

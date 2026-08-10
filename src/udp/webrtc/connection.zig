@@ -309,7 +309,7 @@ pub const Connection = struct {
     ///
     /// Return:
     /// - Outcome
-    /// - error.OutOfMemory, error.NoSpace
+    /// - error.OutOfMemory, error.ZixNoSpace
     pub fn handle(self: *Connection, datagram: []const u8, now_ms: u64) Error!Outcome {
         if (self.dead) return .{ .dead = true };
 
@@ -376,7 +376,7 @@ pub const Connection = struct {
     ///
     /// Return:
     /// - ?[]const u8 (a datagram, borrowing out)
-    /// - error.NoSpace when out cannot hold what was ready
+    /// - error.ZixNoSpace when out cannot hold what was ready
     pub fn nextOutbound(self: *Connection, now_ms: u64, out: []u8) Error!?[]const u8 {
         if (self.ice_reply_len > 0) {
             const reply = self.ice_reply[0..self.ice_reply_len];
@@ -746,8 +746,8 @@ pub const Connection = struct {
 };
 
 /// Copy bytes the caller has to own into the caller's buffer.
-fn copyOut(bytes: []const u8, out: []u8) error{NoSpace}![]const u8 {
-    if (out.len < bytes.len) return error.NoSpace;
+fn copyOut(bytes: []const u8, out: []u8) error{ZixNoSpace}![]const u8 {
+    if (out.len < bytes.len) return error.ZixNoSpace;
 
     @memcpy(out[0..bytes.len], bytes);
 

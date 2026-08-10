@@ -84,9 +84,9 @@ pub const Inbound = struct {
 ///
 /// Return:
 /// - Inbound
-/// - error.DecodeError (the body is not exactly 2 bytes, RFC 8446 6 malformed alert)
-pub fn parseInbound(body: []const u8) error{DecodeError}!Inbound {
-    if (body.len != 2) return error.DecodeError;
+/// - error.ZixDecodeError (the body is not exactly 2 bytes, RFC 8446 6 malformed alert)
+pub fn parseInbound(body: []const u8) error{ZixDecodeError}!Inbound {
+    if (body.len != 2) return error.ZixDecodeError;
 
     return .{ .level = body[0], .description = body[1] };
 }
@@ -124,6 +124,6 @@ test "zix tls: Alert, parseInbound classifies close_notify vs fatal" {
     try std.testing.expect(!uc.isFatal());
 
     // a malformed alert body (not 2 bytes) -> decode_error.
-    try std.testing.expectError(error.DecodeError, parseInbound(&[_]u8{0x01}));
-    try std.testing.expectError(error.DecodeError, parseInbound(&[_]u8{ 1, 2, 3 }));
+    try std.testing.expectError(error.ZixDecodeError, parseInbound(&[_]u8{0x01}));
+    try std.testing.expectError(error.ZixDecodeError, parseInbound(&[_]u8{ 1, 2, 3 }));
 }

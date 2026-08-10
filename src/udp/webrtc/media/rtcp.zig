@@ -50,15 +50,15 @@ pub const PacketType = enum(u8) {
 /// What stops a compound packet from being read.
 pub const Error = error{
     /// A packet claims more bytes than the datagram holds, or the walk does not land on the end.
-    Truncated,
+    ZixTruncated,
     /// A version other than 2.
-    UnsupportedVersion,
+    ZixUnsupportedVersion,
 };
 
 /// What stops a compound packet from being a valid one to send.
 pub const CompoundError = error{
     /// The first packet is neither a sender report nor a receiver report (RFC 3550 6.1).
-    NotAReport,
+    ZixNotAReport,
 };
 
 /// One packet inside a compound, borrowed from the datagram it came in.
@@ -117,7 +117,7 @@ pub const Iterator = struct {
 ///
 /// Return:
 /// - Iterator borrowing `compound`
-/// - error.Truncated, error.UnsupportedVersion
+/// - error.ZixTruncated, error.ZixUnsupportedVersion
 pub fn begin(compound: []const u8) Error!Iterator {
     try validate(compound);
 
@@ -135,21 +135,21 @@ pub fn begin(compound: []const u8) Error!Iterator {
 ///
 /// Return:
 /// - void
-/// - error.Truncated, error.UnsupportedVersion
+/// - error.ZixTruncated, error.ZixUnsupportedVersion
 pub fn validate(compound: []const u8) Error!void {
-    if (compound.len < HEADER_LEN) return error.Truncated;
+    if (compound.len < HEADER_LEN) return error.ZixTruncated;
 
     var at: usize = 0;
     while (at < compound.len) {
-        if (at + HEADER_LEN > compound.len) return error.Truncated;
+        if (at + HEADER_LEN > compound.len) return error.ZixTruncated;
 
         const version: u2 = @intCast(compound[at] >> 6);
 
-        if (version != VERSION) return error.UnsupportedVersion;
+        if (version != VERSION) return error.ZixUnsupportedVersion;
 
         const total = packetLen(compound[at..]);
 
-        if (at + total > compound.len) return error.Truncated;
+        if (at + total > compound.len) return error.ZixTruncated;
 
         at += total;
     }
@@ -182,9 +182,9 @@ pub fn count(compound: []const u8) usize {
 ///
 /// Return:
 /// - u32
-/// - error.Truncated when there is no room for one
+/// - error.ZixTruncated when there is no room for one
 pub fn senderSsrc(compound: []const u8) Error!u32 {
-    if (compound.len < SENDER_SSRC_LEN) return error.Truncated;
+    if (compound.len < SENDER_SSRC_LEN) return error.ZixTruncated;
 
     return std.mem.readInt(u32, compound[4..8], .big);
 }
@@ -196,14 +196,14 @@ pub fn senderSsrc(compound: []const u8) Error!u32 {
 ///
 /// Return:
 /// - void
-/// - error.NotAReport
+/// - error.ZixNotAReport
 pub fn requireReportFirst(compound: []const u8) CompoundError!void {
     var walk = Iterator{ .bytes = compound };
-    const first = walk.next() orelse return error.NotAReport;
+    const first = walk.next() orelse return error.ZixNotAReport;
 
     switch (first.packet_type) {
         .SR, .RR => {},
-        else => return error.NotAReport,
+        else => return error.ZixNotAReport,
     }
 }
 
@@ -217,14 +217,14 @@ pub fn requireReportFirst(compound: []const u8) CompoundError!void {
 ///
 /// Return:
 /// - void
-/// - error.NoSpace, error.BadLength
-pub fn writeHeader(out: []u8, packet_type: PacketType, item_count: u5, body_len: usize) error{ NoSpace, BadLength }!void {
-    if (out.len < HEADER_LEN) return error.NoSpace;
-    if (body_len % 4 != 0) return error.BadLength;
+/// - error.ZixNoSpace, error.ZixBadLength
+pub fn writeHeader(out: []u8, packet_type: PacketType, item_count: u5, body_len: usize) error{ ZixNoSpace, ZixBadLength }!void {
+    if (out.len < HEADER_LEN) return error.ZixNoSpace;
+    if (body_len % 4 != 0) return error.ZixBadLength;
 
     const words = (HEADER_LEN + body_len) / 4;
 
-    if (words == 0 or words - 1 > 0xFFFF) return error.BadLength;
+    if (words == 0 or words - 1 > 0xFFFF) return error.ZixBadLength;
 
     out[0] = (@as(u8, VERSION) << 6) | @as(u8, item_count);
     out[1] = @intFromEnum(packet_type);
@@ -268,23 +268,23 @@ test "zix media: rtcp validate, a packet claiming more than the datagram holds i
     var short = empty_report;
     std.mem.writeInt(u16, short[2..4], 4, .big);
 
-    try std.testing.expectError(error.Truncated, validate(&short));
-    try std.testing.expectError(error.Truncated, validate(empty_report[0..3]));
-    try std.testing.expectError(error.Truncated, validate(&[_]u8{}));
+    try std.testing.expectError(error.ZixTruncated, validate(&short));
+    try std.testing.expectError(error.ZixTruncated, validate(empty_report[0..3]));
+    try std.testing.expectError(error.ZixTruncated, validate(&[_]u8{}));
 }
 
 test "zix media: rtcp validate, trailing bytes are a framing error" {
     var buf: [10]u8 = @splat(0);
     @memcpy(buf[0..8], &empty_report);
 
-    try std.testing.expectError(error.Truncated, validate(&buf));
+    try std.testing.expectError(error.ZixTruncated, validate(&buf));
 }
 
 test "zix media: rtcp validate, a version other than two is refused" {
     var wrong = empty_report;
     wrong[0] = 0x40;
 
-    try std.testing.expectError(error.UnsupportedVersion, validate(&wrong));
+    try std.testing.expectError(error.ZixUnsupportedVersion, validate(&wrong));
 }
 
 test "zix media: rtcp begin, a compound datagram walks packet by packet" {
@@ -343,14 +343,14 @@ test "zix media: rtcp senderSsrc, it comes from the first packet" {
 }
 
 test "zix media: rtcp senderSsrc, a packet too short to hold one is refused" {
-    try std.testing.expectError(error.Truncated, senderSsrc(&[_]u8{ 0x80, 201, 0, 0 }));
+    try std.testing.expectError(error.ZixTruncated, senderSsrc(&[_]u8{ 0x80, 201, 0, 0 }));
 }
 
 test "zix media: rtcp requireReportFirst, a compound must open with a report" {
     try requireReportFirst(&empty_report);
 
-    try std.testing.expectError(error.NotAReport, requireReportFirst(&sdes));
-    try std.testing.expectError(error.NotAReport, requireReportFirst(&[_]u8{}));
+    try std.testing.expectError(error.ZixNotAReport, requireReportFirst(&sdes));
+    try std.testing.expectError(error.ZixNotAReport, requireReportFirst(&[_]u8{}));
 }
 
 test "zix media: rtcp requireReportFirst, reduced-size feedback is walked but not required" {
@@ -360,7 +360,7 @@ test "zix media: rtcp requireReportFirst, reduced-size feedback is walked but no
 
     try validate(&feedback);
     try std.testing.expectEqual(@as(usize, 1), count(&feedback));
-    try std.testing.expectError(error.NotAReport, requireReportFirst(&feedback));
+    try std.testing.expectError(error.ZixNotAReport, requireReportFirst(&feedback));
 }
 
 test "zix media: rtcp writeHeader, what was written reads back the same" {
@@ -381,8 +381,8 @@ test "zix media: rtcp writeHeader, what was written reads back the same" {
 test "zix media: rtcp writeHeader, a body that is not whole words is refused" {
     var buf: [8]u8 = undefined;
 
-    try std.testing.expectError(error.BadLength, writeHeader(&buf, .RR, 0, 3));
-    try std.testing.expectError(error.NoSpace, writeHeader(buf[0..3], .RR, 0, 0));
+    try std.testing.expectError(error.ZixBadLength, writeHeader(&buf, .RR, 0, 3));
+    try std.testing.expectError(error.ZixNoSpace, writeHeader(buf[0..3], .RR, 0, 0));
 }
 
 test "zix media: rtcp writeHeader, the count field takes all five bits" {

@@ -19,7 +19,7 @@ pub const HttpServerConfig = struct {
     /// Bind port. Must be non-zero.
     port: u16,
     /// Connection dispatch model. Selects between .ASYNC, .EPOLL, and .URING (.EPOLL and .URING are
-    /// Linux-only, run() rejects them elsewhere with error.DispatchModelUnsupported).
+    /// Linux-only, run() rejects them elsewhere with error.ZixDispatchModelUnsupported).
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// TCP listen backlog: maximum pending connections queued by the kernel before accept().

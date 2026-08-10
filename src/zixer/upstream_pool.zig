@@ -57,9 +57,9 @@ pub const Pool = struct {
     ///
     /// Return:
     /// - Pool
-    /// - error.NoUpstreams when the list is empty
+    /// - error.ZixerNoUpstreams when the list is empty
     pub fn init(allocator: std.mem.Allocator, upstreams: []const site_cfg.Upstream, cooldown_ms: i64) !Pool {
-        if (upstreams.len == 0) return error.NoUpstreams;
+        if (upstreams.len == 0) return error.ZixerNoUpstreams;
 
         const slots = try allocator.alloc(Slot, upstreams.len);
         errdefer allocator.free(slots);
@@ -179,7 +179,7 @@ const TEST_UPSTREAMS = [_]site_cfg.Upstream{
 };
 
 test "zix zixer: upstream pool, empty list refuses and hosts are duped" {
-    try std.testing.expectError(error.NoUpstreams, Pool.init(std.testing.allocator, &.{}, DEFAULT_COOLDOWN_MS));
+    try std.testing.expectError(error.ZixerNoUpstreams, Pool.init(std.testing.allocator, &.{}, DEFAULT_COOLDOWN_MS));
 
     var host_buf = [_]u8{ '1', '2', '7', '.', '0', '.', '0', '.', '1' };
     const upstreams = [_]site_cfg.Upstream{.{ .host = &host_buf, .port = 3000 }};

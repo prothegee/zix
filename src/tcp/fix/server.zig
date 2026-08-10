@@ -15,7 +15,7 @@ const dispatch_support = @import("../../utils/dispatch_support.zig");
 // --------------------------------------------------------- //
 
 /// FIX 4.x session server. Dispatches connections via ASYNC, or EPOLL / URING
-/// (Linux-only: run() rejects them elsewhere with error.DispatchModelUnsupported).
+/// (Linux-only: run() rejects them elsewhere with error.ZixDispatchModelUnsupported).
 /// Session messages (Logon, Logout, Heartbeat, TestRequest) are handled internally.
 /// Application messages are dispatched to the handler.
 ///
@@ -46,9 +46,9 @@ pub const FixServer = struct {
     ///
     /// Return:
     /// - !Self
-    /// - error.PortNotConfigured if config.port is 0
+    /// - error.ZixPortNotConfigured if config.port is 0
     pub fn init(handler: ?core.HandlerFn, config: FixServerConfig) !Self {
-        if (config.port == 0) return error.PortNotConfigured;
+        if (config.port == 0) return error.ZixPortNotConfigured;
 
         return .{ .handler = handler, .config = config };
     }
@@ -66,9 +66,9 @@ pub const FixServer = struct {
 
         // Reject an unrunnable model before binding, so a rejected config leaves nothing behind (ADR-065).
         if (!dispatch_support.isSupported(cfg.dispatch_model)) {
-            common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+            common.logSystem(cfg, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-            return error.DispatchModelUnsupported;
+            return error.ZixDispatchModelUnsupported;
         }
 
         const conn_opts = FixServeOpts{
@@ -87,12 +87,12 @@ pub const FixServer = struct {
             .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
                 epoll_model.runEpoll(cfg, conn_opts)
             else
-                error.DispatchModelUnsupported,
+                error.ZixDispatchModelUnsupported,
             // Native io_uring ring path (ADR-037 Phase 4 extension).
             .URING => if (comptime @import("builtin").target.os.tag == .linux)
                 uring_model.runUring(cfg, conn_opts)
             else
-                error.DispatchModelUnsupported,
+                error.ZixDispatchModelUnsupported,
         };
     }
 };
@@ -106,7 +106,7 @@ test "zix fix: FixServer.init, port zero returns PortNotConfigured" {
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         FixServer.init(null, .{ .io = io, .ip = "127.0.0.1", .port = 0, .comp_id = "SERVER", .dispatch_model = .ASYNC }),
     );
 }

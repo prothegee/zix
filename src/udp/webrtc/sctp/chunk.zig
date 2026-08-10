@@ -31,11 +31,11 @@ pub const MAX_CHUNK_LEN: usize = std.math.maxInt(u16);
 /// Framing faults that make the whole packet undecodable.
 pub const Error = error{
     /// A chunk claims to run past the end of the region.
-    Truncated,
+    ZixTruncated,
     /// A chunk length below the header size, which cannot be right at any type.
-    BadLength,
+    ZixBadLength,
     /// The region has no room for another chunk header.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// Chunk types this build knows (RFC 9260 3.2 Table 1, plus the two extensions in use).
@@ -174,18 +174,18 @@ pub fn isKnown(kind: Type) bool {
 ///
 /// Return:
 /// - void
-/// - error.BadLength if a chunk claims a length below the header size
-/// - error.Truncated if a chunk runs past the end of the region
+/// - error.ZixBadLength if a chunk claims a length below the header size
+/// - error.ZixTruncated if a chunk runs past the end of the region
 pub fn validate(region: []const u8) Error!void {
     var pos: usize = 0;
 
     while (pos < region.len) {
-        if (region.len - pos < HEADER_LEN) return error.Truncated;
+        if (region.len - pos < HEADER_LEN) return error.ZixTruncated;
 
         const len = std.mem.readInt(u16, region[pos + 2 ..][0..2], .big);
 
-        if (len < HEADER_LEN) return error.BadLength;
-        if (region.len - pos < len) return error.Truncated;
+        if (len < HEADER_LEN) return error.ZixBadLength;
+        if (region.len - pos < len) return error.ZixTruncated;
 
         const advance = paddedLen(len);
 
@@ -252,16 +252,16 @@ pub const Iterator = struct {
 ///
 /// Return:
 /// - []const u8 covering header, value, and padding
-/// - error.NoSpace if the buffer cannot hold the padded chunk
-/// - error.BadLength if the value is too long for the 16-bit length field
+/// - error.ZixNoSpace if the buffer cannot hold the padded chunk
+/// - error.ZixBadLength if the value is too long for the 16-bit length field
 pub fn write(out: []u8, kind: Type, flags: u8, value: []const u8) Error![]const u8 {
     const len = HEADER_LEN + value.len;
 
-    if (len > MAX_CHUNK_LEN) return error.BadLength;
+    if (len > MAX_CHUNK_LEN) return error.ZixBadLength;
 
     const total = paddedLen(len);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     out[0] = @intFromEnum(kind);
     out[1] = flags;
@@ -347,7 +347,7 @@ test "zix sctp: chunk write, a buffer too small for the padding errors" {
     var buf: [8]u8 = undefined;
 
     // The value needs 9 bytes and the padding takes it to 12, so 8 is short either way.
-    try std.testing.expectError(error.NoSpace, write(&buf, .COOKIE_ECHO, 0, "abcde"));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, .COOKIE_ECHO, 0, "abcde"));
 }
 
 test "zix sctp: chunk iterator, three bundled chunks come out in order with their offsets" {
@@ -379,13 +379,13 @@ test "zix sctp: chunk iterator, three bundled chunks come out in order with thei
 test "zix sctp: chunk validate, a length below the header size errors" {
     const region: [4]u8 = .{ 0, 0, 0, 3 };
 
-    try std.testing.expectError(error.BadLength, validate(&region));
+    try std.testing.expectError(error.ZixBadLength, validate(&region));
 }
 
 test "zix sctp: chunk validate, a chunk running past the region errors" {
     const region: [4]u8 = .{ 11, 0, 0, 8 };
 
-    try std.testing.expectError(error.Truncated, validate(&region));
+    try std.testing.expectError(error.ZixTruncated, validate(&region));
 }
 
 test "zix sctp: chunk validate, a trailing stub too small for a header errors" {
@@ -394,7 +394,7 @@ test "zix sctp: chunk validate, a trailing stub too small for a header errors" {
     buf[4] = 11;
     buf[5] = 0;
 
-    try std.testing.expectError(error.Truncated, validate(buf[0..6]));
+    try std.testing.expectError(error.ZixTruncated, validate(buf[0..6]));
 }
 
 test "zix sctp: chunk validate, the last chunk may arrive without its padding" {

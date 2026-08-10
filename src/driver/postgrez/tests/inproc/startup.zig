@@ -29,16 +29,16 @@ const INVALID_PASSWORD = "28P01";
 const PROTOCOL_VIOLATION = "08P01";
 
 pub const Error = error{
-    ConnectionClosed,
-    MalformedMessage,
-    MessageTooLarge,
+    PostgrezConnectionClosed,
+    PostgrezMalformedMessage,
+    PostgrezMessageTooLarge,
     /// The client asked to cancel a query rather than open a session.
-    CancelRequested,
+    PostgrezCancelRequested,
     /// The client gave up, or gave the wrong password. Either way the
     /// connection is finished.
-    AuthenticationFailed,
+    PostgrezAuthenticationFailed,
     OutOfMemory,
-    Truncated,
+    PostgrezTruncated,
     WriteFailed,
 };
 
@@ -60,7 +60,7 @@ pub const Result = struct {
 ///
 /// Return:
 /// - Result once ReadyForQuery has been sent
-/// - error.AuthenticationFailed after the rejection has been written
+/// - error.PostgrezAuthenticationFailed after the rejection has been written
 pub fn run(
     transport: *transport_mod.Transport,
     options: options_mod.Options,
@@ -75,10 +75,10 @@ pub fn run(
 
         // the real startup packet follows, inside TLS when it was accepted
         first = try frontend.readStartup(transport, arena);
-        if (first == .ssl_request) return error.MalformedMessage;
+        if (first == .ssl_request) return error.PostgrezMalformedMessage;
     }
 
-    if (first == .cancel_request) return error.CancelRequested;
+    if (first == .cancel_request) return error.PostgrezCancelRequested;
 
     const hello = first.hello;
 
@@ -126,7 +126,7 @@ fn answerSslRequest(
     }
 
     try transport.send("S");
-    transport.upgrade(cert.?) catch return error.ConnectionClosed;
+    transport.upgrade(cert.?) catch return error.PostgrezConnectionClosed;
 }
 
 fn authenticate(
@@ -160,7 +160,7 @@ fn cleartextExchange(
     try transport.send(try challenge.finish());
 
     const msg = try frontend.readMessage(transport, arena);
-    if (msg != .password) return error.MalformedMessage;
+    if (msg != .password) return error.PostgrezMalformedMessage;
 
     // the payload is the password with its NUL terminator
     const offered = std.mem.sliceTo(msg.password, 0);
@@ -183,7 +183,7 @@ fn scramExchange(
     // tls-server-end-point (RFC 5929) is the SHA-256 of the certificate DER
     var cbind: [32]u8 = undefined;
     if (plus) {
-        const presented = cert orelse return error.MalformedMessage;
+        const presented = cert orelse return error.PostgrezMalformedMessage;
         std.crypto.hash.sha2.Sha256.hash(presented.derBytes(), &cbind, .{});
     }
 
@@ -203,7 +203,7 @@ fn scramExchange(
     try transport.send(try offer.finish());
 
     const initial = try frontend.readMessage(transport, arena);
-    if (initial != .password) return error.MalformedMessage;
+    if (initial != .password) return error.PostgrezMalformedMessage;
 
     const client_first = try initialResponseBody(initial.password);
     const server_first = scram.handleClientFirst(client_first) catch {
@@ -216,7 +216,7 @@ fn scramExchange(
     try transport.send(try continue_writer.finish());
 
     const final = try frontend.readMessage(transport, arena);
-    if (final != .password) return error.MalformedMessage;
+    if (final != .password) return error.PostgrezMalformedMessage;
 
     var server_final_buf: [256]u8 = undefined;
     const server_final = scram.handleClientFinal(final.password, &server_final_buf) catch {
@@ -230,12 +230,12 @@ fn scramExchange(
 /// SASLInitialResponse: the mechanism name, then a length-prefixed body.
 fn initialResponseBody(payload: []const u8) Error![]const u8 {
     var reader = message.Reader{ .buf = payload };
-    _ = reader.cstring() catch return error.MalformedMessage;
+    _ = reader.cstring() catch return error.PostgrezMalformedMessage;
 
-    const length = reader.int32() catch return error.MalformedMessage;
-    if (length < 0) return error.MalformedMessage;
+    const length = reader.int32() catch return error.PostgrezMalformedMessage;
+    if (length < 0) return error.PostgrezMalformedMessage;
 
-    return reader.bytes(@intCast(length)) catch return error.MalformedMessage;
+    return reader.bytes(@intCast(length)) catch return error.PostgrezMalformedMessage;
 }
 
 /// Write the refusal, put it on the wire, and end the connection.
@@ -248,7 +248,7 @@ fn reject(transport: *transport_mod.Transport, reply: *message.Writer, text: []c
     });
     try transport.send(try reply.finish());
 
-    return error.AuthenticationFailed;
+    return error.PostgrezAuthenticationFailed;
 }
 
 /// Refuse a TLS request the backend cannot honour, used when a suite wants the
@@ -287,7 +287,7 @@ test "postgrez inproc: startup rejects a sasl initial response with no length" {
     var writer = message.Writer{ .buf = &buf };
     writer.cstring("SCRAM-SHA-256");
 
-    try testing.expectError(error.MalformedMessage, initialResponseBody(try writer.finish()));
+    try testing.expectError(error.PostgrezMalformedMessage, initialResponseBody(try writer.finish()));
 }
 
 test "postgrez inproc: startup rejects a sasl body shorter than its length" {
@@ -297,5 +297,5 @@ test "postgrez inproc: startup rejects a sasl body shorter than its length" {
     writer.int32(64);
     writer.bytes("short");
 
-    try testing.expectError(error.MalformedMessage, initialResponseBody(try writer.finish()));
+    try testing.expectError(error.PostgrezMalformedMessage, initialResponseBody(try writer.finish()));
 }

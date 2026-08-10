@@ -19,6 +19,9 @@ const DIR_PATH_BUF_SIZE: usize = 512;
 /// Stack buffer for building the full log file path.
 const FILE_PATH_BUF_SIZE: usize = 600;
 
+/// What ends a record the buffer could not hold, so a short line is never read as a complete one.
+const TRUNCATION_MARK = " ...[truncated]";
+
 const Timestamp = struct {
     date: [10]u8,
     time: [12]u8,
@@ -81,7 +84,21 @@ fn stderrFd() std.posix.fd_t {
     return std.posix.STDERR_FILENO;
 }
 
-fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
+/// Write every byte of data to fd.
+///
+/// Note:
+/// - .INTR and .AGAIN are retried rather than treated as the end. A signal arriving mid-write, or a
+///   pipe that is momentarily full, is not a reason to lose the line.
+/// - A write of zero bytes is reported as .IO rather than looped on, because retrying it forever
+///   would spin the caller.
+///
+/// Param:
+/// fd - std.posix.fd_t (the log file, or stderr for the console sink)
+///
+/// Return:
+/// - null when the whole slice went out
+/// - the errno that stopped it otherwise, for the caller to report once
+fn rawWrite(fd: std.posix.fd_t, data: []const u8) ?std.posix.E {
     if (comptime builtin.os.tag == .windows) {
         // File logging is suspended on Windows (openFileLocked), so every rawWrite
         // targets stderr regardless of fd. The std.debug lock writer is the portable
@@ -89,8 +106,9 @@ fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
         const stderr = std.debug.lockStderr(&.{});
         defer std.debug.unlockStderr();
 
-        stderr.file_writer.interface.writeAll(data) catch {};
-        return;
+        stderr.file_writer.interface.writeAll(data) catch return .IO;
+
+        return null;
     }
 
     var remaining = data;
@@ -99,12 +117,43 @@ fn rawWrite(fd: std.posix.fd_t, data: []const u8) void {
         switch (std.posix.errno(write_result)) {
             .SUCCESS => {
                 const n: usize = @intCast(write_result);
-                if (n == 0) return;
+                if (n == 0) return .IO;
+
                 remaining = remaining[n..];
             },
-            else => return,
+            .INTR, .AGAIN => continue,
+            else => |errno| return errno,
         }
     }
+
+    return null;
+}
+
+/// Format one record into buf, keeping a truncated line rather than dropping it.
+///
+/// Note:
+/// - A dropped record is worse than a short one: the reader loses the fact that anything happened
+///   at all. What does not fit is replaced by TRUNCATION_MARK, so a short line is always readable
+///   as short.
+/// - buf has to be wider than the mark, which every caller's buffer is by hundreds of bytes.
+///
+/// Param:
+/// buf - []u8 (the caller's stack buffer)
+///
+/// Return:
+/// - the formatted slice, marked when it did not all fit
+fn formatRecord(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
+    const room = buf.len - TRUNCATION_MARK.len;
+
+    var writer = std.Io.Writer.fixed(buf[0..room]);
+    writer.print(fmt, args) catch {
+        const kept = writer.buffered().len;
+        @memcpy(buf[kept..][0..TRUNCATION_MARK.len], TRUNCATION_MARK);
+
+        return buf[0 .. kept + TRUNCATION_MARK.len];
+    };
+
+    return writer.buffered();
 }
 
 // --------------------------------------------------------- //
@@ -222,7 +271,12 @@ pub const Logger = struct {
 
     fn flushLocked(self: *Self) void {
         if (self.buf_pos == 0 or !hasFileFd(self.file_fd)) return;
-        rawWrite(self.file_fd, self.buf[0..self.buf_pos]);
+
+        // A write that fails here used to vanish, so a full disk read as a log that simply stopped.
+        if (rawWrite(self.file_fd, self.buf[0..self.buf_pos])) |errno| {
+            self.suspendFileLocked(@tagName(errno), self.config.save_path);
+        }
+
         self.buf_pos = 0;
     }
 
@@ -240,35 +294,75 @@ pub const Logger = struct {
     fn openFileLocked(self: *Self, date: *const [10]u8) void {
         if (comptime builtin.os.tag == .windows) {
             // File logging is not ported to Windows yet: console logging still works.
-            self.file_suspended = true;
-            rawWrite(stderrFd(), "zix: logger: file logging is not supported on Windows yet, file logging suspended\n");
+            self.suspendFileLocked("file logging is not supported on Windows yet", "");
             return;
         }
 
         var dir_buf: [DIR_PATH_BUF_SIZE:0]u8 = undefined;
         const dir_z = if (comptime ZIG_SEMVER.MINOR == 16)
-            std.fmt.bufPrintZ(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }) catch return
+            std.fmt.bufPrintZ(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }) catch {
+                // Without the suspend the logger would rebuild this same path for every record and
+                // fail the same way, silently, for the life of the process.
+                self.suspendFileLocked("the day directory path is longer than the logger allows", self.config.save_path);
+                return;
+            }
         else
-            std.fmt.bufPrintSentinel(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }, 0) catch return;
-        _ = std.posix.system.mkdirat(@as(i32, std.posix.AT.FDCWD), dir_z, 0o755);
+            std.fmt.bufPrintSentinel(&dir_buf, "{s}/{s}", .{ self.config.save_path, date }, 0) catch {
+                self.suspendFileLocked("the day directory path is longer than the logger allows", self.config.save_path);
+                return;
+            };
+
+        const mkdir_rc = std.posix.system.mkdirat(@as(i32, std.posix.AT.FDCWD), dir_z, 0o755);
+        switch (std.posix.errno(mkdir_rc)) {
+            .SUCCESS, .EXIST => {},
+            else => |errno| {
+                self.suspendFileLocked(@tagName(errno), dir_z);
+                return;
+            },
+        }
 
         var file_buf: [FILE_PATH_BUF_SIZE]u8 = undefined;
         const file_path = std.fmt.bufPrint(
             &file_buf,
             "{s}/{s}/{s}-{d:0>6}.log",
             .{ self.config.save_path, date, self.config.save_file, self.file_seq },
-        ) catch return;
+        ) catch {
+            self.suspendFileLocked("the log file path is longer than the logger allows", self.config.save_path);
+            return;
+        };
 
         self.file_fd = std.posix.openat(
             @as(std.posix.fd_t, std.posix.AT.FDCWD),
             file_path,
             .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
             0o644,
-        ) catch {
-            self.file_suspended = true;
-            rawWrite(stderrFd(), "zix: logger: failed to open log file, ensure save_path exists, file logging suspended\n");
+        ) catch |err| {
+            self.suspendFileLocked(@errorName(err), file_path);
             return;
         };
+    }
+
+    /// Stop writing to the log file and say why, once, on stderr.
+    ///
+    /// Note:
+    /// - stderr is the only destination left: the thing that failed IS the log file. The old line
+    ///   guessed one cause ("ensure save_path exists") for every failure and never printed the
+    ///   path, so a permission problem and a typo read the same.
+    /// - file_suspended is what makes this once. Every later record skips the file sink.
+    ///
+    /// Param:
+    /// cause - []const u8 (the errno or error name, or a sentence when there is no errno)
+    /// subject - []const u8 (the path it happened to, empty when there is none)
+    fn suspendFileLocked(self: *Self, cause: []const u8, subject: []const u8) void {
+        self.file_suspended = true;
+
+        var report_buf: [FILE_PATH_BUF_SIZE + 192]u8 = undefined;
+        const line = if (subject.len > 0)
+            formatRecord(&report_buf, "zix: logger: {s}: {s}, file logging suspended, console logging continues\n", .{ cause, subject })
+        else
+            formatRecord(&report_buf, "zix: logger: {s}, file logging suspended, console logging continues\n", .{cause});
+
+        _ = rawWrite(stderrFd(), line);
     }
 
     fn ensureFileLocked(self: *Self, date: *const [10]u8) void {
@@ -297,8 +391,7 @@ pub const Logger = struct {
             if (self.file_seq >= 999_999) {
                 self.flushLocked();
                 self.closeFileLocked();
-                self.file_suspended = true;
-                rawWrite(stderrFd(), "zix: logger: file sequence exhausted, file logging suspended\n");
+                self.suspendFileLocked("the day's file sequence is exhausted at 999999", self.config.save_path);
                 return;
             }
             self.flushLocked();
@@ -365,18 +458,14 @@ pub const Logger = struct {
         const origin_out = if (origin.len > 0) origin else "-";
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} {s} {s}  {s} {s} {d} {d} \"{s}\" \"{s}\" \"{s}\"",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), method, path, status, bytes, client_ip_out, ua_out, origin_out },
-        ) catch return;
+        const line = formatRecord(&line_buf, "{s} {s} {s}  {s} {s} {d} {d} \"{s}\" \"{s}\" \"{s}\"", .{ &timestamp.date, &timestamp.time, levelLabel(level), method, path, status, bytes, client_ip_out, ua_out, origin_out });
 
         self.spinLock();
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(stderrFd(), line);
-            rawWrite(stderrFd(), "\n");
+            _ = rawWrite(stderrFd(), line);
+            _ = rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -405,18 +494,14 @@ pub const Logger = struct {
         const err_out = err orelse "-";
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} {s} {s}  [tcp:conn] {s} dur={d}ms {s}",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), peer, dur_ms, err_out },
-        ) catch return;
+        const line = formatRecord(&line_buf, "{s} {s} {s}  [tcp:conn] {s} dur={d}ms {s}", .{ &timestamp.date, &timestamp.time, levelLabel(level), peer, dur_ms, err_out });
 
         self.spinLock();
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(stderrFd(), line);
-            rawWrite(stderrFd(), "\n");
+            _ = rawWrite(stderrFd(), line);
+            _ = rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -448,18 +533,14 @@ pub const Logger = struct {
         const err_out = err orelse "-";
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} {s} {s}  [udp:pkt] {s} {s} size={d} {s}",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), dir_out, peer, size, err_out },
-        ) catch return;
+        const line = formatRecord(&line_buf, "{s} {s} {s}  [udp:pkt] {s} {s} size={d} {s}", .{ &timestamp.date, &timestamp.time, levelLabel(level), dir_out, peer, size, err_out });
 
         self.spinLock();
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(stderrFd(), line);
-            rawWrite(stderrFd(), "\n");
+            _ = rawWrite(stderrFd(), line);
+            _ = rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -491,18 +572,14 @@ pub const Logger = struct {
         const err_out = err orelse "-";
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} {s} {s}  [uds:frame] {s} {s} size={d} {s}",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), dir_out, sock_path, size, err_out },
-        ) catch return;
+        const line = formatRecord(&line_buf, "{s} {s} {s}  [uds:frame] {s} {s} size={d} {s}", .{ &timestamp.date, &timestamp.time, levelLabel(level), dir_out, sock_path, size, err_out });
 
         self.spinLock();
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(stderrFd(), line);
-            rawWrite(stderrFd(), "\n");
+            _ = rawWrite(stderrFd(), line);
+            _ = rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -533,18 +610,14 @@ pub const Logger = struct {
         const timestamp = getTimestamp();
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} {s} {s}  [fix:sess] 35={s} sender={s} target={s} seq={d} {s}",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), msg_type, sender, target, seq, state },
-        ) catch return;
+        const line = formatRecord(&line_buf, "{s} {s} {s}  [fix:sess] 35={s} sender={s} target={s} seq={d} {s}", .{ &timestamp.date, &timestamp.time, levelLabel(level), msg_type, sender, target, seq, state });
 
         self.spinLock();
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(stderrFd(), line);
-            rawWrite(stderrFd(), "\n");
+            _ = rawWrite(stderrFd(), line);
+            _ = rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -577,18 +650,14 @@ pub const Logger = struct {
         const timestamp = getTimestamp();
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} {s} {s}  [grpc:rpc] {s} {s} status={d} recv={d} sent={d} dur={d}ms",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), peer, path, grpc_status, recv_bytes, sent_bytes, dur_ms },
-        ) catch return;
+        const line = formatRecord(&line_buf, "{s} {s} {s}  [grpc:rpc] {s} {s} status={d} recv={d} sent={d} dur={d}ms", .{ &timestamp.date, &timestamp.time, levelLabel(level), peer, path, grpc_status, recv_bytes, sent_bytes, dur_ms });
 
         self.spinLock();
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(stderrFd(), line);
-            rawWrite(stderrFd(), "\n");
+            _ = rawWrite(stderrFd(), line);
+            _ = rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -614,21 +683,17 @@ pub const Logger = struct {
         const timestamp = getTimestamp();
 
         var msg_buf: [MSG_BUF_SIZE]u8 = undefined;
-        const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch return;
+        const msg = formatRecord(&msg_buf, fmt, args);
 
         var line_buf: [LINE_BUF_SIZE]u8 = undefined;
-        const line = std.fmt.bufPrint(
-            &line_buf,
-            "{s} {s} {s}  [{s}] {s}",
-            .{ &timestamp.date, &timestamp.time, levelLabel(level), component, msg },
-        ) catch return;
+        const line = formatRecord(&line_buf, "{s} {s} {s}  [{s}] {s}", .{ &timestamp.date, &timestamp.time, levelLabel(level), component, msg });
 
         self.spinLock();
         defer self.spinUnlock();
 
         if (self.consoleActive(level)) {
-            rawWrite(stderrFd(), line);
-            rawWrite(stderrFd(), "\n");
+            _ = rawWrite(stderrFd(), line);
+            _ = rawWrite(stderrFd(), "\n");
         }
 
         if (self.fileActive(level)) {
@@ -689,4 +754,144 @@ test "zix logger: Logger rpc call below min_level is silent" {
     var logger = try Logger.init(allocator, .{ .save_min_level = .ERROR });
     defer logger.deinit();
     logger.rpc("-", "/svc.Svc/Method", 0, 0, 0, 1);
+}
+
+test "zix logger: formatRecord returns the whole record when it fits" {
+    var buf: [64]u8 = undefined;
+    const line = formatRecord(&buf, "{s}:{d}", .{ "port", 8080 });
+
+    try std.testing.expectEqualStrings("port:8080", line);
+}
+
+test "zix logger: formatRecord keeps a marked short line instead of dropping the record" {
+    var buf: [32]u8 = undefined;
+    const line = formatRecord(&buf, "{s}", .{"0123456789012345678901234567890123456789"});
+
+    // The record survives: what fits, then the mark, and nothing longer than the buffer.
+    try std.testing.expect(line.len <= buf.len);
+    try std.testing.expect(std.mem.endsWith(u8, line, TRUNCATION_MARK));
+    try std.testing.expect(std.mem.startsWith(u8, line, "0123456789"));
+}
+
+test "zix logger: formatRecord marks a record that only just overflows" {
+    var buf: [24]u8 = undefined;
+    const room = buf.len - TRUNCATION_MARK.len;
+
+    const exact = formatRecord(&buf, "{s}", .{"abcdefghi"});
+    try std.testing.expectEqualStrings("abcdefghi", exact);
+    try std.testing.expect(exact.len <= room);
+
+    var over_buf: [24]u8 = undefined;
+    const over = formatRecord(&over_buf, "{s}", .{"abcdefghijklmnop"});
+    try std.testing.expect(std.mem.endsWith(u8, over, TRUNCATION_MARK));
+}
+
+test "zix logger: system writes an oversize message as a marked line, not as nothing" {
+    if (comptime builtin.os.tag == .windows) {
+        std.log.info("logger file output is not ported to Windows, test skipped", .{});
+        return;
+    }
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var logger = try Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    var long_buf: [MSG_BUF_SIZE * 2]u8 = undefined;
+    @memset(&long_buf, 'x');
+
+    logger.system(.ERROR, "test", "{s}", .{&long_buf});
+    logger.flush();
+
+    const written = try readLoggedLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(written);
+
+    try std.testing.expect(std.mem.indexOf(u8, written, "ERROR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, TRUNCATION_MARK) != null);
+}
+
+test "zix logger: a save_path that cannot be opened suspends the file sink and keeps the console" {
+    if (comptime builtin.os.tag == .windows) {
+        std.log.info("logger file output is not ported to Windows, test skipped", .{});
+        return;
+    }
+
+    // No such directory, so the open fails and the logger has to say so rather than retry forever.
+    // This test prints one line to stderr on purpose: that line IS the behaviour under test, and it
+    // cannot be captured because the report goes to the raw descriptor by design (the log file is
+    // the thing that failed, so stderr is the only destination left).
+    var logger = try Logger.init(std.testing.allocator, .{
+        .console = .OFF,
+        .save_path = ".zig-cache/tmp/zix-logger-absent-root",
+        .save_min_level = .DEBUG,
+    });
+    defer logger.deinit();
+
+    logger.system(.ERROR, "test", "first record", .{});
+
+    try std.testing.expect(logger.file_suspended);
+    try std.testing.expect(!logger.fileActive(.ERROR));
+
+    // The second record must not try again: the suspend is what makes the report land once.
+    logger.system(.ERROR, "test", "second record", .{});
+    try std.testing.expect(logger.file_suspended);
+}
+
+test "zix logger: rawWrite reports the errno instead of dropping the write" {
+    if (comptime builtin.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, test skipped", .{});
+        return;
+    }
+
+    // A descriptor that was never opened: the write cannot succeed and the caller must learn why.
+    const errno = rawWrite(@as(std.posix.fd_t, 4096), "line\n");
+
+    try std.testing.expect(errno != null);
+    try std.testing.expectEqual(std.posix.E.BADF, errno.?);
+}
+
+test "zix logger: rawWrite answers null when the whole slice went out" {
+    if (comptime builtin.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, test skipped", .{});
+        return;
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [96]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/raw.txt", .{tmp.sub_path}) catch unreachable;
+
+    const fd = try std.posix.openat(
+        @as(std.posix.fd_t, std.posix.AT.FDCWD),
+        path,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+        0o644,
+    );
+    defer _ = std.posix.system.close(fd);
+
+    try std.testing.expectEqual(@as(?std.posix.E, null), rawWrite(fd, "one line\n"));
+}
+
+/// Read back the one log file written under a temp root, for the tests above.
+fn readLoggedLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
+    var days = root.iterate();
+
+    while (try days.next(std.testing.io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        var day = try root.openDir(std.testing.io, entry.name, .{});
+        defer day.close(std.testing.io);
+
+        const bytes = day.readFileAlloc(std.testing.io, "log-000000.log", allocator, .limited(64 * 1024)) catch continue;
+        if (bytes.len > 0) return bytes;
+
+        allocator.free(bytes);
+    }
+
+    return error.ZixNoLogLine;
 }

@@ -113,11 +113,11 @@ pub fn recvTransition(state: RecvState, event: RecvEvent) ?RecvState {
 
 /// The connection-id errors an endpoint MUST raise (RFC 9000 19.15 / 5.1.1).
 pub const ConnIdError = error{
-    Truncated,
+    ZixTruncated,
     /// Connection ID length out of 1..20, or Retire Prior To > Sequence Number: FRAME_ENCODING_ERROR.
-    FrameEncodingError,
+    ZixFrameEncodingError,
     /// The active connection ID count exceeds active_connection_id_limit: CONNECTION_ID_LIMIT_ERROR.
-    ConnectionIdLimitError,
+    ZixConnectionIdLimitError,
 };
 
 /// The validated fields of a NEW_CONNECTION_ID frame (RFC 9000 19.15).
@@ -129,17 +129,17 @@ pub const NewConnId = struct { seq: u64, retire_prior_to: u64, length: u8 };
 pub fn parseNewConnectionId(body: []const u8) ConnIdError!NewConnId {
     var pos: usize = 0;
 
-    const seq_vi = varint.read(body[pos..]) catch return error.Truncated;
+    const seq_vi = varint.read(body[pos..]) catch return error.ZixTruncated;
     pos += seq_vi.len;
 
-    const retire_vi = varint.read(body[pos..]) catch return error.Truncated;
+    const retire_vi = varint.read(body[pos..]) catch return error.ZixTruncated;
     pos += retire_vi.len;
 
-    if (retire_vi.value > seq_vi.value) return error.FrameEncodingError;
-    if (pos >= body.len) return error.Truncated;
+    if (retire_vi.value > seq_vi.value) return error.ZixFrameEncodingError;
+    if (pos >= body.len) return error.ZixTruncated;
 
     const length = body[pos];
-    if (length < 1 or length > 20) return error.FrameEncodingError;
+    if (length < 1 or length > 20) return error.ZixFrameEncodingError;
 
     return .{ .seq = seq_vi.value, .retire_prior_to = retire_vi.value, .length = length };
 }
@@ -162,7 +162,7 @@ pub const ConnIdPool = struct {
         if (frame.seq > self.highest_seq) self.highest_seq = frame.seq;
         if (frame.retire_prior_to > self.retire_floor) self.retire_floor = frame.retire_prior_to;
 
-        if (self.active() > self.limit) return error.ConnectionIdLimitError;
+        if (self.active() > self.limit) return error.ZixConnectionIdLimitError;
     }
 };
 
@@ -212,14 +212,14 @@ test "zix http3: RFC 9000 19.15 / 5.1.1 NEW_CONNECTION_ID validation and limit" 
     const nci_ok = try parseNewConnectionId(&hexBytes("010008" ++ "f067a5502a4262b5" ++ "0102030405060708090a0b0c0d0e0f10"));
     try std.testing.expect(nci_ok.seq == 1 and nci_ok.length == 8);
 
-    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&hexBytes("010000")));
-    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&hexBytes("010015")));
-    try std.testing.expectError(error.FrameEncodingError, parseNewConnectionId(&hexBytes("010208")));
+    try std.testing.expectError(error.ZixFrameEncodingError, parseNewConnectionId(&hexBytes("010000")));
+    try std.testing.expectError(error.ZixFrameEncodingError, parseNewConnectionId(&hexBytes("010015")));
+    try std.testing.expectError(error.ZixFrameEncodingError, parseNewConnectionId(&hexBytes("010208")));
 
     var pool = ConnIdPool{ .limit = 2 };
     try pool.onNewConnectionId(.{ .seq = 1, .retire_prior_to = 0, .length = 8 });
     try std.testing.expectEqual(@as(u64, 2), pool.active());
-    try std.testing.expectError(error.ConnectionIdLimitError, pool.onNewConnectionId(.{ .seq = 2, .retire_prior_to = 0, .length = 8 }));
+    try std.testing.expectError(error.ZixConnectionIdLimitError, pool.onNewConnectionId(.{ .seq = 2, .retire_prior_to = 0, .length = 8 }));
 
     var pool2 = ConnIdPool{ .limit = 2 };
     try pool2.onNewConnectionId(.{ .seq = 1, .retire_prior_to = 0, .length = 8 });

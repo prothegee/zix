@@ -185,7 +185,7 @@ pub const ReceiveQueue = struct {
     ///
     /// Return:
     /// - []const u8 chunk value
-    /// - error.NoSpace if the buffer is too small for the report
+    /// - error.ZixNoSpace if the buffer is too small for the report
     pub fn writeSack(self: *ReceiveQueue, out: []u8, advertised_rwnd: u32) sack.Error![]const u8 {
         var blocks: [MAX_GAP_BLOCKS]sack.GapAckBlock = undefined;
 

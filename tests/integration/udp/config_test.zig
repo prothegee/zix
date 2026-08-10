@@ -21,23 +21,23 @@ test "zix integration: UdpServer.init, valid config succeeds" {
     _ = server;
 }
 
-test "zix integration: UdpServer.init, port zero returns error.PortNotConfigured" {
+test "zix integration: UdpServer.init, port zero returns error.ZixPortNotConfigured" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
     const S = zix.Udp.Server(Pkt);
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }, .{}),
     );
 }
 
-test "zix integration: UdpClient.init, zero bind_port returns error.PortNotConfigured" {
+test "zix integration: UdpClient.init, zero bind_port returns error.ZixPortNotConfigured" {
     const C = zix.Udp.Client(Pkt);
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     const io = threaded.io();
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         C.init(.{ .ip = "127.0.0.1", .server_port = 9200, .bind_port = 0 }, io, .{}),
     );
 }

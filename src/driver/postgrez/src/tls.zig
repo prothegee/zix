@@ -91,10 +91,10 @@ pub const TlsSession = struct {
     fn fillPlain(self: *TlsSession, reader: *std.Io.Reader) !void {
         while (true) {
             const rec = try readWireRecord(reader, &self.record_buf);
-            if (rec[0] == 21) return error.ConnectionClosed; // plaintext alert
+            if (rec[0] == 21) return error.PostgrezConnectionClosed; // plaintext alert
 
             var opened_buf: [record.MAX_PLAINTEXT + 256]u8 = undefined;
-            const opened = self.connection.readRecord(rec, &opened_buf) catch return error.ConnectionClosed;
+            const opened = self.connection.readRecord(rec, &opened_buf) catch return error.PostgrezConnectionClosed;
 
             switch (opened.inner_type) {
                 .APPLICATION_DATA => {
@@ -105,7 +105,7 @@ pub const TlsSession = struct {
                     return;
                 },
                 .HANDSHAKE => continue, // NewSessionTicket / KeyUpdate info
-                else => return error.ConnectionClosed,
+                else => return error.PostgrezConnectionClosed,
             }
         }
     }
@@ -125,13 +125,13 @@ pub fn upgrade(allocator: std.mem.Allocator, io: std.Io, reader: *std.Io.Reader,
     defer request.deinit(allocator);
     try frontend.sslRequest(allocator, &request);
 
-    writer.writeAll(request.items) catch return error.ConnectionClosed;
-    writer.flush() catch return error.ConnectionClosed;
+    writer.writeAll(request.items) catch return error.PostgrezConnectionClosed;
+    writer.flush() catch return error.PostgrezConnectionClosed;
 
     var answer: [1]u8 = undefined;
-    reader.readSliceAll(&answer) catch return error.ConnectionClosed;
+    reader.readSliceAll(&answer) catch return error.PostgrezConnectionClosed;
     if (answer[0] == 'N') return null;
-    if (answer[0] != 'S') return error.ProtocolViolation;
+    if (answer[0] != 'S') return error.PostgrezProtocolViolation;
 
     // handshake phase 1: ClientHello in a plaintext handshake record
     var client_random: [32]u8 = undefined;
@@ -148,8 +148,8 @@ pub fn upgrade(allocator: std.mem.Allocator, io: std.Io, reader: *std.Io.Reader,
     std.mem.writeInt(u16, hello_record[3..5], @intCast(started.client_hello.len), .big);
     @memcpy(hello_record[5 .. 5 + started.client_hello.len], started.client_hello);
 
-    writer.writeAll(hello_record[0 .. 5 + started.client_hello.len]) catch return error.ConnectionClosed;
-    writer.flush() catch return error.ConnectionClosed;
+    writer.writeAll(hello_record[0 .. 5 + started.client_hello.len]) catch return error.PostgrezConnectionClosed;
+    writer.flush() catch return error.PostgrezConnectionClosed;
 
     // handshake phase 2: accumulate server records until finish() completes
     var flight_buf: [client.MAX_FLIGHT_PLAIN + 4096]u8 = undefined;
@@ -157,20 +157,20 @@ pub fn upgrade(allocator: std.mem.Allocator, io: std.Io, reader: *std.Io.Reader,
     var fin_buf: [256]u8 = undefined;
 
     const finished = while (true) {
-        const rec = readWireRecord(reader, flight_buf[flight_len..]) catch return error.ConnectionClosed;
+        const rec = readWireRecord(reader, flight_buf[flight_len..]) catch return error.PostgrezConnectionClosed;
         flight_len += rec.len;
 
         var state = started.state;
         const result = client.finish(&state, flight_buf[0..flight_len], &fin_buf) catch |err| switch (err) {
-            error.NeedMoreRecords => continue,
+            error.PostgrezNeedMoreRecords => continue,
             else => return err,
         };
 
         break result;
     };
 
-    writer.writeAll(finished.client_finished) catch return error.ConnectionClosed;
-    writer.flush() catch return error.ConnectionClosed;
+    writer.writeAll(finished.client_finished) catch return error.PostgrezConnectionClosed;
+    writer.flush() catch return error.PostgrezConnectionClosed;
 
     const session = try allocator.create(TlsSession);
     session.* = .{
@@ -184,14 +184,14 @@ pub fn upgrade(allocator: std.mem.Allocator, io: std.Io, reader: *std.Io.Reader,
 
 /// One TLS record off the wire: 5-byte header, then the framed length.
 fn readWireRecord(reader: *std.Io.Reader, buf: []u8) ![]const u8 {
-    if (buf.len < 5) return error.RecordTooLarge;
+    if (buf.len < 5) return error.PostgrezRecordTooLarge;
 
-    reader.readSliceAll(buf[0..5]) catch return error.ConnectionClosed;
+    reader.readSliceAll(buf[0..5]) catch return error.PostgrezConnectionClosed;
     const body_len = std.mem.readInt(u16, buf[3..5], .big);
-    if (body_len > record.MAX_CIPHERTEXT) return error.RecordTooLarge;
-    if (5 + @as(usize, body_len) > buf.len) return error.RecordTooLarge;
+    if (body_len > record.MAX_CIPHERTEXT) return error.PostgrezRecordTooLarge;
+    if (5 + @as(usize, body_len) > buf.len) return error.PostgrezRecordTooLarge;
 
-    reader.readSliceAll(buf[5 .. 5 + body_len]) catch return error.ConnectionClosed;
+    reader.readSliceAll(buf[5 .. 5 + body_len]) catch return error.PostgrezConnectionClosed;
 
     return buf[0 .. 5 + body_len];
 }

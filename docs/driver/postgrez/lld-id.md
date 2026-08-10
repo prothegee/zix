@@ -27,7 +27,7 @@ sequenceDiagram
     else cleartext
         C->>S: PasswordMessage
     else md5
-        Note over C: tidak didukung, connect gagal dengan error.UnsupportedAuth
+        Note over C: tidak didukung, connect gagal dengan error.PostgrezUnsupportedAuth
     end
     S-->>C: AuthenticationOk, ParameterStatus, BackendKeyData, ReadyForQuery
 ```
@@ -61,7 +61,7 @@ Kolom hasil di-decode menurut format yang di-describe: binary bila driver punya 
 | `Statement.sendRows` + `awaitRows` | banyak Bind dan Execute di belakang satu Sync | 1 per batch |
 | `Pipeline.add` + `sync` | banyak statement di belakang satu Sync | 1 per batch |
 
-Pada error, jalur extended menguras hingga ReadyForQuery berikutnya sehingga koneksi tetap bisa dipakai. Sebuah error server menangkap SQLSTATE dan pesannya ke `lastServerError` dan muncul sebagai `error.ServerError`.
+Pada error, jalur extended menguras hingga ReadyForQuery berikutnya sehingga koneksi tetap bisa dipakai. Sebuah error server menangkap SQLSTATE dan pesannya ke `lastServerError` dan muncul sebagai `error.PostgrezServerError`.
 
 ## Prepared statement
 
@@ -86,10 +86,10 @@ sequenceDiagram
 
 Aturan yang ditegakkan koneksi lewat `batch_pending`, `batch_flushed`, dan `batch_aborted`:
 
-- `max_pending_replies` membatasi antrean, `sendRows` melewati batas shed `error.QueueFull`.
+- `max_pending_replies` membatasi antrean, `sendRows` melewati batas shed `error.PostgrezQueueFull`.
 - `awaitRows` pertama menambah Sync dan flush, jadi satu kirim dan satu burst terima mencakup seluruh batch.
 - Hasil datang sesuai urutan kirim: panggil `awaitRows` pada statement yang mengantre eksekusi itu, dan giring tiap `Result` sampai habis (atau `deinit`) sebelum `awaitRows` berikutnya.
-- Setelah sebuah statement gagal, server membuang sisanya hingga Sync, jadi `awaitRows` sisanya mengembalikan `error.BatchAborted`.
+- Setelah sebuah statement gagal, server membuang sisanya hingga Sync, jadi `awaitRows` sisanya mengembalikan `error.PostgrezBatchAborted`.
 - Sebuah prepare membersihkan send buffer koneksi, jadi semua prepare harus mendahului `sendRows` pertama sebuah batch.
 
 ## Internal executor
@@ -126,7 +126,7 @@ flowchart TB
     empty -->|ya| conn[connect dengan retry, di luar lock]
     empty -->|tidak| park{process_queue_len izinkan parkir?}
     park -->|ya| wait[antre waiter, futex wait]
-    park -->|tidak| shed[error.PoolExhausted atau PoolBusy]
+    park -->|tidak| shed[error.PostgrezPoolExhausted atau PoolBusy]
     rel[release] --> waiter{ada waiter parkir?}
     waiter -->|ya| grant[serahkan koneksi ke waiter tertua]
     waiter -->|tidak| back[tandai slot idle]
@@ -136,19 +136,19 @@ flowchart TB
 - Parkir tidur di satu futex word per waiter. Di Linux ini syscall futex raw (fast path tetap tak tersentuh), di target lain wait dan wake lewat backend `std.Io` dengan semantik yang sama.
 - `release` menyerahkan koneksi sehat langsung ke waiter parkir tertua (slot tetap dipegang lewat handoff), atau menandainya idle.
 - `discard` membebaskan slot rusak, memberikannya ke waiter (yang connect ulang) atau membiarkannya untuk acquire berikutnya.
-- Melewati batas waiter `acquire` shed `error.PoolBusy`, dengan parkir mati ia shed `error.PoolExhausted`.
+- Melewati batas waiter `acquire` shed `error.PostgrezPoolBusy`, dengan parkir mati ia shed `error.PostgrezPoolExhausted`.
 
 ## Taksonomi error
 
 | Error | Arti | Pemulihan |
 | :- | :- | :- |
-| `error.ServerError` | server melaporkan error, tertangkap di `lastServerError` | koneksi tetap bisa dipakai |
-| error transport (`error.ConnectionClosed` dan sejenisnya) | socket gagal | discard koneksi |
-| `error.QueueFull` | batch atau pipeline mencapai `max_pending_replies` | await hasil yang antre dulu |
-| `error.BatchAborted` | statement lebih awal dalam batch gagal | uras sisanya, ulangi batch |
-| `error.PoolExhausted` | pool penuh dan parkir mati | ulang nanti atau naikkan `process_queue_len` |
-| `error.PoolBusy` | antrean waiter penuh | ulang nanti atau naikkan `process_queue_len` |
-| `error.ParamCountMismatch` | args dan statement tidak cocok | perbaiki jumlah argumen |
+| `error.PostgrezServerError` | server melaporkan error, tertangkap di `lastServerError` | koneksi tetap bisa dipakai |
+| error transport (`error.PostgrezConnectionClosed` dan sejenisnya) | socket gagal | discard koneksi |
+| `error.PostgrezQueueFull` | batch atau pipeline mencapai `max_pending_replies` | await hasil yang antre dulu |
+| `error.PostgrezBatchAborted` | statement lebih awal dalam batch gagal | uras sisanya, ulangi batch |
+| `error.PostgrezPoolExhausted` | pool penuh dan parkir mati | ulang nanti atau naikkan `process_queue_len` |
+| `error.PostgrezPoolBusy` | antrean waiter penuh | ulang nanti atau naikkan `process_queue_len` |
+| `error.PostgrezParamCountMismatch` | args dan statement tidak cocok | perbaiki jumlah argumen |
 
 ## Rujukan config
 

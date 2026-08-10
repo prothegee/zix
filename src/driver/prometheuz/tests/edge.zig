@@ -180,7 +180,7 @@ test "prometheuz edge: a query error body surfaces QueryFailed" {
     defer harness.stop();
 
     try testing.expectError(
-        error.QueryFailed,
+        error.PrometheuzQueryFailed,
         prometheuz.query(testing.allocator, harness.io(), harness.queryConfig(), "up =="),
     );
 }
@@ -191,7 +191,7 @@ test "prometheuz edge: a query answer that is not json surfaces InvalidResponse"
     defer harness.stop();
 
     try testing.expectError(
-        error.InvalidResponse,
+        error.PrometheuzInvalidResponse,
         prometheuz.query(testing.allocator, harness.io(), harness.queryConfig(), "up"),
     );
 }
@@ -205,7 +205,7 @@ test "prometheuz edge: a query answer with an unexpected shape surfaces InvalidR
     defer harness.stop();
 
     try testing.expectError(
-        error.InvalidResponse,
+        error.PrometheuzInvalidResponse,
         prometheuz.query(testing.allocator, harness.io(), harness.queryConfig(), "up"),
     );
 }
@@ -263,7 +263,7 @@ test "prometheuz edge: a remote write refused by the receiver surfaces the failu
     };
 
     try testing.expectError(
-        error.RemoteWriteRejected,
+        error.PrometheuzRemoteWriteRejected,
         prometheuz.remoteWrite(testing.allocator, harness.io(), harness.writeConfig(), &samples),
     );
 }

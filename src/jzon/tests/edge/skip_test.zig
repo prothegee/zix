@@ -28,40 +28,40 @@ fn expectRefused(document: []const u8, failure: anyerror) !void {
 }
 
 test "jzon edge: skip reports a value the document ends inside" {
-    try expectRefused("", error.Truncated);
-    try expectRefused("{", error.Truncated);
-    try expectRefused("{\"a\"", error.Truncated);
-    try expectRefused("{\"a\":", error.Truncated);
-    try expectRefused("{\"a\":1", error.Truncated);
-    try expectRefused("[", error.Truncated);
-    try expectRefused("[1,2", error.Truncated);
-    try expectRefused("\"unterminated", error.Truncated);
-    try expectRefused("tru", error.Truncated);
-    try expectRefused("nul", error.Truncated);
+    try expectRefused("", error.JzonTruncated);
+    try expectRefused("{", error.JzonTruncated);
+    try expectRefused("{\"a\"", error.JzonTruncated);
+    try expectRefused("{\"a\":", error.JzonTruncated);
+    try expectRefused("{\"a\":1", error.JzonTruncated);
+    try expectRefused("[", error.JzonTruncated);
+    try expectRefused("[1,2", error.JzonTruncated);
+    try expectRefused("\"unterminated", error.JzonTruncated);
+    try expectRefused("tru", error.JzonTruncated);
+    try expectRefused("nul", error.JzonTruncated);
 }
 
 test "jzon edge: skip reports a value the grammar does not allow" {
-    try expectRefused("}", error.Unexpected);
-    try expectRefused("]", error.Unexpected);
-    try expectRefused(",", error.Unexpected);
-    try expectRefused("{,}", error.Unexpected);
-    try expectRefused("{\"a\":1,}", error.Unexpected);
-    try expectRefused("{\"a\" 1}", error.Unexpected);
-    try expectRefused("{a:1}", error.Unexpected);
-    try expectRefused("[1,,2]", error.Unexpected);
-    try expectRefused("[1,]", error.Unexpected);
-    try expectRefused("trve", error.Unexpected);
-    try expectRefused("NULL", error.Unexpected);
+    try expectRefused("}", error.JzonUnexpected);
+    try expectRefused("]", error.JzonUnexpected);
+    try expectRefused(",", error.JzonUnexpected);
+    try expectRefused("{,}", error.JzonUnexpected);
+    try expectRefused("{\"a\":1,}", error.JzonUnexpected);
+    try expectRefused("{\"a\" 1}", error.JzonUnexpected);
+    try expectRefused("{a:1}", error.JzonUnexpected);
+    try expectRefused("[1,,2]", error.JzonUnexpected);
+    try expectRefused("[1,]", error.JzonUnexpected);
+    try expectRefused("trve", error.JzonUnexpected);
+    try expectRefused("NULL", error.JzonUnexpected);
 }
 
 test "jzon edge: skip reports a number the grammar does not allow" {
     // The cursor bounds a number token without validating it, so the check has
     // to happen here or a document std refuses would be stepped over.
-    try expectRefused("1.2.3", error.Unexpected);
-    try expectRefused("01", error.Unexpected);
-    try expectRefused("1e", error.Unexpected);
-    try expectRefused("1.", error.Unexpected);
-    try expectRefused("-", error.Unexpected);
+    try expectRefused("1.2.3", error.JzonUnexpected);
+    try expectRefused("01", error.JzonUnexpected);
+    try expectRefused("1e", error.JzonUnexpected);
+    try expectRefused("1.", error.JzonUnexpected);
+    try expectRefused("-", error.JzonUnexpected);
 }
 
 test "jzon edge: a value skip refuses is a value the std path refuses too" {
@@ -78,7 +78,7 @@ test "jzon edge: a value skip refuses is a value the std path refuses too" {
     };
 
     for (malformed) |document| {
-        try expectRefused(document, error.Unexpected);
+        try expectRefused(document, error.JzonUnexpected);
         try std.testing.expect(std.meta.isError(std_parser.parse(std.json.Value, allocator, document, .{})));
     }
 }
@@ -90,7 +90,7 @@ test "jzon edge: skip refuses nesting past the cap" {
     @memset(document[0..depth], '[');
     @memset(document[depth..], ']');
 
-    try expectRefused(&document, error.Unexpected);
+    try expectRefused(&document, error.JzonUnexpected);
 }
 
 test "jzon edge: skip walks nesting right up to the cap" {

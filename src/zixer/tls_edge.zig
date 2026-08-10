@@ -191,7 +191,7 @@ fn streamDecrypt(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.
         if (r.buffer.len - r.end < rec.full.len) return error.ReadFailed;
 
         const plain = session.conn.readAppData(rec.full, r.buffer[r.end..]) catch |err| {
-            if (err == error.PeerClosed) return error.EndOfStream;
+            if (err == error.ZixPeerClosed) return error.EndOfStream;
 
             return error.ReadFailed;
         };
@@ -276,7 +276,7 @@ fn readRecord(stream_r: *std.Io.Reader, buf: []u8) ![]const u8 {
     try stream_r.readSliceAll(buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
-    if (5 + @as(usize, length) > buf.len) return error.RecordTooLarge;
+    if (5 + @as(usize, length) > buf.len) return error.ZixerRecordTooLarge;
     try stream_r.readSliceAll(buf[5 .. 5 + length]);
 
     return buf[0 .. 5 + length];
@@ -306,7 +306,7 @@ fn recordView(bytes: []const u8) RecordView {
 /// - the handshake errors (bad ClientHello, version refused, peer abort)
 pub fn handshake(session: *Session, io: std.Io, ctx: *const Tls.Context, stream_r: *std.Io.Reader, stream_w: *std.Io.Writer) !void {
     const hello_rec = recordView(try readRecord(stream_r, &session.record_buf));
-    if (hello_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+    if (hello_rec.content_type != content_type_handshake) return error.ZixerUnexpectedRecord;
 
     var ephemeral_secret: [32]u8 = undefined;
     var server_random: [32]u8 = undefined;
@@ -334,13 +334,13 @@ pub fn handshake(session: *Session, io: std.Io, ctx: *const Tls.Context, stream_
             try stream_w.flush();
 
             const second_rec = recordView(try readRecord(stream_r, &session.record_buf));
-            if (second_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+            if (second_rec.content_type != content_type_handshake) return error.ZixerUnexpectedRecord;
 
             retry_state = retry.state;
             second_hello = second_rec.body;
         }
     } else |err| {
-        if (err != error.UnsupportedTlsVersion) {
+        if (err != error.ZixUnsupportedTlsVersion) {
             sendAlertFor(stream_w, err);
             return err;
         }
@@ -350,7 +350,7 @@ pub fn handshake(session: *Session, io: std.Io, ctx: *const Tls.Context, stream_
         try Tls.serverHandshakeAfterRetry(state, second_hello, &handshake_out)
     else
         Tls.serverHandshake(opts, hello_rec.body, &handshake_out) catch |err| {
-            if (err == error.UnsupportedTlsVersion and ctx.allowsTls12()) {
+            if (err == error.ZixUnsupportedTlsVersion and ctx.allowsTls12()) {
                 return handshake12(session, ctx, opts, hello_rec.body, stream_r, stream_w);
             }
 
@@ -366,8 +366,8 @@ pub fn handshake(session: *Session, io: std.Io, ctx: *const Tls.Context, stream_
     while (true) {
         const rec = recordView(try readRecord(stream_r, &session.record_buf));
         if (rec.content_type == content_type_change_cipher_spec) continue;
-        if (rec.content_type == content_type_alert) return error.PeerAborted;
-        if (rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+        if (rec.content_type == content_type_alert) return error.ZixerPeerAborted;
+        if (rec.content_type != content_type_application_data) return error.ZixerUnexpectedRecord;
 
         try conn.verifyClientFinished(rec.full);
         break;
@@ -382,7 +382,7 @@ pub fn handshake(session: *Session, io: std.Io, ctx: *const Tls.Context, stream_
 fn handshake12(session: *Session, ctx: *const Tls.Context, opts: Tls.HandshakeOptions, client_hello: []const u8, stream_r: *std.Io.Reader, stream_w: *std.Io.Writer) !void {
     const ecdsa_key = switch (ctx.signing_key) {
         .ecdsa_p256 => |key_pair| key_pair,
-        else => return error.Tls12RequiresEcdsa,
+        else => return error.ZixerTls12RequiresEcdsa,
     };
 
     var flight_out: [FLIGHT_OUT_SIZE]u8 = undefined;
@@ -400,8 +400,8 @@ fn handshake12(session: *Session, ctx: *const Tls.Context, opts: Tls.HandshakeOp
     // ClientKeyExchange (plaintext handshake record), copied out before the
     // record buffer is reused.
     const cke_rec = recordView(try readRecord(stream_r, &session.record_buf));
-    if (cke_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
-    if (cke_rec.body.len > KEY_EXCHANGE_SIZE) return error.RecordTooLarge;
+    if (cke_rec.content_type != content_type_handshake) return error.ZixerUnexpectedRecord;
+    if (cke_rec.body.len > KEY_EXCHANGE_SIZE) return error.ZixerRecordTooLarge;
     var cke_buf: [KEY_EXCHANGE_SIZE]u8 = undefined;
     @memcpy(cke_buf[0..cke_rec.body.len], cke_rec.body);
     const client_key_exchange = cke_buf[0..cke_rec.body.len];
@@ -410,8 +410,8 @@ fn handshake12(session: *Session, ctx: *const Tls.Context, opts: Tls.HandshakeOp
     const finished_rec = while (true) {
         const rec = recordView(try readRecord(stream_r, &session.record_buf));
         if (rec.content_type == content_type_change_cipher_spec) continue;
-        if (rec.content_type == content_type_alert) return error.PeerAborted;
-        if (rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+        if (rec.content_type == content_type_alert) return error.ZixerPeerAborted;
+        if (rec.content_type != content_type_handshake) return error.ZixerUnexpectedRecord;
 
         break rec;
     };
@@ -565,7 +565,7 @@ test "zix zixer: tls edge, context builds from the shared cert fixtures" {
     try testing.expect(ctx.cert_der.len > 0);
     try testing.expectEqual(@as(usize, 1), ctx.alpn.len);
 
-    try testing.expectError(error.TlsCertFileNotFound, buildContext(testing.allocator, io, "examples/certs/absent.pem", FIXTURE_KEY, &.{.HTTP_1_1}));
+    try testing.expectError(error.ZixTlsCertFileNotFound, buildContext(testing.allocator, io, "examples/certs/absent.pem", FIXTURE_KEY, &.{.HTTP_1_1}));
 }
 
 test "zix zixer: tls edge, reader decrypts across records and ends on close notify" {

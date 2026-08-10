@@ -19,7 +19,7 @@ pub const Http2ServerConfig = struct {
     /// Connection dispatch model. .ASYNC is the cleartext blocking model, .EPOLL / .URING the
     /// Linux-only shared-nothing multiplexed loops (one SO_REUSEPORT listener plus epoll or io_uring
     /// per worker, .URING falls back to .EPOLL when io_uring is unavailable). Off Linux, run() rejects
-    /// .EPOLL and .URING with error.DispatchModelUnsupported. Required.
+    /// .EPOLL and .URING with error.ZixDispatchModelUnsupported. Required.
     dispatch_model: DispatchModel,
     /// TCP listen backlog.
     kernel_backlog: u31 = 1024,
@@ -85,7 +85,7 @@ pub const Http2ServerConfig = struct {
     /// route is served as a file before the 404 fallback, ".." is rejected. Range (RFC 7233) is
     /// served: 206 for a satisfiable range, 416 for a well-formed one past the end, and a malformed
     /// header is ignored so the whole file is sent. A multi-range header answers the first range.
-    /// Validated at run(): missing dir = error.PublicDirNotFound.
+    /// Validated at run(): missing dir = error.ZixPublicDirNotFound.
     public_dir: []const u8 = "",
     /// How long a resolved static file stays cached, in milliseconds. Default 0 means never cached:
     /// every request re-opens and re-reads the file. Above 0 the file is kept open and its .br / .gz

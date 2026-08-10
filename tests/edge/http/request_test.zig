@@ -44,7 +44,7 @@ test "zix edge: body(), chunked invalid hex is an error, not an empty body" {
 
     // An empty body reads as "the client sent nothing", which is a different
     // request from one the server could not frame. The engine answers 400 on it.
-    try std.testing.expectError(error.InvalidChunkedBody, req.body());
+    try std.testing.expectError(error.ZixInvalidChunkedBody, req.body());
     try std.testing.expect(!req.bodyComplete());
 }
 

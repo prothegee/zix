@@ -524,10 +524,10 @@ pub fn tlsWsEcho(io: std.Io, port: u16) !void {
 ///
 /// Return:
 /// - posix.fd_t the caller owns and must close with fd_io.close
-/// - error.ConnectFailed when the connection could not be established
+/// - error.ZixConnectFailed when the connection could not be established
 fn sseConnectLocal(io: std.Io, port: u16) !posix.fd_t {
-    const addr = std.Io.net.IpAddress.resolve(io, "127.0.0.1", port) catch return error.ConnectFailed;
-    const stream = addr.connect(io, .{ .mode = .stream }) catch return error.ConnectFailed;
+    const addr = std.Io.net.IpAddress.resolve(io, "127.0.0.1", port) catch return error.ZixConnectFailed;
+    const stream = addr.connect(io, .{ .mode = .stream }) catch return error.ZixConnectFailed;
 
     return stream.socket.handle;
 }
@@ -541,7 +541,7 @@ fn sseReadRecord(fd: posix.fd_t, buf: []u8) !SseRecord {
     try sseReadAll(fd, buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
-    if (5 + length > buf.len) return error.RecordTooLarge;
+    if (5 + length > buf.len) return error.ZixRecordTooLarge;
 
     try sseReadAll(fd, buf[5 .. 5 + length]);
 
@@ -554,10 +554,10 @@ fn sseReadAll(fd: posix.fd_t, buf: []u8) !void {
     var filled: usize = 0;
 
     while (filled < buf.len) {
-        if (!fd_io.waitReadable(fd, SSE_READ_TIMEOUT_MS)) return error.ReadTimeout;
+        if (!fd_io.waitReadable(fd, SSE_READ_TIMEOUT_MS)) return error.ZixReadTimeout;
 
         const got = try fd_io.readOnce(fd, buf[filled..]);
-        if (got == 0) return error.ConnectionClosed;
+        if (got == 0) return error.ZixConnectionClosed;
 
         filled += got;
     }

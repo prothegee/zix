@@ -29,12 +29,12 @@ pub const Mechanism = enum {
 };
 
 pub const ScramError = error{
-    BadServerFirst,
-    BadServerFinal,
-    ServerRejected,
-    ServerSignatureMismatch,
-    NonceMismatch,
-    InputTooLong,
+    PostgrezBadServerFirst,
+    PostgrezBadServerFinal,
+    PostgrezServerRejected,
+    PostgrezServerSignatureMismatch,
+    PostgrezNonceMismatch,
+    PostgrezInputTooLong,
 };
 
 /// Upper bounds for the fixed buffers. A server-first beyond this is
@@ -85,9 +85,9 @@ pub const Scram = struct {
     /// nonce_text - []const u8 (printable random text, the caller generates it)
     /// cbind_data - []const u8 (server certificate hash for PLUS, empty otherwise)
     pub fn init(mechanism: Mechanism, username: []const u8, password: []const u8, nonce_text: []const u8, cbind_data: []const u8) ScramError!Scram {
-        if (username.len > MAX_USERNAME) return error.InputTooLong;
-        if (nonce_text.len == 0 or nonce_text.len > MAX_NONCE_TEXT) return error.InputTooLong;
-        if (cbind_data.len > MAX_CBIND_DATA) return error.InputTooLong;
+        if (username.len > MAX_USERNAME) return error.PostgrezInputTooLong;
+        if (nonce_text.len == 0 or nonce_text.len > MAX_NONCE_TEXT) return error.PostgrezInputTooLong;
+        if (cbind_data.len > MAX_CBIND_DATA) return error.PostgrezInputTooLong;
 
         var self = Scram{
             .mechanism = mechanism,
@@ -96,10 +96,10 @@ pub const Scram = struct {
         };
 
         var writer = std.Io.Writer.fixed(&self.client_first_bare_buf);
-        writer.writeAll("n=") catch return error.InputTooLong;
-        writer.writeAll(username) catch return error.InputTooLong;
-        writer.writeAll(",r=") catch return error.InputTooLong;
-        writer.writeAll(nonce_text) catch return error.InputTooLong;
+        writer.writeAll("n=") catch return error.PostgrezInputTooLong;
+        writer.writeAll(username) catch return error.PostgrezInputTooLong;
+        writer.writeAll(",r=") catch return error.PostgrezInputTooLong;
+        writer.writeAll(nonce_text) catch return error.PostgrezInputTooLong;
         self.client_first_bare_len = writer.buffered().len;
         self.client_nonce_len = nonce_text.len;
 
@@ -122,7 +122,7 @@ pub const Scram = struct {
     pub fn clientFirst(self: *Scram, out: []u8) ScramError![]const u8 {
         const gs2 = self.gs2Header();
         const bare = self.clientFirstBare();
-        if (gs2.len + bare.len > out.len) return error.InputTooLong;
+        if (gs2.len + bare.len > out.len) return error.PostgrezInputTooLong;
 
         @memcpy(out[0..gs2.len], gs2);
         @memcpy(out[gs2.len..][0..bare.len], bare);
@@ -134,10 +134,10 @@ pub const Scram = struct {
     ///
     /// Return:
     /// - the client-final message, valid until the next call on this struct
-    /// - error.BadServerFirst on malformed attributes
-    /// - error.NonceMismatch when the server nonce does not extend ours
+    /// - error.PostgrezBadServerFirst on malformed attributes
+    /// - error.PostgrezNonceMismatch when the server nonce does not extend ours
     pub fn handleServerFirst(self: *Scram, server_first: []const u8) ScramError![]const u8 {
-        if (server_first.len > MAX_SERVER_FIRST) return error.InputTooLong;
+        if (server_first.len > MAX_SERVER_FIRST) return error.PostgrezInputTooLong;
 
         @memcpy(self.server_first_buf[0..server_first.len], server_first);
         self.server_first_len = server_first.len;
@@ -154,23 +154,23 @@ pub const Scram = struct {
             } else if (attrValue(part, 's')) |value| {
                 salt_b64 = value;
             } else if (attrValue(part, 'i')) |value| {
-                iterations = std.fmt.parseInt(u32, value, 10) catch return error.BadServerFirst;
+                iterations = std.fmt.parseInt(u32, value, 10) catch return error.PostgrezBadServerFirst;
             } else if (attrValue(part, 'm')) |_| {
-                return error.BadServerFirst;
+                return error.PostgrezBadServerFirst;
             }
         }
-        if (full_nonce.len == 0 or salt_b64.len == 0 or iterations == 0) return error.BadServerFirst;
+        if (full_nonce.len == 0 or salt_b64.len == 0 or iterations == 0) return error.PostgrezBadServerFirst;
 
         const client_nonce = self.clientFirstBare()[self.client_first_bare_len - self.client_nonce_len ..];
-        if (full_nonce.len <= client_nonce.len) return error.NonceMismatch;
-        if (!std.mem.startsWith(u8, full_nonce, client_nonce)) return error.NonceMismatch;
+        if (full_nonce.len <= client_nonce.len) return error.PostgrezNonceMismatch;
+        if (!std.mem.startsWith(u8, full_nonce, client_nonce)) return error.PostgrezNonceMismatch;
 
         var salt_buf: [MAX_SALT]u8 = undefined;
-        const salt_len = std.base64.standard.Decoder.calcSizeForSlice(salt_b64) catch return error.BadServerFirst;
-        if (salt_len > salt_buf.len) return error.BadServerFirst;
-        std.base64.standard.Decoder.decode(salt_buf[0..salt_len], salt_b64) catch return error.BadServerFirst;
+        const salt_len = std.base64.standard.Decoder.calcSizeForSlice(salt_b64) catch return error.PostgrezBadServerFirst;
+        if (salt_len > salt_buf.len) return error.PostgrezBadServerFirst;
+        std.base64.standard.Decoder.decode(salt_buf[0..salt_len], salt_b64) catch return error.PostgrezBadServerFirst;
 
-        std.crypto.pwhash.pbkdf2(&self.salted_password, self.password, salt_buf[0..salt_len], iterations, HmacSha256) catch return error.BadServerFirst;
+        std.crypto.pwhash.pbkdf2(&self.salted_password, self.password, salt_buf[0..salt_len], iterations, HmacSha256) catch return error.PostgrezBadServerFirst;
 
         // client-final-without-proof: c=<b64(gs2 + cbind)>,r=<full nonce>
         var final_writer = std.Io.Writer.fixed(&self.client_final_buf);
@@ -181,18 +181,18 @@ pub const Scram = struct {
         var cbind_b64: [std.base64.standard.Encoder.calcSize(cbind_input.len)]u8 = undefined;
         const cbind_encoded = std.base64.standard.Encoder.encode(&cbind_b64, cbind_input[0 .. gs2.len + self.cbind_data.len]);
 
-        final_writer.writeAll("c=") catch return error.InputTooLong;
-        final_writer.writeAll(cbind_encoded) catch return error.InputTooLong;
-        final_writer.writeAll(",r=") catch return error.InputTooLong;
-        final_writer.writeAll(full_nonce) catch return error.InputTooLong;
+        final_writer.writeAll("c=") catch return error.PostgrezInputTooLong;
+        final_writer.writeAll(cbind_encoded) catch return error.PostgrezInputTooLong;
+        final_writer.writeAll(",r=") catch return error.PostgrezInputTooLong;
+        final_writer.writeAll(full_nonce) catch return error.PostgrezInputTooLong;
 
         // AuthMessage = client-first-bare , server-first , client-final-without-proof
         var auth_writer = std.Io.Writer.fixed(&self.auth_message_buf);
-        auth_writer.writeAll(self.clientFirstBare()) catch return error.InputTooLong;
-        auth_writer.writeAll(",") catch return error.InputTooLong;
-        auth_writer.writeAll(kept) catch return error.InputTooLong;
-        auth_writer.writeAll(",") catch return error.InputTooLong;
-        auth_writer.writeAll(final_writer.buffered()) catch return error.InputTooLong;
+        auth_writer.writeAll(self.clientFirstBare()) catch return error.PostgrezInputTooLong;
+        auth_writer.writeAll(",") catch return error.PostgrezInputTooLong;
+        auth_writer.writeAll(kept) catch return error.PostgrezInputTooLong;
+        auth_writer.writeAll(",") catch return error.PostgrezInputTooLong;
+        auth_writer.writeAll(final_writer.buffered()) catch return error.PostgrezInputTooLong;
         self.auth_message_len = auth_writer.buffered().len;
 
         // ClientProof = ClientKey XOR HMAC(SHA256(ClientKey), AuthMessage)
@@ -213,8 +213,8 @@ pub const Scram = struct {
         var proof_b64: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
         const proof_encoded = std.base64.standard.Encoder.encode(&proof_b64, &proof);
 
-        final_writer.writeAll(",p=") catch return error.InputTooLong;
-        final_writer.writeAll(proof_encoded) catch return error.InputTooLong;
+        final_writer.writeAll(",p=") catch return error.PostgrezInputTooLong;
+        final_writer.writeAll(proof_encoded) catch return error.PostgrezInputTooLong;
         self.client_final_len = final_writer.buffered().len;
 
         return self.client_final_buf[0..self.client_final_len];
@@ -225,19 +225,19 @@ pub const Scram = struct {
     ///
     /// Return:
     /// - void when the signature matches
-    /// - error.ServerRejected on an e= attribute
-    /// - error.ServerSignatureMismatch on a wrong v= value
+    /// - error.PostgrezServerRejected on an e= attribute
+    /// - error.PostgrezServerSignatureMismatch on a wrong v= value
     pub fn handleServerFinal(self: *Scram, server_final: []const u8) ScramError!void {
         var part_it = std.mem.splitScalar(u8, server_final, ',');
-        const first = part_it.next() orelse return error.BadServerFinal;
+        const first = part_it.next() orelse return error.PostgrezBadServerFinal;
 
-        if (attrValue(first, 'e')) |_| return error.ServerRejected;
-        const verifier_b64 = attrValue(first, 'v') orelse return error.BadServerFinal;
+        if (attrValue(first, 'e')) |_| return error.PostgrezServerRejected;
+        const verifier_b64 = attrValue(first, 'v') orelse return error.PostgrezBadServerFinal;
 
         var expected: [32]u8 = undefined;
-        const expected_len = std.base64.standard.Decoder.calcSizeForSlice(verifier_b64) catch return error.BadServerFinal;
-        if (expected_len != expected.len) return error.BadServerFinal;
-        std.base64.standard.Decoder.decode(&expected, verifier_b64) catch return error.BadServerFinal;
+        const expected_len = std.base64.standard.Decoder.calcSizeForSlice(verifier_b64) catch return error.PostgrezBadServerFinal;
+        if (expected_len != expected.len) return error.PostgrezBadServerFinal;
+        std.base64.standard.Decoder.decode(&expected, verifier_b64) catch return error.PostgrezBadServerFinal;
 
         var server_key: [32]u8 = undefined;
         HmacSha256.create(&server_key, "Server Key", &self.salted_password);
@@ -245,7 +245,7 @@ pub const Scram = struct {
         var server_signature: [32]u8 = undefined;
         HmacSha256.create(&server_signature, self.authMessage(), &server_key);
 
-        if (!std.mem.eql(u8, &server_signature, &expected)) return error.ServerSignatureMismatch;
+        if (!std.mem.eql(u8, &server_signature, &expected)) return error.PostgrezServerSignatureMismatch;
     }
 
     fn authMessage(self: *const Scram) []const u8 {
@@ -306,7 +306,7 @@ test "postgrez auth: scram rejects a wrong server signature" {
     _ = try scram.handleServerFirst(RFC_SERVER_FIRST);
 
     try testing.expectError(
-        error.ServerSignatureMismatch,
+        error.PostgrezServerSignatureMismatch,
         scram.handleServerFinal("v=aaaaTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="),
     );
 }
@@ -318,7 +318,7 @@ test "postgrez auth: scram rejects a server error reply" {
     _ = try scram.clientFirst(&buf);
     _ = try scram.handleServerFirst(RFC_SERVER_FIRST);
 
-    try testing.expectError(error.ServerRejected, scram.handleServerFinal("e=invalid-proof"));
+    try testing.expectError(error.PostgrezServerRejected, scram.handleServerFinal("e=invalid-proof"));
 }
 
 test "postgrez auth: scram rejects a nonce that does not extend ours" {
@@ -328,7 +328,7 @@ test "postgrez auth: scram rejects a nonce that does not extend ours" {
     _ = try scram.clientFirst(&buf);
 
     try testing.expectError(
-        error.NonceMismatch,
+        error.PostgrezNonceMismatch,
         scram.handleServerFirst("r=XXXXNGfwEbeRWgbNEkqOtail,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"),
     );
 }
@@ -339,7 +339,7 @@ test "postgrez auth: scram rejects malformed server-first" {
     var buf: [256]u8 = undefined;
     _ = try scram.clientFirst(&buf);
 
-    try testing.expectError(error.BadServerFirst, scram.handleServerFirst("s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"));
+    try testing.expectError(error.PostgrezBadServerFirst, scram.handleServerFirst("s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"));
 }
 
 test "postgrez auth: scram PLUS binds the channel into gs2 and c=" {

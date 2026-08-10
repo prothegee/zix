@@ -124,15 +124,15 @@ sequenceDiagram
 
 | Error | Sumber | Arti |
 | :- | :- | :- |
-| `error.PathEmpty` | `Server.init()` | `config.path` kosong |
-| `error.MessageTooLarge` | `Client.recvMsg()` | payload frame dari server melebihi `buf.len` pemanggil |
-| `error.ConnectionClosed` | `Client.recvMsg()` | server menutup koneksi di tengah frame |
+| `error.ZixPathEmpty` | `Server.init()` | `config.path` kosong |
+| `error.ZixMessageTooLarge` | `Client.recvMsg()` | payload frame dari server melebihi `buf.len` pemanggil |
+| `error.ZixConnectionClosed` | `Client.recvMsg()` | server menutup koneksi di tengah frame |
 
 ---
 
 ## Timeout dan Keterbatasan
 
-`recv_timeout_ms` / `send_timeout_ms` (kedua config, default 0 = dinonaktifkan) membatasi socket, bukan call connect. Pada server, `applyConnTimeout` menyetel `SO_RCVTIMEO` / `SO_SNDTIMEO` pada tiap koneksi yang diterima sebelum handler berjalan. Pada client, `recvMsg` / `sendMsg` masing-masing poll (`POLLIN` / `POLLOUT`) sebelum read atau write, mengembalikan `error.RecvTimeout` / `error.SendTimeout` saat expired, alih-alih `SO_RCVTIMEO` / `SO_SNDTIMEO`, karena `std.Io.Threaded` panic pada `EAGAIN`.
+`recv_timeout_ms` / `send_timeout_ms` (kedua config, default 0 = dinonaktifkan) membatasi socket, bukan call connect. Pada server, `applyConnTimeout` menyetel `SO_RCVTIMEO` / `SO_SNDTIMEO` pada tiap koneksi yang diterima sebelum handler berjalan. Pada client, `recvMsg` / `sendMsg` masing-masing poll (`POLLIN` / `POLLOUT`) sebelum read atau write, mengembalikan `error.ZixRecvTimeout` / `error.ZixSendTimeout` saat expired, alih-alih `SO_RCVTIMEO` / `SO_SNDTIMEO`, karena `std.Io.Threaded` panic pada `EAGAIN`.
 
 `std.Io.net.UnixAddress.connect` tidak menerima parameter timeout. Berbeda dengan `IpAddress.connect` pada TCP yang menerima `ConnectOptions.timeout`, path connect UDS tidak memiliki hook di stdlib untuk deadline, jadi timeout saat connect tidak dapat diimplementasi tanpa perubahan di stdlib. Keterbatasan ini disebabkan oleh stdlib, bukan keputusan desain zix, dan akan ditinjau kembali saat stdlib menyediakan primitif yang diperlukan.
 

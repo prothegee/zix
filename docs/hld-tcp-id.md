@@ -15,7 +15,7 @@ Sudah diimplementasi. Lihat ADR-022 untuk dasar keputusan desain.
 - Eksplisit daripada implisit: pola config dan dispatch model yang sama seperti `zix.Http`.
 - Pengguna memiliki handler: `HandlerFn = *const fn(stream, io) void`, dibakukan ke dalam tipe server pada `init` (ADR-038), identik bentuknya dengan `zix.Uds.HandlerFn`.
 - Framing dengan length-prefix sudah terintegrasi di echo handler default dan API client (big-endian, network byte order).
-- Dispatch model ASYNC dan EPOLL untuk handler per-connection: semantik sama seperti HTTP. EPOLL khusus Linux dan `run()` menolaknya di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065). Callback per-frame `FrameFn` (`initFramed`) menambah jalur ring `.URING` native (ADR-037, ADR-038).
+- Dispatch model ASYNC dan EPOLL untuk handler per-connection: semantik sama seperti HTTP. EPOLL khusus Linux dan `run()` menolaknya di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065). Callback per-frame `FrameFn` (`initFramed`) menambah jalur ring `.URING` native (ADR-037, ADR-038).
 - `initArgs()` pada server maupun client agar `--ip` dan `--port` dapat diganti saat runtime tanpa perlu build ulang.
 - Tidak ada dependensi lintas protokol: `src/tcp/server.zig`, `src/tcp/client.zig`, `src/tcp/config.zig` tidak mengimpor dari `src/tcp/http/`.
 
@@ -109,7 +109,7 @@ flowchart TD
 
 ### EPOLL
 
-Shared-nothing: setiap worker memiliki satu `SO_REUSEPORT` listener dan satu epoll instance. Kernel menyeimbangkan koneksi yang diterima ke worker tanpa antrian bersama. Setiap koneksi tetap menjalankan `HandlerFn` per-connection yang blocking. Khusus Linux dan native: `workers = 0` menghasilkan `cpu_count` worker. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported`, jadi pakai `.ASYNC` di sana.
+Shared-nothing: setiap worker memiliki satu `SO_REUSEPORT` listener dan satu epoll instance. Kernel menyeimbangkan koneksi yang diterima ke worker tanpa antrian bersama. Setiap koneksi tetap menjalankan `HandlerFn` per-connection yang blocking. Khusus Linux dan native: `workers = 0` menghasilkan `cpu_count` worker. Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported`, jadi pakai `.ASYNC` di sana.
 
 ### URING (hanya jalur framed)
 
@@ -173,9 +173,9 @@ sequenceDiagram
 
 | Error | Sumber | Makna |
 | :- | :- | :- |
-| `error.PortNotConfigured` | `Server.init()` / `Client.connect()` | `config.port` bernilai 0 |
-| `error.MessageTooLarge` | `Client.recvMsg()` | payload frame server melebihi `buf.len` milik pemanggil |
-| `error.ConnectionClosed` | `Client.recvMsg()` | server menutup koneksi di tengah frame |
+| `error.ZixPortNotConfigured` | `Server.init()` / `Client.connect()` | `config.port` bernilai 0 |
+| `error.ZixMessageTooLarge` | `Client.recvMsg()` | payload frame server melebihi `buf.len` milik pemanggil |
+| `error.ZixConnectionClosed` | `Client.recvMsg()` | server menutup koneksi di tengah frame |
 
 ---
 

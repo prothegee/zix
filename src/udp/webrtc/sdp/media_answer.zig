@@ -55,7 +55,7 @@ pub const REJECTED_ADDRESS: []const u8 = "0.0.0.0";
 /// What stops a section from being written.
 pub const Error = error{
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// The transport facts every section repeats.
@@ -98,7 +98,7 @@ pub const Section = struct {
 ///
 /// Return:
 /// - Section, whose text borrows `out`
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn write(
     out: []u8,
     offered: media_offer.MediaOffer,
@@ -160,7 +160,7 @@ pub fn write(
 ///
 /// Return:
 /// - Section, whose text borrows `out`
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn refuseSection(out: []u8, media_line: media.Media, mid: ?[]const u8) Error!Section {
     var appender = builder.Builder{ .out = out };
 
@@ -171,7 +171,7 @@ pub fn refuseSection(out: []u8, media_line: media.Media, mid: ?[]const u8) Error
         REJECTED_PORT,
         media_line.proto,
         media_line.formats,
-    ) catch return error.NoSpace;
+    ) catch return error.ZixNoSpace;
 
     try appender.addLine(.MEDIA, written);
     try connectionText(&appender, .IP4, REJECTED_ADDRESS);
@@ -195,7 +195,7 @@ fn mediaLine(appender: *builder.Builder, offered: media_offer.MediaOffer, port: 
         if (entry.is_retransmission) continue;
 
         if (at != 0) {
-            if (at + 1 > formats.len) return error.NoSpace;
+            if (at + 1 > formats.len) return error.ZixNoSpace;
 
             formats[at] = ' ';
             at += 1;
@@ -204,7 +204,7 @@ fn mediaLine(appender: *builder.Builder, offered: media_offer.MediaOffer, port: 
         var digits: [builder.MAX_DIGITS]u8 = undefined;
         const text = builder.writeNumber(&digits, entry.payload_type);
 
-        if (at + text.len > formats.len) return error.NoSpace;
+        if (at + text.len > formats.len) return error.ZixNoSpace;
 
         at += builder.copy(formats[at..], text);
     }
@@ -221,7 +221,7 @@ fn mediaLineWith(
 ) Error!void {
     var value: [4 * format_ceiling + 64]u8 = undefined;
     const written = media.write(&value, kind.name(), port, media.RTP_PROTO, formats) catch
-        return error.NoSpace;
+        return error.ZixNoSpace;
 
     try appender.addLine(.MEDIA, written);
 }
@@ -229,7 +229,7 @@ fn mediaLineWith(
 /// Append the connection line for an address.
 fn connectionLine(appender: *builder.Builder, host: IpAddress) Error!void {
     var text: [address.MAX_ADDRESS_LEN]u8 = undefined;
-    const host_text = address.writeAddress(&text, host) catch return error.NoSpace;
+    const host_text = address.writeAddress(&text, host) catch return error.ZixNoSpace;
 
     try connectionText(appender, address.familyOf(host), host_text);
 }
@@ -237,7 +237,7 @@ fn connectionLine(appender: *builder.Builder, host: IpAddress) Error!void {
 /// Append the connection line for an address already in text.
 fn connectionText(appender: *builder.Builder, family: address.Family, host: []const u8) Error!void {
     var value: [address.MAX_CONNECTION_LEN]u8 = undefined;
-    const written = address.writeConnection(&value, family, host) catch return error.NoSpace;
+    const written = address.writeConnection(&value, family, host) catch return error.ZixNoSpace;
 
     try appender.addLine(.CONNECTION, written);
 }
@@ -251,7 +251,7 @@ fn candidateLine(appender: *builder.Builder, host: IpAddress) Error!void {
     const entry = ice.Candidate.host(host, .RTP, ice.SINGLE_ADDRESS_PREFERENCE);
 
     var value: [candidate.MAX_VALUE_LEN]u8 = undefined;
-    const written = candidate.write(&value, entry) catch return error.NoSpace;
+    const written = candidate.write(&value, entry) catch return error.ZixNoSpace;
 
     try appender.addAttribute(candidate.ATTRIBUTE, written);
 }
@@ -259,7 +259,7 @@ fn candidateLine(appender: *builder.Builder, host: IpAddress) Error!void {
 /// Append the fingerprint attribute.
 fn fingerprintLine(appender: *builder.Builder, value: *const fingerprint.Fingerprint) Error!void {
     var text: [fingerprint.MAX_VALUE_LEN]u8 = undefined;
-    const written = fingerprint.write(&text, value) catch return error.NoSpace;
+    const written = fingerprint.write(&text, value) catch return error.ZixNoSpace;
 
     try appender.addAttribute(fingerprint.ATTRIBUTE, written);
 }
@@ -277,7 +277,7 @@ fn feedbackLine(appender: *builder.Builder, payload_type: u7, kind: []const u8, 
         .applies = .{ .ONE = payload_type },
         .kind = kind,
         .parameter = parameter,
-    }) catch return error.NoSpace;
+    }) catch return error.ZixNoSpace;
 
     try appender.addAttribute(rtcp_feedback.ATTRIBUTE, written);
 }
@@ -511,8 +511,8 @@ test "zix sdp: media answer write, what was written parses as a media section" {
 test "zix sdp: media answer write, a short buffer errors" {
     var buf: [32]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, try offeredAt(0), testTransport(), true));
-    try std.testing.expectError(error.NoSpace, write(buf[0..8], try offeredAt(0), testTransport(), false));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, try offeredAt(0), testTransport(), true));
+    try std.testing.expectError(error.ZixNoSpace, write(buf[0..8], try offeredAt(0), testTransport(), false));
 }
 
 test "zix sdp: media answer write, a static payload type answers without a mapping" {

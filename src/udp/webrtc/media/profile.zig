@@ -39,7 +39,7 @@ pub const MAX_TAG_LEN: usize = 10;
 /// What stops a profile from being used.
 pub const Error = error{
     /// A profile zix does not answer, including the NULL ciphers and anything unregistered.
-    UnsupportedProfile,
+    ZixUnsupportedProfile,
 };
 
 /// The byte lengths one profile fixes.
@@ -71,7 +71,7 @@ pub const Parameters = struct {
 ///
 /// Return:
 /// - Parameters
-/// - error.UnsupportedProfile
+/// - error.ZixUnsupportedProfile
 pub fn parametersFor(profile: exporter.SrtpProfile) Error!Parameters {
     return switch (profile) {
         .SRTP_AES128_CM_HMAC_SHA1_80 => .{
@@ -88,7 +88,7 @@ pub fn parametersFor(profile: exporter.SrtpProfile) Error!Parameters {
             .rtp_tag_len = 4,
             .rtcp_tag_len = 10,
         },
-        else => error.UnsupportedProfile,
+        else => error.ZixUnsupportedProfile,
     };
 }
 
@@ -100,7 +100,7 @@ pub fn parametersFor(profile: exporter.SrtpProfile) Error!Parameters {
 /// Return:
 /// - bool
 pub fn isSupported(profile: exporter.SrtpProfile) bool {
-    return parametersFor(profile) != Error.UnsupportedProfile;
+    return parametersFor(profile) != Error.ZixUnsupportedProfile;
 }
 
 /// The profiles zix offers, in the order it would rather have them.
@@ -147,9 +147,9 @@ test "zix media: profile parametersFor, both aes profiles share every key length
 }
 
 test "zix media: profile parametersFor, the null and unknown profiles are refused" {
-    try std.testing.expectError(error.UnsupportedProfile, parametersFor(.SRTP_NULL_HMAC_SHA1_80));
-    try std.testing.expectError(error.UnsupportedProfile, parametersFor(.SRTP_NULL_HMAC_SHA1_32));
-    try std.testing.expectError(error.UnsupportedProfile, parametersFor(@enumFromInt(0xFFFF)));
+    try std.testing.expectError(error.ZixUnsupportedProfile, parametersFor(.SRTP_NULL_HMAC_SHA1_80));
+    try std.testing.expectError(error.ZixUnsupportedProfile, parametersFor(.SRTP_NULL_HMAC_SHA1_32));
+    try std.testing.expectError(error.ZixUnsupportedProfile, parametersFor(@enumFromInt(0xFFFF)));
 }
 
 test "zix media: profile isSupported, it agrees with parametersFor" {

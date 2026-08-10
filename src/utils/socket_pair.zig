@@ -18,7 +18,7 @@ const fd_io = @import("fd_io.zig");
 const is_windows = builtin.os.tag == .windows;
 const is_linux = builtin.os.tag == .linux;
 
-pub const Error = error{SocketPairFailed};
+pub const Error = error{ZixSocketPairFailed};
 
 // --------------------------------------------------------- //
 
@@ -33,7 +33,7 @@ pub const Error = error{SocketPairFailed};
 ///
 /// Return:
 /// - void on success
-/// - error.SocketPairFailed when the pair could not be established
+/// - error.ZixSocketPairFailed when the pair could not be established
 pub fn open(io: std.Io, fds: *[2]posix.fd_t) Error!void {
     if (comptime is_windows) return openLoopback(io, fds);
 
@@ -48,33 +48,33 @@ pub fn open(io: std.Io, fds: *[2]posix.fd_t) Error!void {
 ///   maxInt(usize), which never compares equal to -1, so one shared check would report every
 ///   libc failure as success and leave the caller holding two undefined descriptors.
 fn openPosix(fds: *[2]posix.fd_t) Error!void {
-    if (comptime is_windows) return error.SocketPairFailed;
+    if (comptime is_windows) return error.ZixSocketPairFailed;
 
     if (comptime is_linux) {
         const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
-        if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
+        if (posix.errno(rc) != .SUCCESS) return error.ZixSocketPairFailed;
 
         return;
     }
 
     const rc = posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, fds);
-    if (posix.errno(rc) != .SUCCESS) return error.SocketPairFailed;
+    if (posix.errno(rc) != .SUCCESS) return error.ZixSocketPairFailed;
 }
 
 /// Loopback stand-in used where socketpair does not exist: listen on an ephemeral port,
 /// connect to it, accept, then drop the listener so only the two connected ends remain.
 fn openLoopback(io: std.Io, fds: *[2]posix.fd_t) Error!void {
-    const addr = std.Io.net.IpAddress.resolve(io, "127.0.0.1", 0) catch return error.SocketPairFailed;
+    const addr = std.Io.net.IpAddress.resolve(io, "127.0.0.1", 0) catch return error.ZixSocketPairFailed;
 
-    var listener = addr.listen(io, .{ .mode = .stream, .reuse_address = true }) catch return error.SocketPairFailed;
+    var listener = addr.listen(io, .{ .mode = .stream, .reuse_address = true }) catch return error.ZixSocketPairFailed;
     defer listener.deinit(io);
 
     const bound = listener.socket.address;
 
-    const client = bound.connect(io, .{ .mode = .stream }) catch return error.SocketPairFailed;
+    const client = bound.connect(io, .{ .mode = .stream }) catch return error.ZixSocketPairFailed;
     errdefer fd_io.close(client.socket.handle);
 
-    const server = listener.accept(io) catch return error.SocketPairFailed;
+    const server = listener.accept(io) catch return error.ZixSocketPairFailed;
 
     fds[0] = client.socket.handle;
     fds[1] = server.socket.handle;
@@ -105,7 +105,7 @@ pub const Pair = struct {
     ///
     /// Return:
     /// - Pair with both ends open
-    /// - error.SocketPairFailed when the pair could not be established
+    /// - error.ZixSocketPairFailed when the pair could not be established
     pub fn open(allocator: std.mem.Allocator) Error!Pair {
         if (comptime !is_windows) {
             var fds: [2]posix.fd_t = undefined;

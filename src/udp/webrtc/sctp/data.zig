@@ -41,11 +41,11 @@ pub const FLAG_IMMEDIATE: u8 = 0x08;
 /// Everything that stops a DATA chunk from being read or built.
 pub const Error = error{
     /// Fewer bytes than the fixed fields need.
-    Truncated,
+    ZixTruncated,
     /// A chunk with a header and no payload, which RFC 9260 3.3.1 does not allow.
-    NoUserData,
+    ZixNoUserData,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// One DATA chunk, borrowing the payload it was read from.
@@ -129,11 +129,11 @@ pub fn valueLen(payload_len: usize) usize {
 ///
 /// Return:
 /// - Data borrowing `value`
-/// - error.Truncated if the body is shorter than the fixed fields
-/// - error.NoUserData if there is no payload after them
+/// - error.ZixTruncated if the body is shorter than the fixed fields
+/// - error.ZixNoUserData if there is no payload after them
 pub fn read(flags: u8, value: []const u8) Error!Data {
-    if (value.len < FIXED_LEN) return error.Truncated;
-    if (value.len == FIXED_LEN) return error.NoUserData;
+    if (value.len < FIXED_LEN) return error.ZixTruncated;
+    if (value.len == FIXED_LEN) return error.ZixNoUserData;
 
     const unordered = flags & FLAG_UNORDERED != 0;
 
@@ -163,14 +163,14 @@ pub fn read(flags: u8, value: []const u8) Error!Data {
 ///
 /// Return:
 /// - []const u8 chunk value
-/// - error.NoUserData if the payload is empty
-/// - error.NoSpace if the buffer cannot hold the fixed fields and the payload
+/// - error.ZixNoUserData if the payload is empty
+/// - error.ZixNoSpace if the buffer cannot hold the fixed fields and the payload
 pub fn write(out: []u8, item: Data) Error![]const u8 {
-    if (item.payload.len == 0) return error.NoUserData;
+    if (item.payload.len == 0) return error.ZixNoUserData;
 
     const total = valueLen(item.payload.len);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     std.mem.writeInt(u32, out[0..4], item.tsn, .big);
     std.mem.writeInt(u16, out[4..6], item.stream_identifier, .big);
@@ -272,13 +272,13 @@ test "zix sctp: data read, a chunk with no payload errors" {
     var buf: [32]u8 = undefined;
     const value = try write(&buf, sample);
 
-    try std.testing.expectError(error.NoUserData, read(sample.flags(), value[0..FIXED_LEN]));
+    try std.testing.expectError(error.ZixNoUserData, read(sample.flags(), value[0..FIXED_LEN]));
 }
 
 test "zix sctp: data read, a chunk shorter than the fixed fields errors" {
     const short: [11]u8 = @splat(0);
 
-    try std.testing.expectError(error.Truncated, read(0, &short));
+    try std.testing.expectError(error.ZixTruncated, read(0, &short));
 }
 
 test "zix sctp: data write, an empty payload errors" {
@@ -286,13 +286,13 @@ test "zix sctp: data write, an empty payload errors" {
     var item = sample;
     item.payload = &.{};
 
-    try std.testing.expectError(error.NoUserData, write(&buf, item));
+    try std.testing.expectError(error.ZixNoUserData, write(&buf, item));
 }
 
 test "zix sctp: data write, a buffer too small errors" {
     var buf: [16]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, sample));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, sample));
 }
 
 test "zix sctp: data write, one byte of payload gives a value of seventeen bytes" {

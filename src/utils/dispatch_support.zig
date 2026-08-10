@@ -14,7 +14,7 @@ const builtin = @import("builtin");
 const DispatchModel = @import("../tcp/config.zig").DispatchModel;
 
 /// The error every engine's run() returns when the configured model cannot run on this platform.
-pub const Error = error{DispatchModelUnsupported};
+pub const Error = error{ZixDispatchModelUnsupported};
 
 /// Whether the model can run on the target this build targets.
 ///
@@ -62,7 +62,7 @@ test "zix dispatch: rejectedName reports the model tag" {
 }
 
 test "zix dispatch: Error carries the single canonical reject error" {
-    const failing: Error!void = error.DispatchModelUnsupported;
+    const failing: Error!void = error.ZixDispatchModelUnsupported;
 
-    try std.testing.expectError(error.DispatchModelUnsupported, failing);
+    try std.testing.expectError(error.ZixDispatchModelUnsupported, failing);
 }

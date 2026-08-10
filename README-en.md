@@ -154,7 +154,7 @@ __*Platform Development Status:*__ <br>
 <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
 
 > green: validated on native hardware. <br>
-> yellow: cross-build verified (module, examples, test suites, and runners compile, EPOLL / URING are rejected at run() with error.DispatchModelUnsupported, so those targets use ASYNC).
+> yellow: cross-build verified (module, examples, test suites, and runners compile, EPOLL / URING are rejected at run() with error.ZixDispatchModelUnsupported, so those targets use ASYNC).
 
 __*Maintained Platforms:*__
 - x86_64-linux:
@@ -864,7 +864,7 @@ pub fn main(process: std.process.Init) !void {
 
 **`.EPOLL` (shared-nothing epoll workers, Linux-only):**
 
-Each worker owns a private `SO_REUSEPORT` listener and one `epoll` instance. The kernel distributes new connections across workers. No shared queue, no mutex, no fd handoff between threads. Level-triggered `EPOLLIN` keeps connections registered after each request without explicit re-arm. Idle keep-alive connections hold no thread. Best for high-throughput short-lived requests on Linux. Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
+Each worker owns a private `SO_REUSEPORT` listener and one `epoll` instance. The kernel distributes new connections across workers. No shared queue, no mutex, no fd handoff between threads. Level-triggered `EPOLLIN` keeps connections registered after each request without explicit re-arm. Idle keep-alive connections hold no thread. Best for high-throughput short-lived requests on Linux. Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`: pick `.ASYNC` there.
 
 ```zig
 var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
@@ -878,7 +878,7 @@ var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
 
 **`.URING` (shared-nothing io_uring workers, Linux-only):**
 
-Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based, so most syscall transitions are batched into the ring. Accept, recv, send, and close all run on the ring (`zix.Http1` rings the close via `prep_close`, so the worker keeps reaping completions across connection teardowns under churn). Implemented natively by `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, and `zix.Http2`. The `zix.Tcp` per-connection handler has no native ring and folds to `.EPOLL` (its `initFramed` per-frame path does run on the ring). Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
+Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` listener and one ring per worker, no shared queue), but completion-based instead of readiness-based, so most syscall transitions are batched into the ring. Accept, recv, send, and close all run on the ring (`zix.Http1` rings the close via `prep_close`, so the worker keeps reaping completions across connection teardowns under churn). Implemented natively by `zix.Http1`, `zix.Http`, `zix.Grpc`, `zix.Fix`, and `zix.Http2`. The `zix.Tcp` per-connection handler has no native ring and folds to `.EPOLL` (its `initFramed` per-frame path does run on the ring). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`: pick `.ASYNC` there.
 
 ```zig
 var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
@@ -1173,7 +1173,7 @@ var client = zix.Http.Client.init(.{
     .allocator         = arena.allocator(),
     .io                = process.io,
     .connect_timeout_ms = 5000,       // error.Timeout if TCP connect takes > 5s
-    .max_response_body  = 64 * 1024,  // error.BodyTooLarge if body exceeds 64 KB
+    .max_response_body  = 64 * 1024,  // error.ZixBodyTooLarge if body exceeds 64 KB
 });
 defer client.deinit();
 
@@ -1216,8 +1216,12 @@ defer fast.deinit();
 
 | Error | Condition |
 | :- | :- |
-| `error.InvalidUrl` | malformed URL, unsupported scheme, or missing host |
-| `error.BodyTooLarge` | response body exceeded `max_response_body` |
+| `error.ZixUrlMalformed` | the URL does not parse |
+| `error.ZixUrlSchemeUnsupported` | the scheme is not one the transport speaks |
+| `error.ZixUrlHostMissing` | the URL carries no host |
+| `error.ZixUrlPortInvalid` | the port is not a number in range |
+| `error.ZixUrlPathTooLong` | the path and query do not fit the request buffer |
+| `error.ZixBodyTooLarge` | response body exceeded `max_response_body` |
 | `error.Timeout` | TCP connect exceeded `connect_timeout_ms` |
 
 Redirects are followed automatically up to `max_redirects` (default 3). Set `follow_redirects = false` to receive the 3xx response directly.
@@ -1236,7 +1240,7 @@ The same `zix.Http.Client` works against the raw `zix.Http1` server via `.versio
 
 ### Static Files & Upload
 
-Set `public_dir` in `HttpServerConfig` to enable static file serving. `server.run()` returns `error.PublicDirNotFound` if the directory does not exist. Use a `createInitDirs` helper to create all required directories before `Server.init`:
+Set `public_dir` in `HttpServerConfig` to enable static file serving. `server.run()` returns `error.ZixPublicDirNotFound` if the directory does not exist. Use a `createInitDirs` helper to create all required directories before `Server.init`:
 
 ```zig
 fn createInitDirs(io: std.Io) void {
@@ -1319,7 +1323,7 @@ var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
 });
 ```
 
-`addHeader()` returns `error.TooManyHeaders` when the cap is reached and `error.InvalidHeaderName` / `error.InvalidHeaderValue` if the name or value contains CR or LF (header injection guard).
+`addHeader()` returns `error.ZixTooManyHeaders` when the cap is reached and `error.ZixInvalidHeaderName` / `error.ZixInvalidHeaderValue` if the name or value contains CR or LF (header injection guard).
 
 `.{ .CUSTOM = N }` allocates exactly N slots from the per-request arena (no ceiling, no clamping).
 
@@ -1612,7 +1616,7 @@ pos += zix.Grpc.encodeDouble(3, 1.5,      out[pos..]); // field 3: double
 // send out[0..pos] as the gRPC message payload
 ```
 
-**Dispatch models:** `.ASYNC`, `.EPOLL`, `.URING` (the last two Linux-only, the field is required with no default). The gRPC EPOLL and URING models are shared-nothing multiplexed event loops: each worker owns a private `SO_REUSEPORT` listener and one epoll instance, and drives many non-blocking h2 connections through a resumable HTTP/2 state machine. `workers` is the worker count (0 = cpu_count). Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
+**Dispatch models:** `.ASYNC`, `.EPOLL`, `.URING` (the last two Linux-only, the field is required with no default). The gRPC EPOLL and URING models are shared-nothing multiplexed event loops: each worker owns a private `SO_REUSEPORT` listener and one epoll instance, and drives many non-blocking h2 connections through a resumable HTTP/2 state machine. `workers` is the worker count (0 = cpu_count). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`: pick `.ASYNC` there. See [`docs/concurrency-en.md`](docs/concurrency-en.md) for details.
 
 **Context timeout:** Three inputs, tightest wins:
 
@@ -1864,7 +1868,7 @@ try client.logout(io);
 
 **`zix.Fix.MsgType`**: namespace struct of 47 compile-time string constants for FIX MsgType values (FIX 4.0-4.4). Use named constants instead of raw strings: `MsgType.NewOrderSingle` (`"D"`), `MsgType.ExecutionReport` (`"8"`), `MsgType.Logon` (`"A"`), etc.
 
-**Dispatch models:** `.ASYNC` (suited to long-lived FIX sessions and the only portable model), `.EPOLL`, `.URING` (both Linux-only: shared-nothing per-core workers). Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
+**Dispatch models:** `.ASYNC` (suited to long-lived FIX sessions and the only portable model), `.EPOLL`, `.URING` (both Linux-only: shared-nothing per-core workers). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`: pick `.ASYNC` there.
 
 **When to use:** use `zix.Fix` when you integrate with financial counterparties over FIX 4.x: order entry, execution reports, market-data sessions. Session mechanics (Logon/Logout/Heartbeat/TestRequest, sequence handling) are built in, so you write only application-message handlers. Use echo mode for a conformance harness and router mode for real trading logic. For any non-financial protocol use `zix.Tcp` instead.
 
@@ -1952,11 +1956,11 @@ defer ch.deinit();
 
 // producer (runs in its own thread / task)
 try ch.send(io, 42);
-ch.close(io); // signal done: receivers drain, then get error.Closed
+ch.close(io); // signal done: receivers drain, then get error.ZixClosed
 
 // consumer (runs in its own thread / task)
 while (true) {
-    const v = ch.recv(io) catch break; // error.Closed when channel is drained and closed
+    const v = ch.recv(io) catch break; // error.ZixClosed when channel is drained and closed
     // process v
 }
 ```
@@ -2131,7 +2135,7 @@ curl --http3-only -k https://127.0.0.1:9063/
 - `req.method` and `req.path` are populated from the wire. The response body handed to `res.send` is copied after the handler returns, so it may point at static or handler-owned memory.
 - `req.accept_encoding` carries the client's Accept-Encoding (empty when absent). A handler negotiates a pre-compressed body against it and calls `res.setContentEncoding(.br)` (or `.gzip`), which emits the `content-encoding` response header. The engine never compresses on the send path: `res.body` must already be encoded (serve a pre-built `.br` / `.gz` file), so there is no per-request codec cost.
 - `ctx` carries `stream_id` (the raw escape hatch, QUIC has no per-request fd), `io`, a per-request arena allocator, and the timeout helpers (`withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`), same shape as every other engine. A handler error auto-completes as one 500 when nothing was sent yet (`res.sent`).
-- `run()` requires a non-zero port and a TLS context: it returns `error.PortNotConfigured` or `error.TlsRequired` otherwise (`init` only stores the config).
+- `run()` requires a non-zero port and a TLS context: it returns `error.ZixPortNotConfigured` or `error.ZixTlsRequired` otherwise (`init` only stores the config).
 
 **Dispatch models:** `.ASYNC` runs one single-worker recv loop with internal connection-id demux (migration-safe). `.EPOLL` / `.URING` run one SO_REUSEPORT worker per core with epoll readiness or io_uring completion on top (`.URING` folds to the epoll worker loop when io_uring is unavailable), and are Linux-only. Per-core connection-id steering is deferred (phase 3).
 
@@ -2187,7 +2191,7 @@ pub fn main(process: std.process.Init) !void {
 
 - Three events: `CHANNEL_OPEN` and `CHANNEL_CLOSED` carry a stream identifier, `MESSAGE` carries `channel`, `kind` and `payload`. A `payload` is borrowed for the length of the call and dies on the next one, so anything worth keeping has to be copied out.
 - `ctx` answers: `send(channel, kind, bytes)`, `broadcast(kind, bytes)`, `openChannel(request)`, `close(channel)`, `channelCount()`. The reach of `broadcast` is one worker, which is the whole room under `.ASYNC` and this core's share under `.EPOLL` or `.URING`.
-- `run()` validates before it binds: `error.PortNotConfigured`, `error.IceCredentialsRequired`, `error.IceCredentialsInvalid`, `error.TlsRequired`, `error.UnsupportedCertificateKey` (the key must be ECDSA P-256), and `error.DispatchModelUnsupported` off Linux.
+- `run()` validates before it binds: `error.ZixPortNotConfigured`, `error.ZixIceCredentialsRequired`, `error.ZixIceCredentialsInvalid`, `error.ZixTlsRequired`, `error.ZixUnsupportedCertificateKey` (the key must be ECDSA P-256), and `error.ZixDispatchModelUnsupported` off Linux.
 - A browser draws a fresh ICE ufrag for every peer connection, so a browser-facing server sets `accept_any_peer_ice_ufrag = true` and lets `ice_password` be the gate.
 
 **Dispatch models:** `.ASYNC` runs one worker and runs everywhere. `.EPOLL` and `.URING` run one SO_REUSEPORT worker per core and are Linux-only. There is deliberately no CPU steering knob here: a WebRTC peer is its 4-tuple, and steering would split one session across two workers mid-handshake.

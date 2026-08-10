@@ -15,14 +15,16 @@ const dispatchConn = common.dispatchConn;
 pub fn runAsync(cfg: FixServerConfig, conn_opts: FixServeOpts) !void {
     const io = cfg.io;
 
-    logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
-
     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
     var listener = try addr.listen(io, .{
         .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, applied to all models
         .kernel_backlog = cfg.kernel_backlog,
     });
     defer listener.deinit(io);
+
+    // Announced below the bind, not above it: the old line claimed an address the listener
+    // may never have taken.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
     while (true) {
         const stream = listener.accept(io) catch |err| {

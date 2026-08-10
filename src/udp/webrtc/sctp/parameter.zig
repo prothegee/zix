@@ -33,11 +33,11 @@ pub const MAX_PARAMETER_LEN: usize = std.math.maxInt(u16);
 /// Framing faults that make the enclosing chunk undecodable.
 pub const Error = error{
     /// A parameter claims to run past the end of the region.
-    Truncated,
+    ZixTruncated,
     /// A parameter length below the header size, which cannot be right at any type.
-    BadLength,
+    ZixBadLength,
     /// The region has no room for another parameter.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// Parameter types this build knows.
@@ -170,18 +170,18 @@ pub fn isKnown(kind: Type) bool {
 ///
 /// Return:
 /// - void
-/// - error.BadLength if a parameter claims a length below the header size
-/// - error.Truncated if a parameter runs past the end of the region
+/// - error.ZixBadLength if a parameter claims a length below the header size
+/// - error.ZixTruncated if a parameter runs past the end of the region
 pub fn validate(region: []const u8) Error!void {
     var pos: usize = 0;
 
     while (pos < region.len) {
-        if (region.len - pos < HEADER_LEN) return error.Truncated;
+        if (region.len - pos < HEADER_LEN) return error.ZixTruncated;
 
         const len = std.mem.readInt(u16, region[pos + 2 ..][0..2], .big);
 
-        if (len < HEADER_LEN) return error.BadLength;
-        if (region.len - pos < len) return error.Truncated;
+        if (len < HEADER_LEN) return error.ZixBadLength;
+        if (region.len - pos < len) return error.ZixTruncated;
 
         const advance = paddedLen(len);
 
@@ -309,16 +309,16 @@ pub fn collectReportable(region: []const u8, out: []Parameter) []Parameter {
 ///
 /// Return:
 /// - []const u8 covering header, value, and padding
-/// - error.NoSpace if the buffer cannot hold the padded parameter
-/// - error.BadLength if the value is too long for the 16-bit length field
+/// - error.ZixNoSpace if the buffer cannot hold the padded parameter
+/// - error.ZixBadLength if the value is too long for the 16-bit length field
 pub fn write(out: []u8, kind: Type, value: []const u8) Error![]const u8 {
     const len = HEADER_LEN + value.len;
 
-    if (len > MAX_PARAMETER_LEN) return error.BadLength;
+    if (len > MAX_PARAMETER_LEN) return error.ZixBadLength;
 
     const total = paddedLen(len);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     std.mem.writeInt(u16, out[0..2], @intFromEnum(kind), .big);
     std.mem.writeInt(u16, out[2..4], @intCast(len), .big);
@@ -392,7 +392,7 @@ test "zix sctp: parameter write, an empty value gives a bare header" {
 test "zix sctp: parameter write, a buffer too small errors" {
     var buf: [4]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, .STATE_COOKIE, "abcd"));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, .STATE_COOKIE, "abcd"));
 }
 
 test "zix sctp: parameter find, the right type is picked out of a mixed region" {
@@ -428,13 +428,13 @@ test "zix sctp: parameter find, the first of a repeated type is returned" {
 test "zix sctp: parameter validate, a length below the header size errors" {
     const region: [4]u8 = .{ 0x00, 0x07, 0x00, 0x02 };
 
-    try std.testing.expectError(error.BadLength, validate(&region));
+    try std.testing.expectError(error.ZixBadLength, validate(&region));
 }
 
 test "zix sctp: parameter validate, a parameter running past the region errors" {
     const region: [4]u8 = .{ 0x00, 0x07, 0x00, 0x10 };
 
-    try std.testing.expectError(error.Truncated, validate(&region));
+    try std.testing.expectError(error.ZixTruncated, validate(&region));
 }
 
 test "zix sctp: parameter validate, the last parameter may arrive without its padding" {

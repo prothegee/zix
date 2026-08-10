@@ -202,7 +202,7 @@ pub fn runFixTrading(io: std.Io, server_path: []const u8) !void {
     const raw = try client.recvMessage(io);
     var fields: [zix.Fix.MAX_FIELDS]zix.Fix.Field = undefined;
     const field_count = try zix.Fix.parseFields(raw, &fields);
-    const msg_type = zix.Fix.getField(fields[0..field_count], .MsgType) orelse return error.MissingMsgType;
+    const msg_type = zix.Fix.getField(fields[0..field_count], .MsgType) orelse return error.ZixMissingMsgType;
 
     if (!std.mem.eql(u8, msg_type, "8")) return error.UnexpectedMsgType;
 

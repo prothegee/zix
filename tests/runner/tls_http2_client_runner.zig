@@ -68,7 +68,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (!std.mem.containsAtLeast(u8, resp.body(), 1, "hello over h2 tls 1.3")) return error.MissingExpectedBody;
 
     // one request per run: the example's TLS terminator serves a single connection, and this proves

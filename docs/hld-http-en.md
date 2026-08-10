@@ -23,7 +23,7 @@ HTTP server and client built on Zig 0.16.x `std.Io`.
 
 ## Runtime Model
 
-Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, so a portable caller picks the model per target at comptime and `run()` rejects a Linux-only model off Linux with `error.DispatchModelUnsupported` (ADR-065).
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, so a portable caller picks the model per target at comptime and `run()` rejects a Linux-only model off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### .ASYNC: Single Accept, io.async() Dispatch
 
@@ -78,7 +78,7 @@ flowchart TD
 - Non-blocking fds: the worker reads to EAGAIN into the connection buffer, then `processRequest` does a synchronous parse/dispatch/send and returns the worker to `epoll_wait`.
 - `workers` controls worker count (0 = cpu_count).
 - Best for high-throughput short-lived requests on Linux. Not suitable for SSE or WebSocket (blocking reads would park the worker).
-- Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
+- Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`: pick `.ASYNC` there.
 
 ### .URING: Shared-Nothing io_uring Workers (Linux-only)
 
@@ -88,7 +88,7 @@ Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` li
 - Best for sustained, pipelined load where the batched ring amortizes syscalls. On loopback it matches `.EPOLL` on throughput and wins mainly on cache locality. On a many-core box the ring close (`prep_close`, ADR-041, native to `zix.Http1` for now) keeps the worker reaping completions through connection churn, where `.URING` reaches parity or better at a fraction of the memory.
 - Like `.EPOLL`, the per-connection serve is blocking once a request is ready, so it is not suited to SSE or WebSocket.
 - When io_uring itself is unavailable on the host (old kernel, low `RLIMIT_MEMLOCK`, sandbox) the engine folds to the `.EPOLL` loop with a logged notice.
-- Off Linux, `run()` returns `error.DispatchModelUnsupported`: pick `.ASYNC` there.
+- Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`: pick `.ASYNC` there.
 
 `zix.Http.Server` receives an opaque `std.Io` value and does not own or deinit the backend. See [`docs/concurrency.md`](concurrency.md) for thread count details and model comparison.
 
@@ -184,7 +184,7 @@ Access via `const zix = @import("zix");`
 | `zix.Logger.ConsoleMode` | enum(u8) | `OFF`(0) `DEBUG_ONLY`(1) `ALWAYS`(2) |
 | `zix.Http.HandlerFn` | type | `*const fn(*Request, *Response, *Context) anyerror!void` |
 | `zix.Http.Header` | struct | `{ name: []const u8, value: []const u8 }` |
-| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only io_uring). Off Linux `run()` returns `error.DispatchModelUnsupported` for the last two |
+| `zix.Tcp.DispatchModel` | enum(u8) | Dispatch model: `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only io_uring). Off Linux `run()` returns `error.ZixDispatchModelUnsupported` for the last two |
 | `zix.Http.RequestHeaderSize` | union(enum) | Request header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.{ .CUSTOM = N }` |
 | `zix.Http.default_user_agent` | `[]const u8` | Client user agent string from `build.zig.zon` (e.g. `"zix/0.1.0"`) |
 | `zix.Http.HeaderSize` | union(enum) | Response header cap: `.MINIMAL`(16) `.COMMON`(32) `.LARGE`(64) `.EXTRA_LARGE`(128) `.{ .CUSTOM = N }` |
@@ -304,7 +304,7 @@ A zero-copy view over the parsed request head and the connection fd, which `body
 
 | Method | Returns | Notes |
 | :- | :- | :- |
-| `method()` | `Method.Code` | Resolved by this engine's own request-line parser. A method it does not implement never reaches a handler: the parse reports `error.UnknownMethod` and the caller answers 501 |
+| `method()` | `Method.Code` | Resolved by this engine's own request-line parser. A method it does not implement never reaches a handler: the parse reports `error.ZixUnknownMethod` and the caller answers 501 |
 | `path()` | `[]const u8` | Target stripped of query string |
 | `query()` | `[]const u8` | Raw query string after `?` |
 | `queryParam(key)` | `?[]const u8` | Single key from query string |
@@ -312,7 +312,7 @@ A zero-copy view over the parsed request head and the connection fd, which `body
 | `pathSegments(allocator)` | `![][]const u8` | Non-empty segments split by `/` |
 | `pathParam(name)` | `?[]const u8` | Named capture from param route, null if not captured |
 | `header(name)` | `?[]const u8` | Case-insensitive lookup. Lazy O(1) index built on first call |
-| `body()` | `![]const u8` | Reads body: `Content-Length` bytes or chunked transfer decoded, bounded by `max_request_body` (`error.RequestBodyTooLarge` answered `413`, malformed chunked `error.InvalidChunkedBody` answered `400`). Cached after first call. |
+| `body()` | `![]const u8` | Reads body: `Content-Length` bytes or chunked transfer decoded, bounded by `max_request_body` (`error.ZixRequestBodyTooLarge` answered `413`, malformed chunked `error.ZixInvalidChunkedBody` answered `400`). Cached after first call. |
 | `bodyReceived()` | `u64` | Body bytes the reads actually consumed, not what the header claimed |
 | `bodyComplete()` | `bool` | Whether the declared or framed body end was reached. False means the peer cut the body short, or the handler never read it |
 
@@ -353,7 +353,7 @@ Buffers response state, writes on `send()` or equivalent.
 | `sendCached(req, body, ttl_ms)` | Sends `body`, then stores it under the request key for later `sendFromCache` hits |
 | `sendNegotiated(req, body)` | Sends `body` compressed per `Accept-Encoding` (opt-in via `setCompression`), else identical to `send` |
 
-Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size, `error.BufferTooSmall` is returned if exceeded.
+Response is written to the underlying `std.Io.Writer`. The 4 KB header buffer limits combined header size, `error.ZixBufferTooSmall` is returned if exceeded.
 
 ### Automatic headers emitted by send()
 
@@ -786,9 +786,9 @@ pub const HttpClientConfig = struct {
     allocator:           std.mem.Allocator, // owns response body + head copies
     io:                  std.Io,            // event-loop backend, not owned by client
     connect_timeout_ms:  u32 = 0,          // 0 = no timeout. enforced via connectTcpOptions
-    response_timeout_ms: u32 = 0,          // 0 = no timeout. error.ResponseTimeout when the head never arrives
-    read_timeout_ms:     u32 = 0,          // 0 = no timeout. error.ReadTimeout when the body stalls (Content-Length only)
-    max_response_body:   usize = 1024 * 1024 * 4, // error.BodyTooLarge when exceeded
+    response_timeout_ms: u32 = 0,          // 0 = no timeout. error.ZixResponseTimeout when the head never arrives
+    read_timeout_ms:     u32 = 0,          // 0 = no timeout. error.ZixReadTimeout when the body stalls (Content-Length only)
+    max_response_body:   usize = 1024 * 1024 * 4, // error.ZixBodyTooLarge when exceeded
     follow_redirects:    bool = true,
     max_redirects:       u8   = 3,
     h2_max_read_rounds:  usize = 4096,                       // HTTP/2 client read-loop bound, max frame-read rounds
@@ -827,11 +827,14 @@ sequenceDiagram
 
 | Error | When |
 | :- | :- |
-| `error.InvalidUrl` | `Uri.parse` fails, unsupported scheme, or missing host |
-| `error.BodyTooLarge` | response body exceeds `max_response_body` bytes |
+| `error.ZixUrlMalformed` | `Uri.parse` fails |
+| `error.ZixUrlSchemeUnsupported` | the scheme is neither http nor https |
+| `error.ZixUrlHostMissing` | the host component is absent |
+| `error.ZixUrlPathTooLong` | the path and query do not fit the request buffer |
+| `error.ZixBodyTooLarge` | response body exceeds `max_response_body` bytes |
 | `error.Timeout` | TCP connect exceeded `connect_timeout_ms` (from `std.Io`) |
-| `error.ResponseTimeout` | server accepted the connection but sent no response head within `response_timeout_ms` |
-| `error.ReadTimeout` | body stalled past `read_timeout_ms` mid-transfer (Content-Length bodies only) |
+| `error.ZixResponseTimeout` | server accepted the connection but sent no response head within `response_timeout_ms` |
+| `error.ZixReadTimeout` | body stalled past `read_timeout_ms` mid-transfer (Content-Length bodies only) |
 
 Other errors from `std.http.Client` propagate unchanged (OutOfMemory, ConnectionRefused, etc.).
 

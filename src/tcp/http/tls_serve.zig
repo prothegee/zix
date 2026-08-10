@@ -132,9 +132,9 @@ pub fn processRequestToBuffer(server: anytype, io: std.Io, request: []u8, out: [
         // already streamed the response over TLS (ADR-054). Without it, streaming has no TLS path.
         if (resp.tl_tls_stream != null) return .{ .bytes = &.{}, .outcome = .close, .streamed = true };
 
-        return error.StreamingNotSupported;
+        return error.ZixStreamingNotSupported;
     }
-    if (sink.failed) return error.ResponseTooLarge;
+    if (sink.failed) return error.ZixResponseTooLarge;
 
     return .{ .bytes = out[0..sink.len], .outcome = outcome };
 }
@@ -149,13 +149,17 @@ pub fn runTls(server: anytype, io: std.Io) !void {
     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
     var srv = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = cfg.kernel_backlog });
 
-    common.logSystem(cfg, "listening on {s}:{d} (https/1.1)", .{ cfg.ip, cfg.port });
+    common.logSystem(cfg, .INFO, "listening on {s}:{d} (https/1.1)", .{ cfg.ip, cfg.port });
 
     // io.async / std.Thread.spawn need a concrete function: wrap the generic serve in a closure where
     // the server pointer type is fixed (same pattern as the cleartext async dispatch).
     const Spawn = struct {
         fn handle(srv_ptr: @TypeOf(server), conn_fd: posix.fd_t, tls_ctx: *const Tls.Context, h_io: std.Io) void {
-            serveConnTls(srv_ptr, h_io, conn_fd, tls_ctx) catch {};
+            // A failed handshake used to close the socket with nothing said. It files at DEBUG
+            // rather than WARN because one remote peer drives it, and a scanner would flood.
+            serveConnTls(srv_ptr, h_io, conn_fd, tls_ctx) catch |err| {
+                common.logSystem(srv_ptr.config, .DEBUG, "tls connection ended: {s}", .{@errorName(err)});
+            };
 
             fd_io.close(conn_fd);
         }
@@ -181,7 +185,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
     var record_buf: [record.max_record_wire]u8 = undefined;
 
     const client_hello_rec = try readRecord(fd, &record_buf);
-    if (client_hello_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+    if (client_hello_rec.content_type != content_type_handshake) return error.ZixUnexpectedRecord;
 
     var ephemeral_secret: [32]u8 = undefined;
     var server_random: [32]u8 = undefined;
@@ -198,7 +202,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
     if (!ctx.allowsTls13()) {
         const ecdsa_key = switch (ctx.signing_key) {
             .ecdsa_p256 => |kp| kp,
-            else => return error.Tls12RequiresEcdsa,
+            else => return error.ZixTls12RequiresEcdsa,
         };
 
         return serveConnTls12(server, io, fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random);
@@ -214,13 +218,13 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
             try writeAllFD(fd, retry.to_send);
 
             const ch2_rec = try readRecord(fd, &record_buf);
-            if (ch2_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+            if (ch2_rec.content_type != content_type_handshake) return error.ZixUnexpectedRecord;
 
             retry_state = retry.state;
             second_hello = ch2_rec.body;
         }
     } else |err| {
-        if (err != error.UnsupportedTlsVersion) {
+        if (err != error.ZixUnsupportedTlsVersion) {
             var alert_buf: [Tls.fatal_record_len]u8 = undefined;
             if (Tls.alertRecordForError(&alert_buf, err)) |rec| writeAllFD(fd, rec) catch {};
 
@@ -234,7 +238,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
         Tls.serverHandshake(opts, client_hello_rec.body, &handshake_out) catch |err| {
             // no 1.3 offer -> a TLS 1.2 only client. Honor the floor: refuse at a 1.3 min_version,
             // else take the ECDSA-signed 1.2 path.
-            if (err == error.UnsupportedTlsVersion) {
+            if (err == error.ZixUnsupportedTlsVersion) {
                 if (!ctx.allowsTls12()) {
                     var ver_alert: [Tls.fatal_record_len]u8 = undefined;
                     if (Tls.alertRecordForError(&ver_alert, err)) |rec| writeAllFD(fd, rec) catch {};
@@ -244,7 +248,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
 
                 const ecdsa_key = switch (ctx.signing_key) {
                     .ecdsa_p256 => |kp| kp,
-                    else => return error.Tls12RequiresEcdsa,
+                    else => return error.ZixTls12RequiresEcdsa,
                 };
 
                 return serveConnTls12(server, io, fd, ctx, ecdsa_key, client_hello_rec.body, ephemeral_secret, server_random);
@@ -263,7 +267,7 @@ fn serveConnTls(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Con
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
         if (rec.content_type == content_type_alert) return peerAlert(rec.body);
-        if (rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+        if (rec.content_type != content_type_application_data) return error.ZixUnexpectedRecord;
 
         try conn.verifyClientFinished(rec.full);
         break;
@@ -289,9 +293,9 @@ fn serveConnTls12(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.C
     var record_buf: [record.max_record_wire]u8 = undefined;
 
     const cke_rec = try readRecord(fd, &record_buf);
-    if (cke_rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+    if (cke_rec.content_type != content_type_handshake) return error.ZixUnexpectedRecord;
     var cke_buf: [client_key_exchange_size]u8 = undefined;
-    if (cke_rec.body.len > cke_buf.len) return error.RecordTooLarge;
+    if (cke_rec.body.len > cke_buf.len) return error.ZixRecordTooLarge;
     @memcpy(cke_buf[0..cke_rec.body.len], cke_rec.body);
     const client_key_exchange = cke_buf[0..cke_rec.body.len];
 
@@ -299,7 +303,7 @@ fn serveConnTls12(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.C
         const rec = try readRecord(fd, &record_buf);
         if (rec.content_type == content_type_change_cipher_spec) continue;
         if (rec.content_type == content_type_alert) return peerAlert(rec.body);
-        if (rec.content_type != content_type_handshake) return error.UnexpectedRecord;
+        if (rec.content_type != content_type_handshake) return error.ZixUnexpectedRecord;
 
         break rec;
     };
@@ -350,7 +354,7 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
             writeAllFD(fd, conn.writeAppData(resp.parseErrorResponse(err), &encrypt_buf)) catch {};
             writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
-            return error.BadRequest;
+            return error.ZixBadRequest;
         };
         const complete = if (maybe_head) |h| blk: {
             if (h.chunked) break :blk false; // chunked bodies are out of scope for the TLS cut
@@ -360,17 +364,17 @@ fn serveRequests(server: anytype, io: std.Io, fd: posix.fd_t, ctx: *const Tls.Co
         if (!complete) {
             // need another record: read ciphertext, decrypt, append plaintext to rbuf.
             const request_rec = readRecord(fd, record_buf) catch |err| {
-                if (err == error.ConnectionClosed and rlen == 0) return; // clean keep-alive end
+                if (err == error.ZixConnectionClosed and rlen == 0) return; // clean keep-alive end
                 return err;
             };
             if (request_rec.content_type == content_type_alert) return; // peer close_notify / alert
-            if (request_rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+            if (request_rec.content_type != content_type_application_data) return error.ZixUnexpectedRecord;
 
             const plain = conn.readAppData(request_rec.full, &plain_temp) catch |err| {
-                if (err == error.PeerClosed) return; // client close_notify
+                if (err == error.ZixPeerClosed) return; // client close_notify
                 return err;
             };
-            if (rlen + plain.len > rbuf.len) return error.RequestTooLarge;
+            if (rlen + plain.len > rbuf.len) return error.ZixRequestTooLarge;
             @memcpy(rbuf[rlen..][0..plain.len], plain);
             rlen += plain.len;
 
@@ -445,19 +449,19 @@ fn serveWsTls(conn: anytype, fd: posix.fd_t, on_frame: ws.WsFrameFn, record_buf:
 
     while (true) {
         const rec = readRecord(fd, record_buf) catch |err| {
-            if (err == error.ConnectionClosed) return; // peer hung up
+            if (err == error.ZixConnectionClosed) return; // peer hung up
 
             return err;
         };
         if (rec.content_type == content_type_alert) return; // peer close_notify
-        if (rec.content_type != content_type_application_data) return error.UnexpectedRecord;
+        if (rec.content_type != content_type_application_data) return error.ZixUnexpectedRecord;
 
         const plain = conn.readAppData(rec.full, &plain_temp) catch |err| {
-            if (err == error.PeerClosed) return; // client close_notify
+            if (err == error.ZixPeerClosed) return; // client close_notify
 
             return err;
         };
-        if (acc_len + plain.len > acc.len) return error.WsFrameTooLarge;
+        if (acc_len + plain.len > acc.len) return error.ZixWsFrameTooLarge;
         @memcpy(acc[acc_len..][0..plain.len], plain);
         acc_len += plain.len;
 
@@ -478,7 +482,7 @@ fn serveWsTls(conn: anytype, fd: posix.fd_t, on_frame: ws.WsFrameFn, record_buf:
 fn peerAlert(body: []const u8) anyerror {
     _ = Tls.parseInboundAlert(body) catch {};
 
-    return error.PeerAlert;
+    return error.ZixPeerAlert;
 }
 
 /// The Host header value (RFC 9112 3.2) from a request head, or null when absent.
@@ -522,7 +526,7 @@ fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
     try readAll(fd, buf[0..5]);
 
     const length = std.mem.readInt(u16, buf[3..5], .big);
-    if (5 + length > buf.len) return error.RecordTooLarge;
+    if (5 + length > buf.len) return error.ZixRecordTooLarge;
 
     try readAll(fd, buf[5 .. 5 + length]);
 
@@ -593,7 +597,7 @@ test "zix http: tls_serve, processRequestToBuffer captures the router response" 
 
     // a streaming route with no stream sink armed has no TLS path, surfaced as StreamingNotSupported.
     var req_sse = "GET /sse HTTP/1.1\r\nHost: x\r\n\r\n".*;
-    try std.testing.expectError(error.StreamingNotSupported, processRequestToBuffer(&server, undefined, req_sse[0..], &out, &arena));
+    try std.testing.expectError(error.ZixStreamingNotSupported, processRequestToBuffer(&server, undefined, req_sse[0..], &out, &arena));
 }
 
 /// Capture stream sink for the test: a streaming handler's writes land in `buf` instead of a socket.

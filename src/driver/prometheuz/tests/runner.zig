@@ -37,7 +37,7 @@ fn waitForNodeExporter(io: std.Io, allocator: std.mem.Allocator) !void {
         defer snapshot.deinit();
 
         if (snapshot.up) return;
-        if (attempt >= READY_ATTEMPTS) return error.ServerNeverBecameReady;
+        if (attempt >= READY_ATTEMPTS) return error.PrometheuzServerNeverBecameReady;
         std.Io.sleep(io, .fromMilliseconds(READY_DELAY_MS), .awake) catch {};
     }
 }
@@ -51,7 +51,7 @@ fn waitForPrometheus(io: std.Io, allocator: std.mem.Allocator) !void {
             .port = PROMETHEUS_PORT,
             .conn_timeout_ms = 500,
         }, "up") catch {
-            if (attempt >= READY_ATTEMPTS) return error.ServerNeverBecameReady;
+            if (attempt >= READY_ATTEMPTS) return error.PrometheuzServerNeverBecameReady;
             std.Io.sleep(io, .fromMilliseconds(READY_DELAY_MS), .awake) catch {};
 
             continue;
@@ -150,7 +150,7 @@ pub fn main(process: std.process.Init) !void {
     if (paths.items.len == 0) {
         std.debug.print("usage: prometheuz-runner <example binaries...> (use zig build test-runner)\n", .{});
 
-        return error.NoExamplesGiven;
+        return error.PrometheuzNoExamplesGiven;
     }
 
     std.debug.print("waiting for node-exporter on {s}:{d} ...\n", .{ NODE_EXPORTER_IP, NODE_EXPORTER_PORT });
@@ -177,7 +177,7 @@ pub fn main(process: std.process.Init) !void {
     if (failed > 0) {
         std.debug.print("\n{d}/{d} example(s) failed\n", .{ failed, paths.items.len });
 
-        return error.ExamplesFailed;
+        return error.PrometheuzExamplesFailed;
     }
 
     std.debug.print("prometheuz: all {d} examples passed\n", .{paths.items.len});

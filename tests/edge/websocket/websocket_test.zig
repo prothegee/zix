@@ -49,5 +49,5 @@ test "zix edge: acceptKey, key that exceeds hash_input buffer returns KeyTooLong
     var out: [64]u8 = undefined;
     const long_key_buf: [93]u8 = @splat('A');
     const long_key: []const u8 = &long_key_buf;
-    try std.testing.expectError(error.KeyTooLong, WS.acceptKey(long_key, &out));
+    try std.testing.expectError(error.ZixKeyTooLong, WS.acceptKey(long_key, &out));
 }

@@ -16,9 +16,9 @@ const Oid = oid_mod.Oid;
 const Format = frontend.Format;
 
 pub const DecodeValueError = error{
-    TypeMismatch,
-    ValueOutOfRange,
-    BadCell,
+    PostgrezTypeMismatch,
+    PostgrezValueOutOfRange,
+    PostgrezBadCell,
 };
 
 // --------------------------------------------------------- //
@@ -34,47 +34,47 @@ pub const DecodeValueError = error{
 ///
 /// Return:
 /// - T on success
-/// - error.TypeMismatch when the OID cannot decode into T
-/// - error.ValueOutOfRange when the value does not fit T
-/// - error.BadCell on a malformed cell
+/// - error.PostgrezTypeMismatch when the OID cannot decode into T
+/// - error.PostgrezValueOutOfRange when the value does not fit T
+/// - error.PostgrezBadCell on a malformed cell
 pub fn decode(comptime T: type, oid: Oid, bytes: []const u8) DecodeValueError!T {
     switch (@typeInfo(T)) {
         .bool => {
-            if (oid != .BOOL) return error.TypeMismatch;
-            if (bytes.len != 1) return error.BadCell;
+            if (oid != .BOOL) return error.PostgrezTypeMismatch;
+            if (bytes.len != 1) return error.PostgrezBadCell;
 
             return bytes[0] != 0;
         },
         .int => {
             const wide = try decodeIntWide(oid, bytes);
 
-            return std.math.cast(T, wide) orelse error.ValueOutOfRange;
+            return std.math.cast(T, wide) orelse error.PostgrezValueOutOfRange;
         },
         .float => |float_info| {
             switch (oid) {
                 .FLOAT4 => {
-                    if (bytes.len != 4) return error.BadCell;
+                    if (bytes.len != 4) return error.PostgrezBadCell;
 
                     const value: f32 = @bitCast(std.mem.readInt(u32, bytes[0..4], .big));
 
                     return @floatCast(value);
                 },
                 .FLOAT8 => {
-                    if (float_info.bits < 64) return error.TypeMismatch;
-                    if (bytes.len != 8) return error.BadCell;
+                    if (float_info.bits < 64) return error.PostgrezTypeMismatch;
+                    if (bytes.len != 8) return error.PostgrezBadCell;
 
                     const value: f64 = @bitCast(std.mem.readInt(u64, bytes[0..8], .big));
 
                     return @floatCast(value);
                 },
-                else => return error.TypeMismatch,
+                else => return error.PostgrezTypeMismatch,
             }
         },
         .pointer => {
             if (T != []const u8) @compileError("postgrez binary.decode: unsupported slice type " ++ @typeName(T) ++ ", use []const u8");
 
             if (oid == .JSONB) {
-                if (bytes.len < 1 or bytes[0] != 1) return error.BadCell;
+                if (bytes.len < 1 or bytes[0] != 1) return error.PostgrezBadCell;
 
                 return bytes[1..];
             }
@@ -85,8 +85,8 @@ pub fn decode(comptime T: type, oid: Oid, bytes: []const u8) DecodeValueError!T 
             if (array_info.child != u8 or array_info.len != 16) {
                 @compileError("postgrez binary.decode: unsupported array type " ++ @typeName(T) ++ ", use [16]u8 for uuid");
             }
-            if (oid != .UUID) return error.TypeMismatch;
-            if (bytes.len != 16) return error.BadCell;
+            if (oid != .UUID) return error.PostgrezTypeMismatch;
+            if (bytes.len != 16) return error.PostgrezBadCell;
 
             return bytes[0..16].*;
         },
@@ -98,31 +98,31 @@ pub fn decode(comptime T: type, oid: Oid, bytes: []const u8) DecodeValueError!T 
 fn decodeIntWide(oid: Oid, bytes: []const u8) DecodeValueError!i64 {
     switch (oid) {
         .INT2 => {
-            if (bytes.len != 2) return error.BadCell;
+            if (bytes.len != 2) return error.PostgrezBadCell;
 
             return std.mem.readInt(i16, bytes[0..2], .big);
         },
         .INT4, .DATE => {
-            if (bytes.len != 4) return error.BadCell;
+            if (bytes.len != 4) return error.PostgrezBadCell;
 
             return std.mem.readInt(i32, bytes[0..4], .big);
         },
         .INT8, .TIME, .TIMESTAMP, .TIMESTAMPTZ => {
-            if (bytes.len != 8) return error.BadCell;
+            if (bytes.len != 8) return error.PostgrezBadCell;
 
             return std.mem.readInt(i64, bytes[0..8], .big);
         },
         .OID => {
-            if (bytes.len != 4) return error.BadCell;
+            if (bytes.len != 4) return error.PostgrezBadCell;
 
             return std.mem.readInt(u32, bytes[0..4], .big);
         },
         .CHAR => {
-            if (bytes.len != 1) return error.BadCell;
+            if (bytes.len != 1) return error.PostgrezBadCell;
 
             return bytes[0];
         },
-        else => return error.TypeMismatch,
+        else => return error.PostgrezTypeMismatch,
     }
 }
 
@@ -215,7 +215,7 @@ fn encodeInt(allocator: std.mem.Allocator, value: anytype) !EncodedParam {
     }
 
     // u64/usize and wider: must fit int8
-    const wide = std.math.cast(i64, value) orelse return error.ValueOutOfRange;
+    const wide = std.math.cast(i64, value) orelse return error.PostgrezValueOutOfRange;
 
     return intParam(i64, Oid.INT8, allocator, wide);
 }
@@ -254,9 +254,9 @@ test "postgrez types: binary decode integers with checked narrowing" {
     try testing.expectEqual(@as(u8, 255), try decode(u8, .INT2, &.{ 0, 255 }));
     try testing.expectEqual(@as(i32, 42), try decode(i32, .INT4, &.{ 0, 0, 0, 42 }));
 
-    try testing.expectError(error.ValueOutOfRange, decode(u8, .INT2, &.{ 1, 44 }));
-    try testing.expectError(error.BadCell, decode(i32, .INT4, &.{ 0, 0, 42 }));
-    try testing.expectError(error.TypeMismatch, decode(i32, .TEXT, "42"));
+    try testing.expectError(error.PostgrezValueOutOfRange, decode(u8, .INT2, &.{ 1, 44 }));
+    try testing.expectError(error.PostgrezBadCell, decode(i32, .INT4, &.{ 0, 0, 42 }));
+    try testing.expectError(error.PostgrezTypeMismatch, decode(i32, .TEXT, "42"));
 }
 
 test "postgrez types: binary decode date, time, timestamp as integers" {
@@ -276,15 +276,15 @@ test "postgrez types: binary decode floats" {
     std.mem.writeInt(u64, &float8_bytes, @bitCast(@as(f64, -2.25)), .big);
     try testing.expectEqual(@as(f64, -2.25), try decode(f64, .FLOAT8, &float8_bytes));
 
-    try testing.expectError(error.TypeMismatch, decode(f32, .FLOAT8, &float8_bytes));
+    try testing.expectError(error.PostgrezTypeMismatch, decode(f32, .FLOAT8, &float8_bytes));
 }
 
 test "postgrez types: binary decode bool" {
     try testing.expectEqual(true, try decode(bool, .BOOL, &.{1}));
     try testing.expectEqual(false, try decode(bool, .BOOL, &.{0}));
 
-    try testing.expectError(error.TypeMismatch, decode(bool, .INT2, &.{1}));
-    try testing.expectError(error.BadCell, decode(bool, .BOOL, &.{ 1, 1 }));
+    try testing.expectError(error.PostgrezTypeMismatch, decode(bool, .INT2, &.{1}));
+    try testing.expectError(error.PostgrezBadCell, decode(bool, .BOOL, &.{ 1, 1 }));
 }
 
 test "postgrez types: binary decode text-like, bytea, and jsonb strip" {
@@ -294,7 +294,7 @@ test "postgrez types: binary decode text-like, bytea, and jsonb strip" {
     const jsonb = [_]u8{1} ++ "{\"a\":1}".*;
     try testing.expectEqualStrings("{\"a\":1}", try decode([]const u8, .JSONB, &jsonb));
 
-    try testing.expectError(error.BadCell, decode([]const u8, .JSONB, &.{2}));
+    try testing.expectError(error.PostgrezBadCell, decode([]const u8, .JSONB, &.{2}));
 }
 
 test "postgrez types: binary decode uuid into [16]u8" {
@@ -304,8 +304,8 @@ test "postgrez types: binary decode uuid into [16]u8" {
     const decoded = try decode([16]u8, .UUID, &uuid_bytes);
     try testing.expectEqualSlices(u8, &uuid_bytes, &decoded);
 
-    try testing.expectError(error.BadCell, decode([16]u8, .UUID, uuid_bytes[0..8]));
-    try testing.expectError(error.TypeMismatch, decode([16]u8, .BYTEA, &uuid_bytes));
+    try testing.expectError(error.PostgrezBadCell, decode([16]u8, .UUID, uuid_bytes[0..8]));
+    try testing.expectError(error.PostgrezTypeMismatch, decode([16]u8, .BYTEA, &uuid_bytes));
 }
 
 test "postgrez types: encode integers picks stable wire width by type" {
@@ -327,7 +327,7 @@ test "postgrez types: encode integers picks stable wire width by type" {
     try testing.expectEqual(@as(u32, @intFromEnum(Oid.INT8)), literal.oid);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 7 }, literal.bytes.?);
 
-    try testing.expectError(error.ValueOutOfRange, encode(allocator, @as(u64, std.math.maxInt(u64))));
+    try testing.expectError(error.PostgrezValueOutOfRange, encode(allocator, @as(u64, std.math.maxInt(u64))));
 }
 
 test "postgrez types: encode floats, bool, strings, null" {

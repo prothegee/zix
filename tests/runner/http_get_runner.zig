@@ -93,7 +93,7 @@ fn run(
     var resp = try client.get(url, .{ .headers = headers });
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
 
     if (expected_substr.len > 0) {
         if (!std.mem.containsAtLeast(u8, resp.body(), 1, expected_substr)) return error.MissingExpectedSubstring;

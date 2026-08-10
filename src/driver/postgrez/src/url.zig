@@ -20,8 +20,8 @@ const lib = @import("lib.zig");
 ///
 /// Return:
 /// - lib.Config on success
-/// - error.UnsupportedScheme (not postgres:// or postgresql://)
-/// - error.InvalidUrl on a malformed or missing user, host, port, or
+/// - error.PostgrezUnsupportedScheme (not postgres:// or postgresql://)
+/// - error.PostgrezInvalidUrl on a malformed or missing user, host, port, or
 ///   sslmode segment
 pub fn parseUrl(url: []const u8) !lib.Config {
     var config = lib.Config{ .user = "" };
@@ -32,7 +32,7 @@ pub fn parseUrl(url: []const u8) !lib.Config {
     } else if (std.mem.startsWith(u8, rest, "postgres://")) {
         rest = rest["postgres://".len..];
     } else {
-        return error.UnsupportedScheme;
+        return error.PostgrezUnsupportedScheme;
     }
 
     if (std.mem.indexOfScalar(u8, rest, '?')) |query_pos| {
@@ -60,11 +60,11 @@ pub fn parseUrl(url: []const u8) !lib.Config {
     }
 
     if (std.mem.indexOfScalar(u8, rest, ':')) |colon_pos| {
-        config.port = std.fmt.parseInt(u16, rest[colon_pos + 1 ..], 10) catch return error.InvalidUrl;
+        config.port = std.fmt.parseInt(u16, rest[colon_pos + 1 ..], 10) catch return error.PostgrezInvalidUrl;
         rest = rest[0..colon_pos];
     }
 
-    if (rest.len == 0 or config.user.len == 0) return error.InvalidUrl;
+    if (rest.len == 0 or config.user.len == 0) return error.PostgrezInvalidUrl;
     config.ip = rest;
 
     return config;
@@ -86,7 +86,7 @@ fn applyQuery(config: *lib.Config, query: []const u8) !void {
         } else if (std.mem.eql(u8, mode, "require")) {
             config.tls = .REQUIRE;
         } else {
-            return error.InvalidUrl;
+            return error.PostgrezInvalidUrl;
         }
     }
 }
@@ -146,10 +146,10 @@ test "postgrez: url trailing slash keeps database null" {
 }
 
 test "postgrez: url rejects malformed input" {
-    try testing.expectError(error.UnsupportedScheme, parseUrl("mysql://app@localhost"));
-    try testing.expectError(error.UnsupportedScheme, parseUrl("localhost:5432"));
-    try testing.expectError(error.InvalidUrl, parseUrl("postgres://"));
-    try testing.expectError(error.InvalidUrl, parseUrl("postgres://localhost")); // no user
-    try testing.expectError(error.InvalidUrl, parseUrl("postgres://app@localhost:notaport"));
-    try testing.expectError(error.InvalidUrl, parseUrl("postgres://app@localhost/db?sslmode=bogus"));
+    try testing.expectError(error.PostgrezUnsupportedScheme, parseUrl("mysql://app@localhost"));
+    try testing.expectError(error.PostgrezUnsupportedScheme, parseUrl("localhost:5432"));
+    try testing.expectError(error.PostgrezInvalidUrl, parseUrl("postgres://"));
+    try testing.expectError(error.PostgrezInvalidUrl, parseUrl("postgres://localhost")); // no user
+    try testing.expectError(error.PostgrezInvalidUrl, parseUrl("postgres://app@localhost:notaport"));
+    try testing.expectError(error.PostgrezInvalidUrl, parseUrl("postgres://app@localhost/db?sslmode=bogus"));
 }

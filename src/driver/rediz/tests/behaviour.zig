@@ -387,7 +387,7 @@ test "rediz behaviour: raw command reaches the untyped surface" {
         .map => |entries| try testing.expectEqual(@as(usize, 2), entries.len),
         // RESP2 would return a flat array
         .array => |items| try testing.expectEqual(@as(usize, 4), items.len),
-        else => return error.ProtocolViolation,
+        else => return error.RedizProtocolViolation,
     }
 }
 

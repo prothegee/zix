@@ -33,6 +33,9 @@ pub const generated_emitter = @import("serialize/generated_emitter.zig");
 /// What a caller hands a parse, and what a parse can hand back.
 pub const deserialize_options = @import("deserialize/options.zig");
 
+/// Which field and which byte the last failed parse on this thread was about.
+pub const diagnostic = @import("deserialize/diagnostic.zig");
+
 /// Which of a target's fields a document filled in.
 pub const fields = @import("deserialize/fields.zig");
 
@@ -59,6 +62,13 @@ pub const serialize = @import("serialize/serialize.zig").serialize;
 
 /// Turn JSON text into a typed value, through the read path the options name.
 pub const deserialize = @import("deserialize/deserialize.zig").deserialize;
+
+/// What the last failed parse on this thread was about: the field, the byte, or both.
+///
+/// Note:
+/// - An error value has nowhere to put a field name or an offset. Read this immediately after a
+///   parse returned an error, before another parse on the same thread replaces it.
+pub const lastFailure = @import("deserialize/diagnostic.zig").lastFailure;
 
 /// A write cursor over a caller-owned buffer.
 pub const Sink = sink.Sink;

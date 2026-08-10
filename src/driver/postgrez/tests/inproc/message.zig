@@ -10,7 +10,7 @@
 
 const std = @import("std");
 
-pub const DecodeError = error{Truncated};
+pub const DecodeError = error{PostgrezTruncated};
 
 /// Fixed-capacity message builder.
 pub const Writer = struct {
@@ -30,9 +30,9 @@ pub const Writer = struct {
     ///
     /// Return:
     /// - []const u8 on success
-    /// - error.Truncated when any append did not fit
-    pub fn finish(self: *const Self) error{Truncated}![]const u8 {
-        if (self.overflowed) return error.Truncated;
+    /// - error.PostgrezTruncated when any append did not fit
+    pub fn finish(self: *const Self) error{PostgrezTruncated}![]const u8 {
+        if (self.overflowed) return error.PostgrezTruncated;
 
         return self.buf[0..self.len];
     }
@@ -114,7 +114,7 @@ pub const Reader = struct {
     }
 
     pub fn byte(self: *Self) DecodeError!u8 {
-        if (self.pos + 1 > self.buf.len) return error.Truncated;
+        if (self.pos + 1 > self.buf.len) return error.PostgrezTruncated;
 
         const value = self.buf[self.pos];
         self.pos += 1;
@@ -123,7 +123,7 @@ pub const Reader = struct {
     }
 
     pub fn bytes(self: *Self, count: usize) DecodeError![]const u8 {
-        if (self.pos + count > self.buf.len) return error.Truncated;
+        if (self.pos + count > self.buf.len) return error.PostgrezTruncated;
 
         const value = self.buf[self.pos..][0..count];
         self.pos += count;
@@ -145,7 +145,7 @@ pub const Reader = struct {
 
     /// A NUL-terminated string, the terminator consumed but not returned.
     pub fn cstring(self: *Self) DecodeError![]const u8 {
-        const end = std.mem.indexOfScalarPos(u8, self.buf, self.pos, 0) orelse return error.Truncated;
+        const end = std.mem.indexOfScalarPos(u8, self.buf, self.pos, 0) orelse return error.PostgrezTruncated;
 
         const value = self.buf[self.pos..end];
         self.pos = end + 1;
@@ -201,7 +201,7 @@ test "postgrez inproc: message writer reports overflow instead of truncating qui
 
     writer.cstring("this does not fit");
 
-    try testing.expectError(error.Truncated, writer.finish());
+    try testing.expectError(error.PostgrezTruncated, writer.finish());
 }
 
 test "postgrez inproc: message writer and reader round trip every field kind" {
@@ -227,11 +227,11 @@ test "postgrez inproc: message writer and reader round trip every field kind" {
 test "postgrez inproc: message reader reports a truncated field" {
     var reader = Reader{ .buf = &[_]u8{ 0, 1 } };
 
-    try testing.expectError(error.Truncated, reader.int32());
+    try testing.expectError(error.PostgrezTruncated, reader.int32());
 }
 
 test "postgrez inproc: message reader reports a cstring with no terminator" {
     var reader = Reader{ .buf = "unterminated" };
 
-    try testing.expectError(error.Truncated, reader.cstring());
+    try testing.expectError(error.PostgrezTruncated, reader.cstring());
 }

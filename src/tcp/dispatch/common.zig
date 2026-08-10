@@ -6,22 +6,35 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 const Config = @import("../config.zig");
 const TcpServerConfig = Config.TcpServerConfig;
 const Logger = @import("../../logger/logger.zig").Logger;
 const win_io = @import("../../utils/windows_io.zig");
 
-/// Emit a server lifecycle line. Routes through cfg.logger when present.
-/// Without a logger it prints to stderr only in Debug builds (silent in release).
-pub fn logSystem(cfg: TcpServerConfig, comptime fmt: []const u8, args: anytype) void {
+const log = std.log.scoped(.zix_tcp);
+
+/// Emit a server line at the given level. Routes through cfg.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+pub fn logSystem(cfg: TcpServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (cfg.logger) |lg| {
-        lg.system(.INFO, "tcp", fmt, args);
+        lg.system(level, "tcp", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix tcp dispatch: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 // --------------------------------------------------------- //

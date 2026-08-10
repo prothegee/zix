@@ -325,7 +325,7 @@ fn mainLoop(conn: *Conn) void {
 /// when the call is nested inside a body pump or a window wait.
 fn processFrame(conn: *Conn, active: ?*ActiveStream) ProcessResult {
     const frame = http2_frames.readFrame(conn.client_r, &conn.payload_buf) catch |err| {
-        if (err == error.FrameTooLarge) return connError(conn, Http2.ERR_FRAME_SIZE_ERROR);
+        if (err == error.ZixerFrameTooLarge) return connError(conn, Http2.ERR_FRAME_SIZE_ERROR);
 
         return .CLOSED;
     };
@@ -453,8 +453,8 @@ fn processHeaders(conn: *Conn, active: ?*ActiveStream, first: *const http2_frame
     if (conn.goaway_received) return streamError(conn, id, Http2.ERR_REFUSED_STREAM);
 
     const request = http2_translate.assemble(headers, end_stream) catch |err| switch (err) {
-        error.Malformed => return streamError(conn, id, Http2.ERR_PROTOCOL_ERROR),
-        error.UnsupportedConnect => return localAnswer(conn, id, 501, null),
+        error.ZixerMalformed => return streamError(conn, id, Http2.ERR_PROTOCOL_ERROR),
+        error.ZixerUnsupportedConnect => return localAnswer(conn, id, 501, null),
     };
 
     // rfc 9110 7.4: under TLS, an authority this certificate does not
@@ -777,10 +777,10 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
             pumpBodyToUpstream(conn, active, &up_writer.interface, entry.content_length) catch |err| {
                 conn_up.stream.close(io);
                 switch (err) {
-                    error.ClientDead => return .CONN_DEAD,
-                    error.Reset => return .DONE,
-                    error.BadBody => return if (streamError(conn, active.id, Http2.ERR_PROTOCOL_ERROR) == .CLOSED) .CONN_DEAD else .DONE,
-                    error.UpstreamDead => return if (localAnswer(conn, active.id, 502, "connection_terminated") == .CLOSED) .CONN_DEAD else .DONE,
+                    error.ZixerClientDead => return .CONN_DEAD,
+                    error.ZixerReset => return .DONE,
+                    error.ZixerBadBody => return if (streamError(conn, active.id, Http2.ERR_PROTOCOL_ERROR) == .CLOSED) .CONN_DEAD else .DONE,
+                    error.ZixerUpstreamDead => return if (localAnswer(conn, active.id, 502, "connection_terminated") == .CLOSED) .CONN_DEAD else .DONE,
                 }
             };
         }
@@ -801,12 +801,12 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
         const response = readUpstreamHead(conn, active, &up_reader.interface, &resp_head_buf, method, gate) catch |err| {
             conn_up.stream.close(io);
             switch (err) {
-                error.ClientDead => return .CONN_DEAD,
+                error.ZixerClientDead => return .CONN_DEAD,
 
                 // A silent upstream is not a dead one: the request was
                 // already delivered, so it is neither replayed elsewhere
                 // nor is the slot taken out of rotation.
-                error.UpstreamTimeout => return if (localAnswer(conn, active.id, 504, "http_response_timeout") == .CLOSED) .CONN_DEAD else .DONE,
+                error.ZixerUpstreamTimeout => return if (localAnswer(conn, active.id, 504, "http_response_timeout") == .CLOSED) .CONN_DEAD else .DONE,
                 else => {},
             }
             if (!entry.needs_body) {
@@ -832,19 +832,19 @@ fn servePool(conn: *Conn, active: *ActiveStream, entry: *const Pending) Outcome 
 fn readUpstreamHead(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, head_buf: []u8, method: []const u8, gate: upstream_deadline.Gate) !http1_head.ResponseHead {
     var interim: usize = 0;
     while (interim <= MAX_INTERIM) : (interim += 1) {
-        if (!gate.ready(up_r)) return error.UpstreamTimeout;
+        if (!gate.ready(up_r)) return error.ZixerUpstreamTimeout;
 
-        const bytes = http1_head.readHead(up_r, head_buf) catch return error.UpstreamDead;
-        const response = http1_head.parseResponse(bytes, method) catch return error.UpstreamDead;
+        const bytes = http1_head.readHead(up_r, head_buf) catch return error.ZixerUpstreamDead;
+        const response = http1_head.parseResponse(bytes, method) catch return error.ZixerUpstreamDead;
 
-        if (response.status == 101) return error.UpstreamDead;
+        if (response.status == 101) return error.ZixerUpstreamDead;
         if (response.status / 100 != 1) return response;
 
-        const block = http2_translate.encodeResponseBlock(&conn.resp_block_buf, &response, null, conn.clientBlock()) catch return error.UpstreamDead;
-        if (writeBlock(conn, active.id, block, false) == .CLOSED) return error.ClientDead;
+        const block = http2_translate.encodeResponseBlock(&conn.resp_block_buf, &response, null, conn.clientBlock()) catch return error.ZixerUpstreamDead;
+        if (writeBlock(conn, active.id, block, false) == .CLOSED) return error.ZixerClientDead;
     }
 
-    return error.UpstreamDead;
+    return error.ZixerUpstreamDead;
 }
 
 /// Relay one upstream response onto the stream: head as a header block,
@@ -888,12 +888,12 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
         };
 
         relayed catch |err| switch (err) {
-            error.ClientDead => {
+            error.ZixerClientDead => {
                 conn_up.stream.close(io);
                 return .CONN_DEAD;
             },
-            error.Reset => relay_failed = true,
-            error.UpstreamDead, error.BadBody => {
+            error.ZixerReset => relay_failed = true,
+            error.ZixerUpstreamDead, error.ZixerBadBody => {
                 relay_failed = true;
                 relay_result = if (streamError(conn, active.id, Http2.ERR_INTERNAL_ERROR) == .CLOSED) .CONN_DEAD else .DONE;
             },
@@ -918,10 +918,10 @@ fn relayResponse(conn: *Conn, active: *ActiveStream, response: *const http1_head
 // body relays
 
 const RelayError = error{
-    ClientDead,
-    Reset,
-    UpstreamDead,
-    BadBody,
+    ZixerClientDead,
+    ZixerReset,
+    ZixerUpstreamDead,
+    ZixerBadBody,
 };
 
 /// Pump the request DATA frames onto the upstream leg, granting the flow
@@ -934,27 +934,27 @@ fn pumpBodyToUpstream(conn: *Conn, active: *ActiveStream, up_w: *std.Io.Writer, 
     while (!active.recv_done) {
         active.took_data = "";
         active.took_wire = 0;
-        if (processFrame(conn, active) == .CLOSED) return error.ClientDead;
-        if (active.reset) return error.Reset;
+        if (processFrame(conn, active) == .CLOSED) return error.ZixerClientDead;
+        if (active.reset) return error.ZixerReset;
 
         if (active.took_data.len > 0) {
             const data = active.took_data;
             if (chunked) {
-                up_w.print("{x}\r\n", .{data.len}) catch return error.UpstreamDead;
-                up_w.writeAll(data) catch return error.UpstreamDead;
-                up_w.writeAll("\r\n") catch return error.UpstreamDead;
+                up_w.print("{x}\r\n", .{data.len}) catch return error.ZixerUpstreamDead;
+                up_w.writeAll(data) catch return error.ZixerUpstreamDead;
+                up_w.writeAll("\r\n") catch return error.ZixerUpstreamDead;
             } else {
-                if (data.len > remaining) return error.BadBody;
-                up_w.writeAll(data) catch return error.UpstreamDead;
+                if (data.len > remaining) return error.ZixerBadBody;
+                up_w.writeAll(data) catch return error.ZixerUpstreamDead;
                 remaining -= data.len;
             }
         }
 
-        if (active.took_wire > 0) grantCredit(conn, active.id, active.took_wire) catch return error.ClientDead;
+        if (active.took_wire > 0) grantCredit(conn, active.id, active.took_wire) catch return error.ZixerClientDead;
     }
 
-    if (!chunked and remaining != 0) return error.BadBody;
-    if (chunked) up_w.writeAll("0\r\n\r\n") catch return error.UpstreamDead;
+    if (!chunked and remaining != 0) return error.ZixerBadBody;
+    if (chunked) up_w.writeAll("0\r\n\r\n") catch return error.ZixerUpstreamDead;
 }
 
 /// Hand consumed request-body credit back on the connection and stream.
@@ -974,8 +974,8 @@ fn sendData(conn: *Conn, active: *ActiveStream, bytes: []const u8, end_stream: b
 
         lockWrite(conn);
         defer unlockWrite(conn);
-        http2_frames.writeFrame(conn.client_w, Http2.FRAME_TYPE_DATA, Http2.FLAG_END_STREAM, active.id, "") catch return error.ClientDead;
-        conn.client_w.flush() catch return error.ClientDead;
+        http2_frames.writeFrame(conn.client_w, Http2.FRAME_TYPE_DATA, Http2.FLAG_END_STREAM, active.id, "") catch return error.ZixerClientDead;
+        conn.client_w.flush() catch return error.ZixerClientDead;
 
         return;
     }
@@ -986,9 +986,9 @@ fn sendData(conn: *Conn, active: *ActiveStream, bytes: []const u8, end_stream: b
         if (window <= 0) {
             // Everything staged must reach the client before blocking on
             // its next grant, an unflushed frame cannot be acknowledged.
-            conn.client_w.flush() catch return error.ClientDead;
-            if (processFrame(conn, active) == .CLOSED) return error.ClientDead;
-            if (active.reset) return error.Reset;
+            conn.client_w.flush() catch return error.ZixerClientDead;
+            if (processFrame(conn, active) == .CLOSED) return error.ZixerClientDead;
+            if (active.reset) return error.ZixerReset;
             continue;
         }
 
@@ -999,7 +999,7 @@ fn sendData(conn: *Conn, active: *ActiveStream, bytes: []const u8, end_stream: b
         lockWrite(conn);
         http2_frames.writeFrame(conn.client_w, Http2.FRAME_TYPE_DATA, flags, active.id, bytes[offset..][0..take]) catch {
             unlockWrite(conn);
-            return error.ClientDead;
+            return error.ZixerClientDead;
         };
         unlockWrite(conn);
 
@@ -1016,17 +1016,17 @@ fn relayExact(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, len: u64
     while (remaining > 0) {
         // The head is already on the wire, so a stall here can only end the
         // stream. The client sees a reset rather than a body that never ends.
-        if (!gate.ready(up_r)) return error.UpstreamDead;
+        if (!gate.ready(up_r)) return error.ZixerUpstreamDead;
 
         const want: usize = @intCast(@min(remaining, chunk.len));
-        const got = up_r.readSliceShort(chunk[0..want]) catch return error.UpstreamDead;
-        if (got == 0) return error.UpstreamDead;
+        const got = up_r.readSliceShort(chunk[0..want]) catch return error.ZixerUpstreamDead;
+        if (got == 0) return error.ZixerUpstreamDead;
 
         remaining -= got;
         try sendData(conn, active, chunk[0..got], remaining == 0);
     }
 
-    conn.client_w.flush() catch return error.ClientDead;
+    conn.client_w.flush() catch return error.ZixerClientDead;
 }
 
 /// Relay a chunked upstream body: each chunk flushes as its own DATA so
@@ -1035,11 +1035,11 @@ fn relayExact(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader, len: u64
 fn relayChunked(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader) RelayError!void {
     while (true) {
         var line_buf: [256]u8 = undefined;
-        const size_line = readLine(up_r, &line_buf) catch return error.UpstreamDead;
+        const size_line = readLine(up_r, &line_buf) catch return error.ZixerUpstreamDead;
 
         const semicolon = std.mem.indexOfScalar(u8, size_line, ';');
         const size_text = std.mem.trim(u8, if (semicolon) |pos| size_line[0..pos] else size_line, " \t");
-        const size = std.fmt.parseInt(u64, size_text, 16) catch return error.BadBody;
+        const size = std.fmt.parseInt(u64, size_text, 16) catch return error.ZixerBadBody;
 
         if (size == 0) return relayTrailers(conn, active, up_r);
 
@@ -1047,17 +1047,17 @@ fn relayChunked(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader) RelayE
         var chunk: [http2_frames.MAX_PAYLOAD]u8 = undefined;
         while (remaining > 0) {
             const want: usize = @intCast(@min(remaining, chunk.len));
-            const got = up_r.readSliceShort(chunk[0..want]) catch return error.UpstreamDead;
-            if (got == 0) return error.UpstreamDead;
+            const got = up_r.readSliceShort(chunk[0..want]) catch return error.ZixerUpstreamDead;
+            if (got == 0) return error.ZixerUpstreamDead;
 
             remaining -= got;
             try sendData(conn, active, chunk[0..got], false);
         }
 
-        const after = readLine(up_r, &line_buf) catch return error.UpstreamDead;
-        if (after.len != 0) return error.BadBody;
+        const after = readLine(up_r, &line_buf) catch return error.ZixerUpstreamDead;
+        if (after.len != 0) return error.ZixerBadBody;
 
-        conn.client_w.flush() catch return error.ClientDead;
+        conn.client_w.flush() catch return error.ZixerClientDead;
     }
 }
 
@@ -1071,7 +1071,7 @@ fn relayTrailers(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader) Relay
 
     while (true) {
         var line_buf: [512]u8 = undefined;
-        const line = readLine(up_r, &line_buf) catch return error.UpstreamDead;
+        const line = readLine(up_r, &line_buf) catch return error.ZixerUpstreamDead;
         if (line.len == 0) break;
         if (trailer_count == trailers.len) continue;
         if (text_len + line.len > text_buf.len) continue;
@@ -1093,7 +1093,7 @@ fn relayTrailers(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader) Relay
             return try sendData(conn, active, "", true);
         };
         if (block.len > 0) {
-            if (writeBlock(conn, active.id, block, true) == .CLOSED) return error.ClientDead;
+            if (writeBlock(conn, active.id, block, true) == .CLOSED) return error.ZixerClientDead;
 
             return;
         }
@@ -1110,7 +1110,7 @@ fn relayUntilClose(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader) Rel
         const burst = up_r.peekGreedy(1) catch break;
 
         try sendData(conn, active, burst, false);
-        conn.client_w.flush() catch return error.ClientDead;
+        conn.client_w.flush() catch return error.ZixerClientDead;
         up_r.toss(burst.len);
     }
 
@@ -1121,14 +1121,14 @@ fn relayUntilClose(conn: *Conn, active: *ActiveStream, up_r: *std.Io.Reader) Rel
 fn readLine(src: *std.Io.Reader, buf: []u8) ![]const u8 {
     var len: usize = 0;
     while (len < buf.len) {
-        const got = src.readSliceShort(buf[len .. len + 1]) catch return error.ConnectionClosed;
-        if (got == 0) return error.ConnectionClosed;
+        const got = src.readSliceShort(buf[len .. len + 1]) catch return error.ZixerConnectionClosed;
+        if (got == 0) return error.ZixerConnectionClosed;
 
         len += 1;
         if (len >= 2 and buf[len - 2] == '\r' and buf[len - 1] == '\n') return buf[0 .. len - 2];
     }
 
-    return error.BadChunk;
+    return error.ZixerBadChunk;
 }
 
 // --------------------------------------------------------- //
@@ -1192,7 +1192,7 @@ fn serveStaticFile(conn: *Conn, active: *ActiveStream, resolved: static_files.Re
 
         offset += frame.len;
         sendData(conn, active, frame, offset == resolved.size) catch |err| switch (err) {
-            error.ClientDead => return .CONN_DEAD,
+            error.ZixerClientDead => return .CONN_DEAD,
 
             // The stream ended under us, the staged head still leaves.
             else => {
@@ -2546,7 +2546,7 @@ test "zix zixer: http2 edge, client goaway drains and closes the connection" {
 
     const answer_frame = try client.nextFrame();
     try testing.expectEqual(@as(u8, Http2.FRAME_TYPE_GOAWAY), answer_frame.head.frame_type);
-    try testing.expectError(error.ConnectionClosed, client.nextFrame());
+    try testing.expectError(error.ZixerConnectionClosed, client.nextFrame());
 
     client.stream.close(io);
     edge_thread.join();

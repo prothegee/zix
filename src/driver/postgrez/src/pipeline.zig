@@ -5,7 +5,7 @@
 //! - add() only appends to the connection send buffer, nothing hits the
 //!   wire before sync().
 //! - config.max_pending_replies bounds the queued statements (0 = no
-//!   bound). Beyond the bound add() sheds with error.QueueFull instead of
+//!   bound). Beyond the bound add() sheds with error.PostgrezQueueFull instead of
 //!   growing memory.
 //! - After a failed statement the server discards the rest of the batch
 //!   until Sync: those results come back ABORTED.
@@ -46,10 +46,10 @@ pub const Pipeline = struct {
     ///
     /// Return:
     /// - void on success
-    /// - error.QueueFull when max_pending_replies is set and reached
+    /// - error.PostgrezQueueFull when max_pending_replies is set and reached
     pub fn add(self: *Pipeline, sql: []const u8, args: anytype) !void {
         const bound = self.conn.config.max_pending_replies;
-        if (bound != 0 and self.statement_count >= bound) return error.QueueFull;
+        if (bound != 0 and self.statement_count >= bound) return error.PostgrezQueueFull;
 
         const conn = self.conn;
         const arena = conn.query_arena.allocator();
@@ -104,7 +104,7 @@ pub const Pipeline = struct {
 
                     return results;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }

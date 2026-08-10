@@ -36,15 +36,15 @@ pub const UNORDERED_FLAG: u8 = 0x80;
 /// Everything that stops a DCEP message from being read or built.
 pub const Error = error{
     /// Fewer bytes than the message needs.
-    Truncated,
+    ZixTruncated,
     /// The label and protocol lengths do not match the bytes that came with them.
-    BadLength,
+    ZixBadLength,
     /// A message type this endpoint does not implement.
-    UnknownMessageType,
+    ZixUnknownMessageType,
     /// A channel type outside the six RFC 8832 5.1 defines.
-    UnknownChannelType,
+    ZixUnknownChannelType,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// What a DCEP message is (RFC 8832 8.2.1).
@@ -134,9 +134,9 @@ pub const Open = struct {
 ///
 /// Return:
 /// - MessageType
-/// - error.Truncated if the payload is empty
+/// - error.ZixTruncated if the payload is empty
 pub fn messageType(message: []const u8) Error!MessageType {
-    if (message.len == 0) return error.Truncated;
+    if (message.len == 0) return error.ZixTruncated;
 
     return @enumFromInt(message[0]);
 }
@@ -152,23 +152,23 @@ pub fn messageType(message: []const u8) Error!MessageType {
 ///
 /// Return:
 /// - Open borrowing `message`
-/// - error.Truncated if the message is shorter than its fixed part
-/// - error.BadLength if the two length fields do not account for the rest of it exactly
-/// - error.UnknownMessageType if it is not a DATA_CHANNEL_OPEN
-/// - error.UnknownChannelType
+/// - error.ZixTruncated if the message is shorter than its fixed part
+/// - error.ZixBadLength if the two length fields do not account for the rest of it exactly
+/// - error.ZixUnknownMessageType if it is not a DATA_CHANNEL_OPEN
+/// - error.ZixUnknownChannelType
 pub fn readOpen(message: []const u8) Error!Open {
-    if (message.len < OPEN_FIXED_LEN) return error.Truncated;
-    if ((try messageType(message)) != .OPEN) return error.UnknownMessageType;
+    if (message.len < OPEN_FIXED_LEN) return error.ZixTruncated;
+    if ((try messageType(message)) != .OPEN) return error.ZixUnknownMessageType;
 
     const channel_type: ChannelType = @enumFromInt(message[1]);
 
-    if (!isKnownChannelType(channel_type)) return error.UnknownChannelType;
+    if (!isKnownChannelType(channel_type)) return error.ZixUnknownChannelType;
 
     const label_len = std.mem.readInt(u16, message[8..10], .big);
     const protocol_len = std.mem.readInt(u16, message[10..12], .big);
     const total = OPEN_FIXED_LEN + @as(usize, label_len) + @as(usize, protocol_len);
 
-    if (message.len != total) return error.BadLength;
+    if (message.len != total) return error.ZixBadLength;
 
     return .{
         .channel_type = channel_type,
@@ -198,17 +198,17 @@ pub fn openLen(open: Open) usize {
 ///
 /// Return:
 /// - []const u8, the whole message
-/// - error.NoSpace if `out` cannot hold it
-/// - error.BadLength if the label or the protocol is longer than its length field
-/// - error.UnknownChannelType
+/// - error.ZixNoSpace if `out` cannot hold it
+/// - error.ZixBadLength if the label or the protocol is longer than its length field
+/// - error.ZixUnknownChannelType
 pub fn writeOpen(out: []u8, open: Open) Error![]const u8 {
-    if (open.label.len > MAX_FIELD_LEN) return error.BadLength;
-    if (open.protocol.len > MAX_FIELD_LEN) return error.BadLength;
-    if (!isKnownChannelType(open.channel_type)) return error.UnknownChannelType;
+    if (open.label.len > MAX_FIELD_LEN) return error.ZixBadLength;
+    if (open.protocol.len > MAX_FIELD_LEN) return error.ZixBadLength;
+    if (!isKnownChannelType(open.channel_type)) return error.ZixUnknownChannelType;
 
     const total = openLen(open);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     out[0] = @intFromEnum(MessageType.OPEN);
     out[1] = @intFromEnum(open.channel_type);
@@ -229,9 +229,9 @@ pub fn writeOpen(out: []u8, open: Open) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8, the whole message
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeAck(out: []u8) Error![]const u8 {
-    if (out.len < ACK_LEN) return error.NoSpace;
+    if (out.len < ACK_LEN) return error.ZixNoSpace;
 
     out[0] = @intFromEnum(MessageType.ACK);
 
@@ -276,7 +276,7 @@ test "zix datachannel: dcep messageType, the two type numbers match RFC 8832 8.2
 }
 
 test "zix datachannel: dcep messageType, an empty payload is truncated" {
-    try std.testing.expectError(error.Truncated, messageType(""));
+    try std.testing.expectError(error.ZixTruncated, messageType(""));
 }
 
 test "zix datachannel: dcep readOpen, the hand-built sample reads field for field" {
@@ -306,14 +306,14 @@ test "zix datachannel: dcep readOpen, a label and a protocol both come back" {
 }
 
 test "zix datachannel: dcep readOpen, a message shorter than the fixed part is truncated" {
-    try std.testing.expectError(error.Truncated, readOpen(sample_open[0..11]));
+    try std.testing.expectError(error.ZixTruncated, readOpen(sample_open[0..11]));
 }
 
 test "zix datachannel: dcep readOpen, a label length past the end is a framing error" {
     var message = sample_open;
     std.mem.writeInt(u16, message[8..10], 40, .big);
 
-    try std.testing.expectError(error.BadLength, readOpen(&message));
+    try std.testing.expectError(error.ZixBadLength, readOpen(&message));
 }
 
 test "zix datachannel: dcep readOpen, trailing bytes are a framing error" {
@@ -323,28 +323,28 @@ test "zix datachannel: dcep readOpen, trailing bytes are a framing error" {
 
     // The lengths account for 16 bytes and 17 arrived, which RFC 8832 7 treats as an error
     // rather than something to read past.
-    try std.testing.expectError(error.BadLength, readOpen(&message));
+    try std.testing.expectError(error.ZixBadLength, readOpen(&message));
 }
 
 test "zix datachannel: dcep readOpen, an ack is not an open" {
     var buf: [ACK_LEN]u8 = undefined;
     const ack = try writeAck(&buf);
 
-    try std.testing.expectError(error.Truncated, readOpen(ack));
+    try std.testing.expectError(error.ZixTruncated, readOpen(ack));
 }
 
 test "zix datachannel: dcep readOpen, a channel type outside the six is refused" {
     var message = sample_open;
     message[1] = 0x03;
 
-    try std.testing.expectError(error.UnknownChannelType, readOpen(&message));
+    try std.testing.expectError(error.ZixUnknownChannelType, readOpen(&message));
 }
 
 test "zix datachannel: dcep readOpen, a message type that is neither open nor ack is refused" {
     var message = sample_open;
     message[0] = 0x04;
 
-    try std.testing.expectError(error.UnknownMessageType, readOpen(&message));
+    try std.testing.expectError(error.ZixUnknownMessageType, readOpen(&message));
 }
 
 test "zix datachannel: dcep writeOpen, the bytes match the hand-built sample" {
@@ -363,7 +363,7 @@ test "zix datachannel: dcep writeOpen, the bytes match the hand-built sample" {
 test "zix datachannel: dcep writeOpen, a buffer one byte short errors" {
     var buf: [15]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeOpen(&buf, .{
+    try std.testing.expectError(error.ZixNoSpace, writeOpen(&buf, .{
         .channel_type = .RELIABLE,
         .priority = 256,
         .reliability_parameter = 0,
@@ -383,7 +383,7 @@ test "zix datachannel: dcep writeAck, the whole message is one byte" {
 test "zix datachannel: dcep writeAck, an empty buffer errors" {
     var buf: [0]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeAck(&buf));
+    try std.testing.expectError(error.ZixNoSpace, writeAck(&buf));
 }
 
 test "zix datachannel: dcep channel type, the unordered bit is independent of the reliability" {

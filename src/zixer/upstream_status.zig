@@ -53,7 +53,7 @@ pub fn afterAttempts(any_timed_out: bool) Answer {
 /// Return:
 /// - true only for a handshake that never got an answer
 pub fn ranOutOfTime(err: upstream_conn.ConnectError) bool {
-    return err == error.ConnectTimeout;
+    return err == error.ZixConnectTimeout;
 }
 
 // --------------------------------------------------------- //
@@ -76,8 +76,8 @@ test "zix zixer: upstream status, a round of plain failures answers 502" {
 }
 
 test "zix zixer: upstream status, only the elapsed budget counts as out of time" {
-    try testing.expect(ranOutOfTime(error.ConnectTimeout));
+    try testing.expect(ranOutOfTime(error.ZixConnectTimeout));
 
-    try testing.expect(!ranOutOfTime(error.ConnectFailed));
-    try testing.expect(!ranOutOfTime(error.BadUpstreamAddress));
+    try testing.expect(!ranOutOfTime(error.ZixConnectFailed));
+    try testing.expect(!ranOutOfTime(error.ZixerBadUpstreamAddress));
 }

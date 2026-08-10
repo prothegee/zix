@@ -210,7 +210,7 @@ Blok diproduksi dengan menjalankan `HpackEncoder` asli di comptime, jadi byte-ny
 
 ### Dispatch (run)
 
-`server.zig` memuat tipe publik `GrpcServer` dan `run()` switch tipis pada `dispatch_model`. Implementasi per-model berada di `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` mempertahankan struktur accept-thread + `io.async` dan memanggil `serveGrpcConn`. `.EPOLL` memanggil `epoll.runEpoll`. `.URING` memanggil `uring.runUring` (bentuk berbasis completion io_uring dari `.EPOLL`). Saat `cfg.tls != null`, `run()` justru bercabang ke `tls_mux.runTlsMux` (multiplex) atau `tls_serve.runTls` (blocking per koneksi). Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
+`server.zig` memuat tipe publik `GrpcServer` dan `run()` switch tipis pada `dispatch_model`. Implementasi per-model berada di `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` mempertahankan struktur accept-thread + `io.async` dan memanggil `serveGrpcConn`. `.EPOLL` memanggil `epoll.runEpoll`. `.URING` memanggil `uring.runUring` (bentuk berbasis completion io_uring dari `.EPOLL`). Saat `cfg.tls != null`, `run()` justru bercabang ke `tls_mux.runTlsMux` (multiplex) atau `tls_serve.runTls` (blocking per koneksi). Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
 
 Simbol `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, dan `runEpoll` di bawah semuanya berada di `dispatch/epoll.zig`.
 

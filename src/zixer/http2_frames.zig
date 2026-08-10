@@ -13,9 +13,9 @@ pub const MAX_PAYLOAD: usize = Http2.DEFAULT_MAX_FRAME_SIZE;
 pub const SETTINGS_ENABLE_CONNECT_PROTOCOL: u16 = 0x08;
 
 pub const Error = error{
-    ConnectionClosed,
-    FrameTooLarge,
-    BadFrame,
+    ZixerConnectionClosed,
+    ZixerFrameTooLarge,
+    ZixerBadFrame,
 };
 
 /// One frame as read off the wire. payload borrows the caller's buffer and
@@ -28,11 +28,11 @@ pub const Frame = struct {
 /// Read one frame (header plus payload) into payload_buf.
 pub fn readFrame(src: *std.Io.Reader, payload_buf: []u8) Error!Frame {
     var head_bytes: [Http2.FRAME_HEADER_LEN]u8 = undefined;
-    src.readSliceAll(&head_bytes) catch return error.ConnectionClosed;
+    src.readSliceAll(&head_bytes) catch return error.ZixerConnectionClosed;
 
     const head = Http2.parseFrameHeader(&head_bytes);
-    if (head.length > payload_buf.len) return error.FrameTooLarge;
-    src.readSliceAll(payload_buf[0..head.length]) catch return error.ConnectionClosed;
+    if (head.length > payload_buf.len) return error.ZixerFrameTooLarge;
+    src.readSliceAll(payload_buf[0..head.length]) catch return error.ZixerConnectionClosed;
 
     return .{ .head = head, .payload = payload_buf[0..head.length] };
 }
@@ -169,9 +169,9 @@ pub const SettingsIterator = struct {
 pub fn dataPayload(frame: *const Frame) Error![]const u8 {
     if ((frame.head.flags & Http2.FLAG_PADDED) == 0) return frame.payload;
 
-    if (frame.payload.len < 1) return error.BadFrame;
+    if (frame.payload.len < 1) return error.ZixerBadFrame;
     const pad_len: usize = frame.payload[0];
-    if (1 + pad_len > frame.payload.len) return error.BadFrame;
+    if (1 + pad_len > frame.payload.len) return error.ZixerBadFrame;
 
     return frame.payload[1 .. frame.payload.len - pad_len];
 }
@@ -183,24 +183,24 @@ pub fn headersFragment(frame: *const Frame) Error![]const u8 {
     var pad_len: usize = 0;
 
     if ((frame.head.flags & Http2.FLAG_PADDED) != 0) {
-        if (fragment.len < 1) return error.BadFrame;
+        if (fragment.len < 1) return error.ZixerBadFrame;
         pad_len = fragment[0];
         fragment = fragment[1..];
     }
 
     if ((frame.head.flags & Http2.FLAG_PRIORITY) != 0) {
-        if (fragment.len < 5) return error.BadFrame;
+        if (fragment.len < 5) return error.ZixerBadFrame;
         fragment = fragment[5..];
     }
 
-    if (pad_len > fragment.len) return error.BadFrame;
+    if (pad_len > fragment.len) return error.ZixerBadFrame;
 
     return fragment[0 .. fragment.len - pad_len];
 }
 
 /// The increment of a WINDOW_UPDATE payload, reserved bit dropped.
 pub fn windowIncrement(payload: []const u8) Error!u31 {
-    if (payload.len != 4) return error.BadFrame;
+    if (payload.len != 4) return error.ZixerBadFrame;
 
     const raw = std.mem.readInt(u32, payload[0..4], .big);
 
@@ -236,14 +236,14 @@ test "zix zixer: http2 frames, oversize length refuses before the payload read" 
 
     var src = std.Io.Reader.fixed(out.buffered());
     var payload_buf: [16]u8 = undefined;
-    try testing.expectError(error.FrameTooLarge, readFrame(&src, &payload_buf));
+    try testing.expectError(error.ZixerFrameTooLarge, readFrame(&src, &payload_buf));
 }
 
 test "zix zixer: http2 frames, truncated wire reads as connection closed" {
     var src = std.Io.Reader.fixed("\x00\x00");
     var payload_buf: [16]u8 = undefined;
 
-    try testing.expectError(error.ConnectionClosed, readFrame(&src, &payload_buf));
+    try testing.expectError(error.ZixerConnectionClosed, readFrame(&src, &payload_buf));
 }
 
 test "zix zixer: http2 frames, settings roundtrip through the iterator" {
@@ -280,7 +280,7 @@ test "zix zixer: http2 frames, data padding strips and refuses overrun" {
         .head = .{ .length = 2, .frame_type = Http2.FRAME_TYPE_DATA, .flags = Http2.FLAG_PADDED, .stream_id = 1 },
         .payload = "\x05a",
     };
-    try testing.expectError(error.BadFrame, dataPayload(&overrun));
+    try testing.expectError(error.ZixerBadFrame, dataPayload(&overrun));
 
     const plain = Frame{
         .head = .{ .length = 2, .frame_type = Http2.FRAME_TYPE_DATA, .flags = 0, .stream_id = 1 },
@@ -306,7 +306,7 @@ test "zix zixer: http2 frames, headers fragment drops padding and priority" {
         .head = .{ .length = 2, .frame_type = Http2.FRAME_TYPE_HEADERS, .flags = Http2.FLAG_PRIORITY, .stream_id = 1 },
         .payload = "ab",
     };
-    try testing.expectError(error.BadFrame, headersFragment(&short));
+    try testing.expectError(error.ZixerBadFrame, headersFragment(&short));
 }
 
 test "zix zixer: http2 frames, window update roundtrip drops the reserved bit" {
@@ -323,7 +323,7 @@ test "zix zixer: http2 frames, window update roundtrip drops the reserved bit" {
     const reserved = [4]u8{ 0x80, 0x00, 0x00, 0x07 };
     try testing.expectEqual(@as(u31, 7), try windowIncrement(&reserved));
 
-    try testing.expectError(error.BadFrame, windowIncrement("abc"));
+    try testing.expectError(error.ZixerBadFrame, windowIncrement("abc"));
 }
 
 test "zix zixer: http2 frames, goaway carries last stream and error code" {

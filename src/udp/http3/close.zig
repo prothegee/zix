@@ -23,28 +23,28 @@ pub const ConnClose = struct {
 
 /// Parse a CONNECTION_CLOSE frame including its type byte (RFC 9000 19.19). Only the 0x1c variant
 /// has the Frame Type field.
-pub fn parseConnectionClose(data: []const u8) error{ Truncated, ProtocolViolation }!ConnClose {
+pub fn parseConnectionClose(data: []const u8) error{ ZixTruncated, ZixProtocolViolation }!ConnClose {
     var pos: usize = 0;
 
-    const type_vi = varint.read(data) catch return error.Truncated;
+    const type_vi = varint.read(data) catch return error.ZixTruncated;
     pos += type_vi.len;
-    if (type_vi.value != 0x1c and type_vi.value != 0x1d) return error.ProtocolViolation;
+    if (type_vi.value != 0x1c and type_vi.value != 0x1d) return error.ZixProtocolViolation;
 
     const is_application = type_vi.value == 0x1d;
 
-    const error_code = readField(data, &pos) catch return error.Truncated;
+    const error_code = readField(data, &pos) catch return error.ZixTruncated;
 
     var frame_type: u64 = 0;
-    if (!is_application) frame_type = readField(data, &pos) catch return error.Truncated;
+    if (!is_application) frame_type = readField(data, &pos) catch return error.ZixTruncated;
 
-    const reason_len = readField(data, &pos) catch return error.Truncated;
-    if (data.len < pos + reason_len) return error.Truncated;
+    const reason_len = readField(data, &pos) catch return error.ZixTruncated;
+    if (data.len < pos + reason_len) return error.ZixTruncated;
 
     return .{ .is_application = is_application, .error_code = error_code, .frame_type = frame_type, .reason = data[pos .. pos + reason_len] };
 }
 
 /// Read one variable-length field, advancing the cursor (helper for parseConnectionClose).
-fn readField(data: []const u8, pos: *usize) error{Truncated}!u64 {
+fn readField(data: []const u8, pos: *usize) error{ZixTruncated}!u64 {
     const vi = try varint.read(data[pos.*..]);
     pos.* += vi.len;
 

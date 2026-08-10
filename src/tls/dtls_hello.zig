@@ -30,9 +30,9 @@ pub const MAX_SESSION_ID_LEN: usize = 32;
 
 pub const Error = error{
     /// The bytes ran out mid-field.
-    Truncated,
+    ZixTruncated,
     /// A field is present but outside its allowed size.
-    BadHello,
+    ZixBadHello,
 };
 
 /// A parsed DTLS ClientHello body, borrowing the caller's bytes.
@@ -84,33 +84,33 @@ pub const ClientHello = struct {
 ///
 /// Return:
 /// - ClientHello borrowing body
-/// - error.Truncated, error.BadHello
+/// - error.ZixTruncated, error.ZixBadHello
 pub fn parseClientHello(body: []const u8) Error!ClientHello {
     var reader = wire.Reader{ .buf = body };
 
-    const client_version = reader.readU16() catch return error.Truncated;
-    const random = reader.readBytes(32) catch return error.Truncated;
+    const client_version = reader.readU16() catch return error.ZixTruncated;
+    const random = reader.readBytes(32) catch return error.ZixTruncated;
 
-    const session_id_len = reader.readU8() catch return error.Truncated;
-    if (session_id_len > MAX_SESSION_ID_LEN) return error.BadHello;
-    const session_id = reader.readBytes(session_id_len) catch return error.Truncated;
+    const session_id_len = reader.readU8() catch return error.ZixTruncated;
+    if (session_id_len > MAX_SESSION_ID_LEN) return error.ZixBadHello;
+    const session_id = reader.readBytes(session_id_len) catch return error.ZixTruncated;
 
-    const cookie_len = reader.readU8() catch return error.Truncated;
-    const cookie = reader.readBytes(cookie_len) catch return error.Truncated;
+    const cookie_len = reader.readU8() catch return error.ZixTruncated;
+    const cookie = reader.readBytes(cookie_len) catch return error.ZixTruncated;
 
-    const suites_len = reader.readU16() catch return error.Truncated;
-    if (suites_len == 0 or suites_len % 2 != 0) return error.BadHello;
-    const cipher_suites = reader.readBytes(suites_len) catch return error.Truncated;
+    const suites_len = reader.readU16() catch return error.ZixTruncated;
+    if (suites_len == 0 or suites_len % 2 != 0) return error.ZixBadHello;
+    const cipher_suites = reader.readBytes(suites_len) catch return error.ZixTruncated;
 
-    const compression_len = reader.readU8() catch return error.Truncated;
-    if (compression_len == 0) return error.BadHello;
-    const compression_methods = reader.readBytes(compression_len) catch return error.Truncated;
+    const compression_len = reader.readU8() catch return error.ZixTruncated;
+    if (compression_len == 0) return error.ZixBadHello;
+    const compression_methods = reader.readBytes(compression_len) catch return error.ZixTruncated;
 
     // Extensions are optional in DTLS 1.2, a hello may simply end after compression methods.
     var extensions: []const u8 = &.{};
     if (reader.remaining() >= 2) {
-        const extensions_len = reader.readU16() catch return error.Truncated;
-        extensions = reader.readBytes(extensions_len) catch return error.Truncated;
+        const extensions_len = reader.readU16() catch return error.ZixTruncated;
+        extensions = reader.readBytes(extensions_len) catch return error.ZixTruncated;
     }
 
     return .{
@@ -129,9 +129,9 @@ pub fn parseClientHello(body: []const u8) Error!ClientHello {
 ///
 /// Return:
 /// - []const u8 (the body, borrowing out)
-/// - error.BadHello when the cookie is over MAX_COOKIE_LEN
+/// - error.ZixBadHello when the cookie is over MAX_COOKIE_LEN
 pub fn writeHelloVerifyRequestBody(out: []u8, cookie: []const u8) Error![]const u8 {
-    if (cookie.len > MAX_COOKIE_LEN) return error.BadHello;
+    if (cookie.len > MAX_COOKIE_LEN) return error.ZixBadHello;
 
     var writer = wire.Writer{ .buf = out };
     writer.writeU16(dtls_record.VERSION_DTLS_1_0);
@@ -145,11 +145,11 @@ pub fn writeHelloVerifyRequestBody(out: []u8, cookie: []const u8) Error![]const 
 pub fn parseHelloVerifyRequestBody(body: []const u8) Error![]const u8 {
     var reader = wire.Reader{ .buf = body };
 
-    _ = reader.readU16() catch return error.Truncated;
+    _ = reader.readU16() catch return error.ZixTruncated;
 
-    const cookie_len = reader.readU8() catch return error.Truncated;
+    const cookie_len = reader.readU8() catch return error.ZixTruncated;
 
-    return reader.readBytes(cookie_len) catch error.Truncated;
+    return reader.readBytes(cookie_len) catch error.ZixTruncated;
 }
 
 /// Write a DTLS ClientHello body (RFC 6347 4.2.1). Used by the client half and by tests.
@@ -164,7 +164,7 @@ pub fn parseHelloVerifyRequestBody(body: []const u8) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8 (the body, borrowing out)
-/// - error.BadHello when the cookie or session id is over its limit
+/// - error.ZixBadHello when the cookie or session id is over its limit
 pub fn writeClientHelloBody(
     out: []u8,
     client_version: u16,
@@ -173,8 +173,8 @@ pub fn writeClientHelloBody(
     cookie: []const u8,
     cipher_suites: []const u16,
 ) Error![]const u8 {
-    if (cookie.len > MAX_COOKIE_LEN) return error.BadHello;
-    if (session_id.len > MAX_SESSION_ID_LEN) return error.BadHello;
+    if (cookie.len > MAX_COOKIE_LEN) return error.ZixBadHello;
+    if (session_id.len > MAX_SESSION_ID_LEN) return error.ZixBadHello;
 
     var writer = wire.Writer{ .buf = out };
     writer.writeU16(client_version);
@@ -296,21 +296,21 @@ test "zix dtls: hello parse, malformed bodies are refused" {
     var buf: [256]u8 = undefined;
     const body = try writeClientHelloBody(&buf, dtls_record.VERSION_DTLS_1_2, TEST_RANDOM, "", "", &.{TEST_SUITE});
 
-    try std.testing.expectError(error.Truncated, parseClientHello(body[0 .. body.len - 1]));
-    try std.testing.expectError(error.Truncated, parseClientHello(body[0..10]));
-    try std.testing.expectError(error.Truncated, parseClientHello(""));
+    try std.testing.expectError(error.ZixTruncated, parseClientHello(body[0 .. body.len - 1]));
+    try std.testing.expectError(error.ZixTruncated, parseClientHello(body[0..10]));
+    try std.testing.expectError(error.ZixTruncated, parseClientHello(""));
 
     // A session id longer than the field allows.
     var bad_session: [256]u8 = undefined;
     @memcpy(bad_session[0..body.len], body);
     bad_session[34] = 33;
-    try std.testing.expectError(error.BadHello, parseClientHello(bad_session[0..body.len]));
+    try std.testing.expectError(error.ZixBadHello, parseClientHello(bad_session[0..body.len]));
 
     // An odd cipher suite list length cannot hold whole suites.
     var bad_suites: [256]u8 = undefined;
     @memcpy(bad_suites[0..body.len], body);
     bad_suites[37] = 3;
-    try std.testing.expectError(error.BadHello, parseClientHello(bad_suites[0..body.len]));
+    try std.testing.expectError(error.ZixBadHello, parseClientHello(bad_suites[0..body.len]));
 }
 
 test "zix dtls: hello verify request, round trips the cookie at dtls 1.0" {
@@ -325,12 +325,12 @@ test "zix dtls: hello verify request, round trips the cookie at dtls 1.0" {
 
     try std.testing.expectEqualSlices(u8, &cookie, try parseHelloVerifyRequestBody(body));
 
-    try std.testing.expectError(error.Truncated, parseHelloVerifyRequestBody(body[0 .. body.len - 1]));
-    try std.testing.expectError(error.Truncated, parseHelloVerifyRequestBody(""));
+    try std.testing.expectError(error.ZixTruncated, parseHelloVerifyRequestBody(body[0 .. body.len - 1]));
+    try std.testing.expectError(error.ZixTruncated, parseHelloVerifyRequestBody(""));
 
     const too_long: [MAX_COOKIE_LEN + 1]u8 = @splat(0);
     var big_buf: [512]u8 = undefined;
-    try std.testing.expectError(error.BadHello, writeHelloVerifyRequestBody(&big_buf, &too_long));
+    try std.testing.expectError(error.ZixBadHello, writeHelloVerifyRequestBody(&big_buf, &too_long));
 }
 
 test "zix dtls: hello, a whole message round trips through the handshake header" {

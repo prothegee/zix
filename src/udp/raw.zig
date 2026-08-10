@@ -55,7 +55,7 @@ pub fn Raw(comptime handler: HandlerFn) type {
                 if (cfg.allow_args) cfg = Config.applyServerArgs(cfg, args);
             }
 
-            if (cfg.port == 0) return error.PortNotConfigured;
+            if (cfg.port == 0) return error.ZixPortNotConfigured;
 
             return .{ .config = cfg };
         }
@@ -69,14 +69,14 @@ pub fn Raw(comptime handler: HandlerFn) type {
         ///
         /// Return:
         /// - !void
-        /// - error.DispatchModelUnsupported if dispatch_model is .EPOLL or .URING off Linux
+        /// - error.ZixDispatchModelUnsupported if dispatch_model is .EPOLL or .URING off Linux
         pub fn run(self: *const Self) !void {
             // Reject an unrunnable model before binding, so a rejected config leaves nothing
             // behind (ADR-065).
             if (!dispatch_support.isSupported(self.config.dispatch_model)) {
-                common.logSystem(self.config, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
+                common.logSystem(self.config, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
 
-                return error.DispatchModelUnsupported;
+                return error.ZixDispatchModelUnsupported;
             }
 
             return switch (self.config.dispatch_model) {
@@ -98,7 +98,7 @@ test "zix udp: Raw init, port zero returns PortNotConfigured" {
     defer threaded.deinit();
 
     const S = Raw(noopHandler);
-    try std.testing.expectError(error.PortNotConfigured, S.init(.{
+    try std.testing.expectError(error.ZixPortNotConfigured, S.init(.{
         .io = threaded.io(),
         .allocator = std.testing.allocator,
         .ip = "127.0.0.1",

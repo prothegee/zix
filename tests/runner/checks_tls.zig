@@ -42,7 +42,7 @@ pub fn runTls(io: std.Io, server_path: []const u8, port: u16) !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (std.mem.indexOf(u8, resp.body(), "hello over tls 1.3") == null) return error.UnexpectedBody;
     if (resp.header("Strict-Transport-Security") == null) return error.MissingHsts;
 }
@@ -75,7 +75,7 @@ pub fn runTlsHttp1Dual(io: std.Io, server_path: []const u8, port: u16, tls_port:
 
     var clear_resp = try client.get(clear_url, .{});
     defer clear_resp.deinit();
-    if (clear_resp.status() != 200) return error.UnexpectedStatus;
+    if (clear_resp.status() != 200) return error.ZixUnexpectedStatus;
     if (std.mem.indexOf(u8, clear_resp.body(), "dual listener") == null) return error.UnexpectedBody;
 
     var tls_url_buf: [64]u8 = undefined;
@@ -83,7 +83,7 @@ pub fn runTlsHttp1Dual(io: std.Io, server_path: []const u8, port: u16, tls_port:
 
     var tls_resp = try client.get(tls_url, .{});
     defer tls_resp.deinit();
-    if (tls_resp.status() != 200) return error.UnexpectedStatus;
+    if (tls_resp.status() != 200) return error.ZixUnexpectedStatus;
     if (std.mem.indexOf(u8, tls_resp.body(), "dual listener") == null) return error.UnexpectedBody;
 }
 
@@ -113,7 +113,7 @@ pub fn runTlsHttp2(io: std.Io, server_path: []const u8, port: u16) !void {
 
     var fin_buf: [256]u8 = undefined;
     var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
-    if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+    if (finished.alpn != Tls.Alpn.H2) return error.ZixAlpnNotH2;
     try wire.tlsWriteAll(fd, finished.client_finished);
 
     var req: [512]u8 = undefined;
@@ -184,7 +184,7 @@ pub fn runTlsGrpc(io: std.Io, server_path: []const u8, port: u16) !void {
 
     var fin_buf: [256]u8 = undefined;
     var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
-    if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+    if (finished.alpn != Tls.Alpn.H2) return error.ZixAlpnNotH2;
     try wire.tlsWriteAll(fd, finished.client_finished);
 
     // preface + empty SETTINGS + HEADERS (POST grpc route) + DATA (one length-prefixed message).
@@ -301,7 +301,7 @@ pub fn runTlsHttp1Ed25519(io: std.Io, server_path: []const u8, port: u16) !void 
     }
 
     const response = recv_accum[0..recv_len];
-    if (std.mem.indexOf(u8, response, " 200 ") == null) return error.UnexpectedStatus;
+    if (std.mem.indexOf(u8, response, " 200 ") == null) return error.ZixUnexpectedStatus;
     if (std.mem.indexOf(u8, response, "hello over tls 1.3 (ed25519)") == null) return error.UnexpectedBody;
     if (std.mem.indexOf(u8, response, "Strict-Transport-Security") == null) return error.MissingHsts;
 }
