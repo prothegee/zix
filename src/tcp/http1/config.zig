@@ -142,9 +142,10 @@ pub const Http1ServerConfig = struct {
     /// behavior (with tls set the server is TLS-only on port). Non-zero (requires tls) serves
     /// cleartext on port AND https on tls_port from one worker fleet. Ignored when tls is null.
     tls_port: u16 = 0,
-    /// Optional logger for server lifecycle lines (listening, fallback notices). null = std.debug.print.
-    /// Per-request access logging is the handler's job: call logger.access() where status and byte
-    /// count are known (res.bytes_written after a send). Caller owns, must outlive.
+    /// Optional logger. When non-null the server routes its lifecycle lines (listening, fallback
+    /// notices) through logger.system() instead of std.log, and writes one access record per served
+    /// request tagged [http1:access]. A handler that frames its own bytes outside the Response is
+    /// not counted in that record's byte total. Caller owns, must outlive.
     logger: ?*Logger = null,
 };
 

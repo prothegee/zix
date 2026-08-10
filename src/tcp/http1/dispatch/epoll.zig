@@ -744,6 +744,7 @@ fn epollWorkerFn(comptime handler_fn: HandlerFn) fn (EpollWorkerCtx) void {
             core.setDateHeader(config.send_date_header);
             core.setLargeBodyRcvbuf(config.large_body_rcvbuf);
             core.setMaxRequestBody(config.max_request_body);
+            core.setAccessLogger(config.logger);
             core.setStatic(config.public_dir, io);
             core.setMaxResponseHeaders(config.max_response_headers.value());
 

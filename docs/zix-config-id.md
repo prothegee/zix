@@ -182,7 +182,7 @@ Jalur serba-lengkap. Set field compression dan cache yang sama dengan HTTP/1, pl
 | cache_max_total_bytes | 0 | batas memori cache per worker, 0 = tanpa batas | membatasi memori cache | atur untuk membatasi RAM cache | jumlah entri dikurangi agar muat | penuh entries * value_bytes | 0 menonaktifkan batas |
 | tls | null | TLS context untuk https (opt-in, ADR-053), null = cleartext | mengaktifkan TLS, band performa tersendiri | pasang context untuk melayani https | | | null melayani cleartext |
 | tls_port | 0 | port bind https pendamping untuk dual listener (ADR-060) | satu worker fleet melayani cleartext + TLS | isi bersama tls untuk melayani keduanya dari satu server | 0 mempertahankan perilaku single-listener | | butuh tls diisi, harus beda dari port |
-| logger | null | logger opsional, memanggil logger.access() per respons | | pasang untuk access logging | | | menyuntikkan ctx.logger untuk handler |
+| logger | null | logger opsional, engine menulis satu record [component:access] per respons | | pasang untuk access logging | | | menyuntikkan ctx.logger untuk handler |
 
 ## TCP (`TcpServerConfig`)
 
@@ -357,6 +357,7 @@ Bangun satu Logger dengan config ini dan lampirkan lewat pointer ke field `logge
 | :- | :- | :- | :- | :- | :- | :- | :- |
 | console | `.OFF` | mode output console | | set untuk mengaktifkan output console | | | |
 | console_min_level | `.INFO` | level minimum untuk output console | | naikkan untuk membungkam console | | | |
+| console_fd | `null` | descriptor tujuan record console, null berarti stderr | | set untuk mengirim output console ke tempat lain | | | descriptor dimiliki pemanggil dan harus tetap terbuka selama logger hidup |
 | save_path | "" | direktori untuk file log, kosong menonaktifkan file logging | I/O disk saat diisi | set untuk mengaktifkan file logging | | | direktori harus sudah ada |
 | save_file | "log" | nama dasar file log | | set nama dasar file | | | |
 | save_min_level | `.INFO` | level minimum untuk output file | | naikkan untuk menulis lebih sedikit baris ke file | | | |

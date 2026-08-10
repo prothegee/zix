@@ -10,6 +10,7 @@ const Config = @import("../config.zig");
 const TcpServerConfig = Config.TcpServerConfig;
 const Logger = @import("../../logger/logger.zig").Logger;
 const win_io = @import("../../utils/windows_io.zig");
+const peer_addr = @import("../../utils/peer_addr.zig");
 
 const log = std.log.scoped(.zix_tcp);
 
@@ -145,22 +146,13 @@ pub fn frameRespond(fd: std.posix.fd_t, payload: []const u8) error{BrokenPipe}!v
 
 // --------------------------------------------------------- //
 
+/// The peer of a connected socket as "1.2.3.4:5678", or "-" when it cannot be read.
+///
+/// Note:
+/// - One line over the shared helper, which is also what the access records and the gRPC stream
+///   records use, so every engine names a peer the same way.
 pub fn getPeerAddr(fd: std.posix.fd_t, buf: []u8) []const u8 {
-    // getpeername is POSIX-only in Zig 0.16 std: no peer string on Windows.
-    if (comptime @import("builtin").target.os.tag == .windows) return "-";
-
-    var storage: std.posix.sockaddr.storage = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
-    std.posix.getpeername(fd, @ptrCast(&storage), &len) catch return "-";
-    if (storage.family == std.posix.AF.INET) {
-        const sock_in: *align(8) const std.posix.sockaddr.in = @ptrCast(&storage);
-        const addr_bytes: [4]u8 = @bitCast(sock_in.addr);
-        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
-            addr_bytes[0],                          addr_bytes[1], addr_bytes[2], addr_bytes[3],
-            std.mem.bigToNative(u16, sock_in.port),
-        }) catch "-";
-    }
-    return "-";
+    return peer_addr.endpoint(fd, buf);
 }
 
 pub fn getMonotonicMs() u64 {

@@ -182,7 +182,7 @@ The batteries-included path. Same compression and cache field set as HTTP/1, plu
 | cache_max_total_bytes | 0 | per-worker cache memory ceiling, 0 = none | caps cache memory | set to bound cache RAM | entry count reduced to fit | full entries * value_bytes | 0 disables the ceiling |
 | tls | null | TLS context for https (opt-in, ADR-053), null = cleartext | enables TLS, a separate perf band | attach a context to serve https | | | null serves cleartext |
 | tls_port | 0 | companion https bind port for the dual listener (ADR-060) | one worker fleet serves cleartext + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
-| logger | null | optional logger, calls logger.access() per response | | attach for access logging | | | injects ctx.logger for handlers |
+| logger | null | optional logger, engine writes one [component:access] record per response | | attach for access logging | | | injects ctx.logger for handlers |
 
 ## TCP (`TcpServerConfig`)
 
@@ -357,6 +357,7 @@ Build one Logger with this config and attach it by pointer to any engine's `logg
 | :- | :- | :- | :- | :- | :- | :- | :- |
 | console | `.OFF` | console output mode | | set to enable console output | | | |
 | console_min_level | `.INFO` | minimum level for console output | | raise to quiet the console | | | |
+| console_fd | `null` | descriptor console records go to, null means stderr | | set to send console output somewhere else | | | the caller owns the descriptor and must keep it open for the logger's whole life |
 | save_path | "" | directory for log files, empty disables file logging | disk I/O when set | set to enable file logging | | | the directory must already exist |
 | save_file | "log" | base name for log files | | set the file base name | | | |
 | save_min_level | `.INFO` | minimum level for file output | | raise to log fewer lines to file | | | |

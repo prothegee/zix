@@ -92,6 +92,15 @@ Anything the grammar cannot read is a fault, never a silent skip:
 | public_dir_cache_ttl_ms | `0` | how long a served file stays cached, `0` turns the cache off, see below | every site with a `public_dir`, as the default a site file may override | above `3600000` it faults and stays at the default |
 | public_dir_cache_max_entries | `256` | files the cache may hold open, daemon-wide | the one cache table this daemon builds | `0` or above `1048576` faults and stays at the default |
 
+### What the daemon log holds
+
+Two record kinds share the file.
+
+- **Access records**, one per exchange the gateway answered, tagged with the requested Host so two sites in one file stay apart: `[shop.example.com:access] GET /cart 200 1234 "203.0.113.7" "curl/8.5.0" "-"`. The level follows the status, so a 5xx access line is an `error` and a 4xx is a `warn`.
+- **System records**, tagged `[zixer]`, covering the daemon's own lifecycle and the edge errors that say why a request was refused.
+
+An answer the gateway sent is always visible at the default `log_level: info`. An upstream failure files at `error` and a refused request files at `warn`. Only the daemon's routine chatter sits below that, so lowering to `debug` adds detail rather than revealing answers that were hidden.
+
 Only `dispatch` is validated without being applied. A blank `main.cfg` is valid: every key falls back to the defaults above.
 
 ### What workers does

@@ -51,6 +51,7 @@ pub fn runAsync(config: Config, handler: HandlerFn) !void {
             .max_request_body = config.max_request_body,
             .public_dir = config.public_dir,
             .max_response_headers = config.max_response_headers.value(),
+            .logger = config.logger,
             .compress = config.compress,
             .compression_min_size = config.compression_min_size,
             .compression_max_out = config.compression_max_out,

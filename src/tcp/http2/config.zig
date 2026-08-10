@@ -74,9 +74,10 @@ pub const Http2ServerConfig = struct {
     /// behavior (with tls set the server is TLS-only on port). Non-zero (requires tls) serves
     /// cleartext on port AND TLS on tls_port from one worker fleet. Ignored when tls is null.
     tls_port: u16 = 0,
-    /// Optional logger. When non-null, the server calls logger.system() for lifecycle events
-    /// (listening, fallback notices) instead of std.debug.print. The h2c handler owns its frame I/O,
-    /// so per-request access logging is the handler's responsibility. Caller owns, must outlive.
+    /// Optional logger. When non-null, the server routes its lifecycle lines (listening, fallback
+    /// notices) through logger.system() instead of std.log, and writes one access record per served
+    /// stream tagged [http2:access]. A handler that frames its own bytes outside the Response is not
+    /// counted in that record's byte total. Caller owns, must outlive.
     logger: ?*Logger = null,
     /// Server-wide default handler processing timeout in milliseconds. 0 = disabled.
     /// Seeds Context.deadline_ns at dispatch. The handler may extend or override via setTimeout/withTimeout.

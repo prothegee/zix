@@ -561,6 +561,9 @@ fn uringMuxWorker(ctx: UringMuxCtx) void {
     if (tls_active) worker.tls_conns = TlsConnTable.init() catch return;
     defer worker.deinit();
 
+    // Per-worker access logger: installed once for the worker's whole life, like the cache below.
+    core.setAccessLogger(ctx.opts.logger);
+
     // Per-worker response cache: lock-free by ownership, never shared, like the EPOLL worker.
     var response_cache: rcache.ResponseCache = undefined;
     var cache_on = false;

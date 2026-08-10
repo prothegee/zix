@@ -434,7 +434,7 @@ See `examples/http1_websocket.zig` (cleartext) and `examples/tls/tls_http1_ws.zi
 
 `config.logger` receives server lifecycle lines only (listening notices, EPOLL fallback). When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds (so a release server with no logger emits no lifecycle output).
 
-Per-request access logging is the handler's responsibility: the response bytes go to the fd through the write helpers, so the engine does not observe response status or byte counts centrally. Call `logger.access()` inside the handler where the final status and size are known.
+Per-request access logging is the engine's, not the handler's. When `config.logger` is set the engine writes one `[http1:access]` record after every served request, taking the status and byte count off the `Response`. A handler that writes straight to the fd instead of through `Response` is still recorded, but its byte count reads 0, so such a handler may call `logger.access()` itself where the real size is known.
 
 ---
 

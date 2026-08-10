@@ -121,10 +121,18 @@ test "zix zixer: daemon log, an unknown or wrongly cased spelling is refused" {
 }
 
 test "zix zixer: daemon log, build carries logs_dir and log_level into both sinks" {
-    var logger = try build(std.testing.allocator, .{ .logs_dir = "/srv/zixer/logs", .log_level = .WARN });
+    // A real directory, because build opens the day file straight away and a missing root would
+    // report a suspend on stderr rather than exercise the config carry this test is about.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try build(std.testing.allocator, .{ .logs_dir = root, .log_level = .WARN });
     defer logger.deinit();
 
-    try std.testing.expectEqualStrings("/srv/zixer/logs", logger.config.save_path);
+    try std.testing.expectEqualStrings(root, logger.config.save_path);
     try std.testing.expectEqualStrings(FILE_NAME, logger.config.save_file);
     try std.testing.expectEqual(Level.WARN, logger.config.save_min_level);
     try std.testing.expectEqual(Level.WARN, logger.config.console_min_level);
@@ -148,11 +156,6 @@ test "zix zixer: daemon log, logSystem with no logger does not reach for one" {
 }
 
 test "zix zixer: daemon log, logSystem files the level it was given" {
-    if (comptime @import("builtin").target.os.tag == .windows) {
-        std.log.info("logger file output is not ported to Windows, test skipped", .{});
-        return;
-    }
-
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 

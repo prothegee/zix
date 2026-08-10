@@ -8,6 +8,9 @@ const compression = @import("../../utils/compression/compression.zig");
 const slab_mem = @import("../../multiplexers/slab.zig");
 const parser = @import("parser.zig");
 const websocket = @import("websocket.zig");
+const peer_addr = @import("../../utils/peer_addr.zig");
+const Method = @import("method.zig");
+const Logger = @import("../../logger/logger.zig").Logger;
 const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 pub const Request = @import("request.zig").Request;
 pub const Response = @import("response.zig").Response;
@@ -90,8 +93,56 @@ pub inline fn invokeHandler(
     }
 
     handler_fn(&req, &res, &ctx) catch {
-        if (!res.sent) sendSimpleFD(fd, 500, "text/plain", "Internal Server Error") catch {};
+        if (!res.sent) {
+            sendSimpleFD(fd, 500, "text/plain", "Internal Server Error") catch {};
+            res.status = .INTERNAL_SERVER_ERROR;
+        }
     };
+
+    writeAccessRecord(&req, &res, fd);
+}
+
+/// The logger this worker writes access records to, or null when none is attached.
+///
+/// Note:
+/// - A threadlocal rather than a parameter because the multiplexed models install their per-worker
+///   state once for the worker's whole life, and threading a logger through every dispatch call
+///   would put that setup on the per-request path instead.
+pub threadlocal var tl_access_logger: ?*Logger = null;
+
+/// Attach the access logger for this worker (or, under .ASYNC, for this connection).
+pub fn setAccessLogger(logger: ?*Logger) void {
+    tl_access_logger = logger;
+}
+
+/// Log one served request, when a logger is attached.
+///
+/// Note:
+/// - The whole call costs one threadlocal load and one branch when no logger is attached, which is
+///   what keeps a raw engine paying nothing for a feature it did not ask for.
+/// - The client address falls back to the socket when no proxy header names one, so a direct
+///   request is logged with a real address rather than "-".
+fn writeAccessRecord(req: *const Request, res: *const Response, fd: std.posix.fd_t) void {
+    const logger = tl_access_logger orelse return;
+
+    var peer_buf: [peer_addr.MAX_LEN]u8 = undefined;
+    const client_ip = peer_addr.clientIp(
+        req.header("x-forwarded-for") orelse "",
+        req.header("x-real-ip") orelse "",
+        fd,
+        &peer_buf,
+    );
+
+    logger.access(
+        "http1",
+        Method.stringFromEnum(req.method()),
+        req.path(),
+        @intFromEnum(res.status),
+        res.bytes_written,
+        client_ip,
+        req.header("user-agent") orelse "",
+        req.header("origin") orelse "",
+    );
 }
 
 /// What a dispatch model measured about the body it just read, for the request
@@ -3645,4 +3696,112 @@ test "zix http1: uringWatchFd routes through the installed trampoline" {
 
     try std.testing.expect(uringWatchFd(7));
     try std.testing.expectEqual(@as(std.posix.fd_t, 7), Fake.seen);
+}
+
+test "zix http1: a served request writes one access record naming the engine" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    setAccessLogger(&logger);
+    defer setAccessLogger(null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const head = parser.ParsedHead{
+        .method = "GET",
+        .path = "/orders/42",
+        .query = "",
+        .raw_headers = "x-forwarded-for: 203.0.113.7\r\nuser-agent: curl/8.5.0\r\n",
+        .version_minor = 1,
+        .keep_alive = true,
+        .content_length = 0,
+        .chunked_request = false,
+        .expect_continue = false,
+    };
+
+    invokeHandler(accessProbeHandler, &head, "", fds[1], std.testing.io, arena.allocator());
+    logger.flush();
+
+    const line = try readLoggedLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    std.log.info(".ACCESS: {s}", .{std.mem.trimEnd(u8, line, "\n")});
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "[http1:access] GET /orders/42 201 5 \"203.0.113.7\" \"curl/8.5.0\" \"-\"") != null);
+}
+
+test "zix http1: a served request writes no access record when no logger is attached" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    setAccessLogger(null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const head = parser.ParsedHead{
+        .method = "GET",
+        .path = "/",
+        .query = "",
+        .raw_headers = "",
+        .version_minor = 1,
+        .keep_alive = true,
+        .content_length = 0,
+        .chunked_request = false,
+        .expect_continue = false,
+    };
+
+    // The point is that it does not reach for a logger it does not have.
+    invokeHandler(accessProbeHandler, &head, "", fds[1], std.testing.io, arena.allocator());
+}
+
+fn accessProbeHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = ctx;
+
+    res.setStatus(.CREATED);
+    try res.send("hello");
+}
+
+/// Read back the one log file written under a temp root, for the access tests above.
+fn readLoggedLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
+    var days = root.iterate();
+
+    while (try days.next(std.testing.io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        var day = try root.openDir(std.testing.io, entry.name, .{});
+        defer day.close(std.testing.io);
+
+        const bytes = day.readFileAlloc(std.testing.io, "log-000000.log", allocator, .limited(64 * 1024)) catch continue;
+        if (bytes.len > 0) return bytes;
+
+        allocator.free(bytes);
+    }
+
+    return error.ZixNoLogLine;
 }

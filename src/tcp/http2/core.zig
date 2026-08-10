@@ -6,6 +6,8 @@ const win_io = @import("../../utils/windows_io.zig");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
 const rc = @import("../../utils/response_cache.zig");
+const peer_addr = @import("../../utils/peer_addr.zig");
+const Logger = @import("../../logger/logger.zig").Logger;
 const router_mod = @import("router.zig");
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
@@ -127,8 +129,56 @@ pub inline fn invokeHandler(handler: HandlerFn, req: *Request, fd: std.posix.fd_
     var ctx = Context{ .fd = fd, .sid = sid, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator(), .public_dir = opts.public_dir, .max_frame_size = peer_max_frame_size };
 
     handler(req, &res, &ctx) catch {
-        if (!res.sent) frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error") catch {};
+        if (!res.sent) {
+            frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error") catch {};
+            res.status = 500;
+        }
     };
+
+    writeAccessRecord(req, &res, fd);
+}
+
+/// The logger this worker writes access records to, or null when none is attached.
+///
+/// Note:
+/// - A threadlocal rather than a parameter because the multiplexed models install their per-worker
+///   state once for the worker's whole life, and threading a logger through every dispatch call
+///   would put that setup on the per-stream path instead.
+pub threadlocal var tl_access_logger: ?*Logger = null;
+
+/// Attach the access logger for this worker (or, under .ASYNC, for this connection).
+pub fn setAccessLogger(logger: ?*Logger) void {
+    tl_access_logger = logger;
+}
+
+/// Log one served stream, when a logger is attached.
+///
+/// Note:
+/// - The whole call costs one threadlocal load and one branch when no logger is attached, which is
+///   what keeps a raw engine paying nothing for a feature it did not ask for.
+/// - The client address falls back to the socket when no proxy header names one, so a direct
+///   request is logged with a real address rather than "-".
+fn writeAccessRecord(req: *const Request, res: *const Response, fd: std.posix.fd_t) void {
+    const logger = tl_access_logger orelse return;
+
+    var peer_buf: [peer_addr.MAX_LEN]u8 = undefined;
+    const client_ip = peer_addr.clientIp(
+        req.header("x-forwarded-for") orelse "",
+        req.header("x-real-ip") orelse "",
+        fd,
+        &peer_buf,
+    );
+
+    logger.access(
+        "http2",
+        req.method,
+        req.path,
+        res.status,
+        res.bytes_written,
+        client_ip,
+        req.header("user-agent") orelse "",
+        req.header("origin") orelse "",
+    );
 }
 
 pub const ServeOpts = struct {
@@ -141,6 +191,8 @@ pub const ServeOpts = struct {
     max_header_scratch: usize = 4096,
     /// Maximum request body buffered per stream in bytes. A larger request body is truncated to this.
     max_body: usize = 16384,
+    /// Where served streams are recorded, from config.logger. Null logs nothing.
+    logger: ?*Logger = null,
     /// Per-connection read buffer floor in bytes. The reader is sized to the larger of this and
     /// one max frame, so a larger floor cuts read() and compaction for big frames.
     conn_read_buf_min: usize = 32 * 1024,
@@ -632,4 +684,96 @@ test "zix http2: response cache round-trips via sendCachedFD then serveCached" {
     // a different request key still misses
     tl_req_path = "/other";
     try std.testing.expect(!serveCached(fds[1], 5, "text/plain"));
+}
+
+test "zix http2: a served stream writes one access record naming the engine" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    setAccessLogger(&logger);
+    defer setAccessLogger(null);
+
+    const headers = [_]hpack.Header{
+        .{ .name = "x-real-ip", .value = "198.51.100.9" },
+        .{ .name = "user-agent", .value = "h2load/1.0" },
+    };
+    var req = Request{
+        .method = "POST",
+        .path = "/rpc/submit",
+        .query = "",
+        .headers = &headers,
+        .body = "",
+    };
+
+    invokeHandler(accessProbeHandler, &req, fds[1], 1, std.testing.io, null, .{}, frame.DEFAULT_MAX_FRAME_SIZE);
+    logger.flush();
+
+    const line = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    std.log.info(".ACCESS: {s}", .{std.mem.trimEnd(u8, line, "\n")});
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "[http2:access] POST /rpc/submit 202 7 \"198.51.100.9\" \"h2load/1.0\" \"-\"") != null);
+}
+
+test "zix http2: a served stream writes no access record when no logger is attached" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    setAccessLogger(null);
+
+    var req = Request{ .method = "GET", .path = "/", .query = "", .headers = &.{}, .body = "" };
+
+    // The point is that it does not reach for a logger it does not have.
+    invokeHandler(accessProbeHandler, &req, fds[1], 1, std.testing.io, null, .{}, frame.DEFAULT_MAX_FRAME_SIZE);
+}
+
+fn accessProbeHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = ctx;
+
+    res.setStatus(202);
+    try res.send("queued!");
+}
+
+/// Read back the one log file written under a temp root, for the access tests above.
+fn readAccessLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
+    var days = root.iterate();
+
+    while (try days.next(std.testing.io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        var day = try root.openDir(std.testing.io, entry.name, .{});
+        defer day.close(std.testing.io);
+
+        const bytes = day.readFileAlloc(std.testing.io, "log-000000.log", allocator, .limited(64 * 1024)) catch continue;
+        if (bytes.len > 0) return bytes;
+
+        allocator.free(bytes);
+    }
+
+    return error.ZixNoLogLine;
 }

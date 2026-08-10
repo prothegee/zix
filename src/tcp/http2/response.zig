@@ -20,6 +20,12 @@ pub const Response = struct {
     /// Set once any send lands, so the engine does not emit a 500 over a response the handler
     /// already wrote when the handler then returns an error.
     sent: bool = false,
+    /// Body bytes handed to the last send, for the engine's access record.
+    ///
+    /// Note:
+    /// - Counts what went through this Response. A handler that frames its own bytes through
+    ///   frame.sendResponseFD, or serves a static file directly, is not counted here.
+    bytes_written: usize = 0,
 
     /// Set the response status code.
     pub fn setStatus(self: *Response, status: u16) void {
@@ -41,6 +47,7 @@ pub const Response = struct {
     /// - !void (propagates the frame writer error)
     pub fn send(self: *Response, body: []const u8) !void {
         self.sent = true;
+        self.bytes_written = body.len;
 
         return frame.sendResponseFD(self.fd, self.sid, self.status, self.content_type, body);
     }

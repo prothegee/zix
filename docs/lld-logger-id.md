@@ -18,8 +18,20 @@ pub const Logger = struct {
     line_count: u64,                  // lines written to current file
     file_suspended: bool,             // true after unrecoverable file I/O error
 
-    buf: []u8,                        // 64 KB write buffer (heap, nil if save_path == "")
-    buf_pos: usize,                   // bytes written into buf
+    file_sink: Sink,                  // dua buffer 64 KB untuk berkas log (kosong jika save_path == "")
+    console_sink: Sink,               // dua buffer 64 KB untuk console (kosong jika console == .OFF)
+    flusher: Flusher,                 // thread latar belakang yang memiliki setiap penulisan
+    flusher_unavailable: bool,        // true saat thread gagal dijalankan, drain berjalan inline
+};
+
+pub const Sink = struct {
+    bufs: [2][]u8,                    // producer mengisi satu, flush thread menulis yang lain
+    active: u1,                       // buffer yang diisi producer
+    fill: usize,                      // byte di dalam bufs[active]
+    pending: usize,                   // byte di bufs[active ^ 1] menunggu ditulis, 0 = tidak ada
+    stalls: u64,                      // berapa kali producer menunggu karena kedua buffer terpakai
+    lines: u64,                       // record yang ditambahkan
+    writes: u64,                      // batch yang sudah ditulis keluar
 };
 ```
 
@@ -69,29 +81,32 @@ CAS loop pada `locked: std.atomic.Value(bool)`:
 - Unlock: `store(false, .release)`.
 - `spinLoopHint()` dipetakan ke `pause`/`yield` pada x86/ARM.
 
-Spinlock benar di bawah konkurensi tinggi karena waktu tahan lock dibatasi oleh `memcpy` ke dalam staging buffer ditambah satu syscall `rawWrite` per baris. Di bawah throughput logging tinggi yang berkelanjutan, kontesi diserialisasi tetapi setiap penulisan adalah syscall berukuran kecil yang tetap.
+Spinlock benar di bawah konkurensi tinggi karena lock hanya dipegang untuk satu `memcpy` ke buffer aktif dan tidak lebih. Lock tidak pernah dipegang melintasi syscall: flush thread melepasnya sebelum menulis dan mengambilnya kembali setelahnya, sehingga disk yang lambat tidak dapat menahan producer.
 
 ---
 
 ## Write Buffer
 
-Dialokasikan oleh `init()` hanya saat `save_path != ""` (`WRITE_BUF_SIZE = 64 KB`).
+Dialokasikan oleh `init()` per destinasi yang aktif, dua buffer masing-masing (`write_buf_size`, 64 KB secara default, dinaikkan agar memuat satu record utuh bila disetel lebih kecil).
 
-`writeLineLocked(line: []const u8)`:
-1. Jika `buf_pos + line.len + 1 > buf.len`: panggil `flushLocked()` terlebih dahulu.
-2. `@memcpy` byte baris ke dalam `buf[buf_pos..]`.
-3. Tambahkan `'\n'` di `buf[buf_pos + line.len]`.
-4. `buf_pos += line.len + 1`.
-5. `line_count += 1`.
-6. `flushLocked()`: selalu flush setelah setiap baris.
+`appendLocked(sink, kind, line)`:
+1. `sink.tryAppend(line)`: `@memcpy` record dan `'\n'` penutup ke `bufs[active]` bila masih muat, lalu kembali.
+2. Tidak muat dan `pending != 0`: flush thread masih memegang buffer satunya. Hitung satu stall dan tunggu, dengan lock dilepas selama menunggu.
+3. `sink.swap()`: serahkan `bufs[active]` sebagai `pending` dan mulai mengisi buffer yang lain.
+4. Ulangi append, yang sekarang muat.
 
-`flushLocked()`: `rawWrite(file_fd, buf[0..buf_pos])` lalu `buf_pos = 0`.
+Producer tidak pernah mengeluarkan syscall. Penulisan terjadi di dua tempat:
 
-Flush dipicu oleh:
-- Setiap baris yang ditulis (di dalam `writeLineLocked`).
-- Pergantian tanggal atau rotasi urut (di dalam `ensureFileLocked`).
+- `pumpSinkLocked` di flush thread, yang melepas lock selama penulisan. Ini jalur normalnya.
+- `drainSinkLocked` di thread pemanggil, dengan lock dipegang sepanjang penulisan. Ini jalur sinkronnya.
+
+Jalur sinkron berjalan pada:
+- Record `ERROR`, sehingga crash tidak menelan record yang menjelaskan crash itu.
+- Pergantian tanggal atau rotasi urut (di dalam `ensureFileLocked`), yang butuh descriptor untuk dirinya sendiri.
 - Pemanggilan eksplisit `logger.flush()`.
-- `logger.deinit()`.
+- `logger.deinit()`, setelah flush thread dihentikan dan di-join.
+
+Flush thread tidur 20 us antar pass selama sebuah burst mungkin masih berjalan, memanjang ke 2 ms setelah 64 pass tanpa pekerjaan. Aliran record yang tipis tetap ditulis paling lambat setiap 2 ms, dan itulah yang membatasi laju syscall untuk logger yang tidak pernah memenuhi buffer.
 
 ---
 

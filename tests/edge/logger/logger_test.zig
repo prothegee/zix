@@ -17,15 +17,15 @@ test "zix edge: statusLevel 2xx boundary (200 -> INFO)" {
     var logger = try zix.Logger.init(std.testing.allocator, .{ .save_min_level = .DEBUG });
     defer logger.deinit();
 
-    logger.access("GET", "/", 100, 0, "", "", "");
-    logger.access("GET", "/", 199, 0, "", "", "");
-    logger.access("GET", "/", 200, 0, "", "", "");
-    logger.access("GET", "/", 301, 0, "", "", "");
-    logger.access("GET", "/", 399, 0, "", "", "");
-    logger.access("GET", "/", 400, 0, "", "", "");
-    logger.access("GET", "/", 499, 0, "", "", "");
-    logger.access("GET", "/", 500, 0, "", "", "");
-    logger.access("GET", "/", 599, 0, "", "", "");
+    logger.access("http", "GET", "/", 100, 0, "", "", "");
+    logger.access("http", "GET", "/", 199, 0, "", "", "");
+    logger.access("http", "GET", "/", 200, 0, "", "", "");
+    logger.access("http", "GET", "/", 301, 0, "", "", "");
+    logger.access("http", "GET", "/", 399, 0, "", "", "");
+    logger.access("http", "GET", "/", 400, 0, "", "", "");
+    logger.access("http", "GET", "/", 499, 0, "", "", "");
+    logger.access("http", "GET", "/", 500, 0, "", "", "");
+    logger.access("http", "GET", "/", 599, 0, "", "", "");
 }
 
 test "zix edge: Level enum ordering (DEBUG < INFO < WARN < ERROR)" {
@@ -60,7 +60,7 @@ test "zix edge: access() below save_min_level is silent" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/", 200, 100, "", "UA", "origin");
+    logger.access("http", "GET", "/", 200, 100, "", "UA", "origin");
     try std.testing.expectEqual(TEST_NO_FD, logger.file_fd);
 }
 
@@ -82,7 +82,7 @@ test "zix edge: access() with empty method and path does not panic" {
     var logger = try zix.Logger.init(std.testing.allocator, .{});
     defer logger.deinit();
 
-    logger.access("", "", 200, 0, "", "", "");
+    logger.access("http", "", "", 200, 0, "", "", "");
 }
 
 test "zix edge: init with empty save_path, file_fd stays invalid" {
@@ -95,13 +95,13 @@ test "zix edge: init with empty save_path, file_fd stays invalid" {
 test "zix edge: access() empty client_ip does not panic" {
     var logger = try zix.Logger.init(std.testing.allocator, .{});
     defer logger.deinit();
-    logger.access("GET", "/", 200, 0, "", "", "");
+    logger.access("http", "GET", "/", 200, 0, "", "", "");
 }
 
 test "zix edge: access() non-empty client_ip does not panic" {
     var logger = try zix.Logger.init(std.testing.allocator, .{});
     defer logger.deinit();
-    logger.access("GET", "/", 200, 0, "203.0.113.5", "", "");
+    logger.access("http", "GET", "/", 200, 0, "203.0.113.5", "", "");
 }
 
 test "zix edge: console OFF, consoleActive false for all levels" {
