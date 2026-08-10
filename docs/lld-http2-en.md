@@ -179,7 +179,7 @@ Frame codec, control-frame senders, and the constants (`FRAME_TYPE_*`, `FLAG_*`,
 
 `writeAllFD` checks a threadlocal `write_hook`: when set (the TLS seal path, or the coalescing sink) it hands the plaintext to the hook, otherwise it calls `writeAllRawFD`, the blocking write-all that polls on `POLL.OUT` for a non-blocking socket's EAGAIN and retries on INTR. `writeAllRawFD` is also the hook's own flush path, so a coalescing flush does not re-enter the hook.
 
-`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` encode one control frame each. `sendResponseFD` -> `sendResponseEncodedFD` is the immediate, unmetered response (no flow control): HEADERS via `respHeaderBlock`, then the body framed in `<= DEFAULT_MAX_FRAME_SIZE` DATA chunks with END_STREAM on the last (or on HEADERS when the body is empty). Large bodies that may exceed the peer window use `mux.sendResponseStreamFD` instead.
+`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` encode one control frame each. `sendResponseFD` -> `sendResponseEncodedFD` is the immediate, unmetered response (no flow control): HEADERS via `respHeaderBlock`, then the body framed in `<= DEFAULT_MAX_FRAME_SIZE` DATA chunks with END_STREAM on the last (or on HEADERS when the body is empty). A body at or under `SEND_STAGE_BODY_MAX` (4 KiB) leaves as one staged write, a larger one as one vectored write per DATA chunk (the HEADERS block rides the first chunk, a write hook receives each pair as two appends). Large bodies that may exceed the peer window use `mux.sendResponseStreamFD` instead.
 
 ---
 
