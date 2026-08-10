@@ -30,6 +30,7 @@ const writeAllFD = resp_mod.writeAllFD;
 const uring = @import("../../../multiplexers/ring.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 const reuseport = @import("../../../multiplexers/reuseport.zig");
+const listen_report = @import("../../../multiplexers/listen_report.zig");
 const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../multiplexers/tls_conn.zig");
 const Tls = @import("../../../tls/Tls.zig");
@@ -49,7 +50,7 @@ const URING_SQ_THREAD_IDLE_MS: u32 = 1000;
 /// to a flagless ring when the kernel does not support them. Mirrors the
 /// zix.Http1 ring init.
 fn initUringRing() !IoUring {
-    if (comptime builtin.os.tag != .linux) return error.PlatformNotSupported;
+    if (comptime builtin.os.tag != .linux) return error.ZixPlatformNotSupported;
 
     const linux = std.os.linux;
     var params = std.mem.zeroInit(linux.io_uring_params, .{
@@ -836,7 +837,7 @@ fn UringWorker(comptime ServerPtr: type) type {
 /// request through processRequest with the response staged into a
 /// RespSink, and submits one coalesced send. Half-duplex per connection,
 /// one request per buffer (matches the EPOLL path, ADR-037 Phase 4 step 4).
-fn uringWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reuseport.Steering) void {
+fn uringWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reuseport.Steering, report: *listen_report.Report) void {
     const ServerPtr = @TypeOf(server);
     const cfg = server.config;
 
@@ -847,16 +848,29 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
     var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
     defer bind_turn.release();
 
-    const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch return;
+    // Every exit between here and the ring loop has to reach the group, or the workers that did
+    // bind wait on one that is already gone.
+    var slot = report.slot(io, error.ZixHttpWorkerSetupFailed);
+    defer slot.close();
+
+    const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
     var net_server = addr.listen(io, .{
         .mode = .stream,
         .kernel_backlog = @intCast(cfg.kernel_backlog),
         .reuse_address = true,
-    }) catch return;
+    }) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
     defer net_server.deinit(io);
     const listener_fd = net_server.socket.handle;
 
-    if (steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+    if (steering) |steer| _ = reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
     // Dual-listener TLS side: a second listener on tls_port whose connections terminate TLS in
     // this same ring loop (no separate epoll fleet).
@@ -864,19 +878,32 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
     var tls_srv: std.Io.net.Server = undefined;
     var tls_listener_fd: std.posix.fd_t = -1;
     if (tls_active) {
-        const tls_addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.tls_port) catch return;
+        const tls_addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.tls_port) catch |err| {
+            slot.fail(err);
+
+            return;
+        };
         tls_srv = tls_addr.listen(io, .{
             .mode = .stream,
             .kernel_backlog = @intCast(cfg.kernel_backlog),
             .reuse_address = true,
-        }) catch return;
+        }) catch |err| {
+            slot.fail(err);
+
+            return;
+        };
         tls_listener_fd = tls_srv.socket.handle;
-        if (steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
+        if (steering) |steer| _ = reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
     }
     defer if (tls_active) tls_srv.deinit(io);
 
     // Both groups joined: release the bind turn to the next worker.
     bind_turn.release();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them
+    // and the caller gets one honest failure.
+    slot.ok();
+    if (report.awaitGroup(io) != null) return;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
@@ -946,7 +973,7 @@ fn uringWorker(server: anytype, io: std.Io, worker_id: usize, steering: ?reusepo
 
     worker.run();
 
-    logSystem(cfg, "uring worker {d}: {d} requests served", .{ worker_id, worker.requests_served });
+    logSystem(cfg, .INFO, "uring worker {d}: {d} requests served", .{ worker_id, worker.requests_served });
 }
 
 // --------------------------------------------------------- //
@@ -961,19 +988,13 @@ pub fn runUring(server: anytype, io: std.Io) !void {
     // setup, return, and the server would vanish right after binding (a confusing
     // ServerStartTimeout downstream). Fall back to the EPOLL shared-nothing loop.
     var probe = initUringRing() catch |err| {
-        logSystem(cfg, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
+        logSystem(cfg, .WARN, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
 
         return epoll_model.runEpoll(server, io);
     };
     probe.deinit();
 
     const worker_count = if (cfg.workers == 0) getAvailableCpuCount() else cfg.workers;
-
-    logSystem(cfg, "listening on {s}:{d} (io_uring, {d} workers, shared-nothing)", .{
-        cfg.ip, cfg.port, worker_count,
-    });
-    if (cfg.tls != null and cfg.tls_port != 0)
-        logSystem(cfg, "dual listener: https/1.1 TLS on {s}:{d} (same workers, on-ring)", .{ cfg.ip, cfg.tls_port });
 
     const threads = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(threads);
@@ -988,9 +1009,36 @@ pub fn runUring(server: anytype, io: std.Io) !void {
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
+    // What every worker says about its own listeners, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(worker_count);
+
     for (threads, 0..) |*thread, idx| {
-        thread.* = try std.Thread.spawn(.{ .stack_size = worker_stack }, uringWorker, .{ server, io, idx, steering });
+        thread.* = std.Thread.spawn(.{ .stack_size = worker_stack }, uringWorker, .{ server, io, idx, steering, &report }) catch |err| {
+            logSystem(cfg, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ idx, worker_count, @errorName(err) });
+            report.abandon(io, worker_count - idx, err);
+
+            for (threads[0..idx]) |spawned| spawned.join();
+
+            return error.ZixHttpListenFailed;
+        };
     }
+
+    if (report.awaitGroup(io)) |err| {
+        logSystem(cfg, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ cfg.ip, cfg.port, report.failures(), worker_count, @errorName(err) });
+
+        for (threads) |thread| thread.join();
+
+        return error.ZixHttpListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a listener that may never have come up.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (io_uring, {d} workers, shared-nothing)", .{
+        cfg.ip, cfg.port, worker_count,
+    });
+    if (cfg.tls != null and cfg.tls_port != 0)
+        logSystem(cfg, .INFO, "dual listener: https/1.1 TLS on {s}:{d} (same workers, on-ring)", .{ cfg.ip, cfg.tls_port });
 
     for (threads) |thread| thread.join();
 }

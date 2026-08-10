@@ -25,10 +25,8 @@ pub fn runAsync(server: anytype, io: std.Io) !void {
     // the accept loop ends rather than living until process exit.
     defer _ = async_cache.reclaim();
 
-    logSystem(cfg, "listening on {s}:{d} (io.async)", .{ cfg.ip, cfg.port });
-
     const addr = std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port) catch |err| {
-        logSystem(cfg, "resolve error: {}", .{err});
+        logSystem(cfg, .ERROR, "resolve error: {}", .{err});
         return;
     };
     var net_server = addr.listen(io, .{
@@ -36,15 +34,19 @@ pub fn runAsync(server: anytype, io: std.Io) !void {
         .kernel_backlog = @intCast(cfg.kernel_backlog),
         .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, applied to all models
     }) catch |err| {
-        logSystem(cfg, "listen error: {}", .{err});
+        logSystem(cfg, .ERROR, "listen error: {}", .{err});
         return;
     };
     defer net_server.deinit(io);
 
+    // Announced below the bind, not above it: the old line claimed an address the listener
+    // may never have taken.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (io.async)", .{ cfg.ip, cfg.port });
+
     while (true) {
         const stream = net_server.accept(io) catch |err| {
             if (err != error.ConnectionAborted) {
-                logSystem(cfg, "accept error: {}", .{err});
+                logSystem(cfg, .ERROR, "accept error: {}", .{err});
                 break;
             }
             continue;

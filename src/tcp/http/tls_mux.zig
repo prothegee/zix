@@ -23,6 +23,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 
 const common = @import("dispatch/common.zig");
+const listen_report = @import("../../multiplexers/listen_report.zig");
 const parser = @import("parser.zig");
 const ws = @import("websocket.zig");
 const resp = @import("response.zig");
@@ -267,13 +268,28 @@ pub fn Worker(comptime Server: type) type {
             worker_id: usize,
             server: Server,
             ctx: *const Tls.Context,
+            /// Where this worker says whether its listener came up, shared with the whole group.
+            report: *listen_report.Report,
         };
 
         fn workerRun(worker: WorkerCtx) void {
             common.pinToCpu(worker.worker_id);
 
-            const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch return;
-            var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
+            // Every exit between here and the event loop has to reach the group, or the
+            // workers that did bind wait on one that is already gone.
+            var slot = worker.report.slot(worker.io, error.ZixHttpTlsWorkerSetupFailed);
+            defer slot.close();
+
+            const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch |err| {
+                slot.fail(err);
+
+                return;
+            };
+            var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch |err| {
+                slot.fail(err);
+
+                return;
+            };
             defer srv.deinit(worker.io);
             const listener_fd = srv.socket.handle;
             common.setNonBlock(listener_fd);
@@ -295,6 +311,11 @@ pub fn Worker(comptime Server: type) type {
             defer arena.deinit();
             _ = arena.allocator().alloc(u8, worker.max_allocator_size) catch {};
             _ = arena.reset(.retain_capacity);
+
+            // Serve only once every worker is up, so a group where one bind failed serves on none
+            // of them and the caller gets one honest failure.
+            slot.ok();
+            if (worker.report.awaitGroup(worker.io) != null) return;
 
             var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
             while (true) {
@@ -340,13 +361,15 @@ pub fn Worker(comptime Server: type) type {
             const cpu = common.getAvailableCpuCount();
             const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
 
-            common.logSystem(cfg, "listening on {s}:{d} (https/1.1 TLS, epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
-
             const threads = try allocator.alloc(std.Thread, worker_count);
             defer allocator.free(threads);
 
+            // What every worker says about its own listener, so a bind that fails inside a
+            // worker thread reaches this frame instead of ending that thread and nothing else.
+            var report = listen_report.Report.init(worker_count);
+
             for (threads, 0..) |*t, i|
-                t.* = try std.Thread.spawn(.{ .stack_size = cfg.worker_stack_size_bytes }, workerRun, .{WorkerCtx{
+                t.* = std.Thread.spawn(.{ .stack_size = cfg.worker_stack_size_bytes }, workerRun, .{WorkerCtx{
                     .io = io,
                     .ip = cfg.ip,
                     .port = cfg.port,
@@ -355,7 +378,27 @@ pub fn Worker(comptime Server: type) type {
                     .worker_id = i,
                     .server = server,
                     .ctx = ctx,
-                }});
+                    .report = &report,
+                }}) catch |err| {
+                    common.logSystem(cfg, .ERROR, "could not spawn tls worker {d} of {d} ({s})", .{ i, worker_count, @errorName(err) });
+                    report.abandon(io, worker_count - i, err);
+
+                    for (threads[0..i]) |spawned| spawned.join();
+
+                    return error.ZixHttpTlsListenFailed;
+                };
+
+            if (report.awaitGroup(io)) |err| {
+                common.logSystem(cfg, .ERROR, "tls not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ cfg.ip, cfg.port, report.failures(), worker_count, @errorName(err) });
+
+                for (threads) |t| t.join();
+
+                return error.ZixHttpTlsListenFailed;
+            }
+
+            // Announced here rather than above the spawn, because until the group reports there is
+            // nothing to announce: the old line claimed a listener that may never have come up.
+            common.logSystem(cfg, .INFO, "listening on {s}:{d} (https/1.1 TLS, epoll-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
 
             for (threads) |t| t.join();
         }

@@ -31,10 +31,10 @@ const tls_mux = @import("tls_mux.zig");
 /// Note:
 /// - workers = 0 (default): one shared-nothing worker per available CPU under .EPOLL / .URING
 /// - workers = N: exactly N workers, ignored by .ASYNC (always one accept thread)
-/// - If config.public_dir is non-empty, validates the directory exists. Yields error.PublicDirNotFound if absent
+/// - If config.public_dir is non-empty, validates the directory exists. Yields error.ZixPublicDirNotFound if absent
 /// - Each .EPOLL / .URING worker owns its own SO_REUSEPORT listener, so the kernel load-balances
 ///   new connections with no shared queue and no cross-thread fd handoff
-/// - .EPOLL / .URING are Linux-only: run() returns error.DispatchModelUnsupported elsewhere (ADR-065)
+/// - .EPOLL / .URING are Linux-only: run() returns error.ZixDispatchModelUnsupported elsewhere (ADR-065)
 ///
 /// Usage:
 /// ```zig
@@ -93,7 +93,11 @@ pub const Server = struct {
     /// (already overridden to tls_port by the caller) while the cleartext model runs on the
     /// original port.
     fn serveTlsThread(server_copy: Self, tls_io: std.Io) void {
-        tls_serve.runTls(&server_copy, tls_io) catch {};
+        tls_serve.runTls(&server_copy, tls_io) catch |err| {
+            // The cleartext listener keeps serving on its own thread, so without this the https
+            // side is dead and the server still looks healthy.
+            common.logSystem(server_copy.config, .ERROR, "the https listener on {s}:{d} stopped ({s}), cleartext is still serving", .{ server_copy.config.ip, server_copy.config.tls_port, @errorName(err) });
+        };
     }
 
     /// Start listening and accepting connections
@@ -103,16 +107,20 @@ pub const Server = struct {
     pub fn run(self: *Self) !void {
         const cfg = self.config;
 
+        // A forgotten port used to reach the bind and come back as whatever std called it, so the
+        // config mistake read as a network failure. Rejected here like every other engine.
+        if (cfg.port == 0) return error.ZixPortNotConfigured;
+
         // Reject an impossible dual-listener bind before the timer thread spawns, so an
         // error return leaves no detached thread reading this server's registry.
-        if (cfg.tls != null and cfg.tls_port != 0 and cfg.tls_port == cfg.port) return error.TlsPortConflict;
+        if (cfg.tls != null and cfg.tls_port != 0 and cfg.tls_port == cfg.port) return error.ZixTlsPortConflict;
 
         // Reject an unrunnable model before the timer thread spawns, so a rejected config leaves
         // nothing behind (ADR-065).
         if (!dispatch_support.isSupported(cfg.dispatch_model)) {
-            common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+            common.logSystem(cfg, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-            return error.DispatchModelUnsupported;
+            return error.ZixDispatchModelUnsupported;
         }
 
         ignoreSigpipe();
@@ -120,12 +128,24 @@ pub const Server = struct {
         const thread_io: std.Io = cfg.io;
 
         if (cfg.public_dir.len > 0) {
-            const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), thread_io, cfg.public_dir, .{}) catch return error.PublicDirNotFound;
+            // One name used to cover missing, not-a-directory and permission-denied alike, so
+            // a public_dir the process cannot enter reported as one that is not there.
+            const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), thread_io, cfg.public_dir, .{}) catch |err| return switch (err) {
+                error.FileNotFound => error.ZixPublicDirNotFound,
+                error.NotDir => error.ZixPublicDirNotADirectory,
+                else => error.ZixPublicDirUnreadable,
+            };
             dir.close(thread_io);
 
-            const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch .DISABLED;
+            // A failed install used to look exactly like caching being off, so a box out of
+            // memory served every static file through the slow path and said nothing.
+            const installed = static_cache.install(cfg.public_dir_cache_max_entries, cfg.public_dir_cache_ttl_ms) catch |err| downgrade: {
+                common.logSystem(cfg, .WARN, "the static cache could not be installed ({s}), every static request re-opens its file", .{@errorName(err)});
+
+                break :downgrade .DISABLED;
+            };
             if (installed == .MISMATCHED) {
-                std.log.info("zix http: a static cache is already installed in this process with different settings, keeping it", .{});
+                common.logSystem(cfg, .WARN, "a static cache is already installed in this process with different settings, keeping it", .{});
             }
         }
 
@@ -167,9 +187,9 @@ pub const Server = struct {
         // only keeps the Linux-only loops out of analysis there.
         switch (cfg.dispatch_model) {
             .ASYNC => try async_model.runAsync(self, thread_io),
-            .EPOLL => if (comptime is_linux) try epoll_model.runEpoll(self, thread_io) else return error.DispatchModelUnsupported,
+            .EPOLL => if (comptime is_linux) try epoll_model.runEpoll(self, thread_io) else return error.ZixDispatchModelUnsupported,
             // Native io_uring ring path (ADR-037 Phase 4 step 4).
-            .URING => if (comptime is_linux) try uring_model.runUring(self, thread_io) else return error.DispatchModelUnsupported,
+            .URING => if (comptime is_linux) try uring_model.runUring(self, thread_io) else return error.ZixDispatchModelUnsupported,
         }
     }
 };
