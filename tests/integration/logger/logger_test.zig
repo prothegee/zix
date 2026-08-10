@@ -129,7 +129,7 @@ test "zix integration: Logger.access() writes line to file" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/api/users", 200, 512, "192.168.1.1", "TestAgent/1.0", "http://example.com");
+    logger.access("http", "GET", "/api/users", 200, 512, "192.168.1.1", "TestAgent/1.0", "http://example.com");
     logger.flush();
 
     const date = currentDateBuf();
@@ -162,7 +162,7 @@ test "zix integration: access() absent UA and origin logged as dash" {
     });
     defer logger.deinit();
 
-    logger.access("POST", "/submit", 200, 0, "", "", "");
+    logger.access("http", "POST", "/submit", 200, 0, "", "", "");
     logger.flush();
 
     const date = currentDateBuf();
@@ -191,7 +191,7 @@ test "zix integration: access() present UA appears in file" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/", 200, 0, "", "MyBot/2.0", "");
+    logger.access("http", "GET", "/", 200, 0, "", "MyBot/2.0", "");
     logger.flush();
 
     const date = currentDateBuf();
@@ -220,7 +220,7 @@ test "zix integration: system() 5xx status maps to ERROR level" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/crash", 500, 0, "", "", "");
+    logger.access("http", "GET", "/crash", 500, 0, "", "", "");
     logger.flush();
 
     const date = currentDateBuf();
@@ -249,7 +249,7 @@ test "zix integration: access() client_ip appears in log file" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/", 200, 0, "10.0.0.42", "", "");
+    logger.access("http", "GET", "/", 200, 0, "10.0.0.42", "", "");
     logger.flush();
 
     const date = currentDateBuf();
@@ -278,7 +278,7 @@ test "zix integration: access() absent client_ip logged as dash" {
     });
     defer logger.deinit();
 
-    logger.access("GET", "/", 200, 0, "", "", "");
+    logger.access("http", "GET", "/", 200, 0, "", "", "");
     logger.flush();
 
     const date = currentDateBuf();
