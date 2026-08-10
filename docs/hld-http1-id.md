@@ -434,7 +434,7 @@ Lihat `examples/http1_websocket.zig` (cleartext) dan `examples/tls/tls_http1_ws.
 
 `config.logger` hanya menerima baris lifecycle server (notice listening, fallback EPOLL). Saat null, baris lifecycle dicetak ke stderr hanya pada Debug build dan diam pada release build (server release tanpa logger tidak mengeluarkan output lifecycle).
 
-Access logging per-request adalah tanggung jawab handler: handler Http1 menulis langsung ke fd dan mengembalikan `void`, sehingga engine tidak dapat mengamati status response atau jumlah byte. Panggil `logger.access()` di dalam handler di titik status akhir dan ukurannya diketahui.
+Access logging per-request adalah tanggung jawab engine, bukan handler. Saat `config.logger` diisi, engine menulis satu record `[http1:access]` setelah setiap request yang dilayani, mengambil status dan jumlah byte dari `Response`. Handler yang menulis langsung ke fd alih-alih lewat `Response` tetap tercatat, tetapi jumlah byte-nya terbaca 0, sehingga handler seperti itu boleh memanggil `logger.access()` sendiri di titik ukuran sebenarnya diketahui.
 
 ---
 
