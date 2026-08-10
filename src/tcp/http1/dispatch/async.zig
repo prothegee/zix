@@ -34,7 +34,7 @@ pub fn runAsync(config: Config, handler: HandlerFn) !void {
         sweeper.detach();
     }
 
-    logSystem(config, "listening on {s}:{d} (io.async)", .{ config.ip, config.port });
+    logSystem(config, .INFO, "listening on {s}:{d} (io.async)", .{ config.ip, config.port });
 
     while (true) {
         const stream = srv.accept(io) catch continue;

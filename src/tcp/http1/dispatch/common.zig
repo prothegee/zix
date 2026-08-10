@@ -2,25 +2,39 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 const win_io = @import("../../../utils/windows_io.zig");
 const async_cache = @import("../../../utils/async_cache.zig");
 const Config = @import("../config.zig").Http1ServerConfig;
 const core = @import("../core.zig");
 const HandlerFn = core.HandlerFn;
+const Logger = @import("../../../logger/logger.zig").Logger;
+
+const log = std.log.scoped(.zix_http1);
 
 // --------------------------------------------------------- //
 
-/// Emit a server lifecycle line. Routes through config.logger when present.
-/// Without a logger it prints to stderr only in Debug builds (silent in release).
-pub fn logSystem(config: Config, comptime fmt: []const u8, args: anytype) void {
+/// Emit a server line at the given level. Routes through config.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+pub fn logSystem(config: Config, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (config.logger) |lg| {
-        lg.system(.INFO, "http1", fmt, args);
+        lg.system(level, "http1", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 // --------------------------------------------------------- //
@@ -661,4 +675,154 @@ test "zix http1: ConnRegistry leaves a connection before its deadline alone" {
     try std.testing.expectEqual(@as(usize, 1), written);
 
     registry.deregister(&entry, io);
+}
+
+/// Read back the one log file the logger wrote under a temp root.
+///
+/// Note:
+/// - The logger names its file after the current date, so the day directory is found by scanning
+///   rather than by rebuilding the date and risking a midnight straddle.
+///
+/// Return:
+/// - the file's bytes, caller owns them
+/// - error.ZixNoLogLine when the logger wrote nothing
+fn readLoggedLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
+    var days = root.iterate();
+
+    while (try days.next(std.testing.io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        var day = try root.openDir(std.testing.io, entry.name, .{});
+        defer day.close(std.testing.io);
+
+        const bytes = day.readFileAlloc(std.testing.io, "log-000000.log", allocator, .limited(64 * 1024)) catch continue;
+        if (bytes.len > 0) return bytes;
+
+        allocator.free(bytes);
+    }
+
+    return error.ZixNoLogLine;
+}
+
+test "zix http1: logSystem files a failure at the level the caller passed" {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("logger file output is not ported to Windows, test skipped", .{});
+        return;
+    }
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var logger = try Logger.init(std.testing.allocator, .{ .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const config = Config{
+        .io = threaded.io(),
+        .ip = "127.0.0.1",
+        .port = 18990,
+        .dispatch_model = .ASYNC,
+        .logger = &logger,
+    };
+
+    logSystem(config, .ERROR, "listen failed on port {d}", .{18990});
+    logger.flush();
+
+    const line = try readLoggedLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "ERROR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "listen failed on port 18990") != null);
+}
+
+test "zix http1: logSystem lifecycle line files as INFO, not as the old fixed level" {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("logger file output is not ported to Windows, test skipped", .{});
+        return;
+    }
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var logger = try Logger.init(std.testing.allocator, .{ .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const config = Config{
+        .io = threaded.io(),
+        .ip = "127.0.0.1",
+        .port = 18991,
+        .dispatch_model = .ASYNC,
+        .logger = &logger,
+    };
+
+    logSystem(config, .INFO, "listening on {s}:{d}", .{ "127.0.0.1", 18991 });
+    logger.flush();
+
+    const line = try readLoggedLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "INFO") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "ERROR") == null);
+}
+
+test "zix http1: logSystem below the logger min level writes nothing" {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("logger file output is not ported to Windows, test skipped", .{});
+        return;
+    }
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var logger = try Logger.init(std.testing.allocator, .{ .save_path = root, .save_min_level = .ERROR });
+    defer logger.deinit();
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const config = Config{
+        .io = threaded.io(),
+        .ip = "127.0.0.1",
+        .port = 18992,
+        .dispatch_model = .ASYNC,
+        .logger = &logger,
+    };
+
+    logSystem(config, .INFO, "listening on {s}:{d}", .{ "127.0.0.1", 18992 });
+    logSystem(config, .WARN, "io_uring unavailable, falling back", .{});
+    logger.flush();
+
+    try std.testing.expectError(error.ZixNoLogLine, readLoggedLine(tmp.dir, std.testing.allocator));
+}
+
+test "zix http1: logSystem with no logger attached accepts every level" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const config = Config{
+        .io = threaded.io(),
+        .ip = "127.0.0.1",
+        .port = 18993,
+        .dispatch_model = .ASYNC,
+    };
+
+    // The std.log branch. Its destination is the caller's std.options.logFn, which a test cannot
+    // install (it is a root declaration), so what is checked here is that every level is handled
+    // and none of them reaches for a logger that is not there.
+    logSystem(config, .DEBUG, "no logger attached", .{});
+    logSystem(config, .INFO, "no logger attached", .{});
 }

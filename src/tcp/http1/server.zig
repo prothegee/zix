@@ -37,29 +37,49 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
         /// (already overridden to tls_port by the caller) while the cleartext model runs on the
         /// original port.
         fn serveTlsThread(config: Config) void {
-            tls_serve.runTls(handler, config) catch {};
+            tls_serve.runTls(handler, config) catch |err| {
+                // The cleartext listener keeps serving on its own thread, so without this the
+                // https side is dead and the server still looks healthy.
+                common.logSystem(config, .ERROR, "the https listener on {s}:{d} stopped ({s}), cleartext is still serving", .{ config.ip, config.tls_port, @errorName(err) });
+            };
         }
 
         pub fn run(self: *const Self) !void {
             ignoreSigpipe();
 
+            // A forgotten port used to reach the bind and come back as whatever std called it, so
+            // the config mistake read as a network failure. Rejected here like every other engine.
+            if (self.config.port == 0) return error.ZixPortNotConfigured;
+
             // Reject an unrunnable model before any listener or TLS thread starts, so a rejected
             // config leaves nothing behind (ADR-065).
             if (!dispatch_support.isSupported(self.config.dispatch_model)) {
-                common.logSystem(self.config, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
+                common.logSystem(self.config, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(self.config.dispatch_model)});
 
-                return error.DispatchModelUnsupported;
+                return error.ZixDispatchModelUnsupported;
             }
 
             // Static serving is opt-in: when public_dir is set, fail fast if the directory is absent
             // rather than 404-ing every file request at runtime. Mirrors zix.Http.Server.run.
             if (self.config.public_dir.len > 0) {
-                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), self.config.io, self.config.public_dir, .{}) catch return error.PublicDirNotFound;
+                // One name used to cover missing, not-a-directory and permission-denied alike, so
+                // a public_dir the process cannot enter reported as one that is not there.
+                const dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), self.config.io, self.config.public_dir, .{}) catch |err| return switch (err) {
+                    error.FileNotFound => error.ZixPublicDirNotFound,
+                    error.NotDir => error.ZixPublicDirNotADirectory,
+                    else => error.ZixPublicDirUnreadable,
+                };
                 dir.close(self.config.io);
 
-                const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch .DISABLED;
+                // A failed install used to look exactly like caching being off, so a box out of
+                // memory served every static file through the slow path and said nothing.
+                const installed = static_cache.install(self.config.public_dir_cache_max_entries, self.config.public_dir_cache_ttl_ms) catch |err| downgrade: {
+                    common.logSystem(self.config, .WARN, "the static cache could not be installed ({s}), every static request re-opens its file", .{@errorName(err)});
+
+                    break :downgrade .DISABLED;
+                };
                 if (installed == .MISMATCHED) {
-                    std.log.info("zix http1: a static cache is already installed in this process with different settings, keeping it", .{});
+                    common.logSystem(self.config, .WARN, "a static cache is already installed in this process with different settings, keeping it", .{});
                 }
             }
 
@@ -69,7 +89,7 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
                 // Dual listener (tls_port): cleartext on port + TLS on tls_port from ONE worker
                 // fleet, instead of a second server launch.
                 if (self.config.tls_port != 0) {
-                    if (self.config.tls_port == self.config.port) return error.TlsPortConflict;
+                    if (self.config.tls_port == self.config.port) return error.ZixTlsPortConflict;
 
                     if (is_linux and self.config.dispatch_model == .EPOLL)
                         return epoll_model.runEpoll(self.config, handler);
@@ -103,11 +123,11 @@ fn Http1ServerImpl(comptime handler: HandlerFn) type {
                 .EPOLL => if (comptime @import("builtin").target.os.tag == .linux)
                     epoll_model.runEpoll(self.config, handler)
                 else
-                    error.DispatchModelUnsupported,
+                    error.ZixDispatchModelUnsupported,
                 .URING => if (comptime @import("builtin").target.os.tag == .linux)
                     uring_model.runUring(self.config, handler)
                 else
-                    error.DispatchModelUnsupported,
+                    error.ZixDispatchModelUnsupported,
             };
         }
     };

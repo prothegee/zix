@@ -26,6 +26,7 @@ const posix = std.posix;
 const core = @import("core.zig");
 const Config = @import("config.zig").Http1ServerConfig;
 const common = @import("dispatch/common.zig");
+const listen_report = @import("../../multiplexers/listen_report.zig");
 const tls_serve = @import("tls_serve.zig");
 const ws = @import("websocket.zig");
 const Tls = @import("../../tls/Tls.zig");
@@ -177,7 +178,7 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_bu
 
     while (conn.rlen > 0) {
         const parsed = core.parseHead(conn.rbuf[0..conn.rlen]) catch |err| {
-            if (err == error.IncompleteHeader) return true; // wait for the rest of the head
+            if (err == error.ZixIncompleteHeader) return true; // wait for the rest of the head
 
             conn.transport.wclose = true; // malformed request: close
             return true;
@@ -331,6 +332,8 @@ const WorkerCtx = struct {
     ctx: *const Tls.Context,
     public_dir: []const u8 = "",
     max_response_headers: usize = 16,
+    /// Where this worker says whether its listener came up, shared with the whole group.
+    report: *listen_report.Report,
 };
 
 fn workerRun(worker: WorkerCtx) void {
@@ -341,8 +344,21 @@ fn workerRun(worker: WorkerCtx) void {
     core.setStatic(worker.public_dir, worker.io);
     core.setMaxResponseHeaders(worker.max_response_headers);
 
-    const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch return;
-    var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch return;
+    // Every exit between here and the event loop has to reach the group, or the workers that
+    // did bind wait on one that is already gone.
+    var slot = worker.report.slot(worker.io, error.ZixHttp1TlsWorkerSetupFailed);
+    defer slot.close();
+
+    const addr = std.Io.net.IpAddress.resolve(worker.io, worker.ip, worker.port) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
+    var srv = addr.listen(worker.io, .{ .reuse_address = true, .kernel_backlog = worker.kernel_backlog }) catch |err| {
+        slot.fail(err);
+
+        return;
+    };
     defer srv.deinit(worker.io);
     const listener_fd = srv.socket.handle;
     common.setNonBlock(listener_fd);
@@ -364,6 +380,11 @@ fn workerRun(worker: WorkerCtx) void {
 
     const out_buf = allocator.alloc(u8, RESPONSE_BUF_SIZE) catch return;
     defer allocator.free(out_buf);
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them
+    // and the caller gets one honest failure.
+    slot.ok();
+    if (worker.report.awaitGroup(worker.io) != null) return;
 
     var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
     while (true) {
@@ -410,13 +431,15 @@ pub fn runTlsMux(handler: HandlerFn, config: Config) !void {
     const cpu = common.getAvailableCpuCount();
     const worker_count = if (config.workers == 0) cpu else config.workers;
 
-    common.logSystem(config, "listening on {s}:{d} (https/1.1 TLS, epoll-mux/{d})", .{ config.ip, config.port, worker_count });
-
     const threads = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(threads);
 
+    // What every worker says about its own listener, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(worker_count);
+
     for (threads, 0..) |*t, i|
-        t.* = try std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerRun, .{WorkerCtx{
+        t.* = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerRun, .{WorkerCtx{
             .io = config.io,
             .ip = config.ip,
             .port = config.port,
@@ -427,7 +450,27 @@ pub fn runTlsMux(handler: HandlerFn, config: Config) !void {
             .ctx = ctx,
             .public_dir = config.public_dir,
             .max_response_headers = config.max_response_headers.value(),
-        }});
+            .report = &report,
+        }}) catch |err| {
+            common.logSystem(config, .ERROR, "could not spawn tls worker {d} of {d} ({s})", .{ i, worker_count, @errorName(err) });
+            report.abandon(config.io, worker_count - i, err);
+
+            for (threads[0..i]) |spawned| spawned.join();
+
+            return error.ZixHttp1TlsListenFailed;
+        };
+
+    if (report.awaitGroup(config.io)) |err| {
+        common.logSystem(config, .ERROR, "tls not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ config.ip, config.port, report.failures(), worker_count, @errorName(err) });
+
+        for (threads) |t| t.join();
+
+        return error.ZixHttp1TlsListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a listener that may never have come up.
+    common.logSystem(config, .INFO, "listening on {s}:{d} (https/1.1 TLS, epoll-mux/{d})", .{ config.ip, config.port, worker_count });
 
     for (threads) |t| t.join();
 }
@@ -471,7 +514,7 @@ fn readRecordFd(fd: posix.fd_t, buf: []u8) ![]const u8 {
     while (got < 5) {
         const rc = linux.read(fd, buf[got..].ptr, 5 - got);
         if (posix.errno(rc) != .SUCCESS) return error.ReadFailed;
-        if (rc == 0) return error.ConnectionClosed;
+        if (rc == 0) return error.ZixConnectionClosed;
         got += @intCast(rc);
     }
 
@@ -480,7 +523,7 @@ fn readRecordFd(fd: posix.fd_t, buf: []u8) ![]const u8 {
     while (got < total) {
         const rc = linux.read(fd, buf[got..].ptr, total - got);
         if (posix.errno(rc) != .SUCCESS) return error.ReadFailed;
-        if (rc == 0) return error.ConnectionClosed;
+        if (rc == 0) return error.ZixConnectionClosed;
         got += @intCast(rc);
     }
 
