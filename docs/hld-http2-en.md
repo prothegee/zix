@@ -313,7 +313,7 @@ The write hook (`frame.write_hook`) is the shared mechanism: the mux writes plai
 
 `config.logger` receives server lifecycle lines only (listening notices, io_uring fallback, non-Linux fallback) via `logger.system()`. When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds.
 
-Per-stream access logging is the handler's responsibility: the handler owns its frame I/O and returns `void`, so the engine cannot observe the response status or byte count. Call `logger.access()` inside the handler where the final status and size are known.
+Per-stream access logging is the engine's, not the handler's. When `config.logger` is set the engine writes one `[http2:access]` record after every served stream, taking the status and byte count off the `Response`. A handler that frames its own bytes through `frame.sendResponseFD` is still recorded, but its byte count reads 0, so such a handler may call `logger.access()` itself where the real size is known.
 
 ---
 
