@@ -92,6 +92,15 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 | public_dir_cache_ttl_ms | `0` | berapa lama file yang dilayani tetap ter-cache, `0` mematikan cache, lihat di bawah | tiap site yang punya `public_dir`, sebagai default yang boleh ditimpa file site | di atas `3600000` ia fault dan tetap di default |
 | public_dir_cache_max_entries | `256` | berapa file yang boleh ditahan terbuka oleh cache, seluruh daemon | satu cache table yang dibangun daemon ini | `0` atau di atas `1048576` fault dan tetap di default |
 
+### Isi log daemon
+
+Dua jenis record berbagi satu file.
+
+- **Record akses**, satu per exchange yang dijawab gateway, ditandai dengan Host yang diminta sehingga dua site dalam satu file tetap terpisah: `[shop.example.com:access] GET /cart 200 1234 "203.0.113.7" "curl/8.5.0" "-"`. Level mengikuti status, jadi baris akses 5xx adalah `error` dan 4xx adalah `warn`.
+- **Record sistem**, ditandai `[zixer]`, mencakup lifecycle daemon sendiri dan edge error yang menjelaskan mengapa sebuah request ditolak.
+
+Jawaban yang dikirim gateway selalu terlihat pada `log_level: info` default. Kegagalan upstream masuk sebagai `error` dan request yang ditolak masuk sebagai `warn`. Hanya obrolan rutin daemon yang berada di bawahnya, sehingga menurunkan ke `debug` menambah detail, bukan memunculkan jawaban yang tadinya tersembunyi.
+
 Hanya `dispatch` yang divalidasi tanpa dipakai. `main.cfg` kosong tetap valid: tiap key jatuh ke default di atas.
 
 ### Apa yang dilakukan workers
