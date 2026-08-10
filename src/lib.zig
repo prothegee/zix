@@ -75,6 +75,8 @@ pub const utils = struct {
     pub const socket_cut_writer = @import("utils/socket_cut_writer.zig");
     pub const socket_connect = @import("utils/socket_connect.zig");
     pub const monotonic_clock = @import("utils/monotonic_clock.zig");
+    pub const portable_sleep = @import("utils/portable_sleep.zig");
+    pub const peer_addr = @import("utils/peer_addr.zig");
     pub const secure_random = @import("utils/secure_random.zig");
     pub const async_cache = @import("utils/async_cache.zig");
     pub const socket_path = @import("utils/socket_path.zig");
@@ -260,6 +262,8 @@ test "zix: unit test" {
 
     // # zix.Logger
     std.testing.refAllDecls(@import("logger/logger.zig"));
+    std.testing.refAllDecls(@import("logger/sink.zig"));
+    std.testing.refAllDecls(@import("logger/flush.zig"));
 
     // # zix.Utils
     std.testing.refAllDecls(@import("utils/file.zig"));
@@ -279,6 +283,8 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/socket_cut_writer.zig"));
     std.testing.refAllDecls(@import("utils/socket_connect.zig"));
     std.testing.refAllDecls(@import("utils/monotonic_clock.zig"));
+    std.testing.refAllDecls(@import("utils/portable_sleep.zig"));
+    std.testing.refAllDecls(@import("utils/peer_addr.zig"));
     std.testing.refAllDecls(@import("utils/secure_random.zig"));
     std.testing.refAllDecls(@import("utils/async_cache.zig"));
     std.testing.refAllDecls(@import("utils/socket_path.zig"));
