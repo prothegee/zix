@@ -51,7 +51,7 @@ test "zix: unit test" {
 | Function | `camelCase` | `serveDispatch`, `frameRespond`, `uringUnavailableReason` |
 | Field / variable / const binding | `snake_case` | `dispatch_model`, `max_recv_buf`, `worker_stack_size_bytes` (use `_var` if it meant for private usage) |
 | Domain / public / config enum value | `UPPER_CASE` | `ASYNC`, `EPOLL`, `URING` |
-| Error | `error.PascalCase` | `error.PortNotConfigured`, `error.ConnectionClosed` |
+| Error | `error.<Product><Domain><Condition>` | `error.ZixPortNotConfigured`, `error.ZixHttp1ListenFailed` (see section 9) |
 | Comptime version constants | `UPPER_CASE` | `ZIG_SEMVER.MAJOR` |
 
 Enums that model a public, domain, or config choice are `UPPER_CASE` (`DispatchModel`, content type, status, logger level). The narrow exceptions kept in-tree are internal control-flow enums (`keep_alive` / `close` style outcomes) and protocol-mirroring values (WebSocket `text` / `binary` opcodes that mirror the wire name). When in doubt, `UPPER_CASE`.
@@ -152,7 +152,7 @@ Run `zig fmt .` before any commit. Beyond formatting, distinct phases of a funct
 
 ```zig
 pub fn init(config: TcpServerConfig) !Self {
-    if (config.port == 0) return error.PortNotConfigured;
+    if (config.port == 0) return error.ZixPortNotConfigured;
 
     return .{ .config = config };
 }
@@ -205,7 +205,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
         const Self = @This();
 
         pub fn init(config: TcpServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
+            if (config.port == 0) return error.ZixPortNotConfigured;
 
             return .{ .config = config };
         }
@@ -220,7 +220,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
 }
 ```
 
-- `init` validates required fields first and returns an error (`error.PortNotConfigured`) rather than panicking.
+- `init` validates required fields first and returns an error (`error.ZixPortNotConfigured`) rather than panicking.
 - `deinit` always exists even when empty (`pub fn deinit(_: *Self) void {}`), so callers can `defer server.deinit()` uniformly.
 - `io` is always caller-provided through config and must outlive the server. Zix does not own the event loop.
 
@@ -234,7 +234,7 @@ Concurrency is one `DispatchModel` enum (`ASYNC`, `EPOLL`, `URING`), each model 
 
 Two different mismatches, handled two different ways (ADR-065):
 
-- **A model the target OS cannot run** (`.EPOLL` / `.URING` off Linux) is a config error. `run()` logs which model was rejected and returns `error.DispatchModelUnsupported`. It never downgrades: a caller that asked for a per-core loop and silently got something else has no way to tell.
+- **A model the target OS cannot run** (`.EPOLL` / `.URING` off Linux) is a config error. `run()` logs which model was rejected and returns `error.ZixDispatchModelUnsupported`. It never downgrades: a caller that asked for a per-core loop and silently got something else has no way to tell.
 - **A model the host cannot use right now** (io_uring unavailable on Linux, commonly the `RLIMIT_MEMLOCK` cap) is a capability gap. `.URING` folds to the EPOLL loop and logs the reason, so the server does not vanish right after binding.
 
 The platform check is one shared predicate, consulted before the server binds anything:
@@ -243,7 +243,7 @@ The platform check is one shared predicate, consulted before the server binds an
 if (!dispatch_support.isSupported(cfg.dispatch_model)) {
     common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-    return error.DispatchModelUnsupported;
+    return error.ZixDispatchModelUnsupported;
 }
 ```
 
@@ -253,7 +253,7 @@ The `switch` arms keep their comptime OS gate as well, because the Linux-only lo
 .EPOLL => if (comptime builtin.target.os.tag == .linux)
     epoll_model.runEpoll(cfg, handler)
 else
-    error.DispatchModelUnsupported,
+    error.ZixDispatchModelUnsupported,
 ```
 
 > Prefer comptime gating for a build-time fact (`comptime builtin.target.os.tag`), a runtime probe only for a host-time fact (memlock, ring availability). Always log the reason. Never let the server silently disappear after binding, and never let it silently serve a model the caller did not ask for.
@@ -266,11 +266,51 @@ The same guard applies to any hand-rolled Linux-only fast path added purely for 
 
 ## 9. Error handling
 
-- Errors are PascalCase on `error.` and describe the condition (`error.PortNotConfigured`, `error.ConnectionClosed`, `error.MessageTooLarge`, `error.BufferTooSmall`). Reuse the established names before inventing a new one.
+An error has two jobs, and they are not the same job. The error VALUE is what the caller branches on. The log LINE is what the reader debugs from. A name alone cannot say which file, which port, or which field failed, so the rules below cover both halves.
+
+### 9.1 Naming
+
+- An error name is PascalCase on `error.` and reads `<Product><Domain><Condition>`: `error.ZixPortNotConfigured`, `error.ZixHttp1ListenFailed`, `error.ZixTlsCertFileNotFound`.
+- The product prefix is whoever owns the file, not the repository. `Zix` in the engine tree, `Zixer` under `src/zixer`, and a standalone package keeps its own name: `Jzon`, `Postgrez`, `Rediz`, `Prometheuz`.
+- A std error that is re-raised unchanged keeps the name std gave it: `OutOfMemory`, `WriteFailed`, `ReadFailed`, `EndOfStream`, `BrokenPipe`, `NoSpaceLeft`, `Overflow`, `Unexpected`. std propagates the unprefixed name through the same function, so prefixing only the local raise site would leave two names for one condition in the same error set.
+- A name that a caller outside the package can receive is unique to the CONDITION, not just to the subsystem: `error.ZixHttp1RequestLineTruncated`, not a shared `error.ZixTruncated`. Reuse an existing name only when it is the same condition, never because it is close enough.
+- A sans-I/O parser may share a narrow name inside its own error set, because that value is mapped to a domain error before any reader sees it.
+- Never put `@src().file` or `@src().line` in the message. They point at the zix source, not at the reader's config. A name that is unique to the condition already locates the raise.
+
+### 9.2 A log line, an error value, or both
+
+Two questions settle it: can a caller act on it, and does the reader already know the subject.
+
+| Situation | Emit | Why |
+| :- | :- | :- |
+| Sans-I/O parser or internal helper, the caller already holds the input | error value only | the caller has the subject, and a log line here would fire per packet |
+| No error union to return into: `void` function, spawned worker thread, accept loop | log line only | nothing can branch on it, so the line IS the report |
+| Public entry point holding a value the reader configured: path, port, dir, url | both | the value lets the caller branch, the line carries the subject the name cannot |
+
+```zig
+const cert_pem = std.Io.Dir.cwd().readFileAlloc(io, config.cert_path, allocator, .limited(CERT_MAX_BYTES)) catch |err| {
+    logSystem(config, .ERROR, "tls cert read failed: {s} ({})", .{ config.cert_path, err });
+
+    return switch (err) {
+        error.FileNotFound => error.ZixTlsCertFileNotFound,
+        error.AccessDenied => error.ZixTlsCertFileUnreadable,
+        else => error.ZixTlsCertFileReadFailed,
+    };
+};
+```
+
+Two failures this rules out:
+
+- Logging and swallowing where the function CAN return an error. That hides a failure the caller was able to handle.
+- Returning a bare name at a config boundary. `error.ZixTlsCertFileNotFound` on its own still does not say which file, so the path goes in the line.
+
+### 9.3 Shape
+
 - Validate inputs at the boundary (`init`) and return the error early as a guard, with a blank line after.
 - Use `errdefer` to unwind a partial construction, `defer` for unconditional cleanup.
+- Do not collapse several causes into one name. Switch on the cause when the causes call for different fixes: not-found, permission denied and is-a-directory are three different reader actions.
 
-> Return a named error, do not panic on a recoverable condition. Pick the existing error name that fits before adding one.
+> Return a named error, do not panic on a recoverable condition. Name the condition, name the subject in the line, and never make the reader guess which of the two halves is missing.
 
 ---
 
