@@ -10,26 +10,41 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ZIG_SEMVER = @import("../../lib.zig").ZIG_SEMVER;
 
 const Config = @import("../config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const core = @import("../core.zig");
 const datagram = @import("../datagram.zig");
+const Logger = @import("../../logger/logger.zig").Logger;
+
+const log = std.log.scoped(.zix_udp);
 
 const posix = std.posix;
 const IpAddress = std.Io.net.IpAddress;
 
 // --------------------------------------------------------- //
-
-pub fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytype) void {
+/// Emit a server line at the given level. Routes through config.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+pub fn logSystem(config: UdpServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (config.logger) |lg| {
-        lg.system(.INFO, "udp", fmt, args);
+        lg.system(level, "udp", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix udp: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 /// Effective worker count: the configured value, or one per available CPU when 0. cgroup-aware so a
@@ -211,10 +226,16 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reu
     if (reuse) pinToCpu(worker_id);
 
     const fd = datagram.open(config.ip, config.port, reuse) catch |err| {
-        if (config.logger) |lg| lg.system(.ERROR, "udp", "raw bind error: {}", .{err});
+        logSystem(config, .ERROR, "raw bind failed on {s}:{d} ({s})", .{ config.ip, config.port, @errorName(err) });
+
         return;
     };
     defer datagram.close(fd);
+
+    // Announced below the bind, not above it: the caller's old line claimed a socket that may
+    // never have been opened. Only the single-worker caller announces here, a REUSEPORT group
+    // has its own line once the whole group reports.
+    if (!reuse) logSystem(config, .INFO, "raw listening on {s}:{d} (single worker)", .{ config.ip, config.port });
 
     setBusyPoll(fd, config.busy_poll_us);
 
@@ -246,7 +267,6 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: UdpServerConfig, reu
 pub fn runSingle(comptime handler: core.HandlerFn, config: UdpServerConfig) !void {
     if (!datagram.is_linux) return runFallback(handler, config);
 
-    logSystem(config, "raw listening on {s}:{d} (single worker)", .{ config.ip, config.port });
     workerLoop(handler, config, config.reuse_address, 0);
 }
 
@@ -263,7 +283,7 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: UdpServerConfig) !v
     const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
 
-    logSystem(config, "raw listening on {s}:{d} (fallback)", .{ config.ip, config.port });
+    logSystem(config, .INFO, "raw listening on {s}:{d} (fallback)", .{ config.ip, config.port });
 
     const buf = try config.allocator.alloc(u8, config.max_recv_buf);
     defer config.allocator.free(buf);

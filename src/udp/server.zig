@@ -1,25 +1,37 @@
 //! zix udp server
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Config = @import("config.zig");
 const UdpServerConfig = Config.UdpServerConfig;
 const Logger = @import("../logger/logger.zig").Logger;
 const socket_poll = @import("../utils/socket_poll.zig");
-const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
+
+const log = std.log.scoped(.zix_udp);
 
 // --------------------------------------------------------- //
 
-/// Emit a server lifecycle line. Routes through config.logger when present.
-/// Without a logger it prints to stderr only in Debug builds (silent in release).
-fn logSystem(config: UdpServerConfig, comptime fmt: []const u8, args: anytype) void {
+/// Emit a server line at the given level. Routes through config.logger when present.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never loses a failure.
+///   std.log's own default level does the filtering: .ERROR and .WARN survive a release build,
+///   .INFO and .DEBUG do not, and a caller who sets std.options.logFn can route or silence all
+///   of them.
+///
+/// Param:
+/// level - Logger.Level (.ERROR for a failure the reader must act on, .INFO for a lifecycle line)
+fn logSystem(config: UdpServerConfig, level: Logger.Level, comptime fmt: []const u8, args: anytype) void {
     if (config.logger) |lg| {
-        lg.system(.INFO, "udp", fmt, args);
+        lg.system(level, "udp", fmt, args);
         return;
     }
 
-    if (comptime if (ZIG_SEMVER.MINOR == 16) builtin.mode == .Debug else builtin.mode == .debug)
-        std.debug.print("zix udp: " ++ fmt ++ "\n", args);
+    switch (level) {
+        .ERROR => log.err(fmt, args),
+        .WARN => log.warn(fmt, args),
+        .INFO => log.info(fmt, args),
+        .DEBUG => log.debug(fmt, args),
+    }
 }
 
 // --------------------------------------------------------- //
@@ -77,7 +89,7 @@ pub fn UdpServer(comptime Packet: type) type {
         /// args - std.process.Args (e.g. process.minimal.args), or `.{}` when not reading CLI
         ///
         /// Return:
-        /// - error.PortNotConfigured if the resolved port is zero
+        /// - error.ZixPortNotConfigured if the resolved port is zero
         pub fn init(config: UdpServerConfig, args: anytype) !Self {
             var cfg = config;
             // The parse only compiles when args is a real std.process.Args. Passing `.{}` (no CLI)
@@ -86,7 +98,7 @@ pub fn UdpServer(comptime Packet: type) type {
                 if (cfg.allow_args) cfg = Config.applyServerArgs(cfg, args);
             }
 
-            if (cfg.port == 0) return error.PortNotConfigured;
+            if (cfg.port == 0) return error.ZixPortNotConfigured;
 
             return .{ .config = cfg };
         }
@@ -106,12 +118,12 @@ pub fn UdpServer(comptime Packet: type) type {
             const socket = try addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
             defer socket.close(io);
 
-            logSystem(self.config, "listening on {s}:{d}", .{ self.config.ip, self.config.port });
+            logSystem(self.config, .INFO, "listening on {s}:{d}", .{ self.config.ip, self.config.port });
 
             // The typed messaging path runs a single async receive loop. The per-core dispatch models
             // are a property of the raw path (zix.Udp.Raw), so a non-ASYNC value folds here with a
             // notice rather than silently doing nothing.
-            if (self.config.dispatch_model != .ASYNC) logSystem(self.config, "typed UDP uses the ASYNC receive loop, {s} applies only to zix.Udp.Raw", .{@tagName(self.config.dispatch_model)});
+            if (self.config.dispatch_model != .ASYNC) logSystem(self.config, .WARN, "typed UDP uses the ASYNC receive loop, {s} applies only to zix.Udp.Raw", .{@tagName(self.config.dispatch_model)});
 
             // Note: config.allocator must be a general-purpose allocator, not an ArenaAllocator.
             //       The client list grows and shrinks (swapRemove on disconnect). The broadcast peer
@@ -291,7 +303,7 @@ pub fn UdpServer(comptime Packet: type) type {
 // --------------------------------------------------------- //
 
 // RFC 768: port 0 is reserved, binding to it is undefined behavior.
-// init() rejects port 0 with error.PortNotConfigured before any socket is opened.
+// init() rejects port 0 with error.ZixPortNotConfigured before any socket is opened.
 // run() and socket I/O are excluded from unit tests, those require live I/O.
 
 const TestPkt = extern struct { value: u32 };
@@ -301,7 +313,7 @@ test "zix udp: UdpServer init, port zero returns PortNotConfigured" {
     defer threaded.deinit();
 
     const S = UdpServer(TestPkt);
-    try std.testing.expectError(error.PortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }, .{}));
+    try std.testing.expectError(error.ZixPortNotConfigured, S.init(.{ .io = threaded.io(), .allocator = std.testing.allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }, .{}));
 }
 
 test "zix udp: UdpServer init, nonzero port succeeds" {
