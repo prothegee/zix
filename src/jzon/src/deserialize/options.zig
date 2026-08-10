@@ -67,14 +67,19 @@ pub const Options = struct {
 /// - A path may never raise some of these. The std-backed one reports a bad
 ///   escape as a syntax error rather than as BadEscape, because std does not
 ///   separate the two. The set stays whole either way.
+/// - None of these names says WHICH field or WHERE, because an error value cannot carry either.
+///   jzon.lastFailure() answers that, read right after the parse returned. JzonUnknownField,
+///   JzonMissingField and JzonUnknownEnumValue fill in the field. JzonTruncated, JzonUnexpected,
+///   JzonBadNumber and JzonBadEscape fill in the byte on the cursor paths. The std-backed path
+///   reports neither, because std surfaces neither.
 pub const Error = error{
-    UnknownField,
-    MissingField,
-    UnknownEnumValue,
-    Truncated,
-    Unexpected,
-    BadNumber,
-    BadEscape,
+    JzonUnknownField,
+    JzonMissingField,
+    JzonUnknownEnumValue,
+    JzonTruncated,
+    JzonUnexpected,
+    JzonBadNumber,
+    JzonBadEscape,
     OutOfMemory,
 };
 
