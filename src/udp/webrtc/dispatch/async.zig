@@ -43,14 +43,14 @@ pub fn runAsync(comptime handler: core.HandlerFn, config: WebrtcServerConfig) !v
 
     const start = std.Io.Clock.Timestamp.now(io, .awake);
 
-    common.logSystem(config, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
+    common.logSystem(config, .INFO, "listening on {s}:{d} (single worker)", .{ config.ip, config.port });
 
     while (true) {
         const before_ms = common.elapsedMs(start, std.Io.Clock.Timestamp.now(io, .awake));
         const budget_ms = served.waitMs(before_ms);
 
         const ready = socket_poll.waitReady(socket.handle, socket_poll.READABLE, budget_ms) catch |err| {
-            common.logSystem(config, "poll error: {s}", .{@errorName(err)});
+            common.logSystem(config, .ERROR, "poll error: {s}", .{@errorName(err)});
 
             continue;
         };
@@ -77,7 +77,7 @@ fn receiveOne(
     now_ms: u64,
 ) void {
     const message = socket.receive(config.io, recv_buf) catch |err| {
-        common.logSystem(config, "receive error: {s}", .{@errorName(err)});
+        common.logSystem(config, .ERROR, "receive error: {s}", .{@errorName(err)});
 
         return;
     };
@@ -85,7 +85,7 @@ fn receiveOne(
     // A datagram the buffer could not hold is one no layer below can parse, and every layer here
     // is authenticated, so guessing at the missing bytes is not an option.
     if (message.flags.trunc) {
-        common.logSystem(config, "dropped a datagram larger than max_recv_buf ({d})", .{config.max_recv_buf});
+        common.logSystem(config, .WARN, "dropped a datagram larger than max_recv_buf ({d})", .{config.max_recv_buf});
 
         return;
     }

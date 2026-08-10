@@ -110,20 +110,20 @@ pub const Worker = struct {
     pub fn serve(self: *Worker, comptime handler: core.HandlerFn, address: IpAddress, bytes: []const u8, now_ms: u64) void {
         const peer = self.peers.find(address) orelse open: {
             const opened = self.peers.acquire(address, self.options, common.drawSecrets(), now_ms) catch |err| {
-                common.logSystem(self.config, "could not open a peer: {s}", .{@errorName(err)});
+                common.logSystem(self.config, .WARN, "could not open a peer: {s}", .{@errorName(err)});
 
                 return;
             };
 
             break :open opened orelse {
-                common.logSystem(self.config, "peer table is full ({d}), dropping a datagram from a new address", .{self.peers.live});
+                common.logSystem(self.config, .WARN, "peer table is full ({d}), dropping a datagram from a new address", .{self.peers.live});
 
                 return;
             };
         };
 
         const outcome = peer.handle(bytes, now_ms) catch |err| {
-            common.logSystem(self.config, "peer raised {s}", .{@errorName(err)});
+            common.logSystem(self.config, .WARN, "peer raised {s}", .{@errorName(err)});
 
             return;
         };
@@ -134,7 +134,7 @@ pub const Worker = struct {
             return;
         }
 
-        if (outcome.established) common.logSystem(self.config, "peer completed the dtls handshake", .{});
+        if (outcome.established) common.logSystem(self.config, .INFO, "peer completed the dtls handshake", .{});
 
         // Media before the drain. It is not DTLS-wrapped, so it does not travel through the peer's
         // own outbound queue, and holding it back until after the handler would put a frame behind
@@ -165,7 +165,7 @@ pub const Worker = struct {
 
         const dropped = self.peers.dropDead();
 
-        if (dropped > 0) common.logSystem(self.config, "dropped {d} peer(s), {d} still held", .{ dropped, self.peers.live });
+        if (dropped > 0) common.logSystem(self.config, .WARN, "dropped {d} peer(s), {d} still held", .{ dropped, self.peers.live });
     }
 
     /// Put everything queued on the wire.
@@ -177,7 +177,7 @@ pub const Worker = struct {
         if (self.tx.count == 0) return;
 
         self.tx.flush(self.fd) catch |err| {
-            common.logSystem(self.config, "send batch failed: {s}", .{@errorName(err)});
+            common.logSystem(self.config, .WARN, "send batch failed: {s}", .{@errorName(err)});
 
             self.tx.reset();
         };
@@ -230,7 +230,7 @@ pub const Worker = struct {
             var ctx = peer.context(now_ms) orelse break;
             ctx.fanout = .{ .worker = @ptrCast(self), .deliver = deliverBroadcast };
 
-            handler(event, &ctx) catch |err| common.logSystem(self.config, "handler returned {s}", .{@errorName(err)});
+            handler(event, &ctx) catch |err| common.logSystem(self.config, .WARN, "handler returned {s}", .{@errorName(err)});
         }
 
         self.queueOutbound(peer, now_ms);
@@ -351,7 +351,7 @@ pub const Worker = struct {
         self.flush();
 
         if (!self.tx.queue(destination, packet)) {
-            common.logSystem(self.config, "dropped a {d} byte reply the send batch could not hold", .{packet.len});
+            common.logSystem(self.config, .WARN, "dropped a {d} byte reply the send batch could not hold", .{packet.len});
         }
     }
 
@@ -433,6 +433,13 @@ fn testContext(allocator: std.mem.Allocator) !Tls.Context {
     };
 }
 
+/// A logger that writes nowhere: console off and no save_path, so nothing is opened and nothing is
+/// printed. It gives the rejection and drop paths a destination, which keeps a test's expected
+/// failure message out of the runner's logged-error count.
+const Logger = @import("../../../logger/logger.zig").Logger;
+
+var quiet_logger = Logger{ .config = .{}, .allocator = std.testing.allocator };
+
 fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context) WebrtcServerConfig {
     return .{
         .io = io,
@@ -445,6 +452,7 @@ fn testConfig(io: std.Io, allocator: std.mem.Allocator, tls: *Tls.Context) Webrt
         .peer_ice_ufrag = "peer",
         .tls = tls,
         .max_peers = 4,
+        .logger = &quiet_logger,
     };
 }
 
