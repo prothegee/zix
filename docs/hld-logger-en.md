@@ -16,7 +16,7 @@ Implemented. See ADR-023 for design rationale.
 - Structured per-event method signatures rather than printf-style with a category string.
 - Protocol-specific log types: `conn()`, `packet()`, `frame()`, `session()` give machine-parseable lines without post-processing.
 - File rotation: daily subdirectory + per-file sequence number, no external tooling required.
-- Zero allocation on the hot path: 64 KB write buffer flushed after every line written.
+- Zero allocation and no syscall on the caller's thread: a record is copied into a 64 KB write buffer and a background flush thread performs every write.
 - Caller owns the allocator, logger is `init`/`deinit` lifetime.
 
 ---
@@ -54,6 +54,7 @@ pub const Logger = @import("logger/logger.zig").Logger;
 | :- | :- | :- |
 | `console` | `.OFF` | Console output mode |
 | `console_min_level` | `.INFO` | Minimum level printed to console |
+| `console_fd` | `null` | Descriptor console records and the file-suspension report are written to. `null` means stderr. The caller owns it and must keep it open for as long as the logger lives |
 | `save_path` | `""` | Root directory for log files. Must already exist. `""` disables file logging |
 | `save_file` | `"log"` | Base filename. Files named `<save_file>-NNNNNN.log` |
 | `save_min_level` | `.INFO` | Minimum level written to file |
@@ -66,7 +67,7 @@ pub const Logger = @import("logger/logger.zig").Logger;
 | Method | Auto-called by | Level | Line format |
 | :- | :- | :- | :- |
 | `system(level, component, fmt, args)` | all servers (lifecycle) | caller-set | `DATE TIME LEVEL  [component] message` |
-| `access(method, path, status, bytes, ua, origin)` | HTTP server (per-request) | derived from status | `DATE TIME LEVEL  METHOD PATH STATUS BYTES "UA" "ORIGIN"` |
+| `access(component, method, path, status, bytes, client_ip, ua, origin)` | zix.Http, zix.Http1, zix.Http2, zix.Http3 (per-request), zixer (per-exchange) | derived from status | `DATE TIME LEVEL  [component:access] METHOD PATH STATUS BYTES "CLIENT_IP" "UA" "ORIGIN"` |
 | `conn(peer, dur_ms, err)` | TCP server (per-connection close) | INFO / WARN | `DATE TIME LEVEL  [tcp:conn] PEER dur=NNNms ERR` |
 | `packet(dir, peer, size, err)` | UDP server (per-datagram) | INFO / WARN | `DATE TIME LEVEL  [udp:pkt] DIRECTION PEER size=N ERR` |
 | `frame(dir, sock_path, size, err)` | UDS (manual) | INFO / WARN | `DATE TIME LEVEL  [uds:frame] DIRECTION SOCKPATH size=N ERR` |
@@ -88,8 +89,8 @@ pub const Logger = @import("logger/logger.zig").Logger;
 
 ```
 2026-05-23 14:22:01.456 INFO   [startup] server listening on 9300
-2026-05-23 14:22:01.789 INFO   GET /api/items 200 512 "curl/8.1" "-"
-2026-05-23 14:22:01.790 WARN   GET /missing 404 0 "-" "-"
+2026-05-23 14:22:01.789 INFO   [http1:access] GET /api/items 200 512 "203.0.113.7" "curl/8.1" "-"
+2026-05-23 14:22:01.790 WARN   [http1:access] GET /missing 404 0 "203.0.113.7" "-" "-"
 2026-05-23 14:22:02.100 INFO   [tcp:conn] 127.0.0.1:54321 dur=12ms -
 2026-05-23 14:22:02.200 INFO   [udp:pkt] recv 127.0.0.1:5001 size=56 -
 2026-05-23 14:22:02.300 INFO   [uds:frame] recv /tmp/app.sock size=8 -
@@ -112,9 +113,25 @@ Files are written to `<save_path>/YYYY-MM-DD/<save_file>-NNNNNN.log`:
 ## Thread Safety
 
 All log methods are safe to call simultaneously from any OS thread:
-- A spinlock (atomic CAS) serializes all writes to the shared file buffer and file descriptor.
-- `rawWrite` uses the raw POSIX `write` syscall: no `std.Io` dependency, safe on background OS threads.
+- A spinlock (atomic CAS) serializes the copy into the shared write buffer. It is held for a `memcpy`, never across a syscall.
+- `rawWrite` uses the raw POSIX `write` syscall, and the Windows file sink uses ntdll directly: no `std.Io` dependency, safe on background OS threads.
 - No `std.debug.print` or any path through `std.Options.debug_io`. Safe during `zig build test-all`.
+
+### Flush Thread
+
+Each enabled destination holds two write buffers. Producers fill one while the flush thread writes the other, so no caller ever waits on a disk.
+
+- The flush thread is spawned on the first record, because `Logger.init` returns by value and the thread needs the address the logger finally lives at.
+- It writes with the lock released. A buffer handed over is untouchable until the write finishes, which is what keeps rotation and close from racing it.
+- A record is never dropped. When both buffers are full the producer waits for the write in flight, counted by `stallCount()` so a disk that cannot keep up is visible rather than silent.
+- An `ERROR` record is written out before the call returns, so a crash cannot swallow the record that explains it.
+- `flush()` and `deinit()` write everything buffered on the calling thread before returning.
+
+**Durability trade-off**: a crash can lose up to one buffer of records that were not yet written. `flush()` and the `ERROR` rule are the two ways to force the boundary.
+
+### Timestamps
+
+Every record and every day directory is stamped in UTC+0000. The logger does not read a local timezone, so a fleet spread across regions produces one comparable ordering.
 
 ---
 
@@ -125,6 +142,9 @@ Each server accepts an optional `logger: ?*Logger = null` in its config. When no
 | Protocol | Methods called automatically | Config field |
 | :- | :- | :- |
 | HTTP | `access()` per request, `system()` lifecycle | `HttpServerConfig.logger` |
+| HTTP/1.1 | `access()` per request, `system()` lifecycle | `Http1ServerConfig.logger` |
+| HTTP/2 | `access()` per stream, `system()` lifecycle | `Http2ServerConfig.logger` |
+| HTTP/3 | `access()` per request, `system()` lifecycle | `Http3ServerConfig.logger` |
 | TCP | `conn()` on connection close, `system()` lifecycle | `TcpServerConfig.logger` |
 | UDP | `packet()` per datagram, `system()` lifecycle | `UdpServerConfig.logger` |
 | UDS | `system()` lifecycle | `UdsServerConfig.logger` |
