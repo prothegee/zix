@@ -321,7 +321,7 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
             client_w.flush() catch return;
         }
 
-        const outcome = exchange(proxy, client_r, client_w, client_stream, &request, upstream_head, upgrade, buffers, lease, to_client);
+        const outcome = exchange(proxy, client_r, client_w, client_stream, &request, upstream_head, upgrade, buffers, lease, to_client, client_ip);
 
         client_w.flush() catch return;
         if (outcome == .CLOSE) return;
@@ -642,6 +642,7 @@ fn exchange(
     buffers: conn_buffer.Set,
     lease: *client_lease.Lease,
     extra: cfg_headers.Block,
+    client_ip: []const u8,
 ) EdgeResult {
     const io = proxy.io;
     const no_body = request.framing == .none;
@@ -812,6 +813,8 @@ fn exchange(
         const reusable = !relay_failed and !response.connection_close and response.framing != .until_close;
         if (reusable) idle.release(io, conn, monotonic_clock.nowMs(io)) else conn.stream.close(io);
 
+        writeAccessRecord(proxy.logger, request, client_ip, response.status, responseBodyLen(&response));
+
         if (relay_failed or edge_close) return .CLOSE;
 
         return .KEEP;
@@ -819,6 +822,7 @@ fn exchange(
 
     const answer = upstream_status.afterAttempts(connect_timed_out);
     writeEdgeError(proxy.logger, client_w, answer.status, answer.reason, answer.proxy_error, extra);
+    writeAccessRecord(proxy.logger, request, client_ip, answer.status, answer.reason.len + 1);
 
     return .CLOSE;
 }
@@ -972,18 +976,76 @@ fn expectsContinue(request: *const http1_head.RequestHead) bool {
 
 /// Local error reply with the rfc 9209 Proxy-Status parameter, then close.
 ///
+/// One request header value by name, case-insensitive, or an empty slice when it is absent.
+fn requestHeader(request: *const http1_head.RequestHead, name: []const u8) []const u8 {
+    for (request.headerSlice()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+
+    return "";
+}
+
+/// Bytes the response body carried, as far as the framing declares it.
+///
+/// Note:
+/// - A declared length is exact. A chunked or close-delimited body is relayed without a running
+///   total, so it reports 0 rather than a number that would be a guess. Counting those would mean
+///   threading a tally back out of the relay pumps.
+fn responseBodyLen(response: *const http1_head.ResponseHead) usize {
+    return switch (response.framing) {
+        .content_length => |len| @intCast(len),
+        else => 0,
+    };
+}
+
+/// Record one exchange the gateway answered, when a logger is attached.
+///
+/// Note:
+/// - The component is the requested Host, so the record reads [example.com:access] and two sites
+///   sharing the daemon's log file stay distinguishable at a glance. That is the site, because Host
+///   is what zixer routes on.
+/// - Written for every answer, the edge errors included, so a 502 leaves both the error line saying
+///   why and the access line saying what the client got.
+///
+/// Param:
+/// logger - ?*zix.Logger (the daemon's, null outside a daemon)
+/// client_ip - []const u8 (already resolved once per connection by the serve loop)
+fn writeAccessRecord(
+    logger: ?*zix.Logger,
+    request: *const http1_head.RequestHead,
+    client_ip: []const u8,
+    status: u16,
+    bytes: usize,
+) void {
+    const lg = logger orelse return;
+
+    lg.access(
+        if (request.host.len > 0) request.host else "zixer",
+        request.method,
+        request.target,
+        status,
+        bytes,
+        client_ip,
+        requestHeader(request, "user-agent"),
+        requestHeader(request, "origin"),
+    );
+}
+
 /// Note:
 /// - The same answer goes to the operator's log, because a client seeing a 502 and an operator
 ///   seeing nothing is the gap this funnel closes. The status picks the level: a 5xx is the site
-///   or its upstream failing and files at WARN, a 4xx is the client's own request and files at
-///   DEBUG, so a bad client cannot flood the log.
+///   or its upstream failing and files at ERROR, a 4xx is a request that was refused and files at
+///   WARN.
+/// - A 4xx used to file at DEBUG, which made it invisible at the default log_level of info: a real
+///   431 reached the client while the log stayed empty. An answer the operator cannot see is the
+///   thing this funnel exists to prevent, so a refused request is now visible by default.
 ///
 /// Param:
 /// logger - ?*zix.Logger (the daemon's, null outside a daemon)
 fn writeEdgeError(logger: ?*zix.Logger, client_w: *std.Io.Writer, status: u16, reason: []const u8, proxy_error: []const u8, extra: cfg_headers.Block) void {
     daemon_log.logSystem(
         logger,
-        if (status >= 500) .WARN else .DEBUG,
+        if (status >= 500) .ERROR else .WARN,
         "answered {d} {s} (proxy-status error=\"{s}\")",
         .{ status, reason, proxy_error },
     );
@@ -3456,21 +3518,23 @@ test "zix zixer: http1 proxy, a kept-alive connection arms a fresh budget per re
 // --------------------------------------------------------- //
 
 test "zix zixer: http1 proxy, each way a head read ends has its own answer" {
+    // The reply bytes are the subject. quiet_logger takes the daemon line so the suite does not
+    // write one to the terminal, and the no-logger fallback keeps its own test in daemon_log.
     var reply_buf: [512]u8 = undefined;
 
     var timed_out = std.Io.Writer.fixed(&reply_buf);
-    answerUnreadableHead(null, &timed_out, error.PartialHead, .{});
+    answerUnreadableHead(&quiet_logger, &timed_out, error.PartialHead, .{});
     try testing.expect(std.mem.startsWith(u8, timed_out.buffered(), "HTTP/1.1 408 request timeout\r\n"));
     try testing.expect(std.mem.indexOf(u8, timed_out.buffered(), "Connection: close\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, timed_out.buffered(), "\r\n\r\nrequest timeout\n"));
 
     var oversized = std.Io.Writer.fixed(&reply_buf);
-    answerUnreadableHead(null, &oversized, error.ZixerHeadTooLarge, .{});
+    answerUnreadableHead(&quiet_logger, &oversized, error.ZixerHeadTooLarge, .{});
     try testing.expect(std.mem.startsWith(u8, oversized.buffered(), "HTTP/1.1 431 head too large\r\n"));
 
     // The one end that gets no reply at all.
     var silent = std.Io.Writer.fixed(&reply_buf);
-    answerUnreadableHead(null, &silent, error.ZixerConnectionClosed, .{});
+    answerUnreadableHead(&quiet_logger, &silent, error.ZixerConnectionClosed, .{});
     try testing.expectEqual(@as(usize, 0), silent.buffered().len);
 }
 
@@ -3611,4 +3675,188 @@ test "zix zixer: http1 proxy, a kept-alive connection cut while idle is closed w
     client.close(io);
 
     try testing.expectEqual(@as(usize, 0), table.liveCount());
+}
+
+/// A request head for the access-record tests below, built by hand.
+fn accessTestHead(host: []const u8, method: []const u8, target: []const u8) http1_head.RequestHead {
+    var head = http1_head.RequestHead{
+        .method = method,
+        .target = target,
+        .headers = undefined,
+        .header_count = 2,
+        .framing = .none,
+        .host = host,
+        .connection_value = "",
+        .connection_close = false,
+    };
+    head.headers[0] = .{ .name = "user-agent", .value = "curl/8.5.0" };
+    head.headers[1] = .{ .name = "origin", .value = "https://app.example.com" };
+
+    return head;
+}
+
+test "zix zixer: http1 proxy, an answered request writes an access record naming the site" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try zix.Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    const request = accessTestHead("shop.example.com", "GET", "/cart");
+    writeAccessRecord(&logger, &request, "203.0.113.7", 200, 1234);
+    logger.flush();
+
+    const line = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    std.log.info(".ACCESS: {s}", .{std.mem.trimEnd(u8, line, "\n")});
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        line,
+        "[shop.example.com:access] GET /cart 200 1234 \"203.0.113.7\" \"curl/8.5.0\" \"https://app.example.com\"",
+    ) != null);
+}
+
+test "zix zixer: http1 proxy, two sites in one log file stay distinguishable" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try zix.Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    const first = accessTestHead("shop.example.com", "GET", "/");
+    const second = accessTestHead("api.example.com", "POST", "/v1/orders");
+    writeAccessRecord(&logger, &first, "203.0.113.7", 200, 10);
+    writeAccessRecord(&logger, &second, "203.0.113.8", 201, 20);
+    logger.flush();
+
+    const content = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "[shop.example.com:access] GET / 200 10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "[api.example.com:access] POST /v1/orders 201 20") != null);
+}
+
+test "zix zixer: http1 proxy, a request with no Host still records under the daemon name" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try zix.Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    const request = accessTestHead("", "GET", "/");
+    writeAccessRecord(&logger, &request, "203.0.113.7", 400, 12);
+    logger.flush();
+
+    const line = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "[zixer:access] GET / 400 12") != null);
+}
+
+test "zix zixer: http1 proxy, writeAccessRecord with no logger does not reach for one" {
+    const request = accessTestHead("shop.example.com", "GET", "/");
+
+    writeAccessRecord(null, &request, "203.0.113.7", 200, 0);
+}
+
+test "zix zixer: http1 proxy, a refused request is visible at the default log level" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // The daemon default is info. A 4xx used to file at DEBUG and vanish here.
+    var logger = try zix.Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .INFO });
+    defer logger.deinit();
+
+    var out_buf: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+    writeEdgeError(&logger, &out, 431, "request header fields too large", "http_request_error", .{});
+    logger.flush();
+
+    const line = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    std.log.info(".EDGE: {s}", .{std.mem.trimEnd(u8, line, "\n")});
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "WARN ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "answered 431 request header fields too large") != null);
+}
+
+test "zix zixer: http1 proxy, an upstream failure files at ERROR" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try zix.Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .INFO });
+    defer logger.deinit();
+
+    var out_buf: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buf);
+    writeEdgeError(&logger, &out, 502, "all upstreams failed", "connection_refused", .{});
+    logger.flush();
+
+    const line = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "ERROR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "answered 502 all upstreams failed") != null);
+}
+
+test "zix zixer: http1 proxy, responseBodyLen reports a declared length and zero otherwise" {
+    const declared = http1_head.ResponseHead{
+        .status = 200,
+        .reason = "OK",
+        .headers = undefined,
+        .header_count = 0,
+        .framing = .{ .content_length = 4096 },
+        .connection_value = "",
+        .connection_close = false,
+    };
+    try std.testing.expectEqual(@as(usize, 4096), responseBodyLen(&declared));
+
+    const chunked = http1_head.ResponseHead{
+        .status = 200,
+        .reason = "OK",
+        .headers = undefined,
+        .header_count = 0,
+        .framing = .chunked,
+        .connection_value = "",
+        .connection_close = false,
+    };
+    try std.testing.expectEqual(@as(usize, 0), responseBodyLen(&chunked));
+}
+
+/// Read back the one log file written under a temp root, for the access tests above.
+fn readAccessLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
+    var days = root.iterate();
+
+    while (try days.next(testing.io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        var day = try root.openDir(testing.io, entry.name, .{});
+        defer day.close(testing.io);
+
+        const bytes = day.readFileAlloc(testing.io, "zixer-000000.log", allocator, .limited(64 * 1024)) catch
+            day.readFileAlloc(testing.io, "log-000000.log", allocator, .limited(64 * 1024)) catch continue;
+        if (bytes.len > 0) return bytes;
+
+        allocator.free(bytes);
+    }
+
+    return error.ZixerNoLogLine;
 }
