@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 const linux = std.os.linux;
 const ZIG_SEMVER = @import("../../../lib.zig").ZIG_SEMVER;
 const win_io = @import("../../../utils/windows_io.zig");
+const peer_addr = @import("../../../utils/peer_addr.zig");
 
 const Config = @import("../config.zig");
 const Http3ServerConfig = Config.Http3ServerConfig;
@@ -1240,6 +1241,35 @@ fn sealAndQueue(conn: *Connection, tx: *datagram.SendBatch, fd: std.posix.socket
 /// system logger at worker exit so REUSEPORT skew across workers is measurable.
 pub threadlocal var tl_requests_served: u64 = 0;
 
+/// Record one served request, when a logger is attached.
+///
+/// Note:
+/// - QUIC keeps its peer on the connection, so the client is named from there rather than from a
+///   socket. This Request carries no proxy headers, so there is nothing to prefer over the real
+///   peer, and no user agent or origin to report.
+/// - Called where the status and the body length are both known, which is straight after the
+///   handler returns and before the response is framed into packets.
+fn writeAccessRecord(
+    config: Http3ServerConfig,
+    req: *const core.Request,
+    res: *const core.Response,
+    peer: std.posix.sockaddr.in6,
+) void {
+    const logger = config.logger orelse return;
+
+    var peer_buf: [peer_addr.MAX_LEN]u8 = undefined;
+    logger.access(
+        "http3",
+        req.method,
+        req.path,
+        res.status,
+        res.body.len,
+        peer_addr.hostFromIn6(peer, &peer_buf),
+        "",
+        "",
+    );
+}
+
 fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig, stats: ?*WorkerStats) void {
     if (data.len < 1 + cid_len) return;
 
@@ -1324,6 +1354,8 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
         // already copied into a packet.
         const static_slot = core.invokeHandler(handler, &req, &res, stream_req.stream_id, config.io, deadline_ns, config.public_dir);
         tl_requests_served += 1;
+
+        writeAccessRecord(config, &req, &res, conn.peer_addr);
 
         var content: [1024]u8 = undefined;
         const content_len = response.buildRequestStreamContent(&content, res.status, res.content_encoding, res.body) orelse {
@@ -1643,4 +1675,89 @@ test "zix http3: orderPhysicalCoresFirst keeps mask order on unique keys" {
     orderPhysicalCoresFirst(&cpus, &keys);
 
     try std.testing.expectEqualSlices(u32, &.{ 3, 7, 11 }, &cpus);
+}
+
+test "zix http3: a served request writes one access record naming the engine and the QUIC peer" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    const config = Http3ServerConfig{ .allocator = std.testing.allocator, .io = std.testing.io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .logger = &logger };
+    const req = core.Request{ .method = "GET", .path = "/assets/app.js" };
+    const res = core.Response{ .status = 200, .body = "console.log(1)" };
+
+    // An IPv4 client on the dual-stack QUIC socket, as the connection stores it.
+    var peer = std.mem.zeroes(std.posix.sockaddr.in6);
+    peer.addr = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 203, 0, 113, 7 };
+
+    writeAccessRecord(config, &req, &res, peer);
+    logger.flush();
+
+    const line = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    std.log.info(".ACCESS: {s}", .{std.mem.trimEnd(u8, line, "\n")});
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "[http3:access] GET /assets/app.js 200 14 \"203.0.113.7\" \"-\" \"-\"") != null);
+}
+
+test "zix http3: an errored request records its status and empty body" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var logger = try Logger.init(std.testing.allocator, .{ .console = .OFF, .save_path = root, .save_min_level = .DEBUG });
+    defer logger.deinit();
+
+    const config = Http3ServerConfig{ .allocator = std.testing.allocator, .io = std.testing.io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC, .logger = &logger };
+    const req = core.Request{ .method = "GET", .path = "/missing" };
+    const res = core.Response{ .status = 404, .body = "" };
+
+    var peer = std.mem.zeroes(std.posix.sockaddr.in6);
+    peer.addr = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+    writeAccessRecord(config, &req, &res, peer);
+    logger.flush();
+
+    const line = try readAccessLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    // A 4xx files at WARN, and an IPv6 client keeps its own form.
+    try std.testing.expect(std.mem.indexOf(u8, line, "WARN ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "[http3:access] GET /missing 404 0 \"::1\" \"-\" \"-\"") != null);
+}
+
+test "zix http3: a served request writes no access record when no logger is attached" {
+    const config = Http3ServerConfig{ .allocator = std.testing.allocator, .io = std.testing.io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC };
+    const req = core.Request{ .method = "GET", .path = "/" };
+    const res = core.Response{ .status = 200, .body = "" };
+
+    // The point is that it does not reach for a logger it does not have.
+    writeAccessRecord(config, &req, &res, std.mem.zeroes(std.posix.sockaddr.in6));
+}
+
+/// Read back the one log file written under a temp root, for the access tests above.
+fn readAccessLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
+    var days = root.iterate();
+
+    while (try days.next(std.testing.io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        var day = try root.openDir(std.testing.io, entry.name, .{});
+        defer day.close(std.testing.io);
+
+        const bytes = day.readFileAlloc(std.testing.io, "log-000000.log", allocator, .limited(64 * 1024)) catch continue;
+        if (bytes.len > 0) return bytes;
+
+        allocator.free(bytes);
+    }
+
+    return error.ZixNoLogLine;
 }
