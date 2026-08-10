@@ -79,17 +79,48 @@ pub fn steeringProgram(group_size: u32) [3]SockFilter {
     };
 }
 
+/// Whether the group really steers by receiving CPU, or fell back to the default 4-tuple hash.
+pub const Steered = enum {
+    /// The program is installed, so a connection lands on the worker pinned to the receiving CPU.
+    ATTACHED,
+    /// The kernel refused it. Placement is still correct, just hash-based rather than CPU-affine.
+    UNAVAILABLE,
+};
+
+/// Set once the refusal has been reported, so a group of workers says it once and not per worker.
+var steering_reported: std.atomic.Value(bool) = .init(false);
+
+const log = std.log.scoped(.zix_reuseport);
+
 /// Attach the steering program through one member of the REUSEPORT group (the
 /// kernel installs it group-wide, so the last attach wins and every worker
 /// attaching the same program is idempotent). Call after the member joined
-/// the group. Silent no-op on error: the group keeps the default hash.
-pub fn attachCpuSteering(fd: std.posix.fd_t, group_size: usize) void {
-    if (group_size == 0) return;
+/// the group.
+///
+/// Note:
+/// - A kernel without SO_ATTACH_REUSEPORT_CBPF (pre-4.5) leaves the group on the default hash,
+///   which serves correctly and only loses the cache affinity. That fallback used to be silent,
+///   so an operator who set reuseport_cbpf could not tell whether it took effect.
+/// - The refusal is reported once per process, not once per worker: the program is installed
+///   group-wide, so every worker in the group fails the same way for the same reason.
+///
+/// Return:
+/// - Steered.ATTACHED when the group steers by CPU
+/// - Steered.UNAVAILABLE when it kept the default hash
+pub fn attachCpuSteering(fd: std.posix.fd_t, group_size: usize) Steered {
+    if (group_size == 0) return .UNAVAILABLE;
 
     const prog = steeringProgram(@intCast(@min(group_size, std.math.maxInt(u32))));
     const fprog = SockFprog{ .len = prog.len, .filter = &prog };
 
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, SO_ATTACH_REUSEPORT_CBPF, std.mem.asBytes(&fprog)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, SO_ATTACH_REUSEPORT_CBPF, std.mem.asBytes(&fprog)) catch |err| {
+        if (!steering_reported.swap(true, .acq_rel))
+            log.warn("reuseport_cbpf was asked for and this kernel refused it ({s}), the group keeps the default 4-tuple hash", .{@errorName(err)});
+
+        return .UNAVAILABLE;
+    };
+
+    return .ATTACHED;
 }
 
 /// Startup gate serializing the workers' REUSEPORT joins into worker-id order,
@@ -169,7 +200,7 @@ test "zix multiplexers: attachCpuSteering is a no-op on a zero-size group" {
         return;
     }
 
-    attachCpuSteering(-1, 0);
+    try std.testing.expectEqual(Steered.UNAVAILABLE, attachCpuSteering(-1, 0));
 }
 
 test "zix multiplexers: BindOrderGate releases workers in id order" {
@@ -195,4 +226,33 @@ test "zix multiplexers: BindTurn release is idempotent and null steering is a no
     var off_turn = BindTurn.begin(null, 7);
     off_turn.release();
     try std.testing.expectEqual(@as(usize, 1), gate.next.load(.acquire));
+}
+
+test "zix multiplexers: reuseport, an empty group cannot steer" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("SO_ATTACH_REUSEPORT_CBPF is Linux-only, test skipped", .{});
+        return;
+    }
+
+    try std.testing.expectEqual(Steered.UNAVAILABLE, attachCpuSteering(@as(std.posix.fd_t, -1), 0));
+}
+
+test "zix multiplexers: reuseport, a real reuseport socket takes the program" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("SO_ATTACH_REUSEPORT_CBPF is Linux-only, test skipped", .{});
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18993);
+    var srv = addr.listen(io, .{ .mode = .stream, .reuse_address = true, .kernel_backlog = 8 }) catch {
+        std.log.info("the loopback port could not be bound, test skipped", .{});
+        return;
+    };
+    defer srv.deinit(io);
+
+    try std.testing.expectEqual(Steered.ATTACHED, attachCpuSteering(srv.socket.handle, 4));
 }

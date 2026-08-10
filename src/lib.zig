@@ -228,6 +228,7 @@ test "zix: unit test" {
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/ring.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/ring_wait.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/reuseport.zig"));
+    std.testing.refAllDecls(@import("multiplexers/listen_report.zig"));
     std.testing.refAllDecls(@import("multiplexers/slab.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("multiplexers/tls_conn.zig"));
 
