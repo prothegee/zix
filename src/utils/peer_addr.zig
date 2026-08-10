@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const socket_pair = @import("socket_pair.zig");
 
 // --------------------------------------------------------- //
 
@@ -263,39 +264,38 @@ test "zix utils peer: a socket with no IP peer answers UNKNOWN rather than faili
         return;
     }
 
-    // A unix socketpair is connected but has no IP family, which is the non-IP branch.
-    var fds: [2]std.posix.fd_t = undefined;
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds),
-    );
-    defer _ = std.posix.system.close(fds[0]);
-    defer _ = std.posix.system.close(fds[1]);
+    // A unix socketpair is connected but has no IP family, which is the non-IP branch. The helper
+    // reaches the same syscall through libc off linux, so this runs on every POSIX target.
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
 
     var buf: [MAX_LEN]u8 = undefined;
-    try std.testing.expectEqualStrings(UNKNOWN, host(fds[0], &buf));
-    try std.testing.expectEqualStrings(UNKNOWN, endpoint(fds[0], &buf));
-    try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", fds[0], &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, host(pair.fds[0], &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, endpoint(pair.fds[0], &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", pair.fds[0], &buf));
 }
 
 test "zix utils peer: a socket with no peer answers UNKNOWN rather than failing" {
-    if (comptime builtin.target.os.tag != .linux) {
-        std.log.info(".PEER: the bare-socket fixture below is linux only", .{});
+    if (comptime builtin.target.os.tag == .windows) {
+        std.log.info(".PEER: zig 0.16 std has no getpeername on windows, the answer is always UNKNOWN", .{});
         return;
     }
 
-    // A real socket that was never connected. getpeername answers ENOTCONN, which is the branch a
-    // record hits when the connection went away before it was written.
-    const rc = std.os.linux.socket(std.os.linux.AF.INET, std.os.linux.SOCK.STREAM, 0);
-    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(rc));
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
-    const fd: std.posix.fd_t = @intCast(rc);
-    defer _ = std.posix.system.close(fd);
+    // A listening socket is a real socket that was never connected. getpeername answers ENOTCONN,
+    // which is the branch a record hits when the connection went away before it was written. Port
+    // 0 takes whatever the kernel hands out, so this fixture can never collide with another test.
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try addr.listen(io, .{ .kernel_backlog = 1 });
+    defer server.deinit(io);
 
     var buf: [MAX_LEN]u8 = undefined;
-    try std.testing.expectEqualStrings(UNKNOWN, host(fd, &buf));
-    try std.testing.expectEqualStrings(UNKNOWN, endpoint(fd, &buf));
-    try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", fd, &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, host(server.socket.handle, &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, endpoint(server.socket.handle, &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", server.socket.handle, &buf));
 }
 
 test "zix utils peer: a sink sentinel and a stale descriptor answer UNKNOWN instead of aborting" {
@@ -323,6 +323,11 @@ test "zix utils peer: a sink sentinel and a stale descriptor answer UNKNOWN inst
 const TEST_PORT: u16 = 18601;
 
 test "zix utils peer: a real IPv4 peer is named with and without its port" {
+    if (comptime builtin.target.os.tag == .windows) {
+        std.log.info(".PEER: zig 0.16 std has no getpeername on windows, the answer is always UNKNOWN", .{});
+        return;
+    }
+
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
