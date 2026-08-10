@@ -1069,7 +1069,11 @@ test "zix logger: a save_path that cannot be opened suspends the file sink and k
     var lines = std.mem.tokenizeScalar(u8, content, '\n');
     const report = lines.next() orelse return error.ZixMissingSuspendReport;
 
-    try std.testing.expect(std.mem.indexOf(u8, report, "NOENT") != null);
+    // The cause is whatever the platform names its own open failure: NOENT comes from mkdirat on
+    // POSIX, ZixLogOpenFailed from the ntdll path on Windows.
+    const cause = if (comptime builtin.os.tag == .windows) "ZixLogOpenFailed" else "NOENT";
+
+    try std.testing.expect(std.mem.indexOf(u8, report, cause) != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "zix-logger-absent-root") != null);
     try std.testing.expectEqual(@as(?[]const u8, null), lines.next());
 }
