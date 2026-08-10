@@ -18,8 +18,20 @@ pub const Logger = struct {
     line_count: u64,                  // lines written to current file
     file_suspended: bool,             // true after unrecoverable file I/O error
 
-    buf: []u8,                        // 64 KB write buffer (heap, nil if save_path == "")
-    buf_pos: usize,                   // bytes written into buf
+    file_sink: Sink,                  // two 64 KB buffers for the log file (empty if save_path == "")
+    console_sink: Sink,               // two 64 KB buffers for the console (empty if console == .OFF)
+    flusher: Flusher,                 // the background thread that owns every write
+    flusher_unavailable: bool,        // true when the thread could not spawn, so drains run inline
+};
+
+pub const Sink = struct {
+    bufs: [2][]u8,                    // producers fill one, the flush thread writes the other
+    active: u1,                       // which buffer producers append into
+    fill: usize,                      // bytes in bufs[active]
+    pending: usize,                   // bytes in bufs[active ^ 1] awaiting a write, 0 = none in flight
+    stalls: u64,                      // times a producer waited because both buffers were spoken for
+    lines: u64,                       // records appended
+    writes: u64,                      // batches written out
 };
 ```
 
@@ -69,29 +81,32 @@ CAS loop on `locked: std.atomic.Value(bool)`:
 - Unlock: `store(false, .release)`.
 - `spinLoopHint()` maps to `pause`/`yield` on x86/ARM.
 
-The spinlock is correct under high concurrency because lock hold time is bounded by a `memcpy` into the staging buffer plus one `rawWrite` syscall per line. Under sustained high logging throughput, contention is serialized but each write is a small fixed-size syscall.
+The spinlock is correct under high concurrency because the lock is held for a `memcpy` into the active buffer and nothing else. It is never held across a syscall: the flush thread releases it before writing and takes it back afterwards, so a slow disk cannot stall a producer.
 
 ---
 
 ## Write Buffer
 
-Allocated by `init()` only when `save_path != ""` (`WRITE_BUF_SIZE = 64 KB`).
+Allocated by `init()` per enabled destination, two buffers each (`write_buf_size`, 64 KB by default, raised to fit one whole record if configured smaller).
 
-`writeLineLocked(line: []const u8)`:
-1. If `buf_pos + line.len + 1 > buf.len`: `flushLocked()` first.
-2. `@memcpy` line bytes into `buf[buf_pos..]`.
-3. Append `'\n'` at `buf[buf_pos + line.len]`.
-4. `buf_pos += line.len + 1`.
-5. `line_count += 1`.
-6. `flushLocked()`: always flush after every line.
+`appendLocked(sink, kind, line)`:
+1. `sink.tryAppend(line)`: `@memcpy` the record and a trailing `'\n'` into `bufs[active]` when there is room, and return.
+2. No room and `pending != 0`: the flush thread still owns the other buffer. Count a stall and wait for it, releasing the lock while waiting.
+3. `sink.swap()`: hand `bufs[active]` over as `pending` and start filling the other one.
+4. Retry the append, which now fits.
 
-`flushLocked()`: `rawWrite(file_fd, buf[0..buf_pos])` then `buf_pos = 0`.
+The producer never issues a syscall. Writes happen in two places:
 
-Flush is triggered by:
-- Every line written (inside `writeLineLocked`).
-- Date rollover or sequence rotation (inside `ensureFileLocked`).
-- Explicit `logger.flush()` call.
-- `logger.deinit()`.
+- `pumpSinkLocked` on the flush thread, which releases the lock across the write. This is the normal path.
+- `drainSinkLocked` on the calling thread, holding the lock throughout. This is the synchronous path.
+
+The synchronous path runs on:
+- An `ERROR` record, so a crash cannot swallow the record that explains it.
+- Date rollover or sequence rotation (inside `ensureFileLocked`), which needs the descriptor to itself.
+- Explicit `logger.flush()`.
+- `logger.deinit()`, after the flush thread has been stopped and joined.
+
+The flush thread naps 20 us between passes while a burst may still be running, stretching to 2 ms once it has been quiet for 64 passes. A trickle of records is written at least every 2 ms, which is what bounds the syscall rate for a logger that never fills a buffer.
 
 ---
 
