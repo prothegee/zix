@@ -73,7 +73,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
 
     var fin_buf: [256]u8 = undefined;
     var finished = try Tls.Client.finish(&state, flight_buf[0..flight_len], &fin_buf);
-    if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+    if (finished.alpn != Tls.Alpn.H2) return error.ZixAlpnNotH2;
 
     // trust the server cert: chain it to the fixture anchor (loaded out-of-band from disk) and
     // match the hostname (RFC 5280 / 6125). finish proved the peer holds the cert key, this is the

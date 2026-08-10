@@ -7,7 +7,7 @@
 
 const std = @import("std");
 
-pub const DecodeError = error{Truncated};
+pub const DecodeError = error{PostgrezTruncated};
 
 // --------------------------------------------------------------- //
 
@@ -17,7 +17,7 @@ pub const Reader = struct {
     pos: usize = 0,
 
     pub fn readU8(self: *Reader) DecodeError!u8 {
-        if (self.pos + 1 > self.buf.len) return error.Truncated;
+        if (self.pos + 1 > self.buf.len) return error.PostgrezTruncated;
 
         const value = self.buf[self.pos];
         self.pos += 1;
@@ -26,7 +26,7 @@ pub const Reader = struct {
     }
 
     pub fn readU16(self: *Reader) DecodeError!u16 {
-        if (self.pos + 2 > self.buf.len) return error.Truncated;
+        if (self.pos + 2 > self.buf.len) return error.PostgrezTruncated;
 
         const value = std.mem.readInt(u16, self.buf[self.pos..][0..2], .big);
         self.pos += 2;
@@ -35,7 +35,7 @@ pub const Reader = struct {
     }
 
     pub fn readU24(self: *Reader) DecodeError!u32 {
-        if (self.pos + 3 > self.buf.len) return error.Truncated;
+        if (self.pos + 3 > self.buf.len) return error.PostgrezTruncated;
 
         const triplet = self.buf[self.pos..][0..3];
         self.pos += 3;
@@ -44,7 +44,7 @@ pub const Reader = struct {
     }
 
     pub fn readBytes(self: *Reader, n: usize) DecodeError![]const u8 {
-        if (self.pos + n > self.buf.len) return error.Truncated;
+        if (self.pos + n > self.buf.len) return error.PostgrezTruncated;
 
         const slice = self.buf[self.pos .. self.pos + n];
         self.pos += n;
@@ -138,5 +138,5 @@ test "postgrez tls: wire reserve + patch a nested u16 vector" {
     try std.testing.expectEqual(@as(u16, 3), try reader.readU16());
     try std.testing.expectEqual(@as(u16, 0x1122), try reader.readU16());
     try std.testing.expectEqual(@as(u8, 0x33), try reader.readU8());
-    try std.testing.expectError(error.Truncated, reader.readU8());
+    try std.testing.expectError(error.PostgrezTruncated, reader.readU8());
 }

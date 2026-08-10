@@ -148,9 +148,9 @@ pub const SackOutcome = struct {
 pub const Error = error{
     OutOfMemory,
     /// The outstanding limits are reached. Try again once something is acknowledged.
-    NoSpace,
+    ZixNoSpace,
     /// A DATA chunk must carry at least one byte (RFC 9260 3.3.1).
-    NoUserData,
+    ZixNoUserData,
 };
 
 /// Holds unacknowledged chunks and decides what happens to them.
@@ -229,18 +229,18 @@ pub const SendQueue = struct {
     ///
     /// Return:
     /// - u32, the TSN this chunk was given
-    /// - error.NoUserData if the payload is empty
-    /// - error.NoSpace if the outstanding limits are reached
+    /// - error.ZixNoUserData if the payload is empty
+    /// - error.ZixNoSpace if the outstanding limits are reached
     /// - error.OutOfMemory
     pub fn append(self: *SendQueue, item: Outgoing, now_ms: u64) Error!u32 {
         _ = now_ms;
 
-        if (item.payload.len == 0) return error.NoUserData;
-        if (self.chunks.items.len >= self.limits.max_outstanding_chunks) return error.NoSpace;
+        if (item.payload.len == 0) return error.ZixNoUserData;
+        if (self.chunks.items.len >= self.limits.max_outstanding_chunks) return error.ZixNoSpace;
 
         const cost = chunk.paddedLen(chunk.HEADER_LEN + data.FIXED_LEN + item.payload.len);
 
-        if (self.outstanding_bytes + cost > self.limits.max_outstanding_bytes) return error.NoSpace;
+        if (self.outstanding_bytes + cost > self.limits.max_outstanding_bytes) return error.ZixNoSpace;
 
         const owned = try self.allocator.dupe(u8, item.payload);
         errdefer self.allocator.free(owned);
@@ -587,7 +587,7 @@ test "zix sctp: send queue append, an empty payload errors" {
     var queue = testQueue();
     defer queue.deinit();
 
-    try std.testing.expectError(error.NoUserData, queue.append(.{ .stream_identifier = 0, .payload = "" }, 0));
+    try std.testing.expectError(error.ZixNoUserData, queue.append(.{ .stream_identifier = 0, .payload = "" }, 0));
 }
 
 test "zix sctp: send queue append, the chunk limit refuses the next one" {
@@ -597,7 +597,7 @@ test "zix sctp: send queue append, the chunk limit refuses the next one" {
     _ = try queue.append(.{ .stream_identifier = 0, .payload = "a" }, 0);
     _ = try queue.append(.{ .stream_identifier = 0, .payload = "b" }, 0);
 
-    try std.testing.expectError(error.NoSpace, queue.append(.{ .stream_identifier = 0, .payload = "c" }, 0));
+    try std.testing.expectError(error.ZixNoSpace, queue.append(.{ .stream_identifier = 0, .payload = "c" }, 0));
 }
 
 test "zix sctp: send queue append, the byte limit counts the wire cost not the payload" {
@@ -608,7 +608,7 @@ test "zix sctp: send queue append, the byte limit counts the wire cost not the p
     _ = try queue.append(.{ .stream_identifier = 0, .payload = "a" }, 0);
     _ = try queue.append(.{ .stream_identifier = 0, .payload = "b" }, 0);
 
-    try std.testing.expectError(error.NoSpace, queue.append(.{ .stream_identifier = 0, .payload = "c" }, 0));
+    try std.testing.expectError(error.ZixNoSpace, queue.append(.{ .stream_identifier = 0, .payload = "c" }, 0));
 }
 
 test "zix sctp: send queue send, a queued chunk becomes in flight and counts against the window" {

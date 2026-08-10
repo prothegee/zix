@@ -32,9 +32,9 @@ pub const RETRANSMISSION_ENCODING: []const u8 = "rtx";
 /// What stops a format list from being read.
 pub const Error = error{
     /// A format field that is not a payload type number.
-    BadPayloadType,
+    ZixBadPayloadType,
     /// More formats than MAX_FORMATS.
-    TooManyFormats,
+    ZixTooManyFormats,
 };
 
 /// One payload type and everything the section says about it.
@@ -114,15 +114,15 @@ pub const List = struct {
 ///
 /// Return:
 /// - List borrowing `section`
-/// - error.BadPayloadType, error.TooManyFormats
+/// - error.ZixBadPayloadType, error.ZixTooManyFormats
 pub fn read(section: []const u8, formats: []const u8) Error!List {
     var list: List = .{ .entries = undefined, .len = 0 };
     var fields = std.mem.tokenizeScalar(u8, formats, ' ');
 
     while (fields.next()) |field| {
-        if (list.len == MAX_FORMATS) return error.TooManyFormats;
+        if (list.len == MAX_FORMATS) return error.ZixTooManyFormats;
 
-        const payload_type = std.fmt.parseInt(u7, field, 10) catch return error.BadPayloadType;
+        const payload_type = std.fmt.parseInt(u7, field, 10) catch return error.ZixBadPayloadType;
         const mapping_value = rtpmap.findValue(section, payload_type);
         const mapping = if (mapping_value) |value| rtpmap.read(value) catch null else null;
 
@@ -249,9 +249,9 @@ test "zix sdp: format read, the retransmission name is matched without case" {
 }
 
 test "zix sdp: format read, a format field that is not a number is refused" {
-    try std.testing.expectError(error.BadPayloadType, read(video_section, "96 x"));
-    try std.testing.expectError(error.BadPayloadType, read(video_section, "webrtc-datachannel"));
-    try std.testing.expectError(error.BadPayloadType, read(video_section, "200"));
+    try std.testing.expectError(error.ZixBadPayloadType, read(video_section, "96 x"));
+    try std.testing.expectError(error.ZixBadPayloadType, read(video_section, "webrtc-datachannel"));
+    try std.testing.expectError(error.ZixBadPayloadType, read(video_section, "200"));
 }
 
 test "zix sdp: format read, an empty format field gives an empty list" {
@@ -289,7 +289,7 @@ test "zix sdp: format read, more formats than the ceiling is refused" {
         at += 1;
     }
 
-    try std.testing.expectError(error.TooManyFormats, read(video_section, text[0..at]));
+    try std.testing.expectError(error.ZixTooManyFormats, read(video_section, text[0..at]));
 }
 
 test "zix sdp: format read, a repeated number is kept as the media line listed it" {

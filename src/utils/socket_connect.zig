@@ -38,10 +38,10 @@ const uses_libc = std.posix.system == std.c;
 pub const Error = error{
     /// The budget ran out with the handshake unfinished. Nothing is known about the peer past its
     /// silence, which is the case a gateway answers 504 for.
-    ConnectTimeout,
+    ZixConnectTimeout,
     /// The connect ended with no connection: refused, unreachable, or a local end that could not
     /// start one.
-    ConnectFailed,
+    ZixConnectFailed,
 };
 
 /// Connect to address, giving up after budget_ms.
@@ -61,8 +61,8 @@ pub const Error = error{
 ///
 /// Return:
 /// - std.Io.net.Stream, connected and blocking, owned by the caller
-/// - error.ConnectTimeout when the budget ran out first
-/// - error.ConnectFailed when the connect ended without a connection
+/// - error.ZixConnectTimeout when the budget ran out first
+/// - error.ZixConnectFailed when the connect ended without a connection
 pub fn withinBudget(io: std.Io, address: *const std.Io.net.IpAddress, budget_ms: u32) Error!std.Io.net.Stream {
     if (comptime bounded_here) {
         if (budget_ms != 0) return bounded(address, budget_ms);
@@ -74,8 +74,8 @@ pub fn withinBudget(io: std.Io, address: *const std.Io.net.IpAddress, budget_ms:
 /// std's own connect, for the two cases that ask for no bound.
 fn unbounded(io: std.Io, address: *const std.Io.net.IpAddress) Error!std.Io.net.Stream {
     return address.connect(io, .{ .mode = .stream, .protocol = .tcp }) catch |err| switch (err) {
-        error.Timeout => error.ConnectTimeout,
-        else => error.ConnectFailed,
+        error.Timeout => error.ZixConnectTimeout,
+        else => error.ZixConnectFailed,
     };
 }
 
@@ -84,17 +84,17 @@ fn bounded(address: *const std.Io.net.IpAddress, budget_ms: u32) Error!std.Io.ne
     var target: Sockaddr = undefined;
     const target_len = toSockaddr(address, &target);
 
-    const handle = openStream(address.*) orelse return error.ConnectFailed;
+    const handle = openStream(address.*) orelse return error.ZixConnectFailed;
     errdefer closeHandle(handle);
 
-    if (!startConnect(handle, &target, target_len)) return error.ConnectFailed;
+    if (!startConnect(handle, &target, target_len)) return error.ZixConnectFailed;
 
     // Writable is how a non-blocking connect reports that it is over, whichever way it went.
     const settled = socket_poll.waitReady(handle, socket_poll.WRITABLE, budget_ms) catch false;
-    if (!settled) return error.ConnectTimeout;
+    if (!settled) return error.ZixConnectTimeout;
 
-    if (!connectedCleanly(handle)) return error.ConnectFailed;
-    if (!markBlocking(handle)) return error.ConnectFailed;
+    if (!connectedCleanly(handle)) return error.ZixConnectFailed;
+    if (!markBlocking(handle)) return error.ZixConnectFailed;
 
     return .{ .socket = .{ .handle = handle, .address = address.* } };
 }
@@ -271,7 +271,7 @@ test "zix utils: socket_connect a closed port fails rather than waiting out the 
     server.deinit(io);
 
     // A refusal is an answer, so it has to arrive as a failure and not as the budget elapsing.
-    try testing.expectError(error.ConnectFailed, withinBudget(io, &addr, 10_000));
+    try testing.expectError(error.ZixConnectFailed, withinBudget(io, &addr, 10_000));
 }
 
 test "zix utils: socket_connect a silent address gives up on the budget" {
@@ -296,13 +296,13 @@ test "zix utils: socket_connect a silent address gives up on the budget" {
 
         return;
     } else |err| {
-        if (err == error.ConnectFailed) {
+        if (err == error.ZixConnectFailed) {
             std.log.info("this box has no route to the documentation address, so no handshake started, test skipped", .{});
 
             return;
         }
 
-        try testing.expectEqual(error.ConnectTimeout, err);
+        try testing.expectEqual(error.ZixConnectTimeout, err);
     }
 
     // Waited for its budget and not the operating system's own retry limit, which is minutes.

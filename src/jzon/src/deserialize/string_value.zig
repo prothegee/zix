@@ -40,7 +40,7 @@ pub const Options = @import("options.zig").Options;
 /// Return:
 /// - []const u8 (the string's value, pointing into the document only under
 ///   `strings = .BORROW` and only when the token carried no escape)
-/// - error.BadEscape when the token holds an escape the rules do not spell
+/// - error.JzonBadEscape when the token holds an escape the rules do not spell
 /// - error.OutOfMemory when the allocator runs out
 pub fn take(allocator: Allocator, span: StringSpan, comptime options: Options) Error![]const u8 {
     if (span.escaped) return decode(allocator, span.raw);
@@ -61,8 +61,8 @@ fn decode(allocator: Allocator, raw: []const u8) Error![]const u8 {
     var sink: Sink = .init(room);
 
     escape.decode(&sink, raw) catch |failure| return switch (failure) {
-        error.BadEscape => error.BadEscape,
-        error.NoSpaceLeft => error.Unexpected,
+        error.JzonBadEscape => error.JzonBadEscape,
+        error.NoSpaceLeft => error.JzonUnexpected,
     };
 
     const decoded = sink.written();
@@ -139,7 +139,7 @@ test "jzon: a string carrying an escape the rules do not spell is refused" {
 
     const allocator = arena.allocator();
 
-    try std.testing.expectError(error.BadEscape, take(allocator, .{ .raw = "\\q", .escaped = true }, .{}));
-    try std.testing.expectError(error.BadEscape, take(allocator, .{ .raw = "\\ud83d", .escaped = true }, .{}));
-    try std.testing.expectError(error.BadEscape, take(allocator, .{ .raw = "\\u00zz", .escaped = true }, .{}));
+    try std.testing.expectError(error.JzonBadEscape, take(allocator, .{ .raw = "\\q", .escaped = true }, .{}));
+    try std.testing.expectError(error.JzonBadEscape, take(allocator, .{ .raw = "\\ud83d", .escaped = true }, .{}));
+    try std.testing.expectError(error.JzonBadEscape, take(allocator, .{ .raw = "\\u00zz", .escaped = true }, .{}));
 }

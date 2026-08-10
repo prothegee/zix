@@ -18,8 +18,8 @@ pub const MAX_BULK_LEN = 1024 * 1024;
 pub const MAX_ARGS = 512;
 
 pub const ReadError = error{
-    ConnectionClosed,
-    ProtocolViolation,
+    RedizConnectionClosed,
+    RedizProtocolViolation,
     OutOfMemory,
 };
 
@@ -39,15 +39,15 @@ pub const ReadError = error{
 ///
 /// Return:
 /// - []const []const u8 with at least one element
-/// - error.ConnectionClosed when the peer hung up between commands
-/// - error.ProtocolViolation on a malformed frame
+/// - error.RedizConnectionClosed when the peer hung up between commands
+/// - error.RedizProtocolViolation on a malformed frame
 pub fn readCommand(source: anytype, arena: std.mem.Allocator) ReadError![]const []const u8 {
     var line_buf: [MAX_LINE_LEN]u8 = undefined;
     const header = try source.readLine(&line_buf);
-    if (header.len < 2 or header[0] != '*') return error.ProtocolViolation;
+    if (header.len < 2 or header[0] != '*') return error.RedizProtocolViolation;
 
-    const count = std.fmt.parseInt(usize, header[1..], 10) catch return error.ProtocolViolation;
-    if (count == 0 or count > MAX_ARGS) return error.ProtocolViolation;
+    const count = std.fmt.parseInt(usize, header[1..], 10) catch return error.RedizProtocolViolation;
+    if (count == 0 or count > MAX_ARGS) return error.RedizProtocolViolation;
 
     const argv = try arena.alloc([]const u8, count);
     for (argv) |*arg| arg.* = try readBulk(source, arena);
@@ -58,17 +58,17 @@ pub fn readCommand(source: anytype, arena: std.mem.Allocator) ReadError![]const 
 fn readBulk(source: anytype, arena: std.mem.Allocator) ReadError![]const u8 {
     var line_buf: [MAX_LINE_LEN]u8 = undefined;
     const header = try source.readLine(&line_buf);
-    if (header.len < 2 or header[0] != '$') return error.ProtocolViolation;
+    if (header.len < 2 or header[0] != '$') return error.RedizProtocolViolation;
 
-    const len = std.fmt.parseInt(usize, header[1..], 10) catch return error.ProtocolViolation;
-    if (len > MAX_BULK_LEN) return error.ProtocolViolation;
+    const len = std.fmt.parseInt(usize, header[1..], 10) catch return error.RedizProtocolViolation;
+    if (len > MAX_BULK_LEN) return error.RedizProtocolViolation;
 
     const body = try arena.alloc(u8, len);
     try source.readExact(body);
 
     var crlf: [2]u8 = undefined;
     try source.readExact(&crlf);
-    if (crlf[0] != '\r' or crlf[1] != '\n') return error.ProtocolViolation;
+    if (crlf[0] != '\r' or crlf[1] != '\n') return error.RedizProtocolViolation;
 
     return body;
 }
@@ -179,20 +179,20 @@ const FixedSource = struct {
 
             const line_end = self.pos;
             self.pos += 1;
-            if (line_end == start or self.bytes[line_end - 1] != '\r') return error.ProtocolViolation;
+            if (line_end == start or self.bytes[line_end - 1] != '\r') return error.RedizProtocolViolation;
 
             const body = self.bytes[start .. line_end - 1];
-            if (body.len > buf.len) return error.ProtocolViolation;
+            if (body.len > buf.len) return error.RedizProtocolViolation;
             @memcpy(buf[0..body.len], body);
 
             return buf[0..body.len];
         }
 
-        return error.ConnectionClosed;
+        return error.RedizConnectionClosed;
     }
 
     fn readExact(self: *FixedSource, buf: []u8) ReadError!void {
-        if (self.pos + buf.len > self.bytes.len) return error.ConnectionClosed;
+        if (self.pos + buf.len > self.bytes.len) return error.RedizConnectionClosed;
 
         @memcpy(buf, self.bytes[self.pos..][0..buf.len]);
         self.pos += buf.len;
@@ -232,7 +232,7 @@ test "rediz inproc: wire readCommand reports a closed peer, not a violation" {
     defer arena.deinit();
 
     var reader = sourceOver("");
-    try testing.expectError(error.ConnectionClosed, readCommand(&reader, arena.allocator()));
+    try testing.expectError(error.RedizConnectionClosed, readCommand(&reader, arena.allocator()));
 }
 
 test "rediz inproc: wire readCommand rejects a non-array frame" {
@@ -240,7 +240,7 @@ test "rediz inproc: wire readCommand rejects a non-array frame" {
     defer arena.deinit();
 
     var reader = sourceOver("+PING\r\n");
-    try testing.expectError(error.ProtocolViolation, readCommand(&reader, arena.allocator()));
+    try testing.expectError(error.RedizProtocolViolation, readCommand(&reader, arena.allocator()));
 }
 
 test "rediz inproc: wire readCommand rejects a truncated bulk body" {
@@ -248,7 +248,7 @@ test "rediz inproc: wire readCommand rejects a truncated bulk body" {
     defer arena.deinit();
 
     var reader = sourceOver("*1\r\n$10\r\nshort\r\n");
-    try testing.expectError(error.ConnectionClosed, readCommand(&reader, arena.allocator()));
+    try testing.expectError(error.RedizConnectionClosed, readCommand(&reader, arena.allocator()));
 }
 
 test "rediz inproc: wire nil and boolean differ between resp2 and resp3" {

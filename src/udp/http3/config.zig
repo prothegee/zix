@@ -29,7 +29,7 @@ pub const Http3ServerConfig = struct {
 
     /// Concurrency model. ASYNC runs a single worker. EPOLL / URING run one SO_REUSEPORT worker per
     /// core (multicore), the kernel load-balancing by 4-tuple. EPOLL / URING are Linux-only, run()
-    /// rejects them elsewhere with error.DispatchModelUnsupported.
+    /// rejects them elsewhere with error.ZixDispatchModelUnsupported.
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// Worker count for the per-core models (EPOLL / URING). 0 means one per available CPU.
@@ -100,7 +100,7 @@ pub const Http3ServerConfig = struct {
     /// Root directory for static file serving. Empty (default) disables it. A request matching no
     /// route is served as a file before the 404 fallback, ".." is rejected. Responses are always the
     /// whole file: Range (RFC 7233) is not served over HTTP/3 in this pass.
-    /// Validated at run(): missing dir = error.PublicDirNotFound.
+    /// Validated at run(): missing dir = error.ZixPublicDirNotFound.
     public_dir: []const u8 = "",
     /// How long a resolved static file stays cached, in milliseconds. Unlike the other engines this
     /// is NOT optional for static serving: an HTTP/3 response body outlives the handler call (the

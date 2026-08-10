@@ -37,7 +37,7 @@ Pakai `zix.Http2` untuk HTTP/2 kelas browser atau prior-knowledge dengan kontrol
 
 ## Model Runtime
 
-Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
+Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### .ASYNC: Thread-per-connection di atas core blocking
 
@@ -76,13 +76,13 @@ flowchart TD
 - Satu worker menggerakkan banyak koneksi non-blocking melalui state machine h2 yang resumable di `mux.zig`, satu `MuxConn` per fd, sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread.
 - Setiap frame yang ditulis oleh readable batch (HEADERS plus DATA per stream, dikali jumlah stream dalam batch) di-coalesce menjadi satu `write()` melalui sink per-worker (`beginCoalesce` / `endCoalesce`), alih-alih satu write per frame.
 - `workers` adalah jumlah mux worker (0 = cpu count). Handler berjalan inline pada worker, jadi harus tetap terbatas: handler yang lama memblokir koneksi lain pada worker itu.
-- Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
+- Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
 
 ### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
 
 Topologi shared-nothing, satu-listener-per-worker yang sama dengan `.EPOLL`, tetapi completion-based: satu multishot accept dan satu recv per koneksi disubmit sebagai SQE dan dipanen sebagai CQE (ADR-037 Phase 4). Setiap recv mengisi read accumulator koneksi, lalu `mux.processRing` menggerakkan state machine yang resumable yang sama. Handler tetap menulis balasannya langsung ke fd (non-blocking), di-batch oleh coalescing sink yang sama.
 
-`.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Itu capability gap saat runtime di Linux. Di luar Linux model-nya ditolak langsung dengan `error.DispatchModelUnsupported`.
+`.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Itu capability gap saat runtime di Linux. Di luar Linux model-nya ditolak langsung dengan `error.ZixDispatchModelUnsupported`.
 
 ---
 
@@ -220,7 +220,7 @@ try server.run();
 
 ## Penyajian File Static
 
-`public_dir` (ADR-064) menyajikan route yang tidak cocok sebagai file sebelum 404. Kosong (default) menonaktifkannya, dan direktori yang tidak ada gagal saat `run()` dengan `error.PublicDirNotFound`, bukan mem-404-kan setiap request file saat runtime.
+`public_dir` (ADR-064) menyajikan route yang tidak cocok sebagai file sebelum 404. Kosong (default) menonaktifkannya, dan direktori yang tidak ada gagal saat `run()` dengan `error.ZixPublicDirNotFound`, bukan mem-404-kan setiap request file saat runtime.
 
 ```mermaid
 flowchart TD

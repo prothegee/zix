@@ -81,8 +81,8 @@ fn methodImplemented(method: []const u8) bool {
 ///
 /// Return:
 /// - !struct{ head: ParsedHead, body_offset: usize }
-/// - error.InvalidRequest on a malformed request line
-/// - error.UnknownMethod when the request line is well formed but names a
+/// - error.ZixInvalidRequest on a malformed request line
+/// - error.ZixUnknownMethod when the request line is well formed but names a
 ///   method this engine does not implement (the caller answers 501)
 pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
     const body_offset = header_end + 4;
@@ -90,12 +90,12 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
     const first_crlf = std.mem.indexOf(u8, buf[0..header_end], "\r\n") orelse header_end;
     const req_line = buf[0..first_crlf];
 
-    const sp1 = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.InvalidRequest;
-    if (sp1 == 0) return error.InvalidRequest;
+    const sp1 = std.mem.indexOfScalar(u8, req_line, ' ') orelse return error.ZixInvalidRequest;
+    if (sp1 == 0) return error.ZixInvalidRequest;
     const method = req_line[0..sp1];
 
     const rest = req_line[sp1 + 1 ..];
-    const sp2 = std.mem.lastIndexOfScalar(u8, rest, ' ') orelse return error.InvalidRequest;
+    const sp2 = std.mem.lastIndexOfScalar(u8, rest, ' ') orelse return error.ZixInvalidRequest;
     const target = rest[0..sp2];
     const version_str = rest[sp2 + 1 ..];
 
@@ -104,11 +104,11 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
     else if (std.mem.eql(u8, version_str, "HTTP/1.0"))
         0
     else
-        return error.InvalidRequest;
+        return error.ZixInvalidRequest;
 
     // Checked after the version so a mangled request line still reads as
     // malformed (400) rather than as an unimplemented method (501).
-    if (!methodImplemented(method)) return error.UnknownMethod;
+    if (!methodImplemented(method)) return error.ZixUnknownMethod;
 
     var path = target;
     var query: []const u8 = "";
@@ -184,11 +184,11 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
 ///
 /// Return:
 /// - !struct{ head: ParsedHead, body_offset: usize }
-/// - error.IncompleteHeader when \r\n\r\n has not arrived yet
-/// - error.InvalidRequest on a malformed request line
-/// - error.UnknownMethod when the method is not one this engine implements
+/// - error.ZixIncompleteHeader when \r\n\r\n has not arrived yet
+/// - error.ZixInvalidRequest on a malformed request line
+/// - error.ZixUnknownMethod when the method is not one this engine implements
 pub fn parseHead(buf: []const u8) !ParseResult {
-    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return error.IncompleteHeader;
+    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return error.ZixIncompleteHeader;
     return parseHeadAt(buf, header_end);
 }
 

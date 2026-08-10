@@ -50,7 +50,7 @@ pub const UdsClient = struct {
 
     /// Connect to the server at config.path.
     pub fn connect(config: UdsClientConfig, io: std.Io) !Self {
-        if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
+        if (comptime !std.Io.net.has_unix_sockets) return error.ZixUdsNotSupported;
 
         const unix_addr = try std.Io.net.UnixAddress.init(config.path);
         const stream = try unix_addr.connect(io);
@@ -68,12 +68,12 @@ pub const UdsClient = struct {
     ///
     /// Return:
     /// - void on success
-    /// - error.SendTimeout if send_timeout_ms is set and the socket is not writable in time
+    /// - error.ZixSendTimeout if send_timeout_ms is set and the socket is not writable in time
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
         if (self.config.send_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
             if (!try pollReady(self.stream.socket.handle, POLL_OUT, self.config.send_timeout_ms)) {
-                return error.SendTimeout;
+                return error.ZixSendTimeout;
             }
         }
 
@@ -91,14 +91,14 @@ pub const UdsClient = struct {
     ///
     /// Return:
     /// - payload slice on success
-    /// - error.RecvTimeout if recv_timeout_ms is set and no data arrives in time
-    /// - error.MessageTooLarge if the frame payload exceeds buf.len
-    /// - error.ConnectionClosed if the server closed the connection
+    /// - error.ZixRecvTimeout if recv_timeout_ms is set and no data arrives in time
+    /// - error.ZixMessageTooLarge if the frame payload exceeds buf.len
+    /// - error.ZixConnectionClosed if the server closed the connection
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
         if (self.config.recv_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
             if (!try pollReady(self.stream.socket.handle, POLL_IN, self.config.recv_timeout_ms)) {
-                return error.RecvTimeout;
+                return error.ZixRecvTimeout;
             }
         }
 
@@ -108,18 +108,18 @@ pub const UdsClient = struct {
         var hdr: [4]u8 = undefined;
         var n: usize = 0;
         while (n < 4) {
-            const got = reader.interface.readSliceShort(hdr[n..]) catch return error.ConnectionClosed;
-            if (got == 0) return error.ConnectionClosed;
+            const got = reader.interface.readSliceShort(hdr[n..]) catch return error.ZixConnectionClosed;
+            if (got == 0) return error.ZixConnectionClosed;
             n += got;
         }
 
         const len = std.mem.readInt(u32, &hdr, .big);
-        if (len > buf.len) return error.MessageTooLarge;
+        if (len > buf.len) return error.ZixMessageTooLarge;
 
         n = 0;
         while (n < len) {
-            const got = reader.interface.readSliceShort(buf[n..len]) catch return error.ConnectionClosed;
-            if (got == 0) return error.ConnectionClosed;
+            const got = reader.interface.readSliceShort(buf[n..len]) catch return error.ZixConnectionClosed;
+            if (got == 0) return error.ZixConnectionClosed;
             n += got;
         }
 
@@ -225,7 +225,7 @@ test "zix uds: UdsClient.recvMsg does not time out when data arrives immediately
     try std.testing.expectEqualSlices(u8, "hello", reply);
 }
 
-test "zix uds: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives" {
+test "zix uds: UdsClient.recvMsg returns error.ZixRecvTimeout when nothing arrives" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
         return;
@@ -249,7 +249,7 @@ test "zix uds: UdsClient.recvMsg returns error.RecvTimeout when nothing arrives"
     };
 
     var buf: [8]u8 = undefined;
-    try std.testing.expectError(error.RecvTimeout, client.recvMsg(io, &buf));
+    try std.testing.expectError(error.ZixRecvTimeout, client.recvMsg(io, &buf));
 }
 
 test "zix uds: UdsClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
@@ -281,7 +281,7 @@ test "zix uds: UdsClient.sendMsg succeeds within send_timeout_ms when the peer d
     try std.testing.expectEqual(@as(usize, 9), n);
 }
 
-test "zix uds: UdsClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
+test "zix uds: UdsClient.sendMsg returns error.ZixSendTimeout when the peer's buffer is full" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
         return;
@@ -317,5 +317,5 @@ test "zix uds: UdsClient.sendMsg returns error.SendTimeout when the peer's buffe
         .config = .{ .path = "dev/null", .send_timeout_ms = 50 },
     };
 
-    try std.testing.expectError(error.SendTimeout, client.sendMsg(io, "hello"));
+    try std.testing.expectError(error.ZixSendTimeout, client.sendMsg(io, "hello"));
 }

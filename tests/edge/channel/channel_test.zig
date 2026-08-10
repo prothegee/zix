@@ -1,6 +1,6 @@
 //! Edge tests: zix.Channel(T) boundary conditions.
 //! Verifies: capacity=1 minimum works, ring head wraps at buf.len,
-//! full-buffer stability, and error.Closed on send/recv after close.
+//! full-buffer stability, and error.ZixClosed on send/recv after close.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -54,7 +54,7 @@ test "zix edge: Channel, full boundary: count equals buf.len" {
     try std.testing.expectEqual(channel.head, tail);
 }
 
-test "zix edge: Channel, send after close returns error.Closed" {
+test "zix edge: Channel, send after close returns error.ZixClosed" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
@@ -63,10 +63,10 @@ test "zix edge: Channel, send after close returns error.Closed" {
     defer channel.deinit();
 
     channel.close(io);
-    try std.testing.expectError(error.Closed, channel.send(io, 1));
+    try std.testing.expectError(error.ZixClosed, channel.send(io, 1));
 }
 
-test "zix edge: Channel, recv on empty closed channel returns error.Closed" {
+test "zix edge: Channel, recv on empty closed channel returns error.ZixClosed" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
@@ -75,5 +75,5 @@ test "zix edge: Channel, recv on empty closed channel returns error.Closed" {
     defer channel.deinit();
 
     channel.close(io);
-    try std.testing.expectError(error.Closed, channel.recv(io));
+    try std.testing.expectError(error.ZixClosed, channel.recv(io));
 }

@@ -77,13 +77,13 @@ pub const MAX_SESSION_ID: u64 = (@as(u64, 1) << 62) - 1;
 /// Everything that stops an answer from being built.
 pub const Error = error{
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
     /// The offer leaves this endpoint no DTLS role it can take.
-    UnsupportedRole,
+    ZixUnsupportedRole,
     /// The offer has more sections than MAX_SECTIONS.
-    TooManySections,
+    ZixTooManySections,
     /// A media section this endpoint could not read far enough to answer.
-    BadMediaSection,
+    ZixBadMediaSection,
 };
 
 /// What this endpoint answers with.
@@ -151,11 +151,11 @@ pub const Answer = struct {
 ///
 /// Return:
 /// - Answer, whose text borrows `out`
-/// - error.UnsupportedRole if the offer leaves no DTLS role this endpoint can take
-/// - error.TooManySections, error.BadMediaSection, error.NoSpace
+/// - error.ZixUnsupportedRole if the offer leaves no DTLS role this endpoint can take
+/// - error.ZixTooManySections, error.ZixBadMediaSection, error.ZixNoSpace
 pub fn write(out: []u8, offered: offer.Offer, config: Config) Error!Answer {
-    const role = setup.answerFor(offered.setup) catch return error.UnsupportedRole;
-    const role_streams = setup.streamRole(role) catch return error.UnsupportedRole;
+    const role = setup.answerFor(offered.setup) catch return error.ZixUnsupportedRole;
+    const role_streams = setup.streamRole(role) catch return error.ZixUnsupportedRole;
 
     var appender = builder.Builder{ .out = out };
 
@@ -182,7 +182,7 @@ pub fn write(out: []u8, offered: offer.Offer, config: Config) Error!Answer {
     var carried_media: usize = 0;
 
     while (offered.description.section(index)) |section| : (index += 1) {
-        if (index == MAX_SECTIONS) return error.TooManySections;
+        if (index == MAX_SECTIONS) return error.ZixTooManySections;
 
         // Pointer identity, because two sections can read alike and only one of them is the one
         // offer.zig chose to answer as the data channel.
@@ -249,18 +249,18 @@ fn mediaSection(
 ) Error!media_answer.Section {
     if (media_offer.isMediaSection(section)) {
         const parsed = media_offer.read(offered.description, section) catch
-            return error.BadMediaSection;
+            return error.ZixBadMediaSection;
 
         return media_answer.write(out, parsed, transport, config.carry_media) catch
-            return error.NoSpace;
+            return error.ZixNoSpace;
     }
 
     // A media type this endpoint does not read at all, including a second data channel section
     // and an unencrypted RTP profile. It still needs a place in the answer.
-    const media_line = section.mediaLine() catch return error.BadMediaSection;
+    const media_line = section.mediaLine() catch return error.ZixBadMediaSection;
     const mid = attribute.findValue(section.text, "mid");
 
-    return media_answer.refuseSection(out, media_line, mid) catch return error.NoSpace;
+    return media_answer.refuseSection(out, media_line, mid) catch return error.ZixNoSpace;
 }
 
 /// Append the origin line.
@@ -271,7 +271,7 @@ fn originLine(appender: *builder.Builder, session_id: u64) Error!void {
     const identifier = builder.writeNumber(&digits, session_id);
     const total = 2 + identifier.len + 3 + ORIGIN_ADDRESS.len;
 
-    if (value.len < total) return error.NoSpace;
+    if (value.len < total) return error.ZixNoSpace;
 
     var at: usize = 0;
     at += builder.copy(value[at..], "- ");
@@ -291,7 +291,7 @@ fn dataChannelMediaLine(appender: *builder.Builder, port: u16) Error!void {
         port,
         media.DATA_CHANNEL_PROTO,
         media.DATA_CHANNEL_FORMAT,
-    ) catch return error.NoSpace;
+    ) catch return error.ZixNoSpace;
 
     try appender.addLine(.MEDIA, written);
 }
@@ -299,11 +299,11 @@ fn dataChannelMediaLine(appender: *builder.Builder, port: u16) Error!void {
 /// Append the connection line.
 fn connectionLine(appender: *builder.Builder, host: IpAddress) Error!void {
     var text: [address.MAX_ADDRESS_LEN]u8 = undefined;
-    const host_text = address.writeAddress(&text, host) catch return error.NoSpace;
+    const host_text = address.writeAddress(&text, host) catch return error.ZixNoSpace;
 
     var value: [address.MAX_CONNECTION_LEN]u8 = undefined;
     const written = address.writeConnection(&value, address.familyOf(host), host_text) catch
-        return error.NoSpace;
+        return error.ZixNoSpace;
 
     try appender.addLine(.CONNECTION, written);
 }
@@ -311,7 +311,7 @@ fn connectionLine(appender: *builder.Builder, host: IpAddress) Error!void {
 /// Append the fingerprint attribute.
 fn fingerprintLine(appender: *builder.Builder, value: *const fingerprint.Fingerprint) Error!void {
     var text: [fingerprint.MAX_VALUE_LEN]u8 = undefined;
-    const written = fingerprint.write(&text, value) catch return error.NoSpace;
+    const written = fingerprint.write(&text, value) catch return error.ZixNoSpace;
 
     try appender.addAttribute(fingerprint.ATTRIBUTE, written);
 }
@@ -321,7 +321,7 @@ fn candidateLine(appender: *builder.Builder, host: IpAddress) Error!void {
     const entry = ice.Candidate.host(host, .RTP, ice.SINGLE_ADDRESS_PREFERENCE);
 
     var value: [candidate.MAX_VALUE_LEN]u8 = undefined;
-    const written = candidate.write(&value, entry) catch return error.NoSpace;
+    const written = candidate.write(&value, entry) catch return error.ZixNoSpace;
 
     try appender.addAttribute(candidate.ATTRIBUTE, written);
 }
@@ -453,7 +453,7 @@ test "zix sdp: answer write, an offer that needs zix to start the handshake is r
 
     var out: [MAX_ANSWER_BYTES]u8 = undefined;
 
-    try std.testing.expectError(error.UnsupportedRole, write(&out, parsed, testConfig()));
+    try std.testing.expectError(error.ZixUnsupportedRole, write(&out, parsed, testConfig()));
 }
 
 test "zix sdp: answer write, the media section keeps the offered shape" {
@@ -660,7 +660,7 @@ test "zix sdp: answer write, a short buffer errors instead of writing a partial 
     var out: [64]u8 = undefined;
     const parsed_offer = try offer.read(browser_offer);
 
-    try std.testing.expectError(error.NoSpace, write(&out, parsed_offer, testConfig()));
+    try std.testing.expectError(error.ZixNoSpace, write(&out, parsed_offer, testConfig()));
 }
 
 test "zix sdp: answer write, the answer reads back as an offer would" {
@@ -846,7 +846,7 @@ test "zix sdp: answer write, an offer with more sections than the ceiling is ref
 
     var out: [MAX_ANSWER_BYTES]u8 = undefined;
 
-    try std.testing.expectError(error.TooManySections, write(&out, try offer.read(text[0..at]), testConfig()));
+    try std.testing.expectError(error.ZixTooManySections, write(&out, try offer.read(text[0..at]), testConfig()));
 }
 
 test "zix sdp: answer write, a carried media answer reads back through the media reader" {

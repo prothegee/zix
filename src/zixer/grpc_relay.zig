@@ -25,7 +25,7 @@ const NAME_LOWER_MAX: usize = 128;
 pub const Error = error{
     /// The block breaks an rfc 9113 8.2 or 8.3 rule: the stream answers a
     /// protocol error, the upstream never sees it.
-    Malformed,
+    ZixerMalformed,
 };
 
 /// What the request validation hands back for the forwarded element.
@@ -49,7 +49,7 @@ pub const RequestInfo = struct {
 ///
 /// Return:
 /// - RequestInfo (slices borrow the decode scratch, copy before reuse)
-/// - error.Malformed on any 8.2 / 8.3 violation
+/// - error.ZixerMalformed on any 8.2 / 8.3 violation
 pub fn validateRequest(headers: []const Http2.Header) Error!RequestInfo {
     var method: ?[]const u8 = null;
     var target: ?[]const u8 = null;
@@ -59,25 +59,25 @@ pub fn validateRequest(headers: []const Http2.Header) Error!RequestInfo {
     var seen_regular = false;
 
     for (headers) |header| {
-        if (header.name.len == 0) return error.Malformed;
+        if (header.name.len == 0) return error.ZixerMalformed;
 
         if (header.name[0] == ':') {
-            if (seen_regular) return error.Malformed;
+            if (seen_regular) return error.ZixerMalformed;
 
             if (std.mem.eql(u8, header.name, ":method")) {
-                if (method != null) return error.Malformed;
+                if (method != null) return error.ZixerMalformed;
                 method = header.value;
             } else if (std.mem.eql(u8, header.name, ":path")) {
-                if (target != null) return error.Malformed;
+                if (target != null) return error.ZixerMalformed;
                 target = header.value;
             } else if (std.mem.eql(u8, header.name, ":scheme")) {
-                if (scheme != null) return error.Malformed;
+                if (scheme != null) return error.ZixerMalformed;
                 scheme = header.value;
             } else if (std.mem.eql(u8, header.name, ":authority")) {
-                if (authority != null) return error.Malformed;
+                if (authority != null) return error.ZixerMalformed;
                 authority = header.value;
             } else {
-                return error.Malformed;
+                return error.ZixerMalformed;
             }
             continue;
         }
@@ -86,23 +86,23 @@ pub fn validateRequest(headers: []const Http2.Header) Error!RequestInfo {
         try validateRegularName(header.name);
 
         if (std.mem.eql(u8, header.name, "te")) {
-            if (!std.ascii.eqlIgnoreCase(header.value, "trailers")) return error.Malformed;
+            if (!std.ascii.eqlIgnoreCase(header.value, "trailers")) return error.ZixerMalformed;
         } else if (std.mem.eql(u8, header.name, "host")) {
             host_value = header.value;
         }
     }
 
-    const method_value = method orelse return error.Malformed;
-    if (method_value.len == 0) return error.Malformed;
-    if (std.mem.eql(u8, method_value, "CONNECT")) return error.Malformed;
+    const method_value = method orelse return error.ZixerMalformed;
+    if (method_value.len == 0) return error.ZixerMalformed;
+    if (std.mem.eql(u8, method_value, "CONNECT")) return error.ZixerMalformed;
 
-    if (scheme == null) return error.Malformed;
+    if (scheme == null) return error.ZixerMalformed;
 
-    const target_value = target orelse return error.Malformed;
-    if (target_value.len == 0) return error.Malformed;
+    const target_value = target orelse return error.ZixerMalformed;
+    if (target_value.len == 0) return error.ZixerMalformed;
 
     const final_authority = if (authority) |value| value else host_value;
-    if (final_authority.len == 0) return error.Malformed;
+    if (final_authority.len == 0) return error.ZixerMalformed;
 
     return .{ .authority = final_authority };
 }
@@ -143,16 +143,16 @@ pub fn encodeRequestBlock(block_buf: []u8, headers: []const Http2.Header, info: 
 ///
 /// Return:
 /// - the encoded block
-/// - error.Malformed when :status is missing or another pseudo appears
+/// - error.ZixerMalformed when :status is missing or another pseudo appears
 pub fn encodeResponseBlock(block_buf: []u8, headers: []const Http2.Header, extra: cfg_headers.Block) ![]const u8 {
     var encoder = Http2.HpackEncoder.init(block_buf);
 
     var seen_status = false;
     for (headers) |header| {
-        if (header.name.len == 0) return error.Malformed;
+        if (header.name.len == 0) return error.ZixerMalformed;
 
         if (header.name[0] == ':') {
-            if (!std.mem.eql(u8, header.name, ":status") or seen_status) return error.Malformed;
+            if (!std.mem.eql(u8, header.name, ":status") or seen_status) return error.ZixerMalformed;
 
             seen_status = true;
             try encoder.writeHeader(":status", header.value);
@@ -163,7 +163,7 @@ pub fn encodeResponseBlock(block_buf: []u8, headers: []const Http2.Header, extra
 
         try writeLowerHeader(&encoder, header.name, header.value);
     }
-    if (!seen_status) return error.Malformed;
+    if (!seen_status) return error.ZixerMalformed;
 
     try encoder.writeHeader("via", VIA_H2);
 
@@ -179,7 +179,7 @@ pub fn encodeTrailerBlock(block_buf: []u8, headers: []const Http2.Header) ![]con
     var encoder = Http2.HpackEncoder.init(block_buf);
 
     for (headers) |header| {
-        if (header.name.len == 0 or header.name[0] == ':') return error.Malformed;
+        if (header.name.len == 0 or header.name[0] == ':') return error.ZixerMalformed;
 
         try writeLowerHeader(&encoder, header.name, header.value);
     }
@@ -223,12 +223,12 @@ fn writeExtraHeaders(encoder: *Http2.HpackEncoder, extra: cfg_headers.Block) !vo
 /// headers make the whole block malformed.
 fn validateRegularName(name: []const u8) Error!void {
     for (name) |char| {
-        if (char >= 'A' and char <= 'Z') return error.Malformed;
+        if (char >= 'A' and char <= 'Z') return error.ZixerMalformed;
     }
 
     const forbidden = [_][]const u8{ "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade" };
     for (forbidden) |bad| {
-        if (std.mem.eql(u8, name, bad)) return error.Malformed;
+        if (std.mem.eql(u8, name, bad)) return error.ZixerMalformed;
     }
 }
 
@@ -306,7 +306,7 @@ test "zix zixer: grpc relay, a request with no scheme pseudo header is malformed
         makeHeader("content-type", "application/grpc"),
     };
 
-    try testing.expectError(error.Malformed, validateRequest(&no_scheme));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&no_scheme));
 }
 
 test "zix zixer: grpc relay, connection specific headers are malformed" {
@@ -317,7 +317,7 @@ test "zix zixer: grpc relay, connection specific headers are malformed" {
         makeHeader(":authority", "backend"),
         makeHeader("connection", "keep-alive"),
     };
-    try testing.expectError(error.Malformed, validateRequest(&bad_connection));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&bad_connection));
 
     const bad_te = [_]Http2.Header{
         makeHeader(":method", "POST"),
@@ -326,7 +326,7 @@ test "zix zixer: grpc relay, connection specific headers are malformed" {
         makeHeader(":authority", "backend"),
         makeHeader("te", "gzip"),
     };
-    try testing.expectError(error.Malformed, validateRequest(&bad_te));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&bad_te));
 
     const bad_upper = [_]Http2.Header{
         makeHeader(":method", "POST"),
@@ -335,7 +335,7 @@ test "zix zixer: grpc relay, connection specific headers are malformed" {
         makeHeader(":authority", "backend"),
         makeHeader("X-Custom", "1"),
     };
-    try testing.expectError(error.Malformed, validateRequest(&bad_upper));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&bad_upper));
 }
 
 test "zix zixer: grpc relay, pseudo header rules hold" {
@@ -344,7 +344,7 @@ test "zix zixer: grpc relay, pseudo header rules hold" {
         makeHeader("content-type", "application/grpc"),
         makeHeader(":path", "/x"),
     };
-    try testing.expectError(error.Malformed, validateRequest(&after_regular));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&after_regular));
 
     const unknown_pseudo = [_]Http2.Header{
         makeHeader(":method", "POST"),
@@ -353,14 +353,14 @@ test "zix zixer: grpc relay, pseudo header rules hold" {
         makeHeader(":authority", "backend"),
         makeHeader(":protocol", "websocket"),
     };
-    try testing.expectError(error.Malformed, validateRequest(&unknown_pseudo));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&unknown_pseudo));
 
     const no_path = [_]Http2.Header{
         makeHeader(":method", "POST"),
         makeHeader(":scheme", "http"),
         makeHeader(":authority", "backend"),
     };
-    try testing.expectError(error.Malformed, validateRequest(&no_path));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&no_path));
 
     const connect_method = [_]Http2.Header{
         makeHeader(":method", "CONNECT"),
@@ -368,7 +368,7 @@ test "zix zixer: grpc relay, pseudo header rules hold" {
         makeHeader(":path", "/x"),
         makeHeader(":authority", "backend"),
     };
-    try testing.expectError(error.Malformed, validateRequest(&connect_method));
+    try testing.expectError(error.ZixerMalformed, validateRequest(&connect_method));
 }
 
 test "zix zixer: grpc relay, request block keeps order and appends via and forwarded" {
@@ -413,13 +413,13 @@ test "zix zixer: grpc relay, response block requires status and appends via" {
     try testing.expectEqualStrings(VIA_H2, findValue(&out, count, "via").?);
 
     const no_status = [_]Http2.Header{makeHeader("content-type", "application/grpc")};
-    try testing.expectError(error.Malformed, encodeResponseBlock(&block_buf, &no_status, .{}));
+    try testing.expectError(error.ZixerMalformed, encodeResponseBlock(&block_buf, &no_status, .{}));
 
     const bad_pseudo = [_]Http2.Header{
         makeHeader(":status", "200"),
         makeHeader(":path", "/x"),
     };
-    try testing.expectError(error.Malformed, encodeResponseBlock(&block_buf, &bad_pseudo, .{}));
+    try testing.expectError(error.ZixerMalformed, encodeResponseBlock(&block_buf, &bad_pseudo, .{}));
 }
 
 test "zix zixer: grpc relay, trailer block passes through and refuses pseudo" {
@@ -441,7 +441,7 @@ test "zix zixer: grpc relay, trailer block passes through and refuses pseudo" {
     try testing.expectEqualStrings("kept", findValue(&out, count, "x-detail").?);
 
     const with_pseudo = [_]Http2.Header{makeHeader(":status", "200")};
-    try testing.expectError(error.Malformed, encodeTrailerBlock(&block_buf, &with_pseudo));
+    try testing.expectError(error.ZixerMalformed, encodeTrailerBlock(&block_buf, &with_pseudo));
 }
 
 test "zix zixer: grpc relay, unavailable block is a trailers-only grpc answer" {

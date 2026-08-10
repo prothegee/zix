@@ -18,22 +18,22 @@ pub const SCRATCH_BYTES: usize = 16 * 1024;
 
 pub const Error = error{
     /// The block ended inside a representation.
-    Truncated,
+    ZixerTruncated,
     /// The peer referenced its dynamic table. zixer advertises a zero-size
     /// table, so a reference to one is a protocol violation, not a miss.
-    DynamicRef,
+    ZixerDynamicRef,
     /// A static index outside the rfc 9204 appendix A table.
-    UnknownIndex,
+    ZixerUnknownIndex,
     /// More field lines than MAX_FIELDS.
-    TooManyFields,
+    ZixerTooManyFields,
     /// A Huffman string that does not decode.
-    BadHuffman,
+    ZixerBadHuffman,
     /// The caller's scratch or output buffer ran out.
-    BufferFull,
+    ZixerBufferFull,
 };
 
 /// The only way encoding fails: the output buffer has no room.
-pub const EncodeError = error{BufferFull};
+pub const EncodeError = error{ZixerBufferFull};
 
 /// One field line, borrowing the wire block or the decode scratch.
 pub const Field = struct { name: []const u8, value: []const u8 };
@@ -77,28 +77,28 @@ pub fn decodeSection(block: []const u8, scratch: []u8) Error!Section {
     // Encoded Field Section Prefix (rfc 9204 4.5.1): required insert count
     // then the sign bit plus delta base. A zero insert count is the only one
     // a static-only decoder can honour.
-    const insert_count = qpack.decodePrefixedInt(block, 8) catch return error.Truncated;
-    if (insert_count.value != 0) return error.DynamicRef;
+    const insert_count = qpack.decodePrefixedInt(block, 8) catch return error.ZixerTruncated;
+    if (insert_count.value != 0) return error.ZixerDynamicRef;
 
     var pos = insert_count.len;
-    if (pos >= block.len) return error.Truncated;
-    const delta_base = qpack.decodePrefixedInt(block[pos..], 7) catch return error.Truncated;
+    if (pos >= block.len) return error.ZixerTruncated;
+    const delta_base = qpack.decodePrefixedInt(block[pos..], 7) catch return error.ZixerTruncated;
     pos += delta_base.len;
 
     var section = Section{};
     var used: usize = 0;
 
     while (pos < block.len) {
-        if (section.len >= MAX_FIELDS) return error.TooManyFields;
+        if (section.len >= MAX_FIELDS) return error.ZixerTooManyFields;
 
         const lead = block[pos];
 
         // Indexed field line (4.5.2): the static table bit must be set.
         if (lead & 0x80 != 0) {
-            const indexed = qpack.decodeIndexedFieldLine(block[pos..]) catch return error.Truncated;
-            if (!indexed.static) return error.DynamicRef;
+            const indexed = qpack.decodeIndexedFieldLine(block[pos..]) catch return error.ZixerTruncated;
+            if (!indexed.static) return error.ZixerDynamicRef;
 
-            const entry = staticEntry(indexed.index) orelse return error.UnknownIndex;
+            const entry = staticEntry(indexed.index) orelse return error.ZixerUnknownIndex;
             section.entries[section.len] = .{ .name = entry.name, .value = entry.value };
             section.len += 1;
             pos += indexed.len;
@@ -107,10 +107,10 @@ pub fn decodeSection(block: []const u8, scratch: []u8) Error!Section {
 
         // Literal field line with name reference (4.5.4).
         if (lead & 0xc0 == 0x40) {
-            const literal = qpack.decodeLiteralNameRef(block[pos..]) catch return error.Truncated;
-            if (!literal.static) return error.DynamicRef;
+            const literal = qpack.decodeLiteralNameRef(block[pos..]) catch return error.ZixerTruncated;
+            if (!literal.static) return error.ZixerDynamicRef;
 
-            const entry = staticEntry(literal.name_index) orelse return error.UnknownIndex;
+            const entry = staticEntry(literal.name_index) orelse return error.ZixerUnknownIndex;
             const value = try expand(literal.value, literal.huffman, scratch, &used);
 
             section.entries[section.len] = .{ .name = entry.name, .value = value };
@@ -122,19 +122,19 @@ pub fn decodeSection(block: []const u8, scratch: []u8) Error!Section {
         // Literal field line with literal name (4.5.6).
         if (lead & 0xe0 == 0x20) {
             const name_huffman = lead & 0x08 != 0;
-            const name_len = qpack.decodePrefixedInt(block[pos..], 3) catch return error.Truncated;
+            const name_len = qpack.decodePrefixedInt(block[pos..], 3) catch return error.ZixerTruncated;
             var walk = pos + name_len.len;
-            if (walk + name_len.value > block.len) return error.Truncated;
+            if (walk + name_len.value > block.len) return error.ZixerTruncated;
 
             const raw_name = block[walk..][0..@intCast(name_len.value)];
             walk += @intCast(name_len.value);
             const name = try expand(raw_name, name_huffman, scratch, &used);
 
-            if (walk >= block.len) return error.Truncated;
+            if (walk >= block.len) return error.ZixerTruncated;
             const value_huffman = block[walk] & 0x80 != 0;
-            const value_len = qpack.decodePrefixedInt(block[walk..], 7) catch return error.Truncated;
+            const value_len = qpack.decodePrefixedInt(block[walk..], 7) catch return error.ZixerTruncated;
             walk += value_len.len;
-            if (walk + value_len.value > block.len) return error.Truncated;
+            if (walk + value_len.value > block.len) return error.ZixerTruncated;
 
             const raw_value = block[walk..][0..@intCast(value_len.value)];
             walk += @intCast(value_len.value);
@@ -147,7 +147,7 @@ pub fn decodeSection(block: []const u8, scratch: []u8) Error!Section {
         }
 
         // Post-base forms (4.5.3, 4.5.5) address the dynamic table.
-        return error.DynamicRef;
+        return error.ZixerDynamicRef;
     }
 
     return section;
@@ -156,10 +156,10 @@ pub fn decodeSection(block: []const u8, scratch: []u8) Error!Section {
 /// Expand one wire string: Huffman coded into `scratch`, plain borrowed as is.
 fn expand(raw: []const u8, coded: bool, scratch: []u8, used: *usize) Error![]const u8 {
     if (!coded) return raw;
-    if (raw.len > MAX_STRING) return error.BufferFull;
+    if (raw.len > MAX_STRING) return error.ZixerBufferFull;
 
     const room = scratch[used.*..];
-    const written = huffman.decode(room, raw) orelse return error.BadHuffman;
+    const written = huffman.decode(room, raw) orelse return error.ZixerBadHuffman;
     used.* += written;
 
     return room[0..written];
@@ -206,7 +206,7 @@ pub const Encoder = struct {
 
     /// Append one field line.
     pub fn field(encoder: *Encoder, name: []const u8, value: []const u8) EncodeError!void {
-        if (encoder.buf.len < 2) return error.BufferFull;
+        if (encoder.buf.len < 2) return error.ZixerBufferFull;
 
         if (exactIndex(name, value)) |index| {
             try encoder.reserve(prefixedLen(index, 6));
@@ -246,7 +246,7 @@ pub const Encoder = struct {
     }
 
     fn reserve(encoder: *const Encoder, bytes: usize) EncodeError!void {
-        if (encoder.pos + bytes > encoder.buf.len) return error.BufferFull;
+        if (encoder.pos + bytes > encoder.buf.len) return error.ZixerBufferFull;
     }
 };
 
@@ -482,26 +482,26 @@ test "zix zixer: h3 qpack, a dynamic table reference is refused" {
     // never advertises.
     const dynamic_prefix = [_]u8{ 0x01, 0x00, 0xc0 | 17 };
     var scratch: [16]u8 = undefined;
-    try testing.expectError(error.DynamicRef, decodeSection(&dynamic_prefix, &scratch));
+    try testing.expectError(error.ZixerDynamicRef, decodeSection(&dynamic_prefix, &scratch));
 
     // Indexed field line with the static bit clear.
     const dynamic_index = [_]u8{ 0x00, 0x00, 0x80 | 3 };
-    try testing.expectError(error.DynamicRef, decodeSection(&dynamic_index, &scratch));
+    try testing.expectError(error.ZixerDynamicRef, decodeSection(&dynamic_index, &scratch));
 
     // Post-base indexed field line (4.5.3).
     const post_base = [_]u8{ 0x00, 0x00, 0x10 };
-    try testing.expectError(error.DynamicRef, decodeSection(&post_base, &scratch));
+    try testing.expectError(error.ZixerDynamicRef, decodeSection(&post_base, &scratch));
 }
 
 test "zix zixer: h3 qpack, a truncated section and an unknown index both fault" {
     var scratch: [16]u8 = undefined;
 
     const truncated = [_]u8{ 0x00, 0x00, 0x20 | 0x04, 'a' };
-    try testing.expectError(error.Truncated, decodeSection(&truncated, &scratch));
+    try testing.expectError(error.ZixerTruncated, decodeSection(&truncated, &scratch));
 
     // Static index 120 is past appendix A.
     const unknown = [_]u8{ 0x00, 0x00, 0xc0 | 0x3f, 120 - 63 };
-    try testing.expectError(error.UnknownIndex, decodeSection(&unknown, &scratch));
+    try testing.expectError(error.ZixerUnknownIndex, decodeSection(&unknown, &scratch));
 }
 
 test "zix zixer: h3 qpack, a full section refuses rather than truncating" {
@@ -523,14 +523,14 @@ test "zix zixer: h3 qpack, a full section refuses rather than truncating" {
         const name = try std.fmt.bufPrint(&name_buf, "x-field-{d}", .{index});
         try over.field(name, "v");
     }
-    try testing.expectError(error.TooManyFields, decodeSection(over.encoded(), &scratch));
+    try testing.expectError(error.ZixerTooManyFields, decodeSection(over.encoded(), &scratch));
 }
 
 test "zix zixer: h3 qpack, the encoder refuses to overflow its buffer" {
     var small: [8]u8 = undefined;
     var encoder = Encoder.init(&small);
 
-    try testing.expectError(error.BufferFull, encoder.field("x-long-name-here", "and-a-long-value"));
+    try testing.expectError(error.ZixerBufferFull, encoder.field("x-long-name-here", "and-a-long-value"));
 }
 
 test "zix zixer: h3 qpack, get finds a field by name" {

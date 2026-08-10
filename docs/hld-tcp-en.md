@@ -15,7 +15,7 @@ Implemented. See ADR-022 for design rationale.
 - Explicit over implicit: same config and dispatch-model pattern as `zix.Http`.
 - User owns the handler: `HandlerFn = *const fn(stream, io) void`, baked into the server type at `init` (ADR-038), identical in shape to `zix.Uds.HandlerFn`.
 - Length-prefixed framing built into the default echo handler and the client API (big-endian, network byte order).
-- ASYNC and EPOLL dispatch models for the per-connection handler: same semantics as HTTP. EPOLL is Linux-only and `run()` rejects it off Linux with `error.DispatchModelUnsupported` (ADR-065). The per-frame `FrameFn` callback (`initFramed`) adds a native `.URING` ring path (ADR-037, ADR-038).
+- ASYNC and EPOLL dispatch models for the per-connection handler: same semantics as HTTP. EPOLL is Linux-only and `run()` rejects it off Linux with `error.ZixDispatchModelUnsupported` (ADR-065). The per-frame `FrameFn` callback (`initFramed`) adds a native `.URING` ring path (ADR-037, ADR-038).
 - `initArgs()` on both server and client so `--ip` and `--port` are overridable at runtime without rebuilding.
 - No cross-protocol dependencies: `src/tcp/server.zig`, `src/tcp/client.zig`, `src/tcp/config.zig` have no import from `src/tcp/http/`.
 
@@ -109,7 +109,7 @@ flowchart TD
 
 ### EPOLL
 
-Shared-nothing: each worker owns one `SO_REUSEPORT` listener and one epoll instance. The kernel load-balances accepted connections across workers with no shared queue. Each connection still runs the blocking per-connection `HandlerFn`. Linux-only and native: `workers = 0` -> `cpu_count` workers. Off Linux, `run()` returns `error.DispatchModelUnsupported`, so pick `.ASYNC` there.
+Shared-nothing: each worker owns one `SO_REUSEPORT` listener and one epoll instance. The kernel load-balances accepted connections across workers with no shared queue. Each connection still runs the blocking per-connection `HandlerFn`. Linux-only and native: `workers = 0` -> `cpu_count` workers. Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`, so pick `.ASYNC` there.
 
 ### URING (framed path only)
 
@@ -173,9 +173,9 @@ sequenceDiagram
 
 | Error | Source | Meaning |
 | :- | :- | :- |
-| `error.PortNotConfigured` | `Server.init()` / `Client.connect()` | `config.port` is 0 |
-| `error.MessageTooLarge` | `Client.recvMsg()` | server frame payload exceeds caller's `buf.len` |
-| `error.ConnectionClosed` | `Client.recvMsg()` | server closed the connection mid-frame |
+| `error.ZixPortNotConfigured` | `Server.init()` / `Client.connect()` | `config.port` is 0 |
+| `error.ZixMessageTooLarge` | `Client.recvMsg()` | server frame payload exceeds caller's `buf.len` |
+| `error.ZixConnectionClosed` | `Client.recvMsg()` | server closed the connection mid-frame |
 
 ---
 

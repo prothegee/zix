@@ -31,7 +31,7 @@ fn waitForServer(io: std.Io, allocator: std.mem.Allocator) !void {
             .ip = IP,
             .port = PORT,
         }) catch {
-            if (attempt >= READY_ATTEMPTS) return error.ServerNeverBecameReady;
+            if (attempt >= READY_ATTEMPTS) return error.RedizServerNeverBecameReady;
             std.Io.sleep(io, .fromMilliseconds(READY_DELAY_MS), .awake) catch {};
 
             continue;
@@ -130,7 +130,7 @@ pub fn main(process: std.process.Init) !void {
     if (paths.items.len == 0) {
         std.debug.print("usage: rediz-runner <example binaries...> (use zig build test-runner)\n", .{});
 
-        return error.NoExamplesGiven;
+        return error.RedizNoExamplesGiven;
     }
 
     std.debug.print("waiting for the container on {s}:{d} ...\n", .{ IP, PORT });
@@ -155,7 +155,7 @@ pub fn main(process: std.process.Init) !void {
     if (failed > 0) {
         std.debug.print("\n{d}/{d} example(s) failed\n", .{ failed, paths.items.len });
 
-        return error.ExamplesFailed;
+        return error.RedizExamplesFailed;
     }
 
     std.debug.print("rediz: all {d} examples passed\n", .{paths.items.len});

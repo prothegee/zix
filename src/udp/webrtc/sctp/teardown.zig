@@ -32,11 +32,11 @@ pub const FLAG_T: u8 = 0x01;
 /// Everything that stops a teardown chunk from being read or built.
 pub const Error = error{
     /// A body shorter than the chunk type requires.
-    Truncated,
+    ZixTruncated,
     /// A cause length below the cause header size.
-    BadLength,
+    ZixBadLength,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// Read the cumulative TSN ack out of a SHUTDOWN chunk.
@@ -50,9 +50,9 @@ pub const Error = error{
 ///
 /// Return:
 /// - u32 cumulative TSN ack
-/// - error.Truncated if the body is shorter than 4 bytes
+/// - error.ZixTruncated if the body is shorter than 4 bytes
 pub fn readShutdown(value: []const u8) Error!u32 {
-    if (value.len < SHUTDOWN_VALUE_LEN) return error.Truncated;
+    if (value.len < SHUTDOWN_VALUE_LEN) return error.ZixTruncated;
 
     return std.mem.readInt(u32, value[0..4], .big);
 }
@@ -65,9 +65,9 @@ pub fn readShutdown(value: []const u8) Error!u32 {
 ///
 /// Return:
 /// - []const u8 chunk value
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeShutdown(out: []u8, cumulative_tsn_ack: u32) Error![]const u8 {
-    if (out.len < SHUTDOWN_VALUE_LEN) return error.NoSpace;
+    if (out.len < SHUTDOWN_VALUE_LEN) return error.ZixNoSpace;
 
     std.mem.writeInt(u32, out[0..4], cumulative_tsn_ack, .big);
 
@@ -137,7 +137,7 @@ pub const Abort = struct {
 ///
 /// Return:
 /// - Abort borrowing `value`
-/// - error.Truncated, error.BadLength if the cause region is malformed
+/// - error.ZixTruncated, error.ZixBadLength if the cause region is malformed
 pub fn readAbort(flags: u8, value: []const u8) Error!Abort {
     try error_cause.validate(value);
 
@@ -161,13 +161,13 @@ test "zix sctp: teardown shutdown, the cumulative TSN round trips" {
 test "zix sctp: teardown shutdown, a body shorter than the field errors" {
     const short: [3]u8 = .{ 0, 0, 0 };
 
-    try std.testing.expectError(error.Truncated, readShutdown(&short));
+    try std.testing.expectError(error.ZixTruncated, readShutdown(&short));
 }
 
 test "zix sctp: teardown shutdown, a buffer too small errors" {
     var buf: [3]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeShutdown(&buf, 1));
+    try std.testing.expectError(error.ZixNoSpace, writeShutdown(&buf, 1));
 }
 
 test "zix sctp: teardown shutdown, a body longer than the field reads the first four bytes" {
@@ -227,7 +227,7 @@ test "zix sctp: teardown abort, several causes are all searchable" {
 test "zix sctp: teardown abort, a malformed cause region errors" {
     const broken: [4]u8 = .{ 0x00, 0x0C, 0x00, 0x40 };
 
-    try std.testing.expectError(error.Truncated, readAbort(0, &broken));
+    try std.testing.expectError(error.ZixTruncated, readAbort(0, &broken));
 }
 
 test "zix sctp: teardown abort, a user abort reason survives the round trip" {

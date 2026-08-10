@@ -57,9 +57,9 @@ pub fn frameAllowedOnRequest(frame: FrameType) bool {
 /// The control-stream errors (RFC 9114 6.2.1).
 pub const ControlError = error{
     /// The first frame on the control stream was not SETTINGS: H3_MISSING_SETTINGS.
-    MissingSettings,
+    ZixMissingSettings,
     /// A second control stream was opened: H3_STREAM_CREATION_ERROR.
-    StreamCreationError,
+    ZixStreamCreationError,
 };
 
 /// Tracks the control-stream invariants (RFC 9114 6.2.1): exactly one control stream, SETTINGS first.
@@ -69,13 +69,13 @@ pub const ControlStream = struct {
 
     /// Open the single control stream. A second one is H3_STREAM_CREATION_ERROR.
     pub fn openStream(self: *ControlStream) ControlError!void {
-        if (self.open) return error.StreamCreationError;
+        if (self.open) return error.ZixStreamCreationError;
         self.open = true;
     }
 
     /// Process a frame on the control stream. The first frame MUST be SETTINGS.
     pub fn onFrame(self: *ControlStream, frame: FrameType) ControlError!void {
-        if (!self.settings_seen and frame != .settings) return error.MissingSettings;
+        if (!self.settings_seen and frame != .settings) return error.ZixMissingSettings;
         self.settings_seen = true;
     }
 };
@@ -110,7 +110,7 @@ pub const Field = struct { name: []const u8, value: []const u8 };
 pub const MessageKind = enum { request, response };
 
 /// The message-validation error (RFC 9114 4.1.2): a malformed message is H3_MESSAGE_ERROR.
-pub const MessageError = error{MessageError};
+pub const MessageError = error{ZixMessageError};
 
 /// Whether a field name is connection-specific and therefore prohibited in HTTP/3 (RFC 9114 4.2).
 pub fn connectionSpecific(name: []const u8) bool {
@@ -133,7 +133,7 @@ pub fn connectionSpecific(name: []const u8) bool {
 ///
 /// Return:
 /// - void
-/// - error.MessageError on any malformed condition
+/// - error.ZixMessageError on any malformed condition
 pub fn validateMessage(kind: MessageKind, fields: []const Field, content_length: ?u64, data_total: u64) MessageError!void {
     var seen_regular = false;
     var method: ?[]const u8 = null;
@@ -144,11 +144,11 @@ pub fn validateMessage(kind: MessageKind, fields: []const Field, content_length:
 
     for (fields) |entry| {
         for (entry.name) |c| {
-            if (c >= 'A' and c <= 'Z') return error.MessageError;
+            if (c >= 'A' and c <= 'Z') return error.ZixMessageError;
         }
 
         if (entry.name.len > 0 and entry.name[0] == ':') {
-            if (seen_regular) return error.MessageError;
+            if (seen_regular) return error.ZixMessageError;
 
             if (std.mem.eql(u8, entry.name, ":method")) {
                 method = entry.value;
@@ -161,36 +161,36 @@ pub fn validateMessage(kind: MessageKind, fields: []const Field, content_length:
             } else if (std.mem.eql(u8, entry.name, ":status")) {
                 has_status = true;
             } else {
-                return error.MessageError;
+                return error.ZixMessageError;
             }
         } else {
             seen_regular = true;
-            if (connectionSpecific(entry.name)) return error.MessageError;
+            if (connectionSpecific(entry.name)) return error.ZixMessageError;
         }
     }
 
     switch (kind) {
         .request => {
-            if (has_status) return error.MessageError;
+            if (has_status) return error.ZixMessageError;
 
             if (method) |verb| {
                 if (std.mem.eql(u8, verb, "CONNECT")) {
-                    if (!has_authority or has_scheme or has_path) return error.MessageError;
+                    if (!has_authority or has_scheme or has_path) return error.ZixMessageError;
                 } else {
-                    if (!has_scheme or !has_path) return error.MessageError;
+                    if (!has_scheme or !has_path) return error.ZixMessageError;
                 }
             } else {
-                return error.MessageError;
+                return error.ZixMessageError;
             }
         },
         .response => {
-            if (!has_status) return error.MessageError;
-            if (method != null or has_scheme or has_path or has_authority) return error.MessageError;
+            if (!has_status) return error.ZixMessageError;
+            if (method != null or has_scheme or has_path or has_authority) return error.ZixMessageError;
         },
     }
 
     if (content_length) |declared| {
-        if (declared != data_total) return error.MessageError;
+        if (declared != data_total) return error.ZixMessageError;
     }
 }
 
@@ -216,7 +216,7 @@ pub fn frameSendableBy(frame: FrameType, sender: Role) bool {
 }
 
 /// The identifier-ordering error (RFC 9114 5.2 / 7.2.7): H3_ID_ERROR.
-pub const IdError = error{IdError};
+pub const IdError = error{ZixIdError};
 
 /// Tracks received GOAWAY identifiers (RFC 9114 5.2): each MUST NOT exceed any previous one. A larger
 /// identifier is H3_ID_ERROR.
@@ -225,7 +225,7 @@ pub const GoawayTracker = struct {
 
     pub fn receive(self: *GoawayTracker, id: u64) IdError!void {
         if (self.last) |prev| {
-            if (id > prev) return error.IdError;
+            if (id > prev) return error.ZixIdError;
         }
         self.last = id;
     }
@@ -238,7 +238,7 @@ pub const MaxPushIdTracker = struct {
 
     pub fn update(self: *MaxPushIdTracker, id: u64) IdError!void {
         if (self.current) |prev| {
-            if (id < prev) return error.IdError;
+            if (id < prev) return error.ZixIdError;
         }
         self.current = id;
     }
@@ -292,11 +292,11 @@ test "zix http3: RFC 9114 6.2.1 control stream and SETTINGS first" {
     try control.openStream();
     try control.onFrame(.settings);
     try control.onFrame(.goaway);
-    try std.testing.expectError(error.StreamCreationError, control.openStream());
+    try std.testing.expectError(error.ZixStreamCreationError, control.openStream());
 
     var bad_control = ControlStream{};
     try bad_control.openStream();
-    try std.testing.expectError(error.MissingSettings, bad_control.onFrame(.goaway));
+    try std.testing.expectError(error.ZixMissingSettings, bad_control.onFrame(.goaway));
 }
 
 test "zix http3: RFC 9114 7.2 frame-per-stream matrix and 4.1 request sequence" {
@@ -348,7 +348,7 @@ test "zix http3: RFC 9114 5.2 / 7.2.7 GOAWAY, direction, and 8.1 error codes" {
     try goaway.receive(100);
     try goaway.receive(60);
     try goaway.receive(60);
-    try std.testing.expectError(error.IdError, goaway.receive(80));
+    try std.testing.expectError(error.ZixIdError, goaway.receive(80));
 
     try std.testing.expect(frameSendableBy(.max_push_id, .client) and !frameSendableBy(.max_push_id, .server));
     try std.testing.expect(frameSendableBy(.push_promise, .server) and !frameSendableBy(.push_promise, .client));
@@ -356,7 +356,7 @@ test "zix http3: RFC 9114 5.2 / 7.2.7 GOAWAY, direction, and 8.1 error codes" {
     var max_push = MaxPushIdTracker{};
     try max_push.update(10);
     try max_push.update(20);
-    try std.testing.expectError(error.IdError, max_push.update(5));
+    try std.testing.expectError(error.ZixIdError, max_push.update(5));
 
     try std.testing.expectEqual(@as(u64, 0x0100), @intFromEnum(Http3Error.no_error));
     try std.testing.expectEqual(@as(u64, 0x0105), @intFromEnum(Http3Error.frame_unexpected));

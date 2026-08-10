@@ -41,7 +41,7 @@ pub fn runTls(io: std.Io, port: u16) !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (resp.header("Via") == null) return error.MissingVia;
     if (std.mem.indexOf(u8, resp.body(), "upstream: proxies/tls") == null) return error.NotFromUpstream;
     if (std.mem.indexOf(u8, resp.body(), "cleartext http/1.1") == null) return error.UpstreamLegNotCleartext;

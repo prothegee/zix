@@ -28,7 +28,7 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | value | meaning |
 | :- | :- |
 | `.ASYNC` | one accept thread, one `io.async()` per connection. Best for low latency at moderate connection counts. |
-| `.EPOLL` | shared-nothing: each worker owns one SO_REUSEPORT listener plus one epoll instance. Best for very high connection counts. Linux-only, `run()` returns `error.DispatchModelUnsupported` elsewhere. |
+| `.EPOLL` | shared-nothing: each worker owns one SO_REUSEPORT listener plus one epoll instance. Best for very high connection counts. Linux-only, `run()` returns `error.ZixDispatchModelUnsupported` elsewhere. |
 | `.URING` | shared-nothing io_uring: same per-core topology as `.EPOLL`, completion-based so most syscalls are batched away. Linux-only, probes the ring at startup and folds to `.EPOLL` when io_uring is unavailable. |
 
 ## HTTP/1 (`Http1ServerConfig`)
@@ -57,7 +57,7 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | conn_timeout_ms | 0 | connection lifetime guard in ms, 0 = disabled (ADR-062) | background timer eviction on `.ASYNC` | set to evict long-lived connections on the blocking model | connections cut sooner | longer-lived connections | documented no-op on `.EPOLL`/`.URING` (their event loops own connection lifetime) |
 | handler_timeout_ms | 0 | per-handler execution budget in ms, 0 = disabled | cooperative deadline | set to bound slow handlers | handlers cut off sooner | slow handlers run longer | handlers must check isExpired() for it to take effect |
 | send_date_header | true | include the Date header in every response (RFC 7231) | 37 bytes per response | leave on for compliance, off to shrink responses | | | off drops a standard header |
-| public_dir | "" | root directory for static file serving, empty disables it | disk I/O on static hits | set to serve static files for routes that match no handler | | | non-empty is validated at run(), a missing dir yields error.PublicDirNotFound |
+| public_dir | "" | root directory for static file serving, empty disables it | disk I/O on static hits | set to serve static files for routes that match no handler | | | non-empty is validated at run(), a missing dir yields error.ZixPublicDirNotFound |
 | public_dir_upload | "u" | upload subdirectory under public_dir, a declarative path an upload handler writes to by convention | | set the upload path | | | relative to public_dir, the engine does not auto-wire uploads |
 | public_dir_cache_ttl_ms | 0 | how long a resolved static file stays cached in ms, 0 = never cached (ADR-064) | one open descriptor per cached variant instead of an open plus a stat per request | set above 0 to keep static files open and their 200 header prerendered | every request re-opens and re-reads the file | a file edited on disk takes up to one window to appear | 0 is byte for byte the behaviour shipped before ADR-064 |
 | public_dir_cache_max_entries | 256 | static cache slot count, one slot per file plus its .br and .gz siblings | descriptors and a demand-paged slot table | raise for a larger public_dir | files past the table serve uncached | more descriptors held | rounded down to a power of two, clamped against the process descriptor budget |
@@ -367,5 +367,5 @@ Build one Logger with this config and attach it by pointer to any engine's `logg
 
 - Required fields (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`, `ice_ufrag`, `ice_password`) have no default and must be set. A zero `port` is rejected at init by `zix.Tcp` / `zix.Udp` / `zix.Fix` (and their clients), and at `run()` by `zix.Http2` / `zix.Grpc` / `zix.Http3` / `zix.Webrtc`. `zix.Http1` and `zix.Http` do not validate it (port 0 binds a kernel-chosen ephemeral port).
 - `io`, `logger`, and `tls` are caller-owned: they are passed by handle or pointer and must outlive the server.
-- `.EPOLL` and `.URING` are Linux-only. Off Linux `run()` returns `error.DispatchModelUnsupported`, so pick `.ASYNC` there. The TLS paths follow the model: `.EPOLL` / `.URING` terminate in the multiplexed tls_mux workers, `.ASYNC` in tls_serve.
+- `.EPOLL` and `.URING` are Linux-only. Off Linux `run()` returns `error.ZixDispatchModelUnsupported`, so pick `.ASYNC` there. The TLS paths follow the model: `.EPOLL` / `.URING` terminate in the multiplexed tls_mux workers, `.ASYNC` in tls_serve.
 - The compression and response-cache features are active only under `.EPOLL` and `.URING` (shared-nothing, one owner per worker).

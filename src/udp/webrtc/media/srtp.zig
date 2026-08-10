@@ -34,33 +34,33 @@ pub const MAX_OVERHEAD: usize = srtp_auth.LONG_TAG_LEN;
 /// What stops a stream from being opened.
 pub const InitError = error{
     /// A profile with no keys to run on.
-    UnsupportedProfile,
+    ZixUnsupportedProfile,
 };
 
 /// What stops a packet from being protected.
 pub const ProtectError = error{
     /// Too short to hold an RTP header.
-    Truncated,
+    ZixTruncated,
     /// An RTP version other than 2.
-    UnsupportedVersion,
+    ZixUnsupportedVersion,
     /// No room in the buffer for the authentication tag.
-    NoSpace,
+    ZixNoSpace,
     /// A payload past what one counter block may cover.
-    SegmentTooLong,
+    ZixSegmentTooLong,
 };
 
 /// What stops a packet from being opened.
 pub const OpenError = error{
     /// Too short to hold an RTP header and a tag.
-    Truncated,
+    ZixTruncated,
     /// An RTP version other than 2.
-    UnsupportedVersion,
+    ZixUnsupportedVersion,
     /// An index already accepted, or too old to tell apart from one.
-    Replayed,
+    ZixReplayed,
     /// The tag does not match, so the packet is not from the peer that holds the key.
-    AuthenticationFailed,
+    ZixAuthenticationFailed,
     /// A payload past what one counter block may cover.
-    SegmentTooLong,
+    ZixSegmentTooLong,
 };
 
 /// One direction of one stream.
@@ -81,13 +81,13 @@ pub const Session = struct {
     ///
     /// Return:
     /// - Session
-    /// - error.UnsupportedProfile
+    /// - error.ZixUnsupportedProfile
     pub fn init(
         negotiated: exporter.SrtpProfile,
         master_key: [srtp_key.MASTER_KEY_LEN]u8,
         master_salt: [srtp_key.MASTER_SALT_LEN]u8,
     ) InitError!Session {
-        const parameters = profile.parametersFor(negotiated) catch return error.UnsupportedProfile;
+        const parameters = profile.parametersFor(negotiated) catch return error.ZixUnsupportedProfile;
 
         return .{
             .keys = srtp_key.rtpKeys(master_key, master_salt),
@@ -117,10 +117,10 @@ pub const Session = struct {
     ///
     /// Return:
     /// - []const u8, the protected packet, longer than what went in
-    /// - error.Truncated, error.UnsupportedVersion, error.NoSpace, error.SegmentTooLong
+    /// - error.ZixTruncated, error.ZixUnsupportedVersion, error.ZixNoSpace, error.ZixSegmentTooLong
     pub fn protect(self: *Session, buffer: []u8, packet_len: usize) ProtectError![]const u8 {
-        if (packet_len > buffer.len) return error.Truncated;
-        if (buffer.len - packet_len < self.tag_len) return error.NoSpace;
+        if (packet_len > buffer.len) return error.ZixTruncated;
+        if (buffer.len - packet_len < self.tag_len) return error.ZixNoSpace;
 
         const parsed = try rtp.read(buffer[0..packet_len]);
         const index = self.index.forSend(parsed.header.sequence);
@@ -145,16 +145,16 @@ pub const Session = struct {
     ///
     /// Return:
     /// - []const u8, the plain packet, shorter than what came in
-    /// - error.Truncated, error.UnsupportedVersion, error.Replayed, error.AuthenticationFailed,
-    ///   error.SegmentTooLong
+    /// - error.ZixTruncated, error.ZixUnsupportedVersion, error.ZixReplayed, error.ZixAuthenticationFailed,
+    ///   error.ZixSegmentTooLong
     pub fn unprotect(self: *Session, packet: []u8) OpenError![]const u8 {
-        if (packet.len < rtp.FIXED_HEADER_LEN + self.tag_len) return error.Truncated;
+        if (packet.len < rtp.FIXED_HEADER_LEN + self.tag_len) return error.ZixTruncated;
 
         const body_len = packet.len - self.tag_len;
         const parsed = try rtp.read(packet[0..body_len]);
         const index = self.index.estimate(parsed.header.sequence);
 
-        if (!self.replay.isNew(index.value())) return error.Replayed;
+        if (!self.replay.isNew(index.value())) return error.ZixReplayed;
 
         srtp_auth.verifyRtp(
             packet[body_len..],
@@ -162,8 +162,8 @@ pub const Session = struct {
             packet[0..body_len],
             index.roc,
         ) catch |failure| return switch (failure) {
-            error.AuthenticationFailed => error.AuthenticationFailed,
-            error.BadTagLength => unreachable,
+            error.ZixAuthenticationFailed => error.ZixAuthenticationFailed,
+            error.ZixBadTagLength => unreachable,
         };
 
         const block = cipher.counterBlock(self.keys.cipher_salt, parsed.header.ssrc, index.value());
@@ -264,7 +264,7 @@ test "zix media: srtp unprotect, a tampered payload is refused" {
     @memcpy(received[0..protected.len], protected);
     received[rtp.FIXED_HEADER_LEN] ^= 0x01;
 
-    try std.testing.expectError(error.AuthenticationFailed, pair.receiver.unprotect(received[0..protected.len]));
+    try std.testing.expectError(error.ZixAuthenticationFailed, pair.receiver.unprotect(received[0..protected.len]));
 }
 
 test "zix media: srtp unprotect, a tampered header is refused" {
@@ -280,7 +280,7 @@ test "zix media: srtp unprotect, a tampered header is refused" {
     // The header is readable, which does not make it changeable.
     try rtp.setSsrc(received[0..protected.len], 0x0BADF00D);
 
-    try std.testing.expectError(error.AuthenticationFailed, pair.receiver.unprotect(received[0..protected.len]));
+    try std.testing.expectError(error.ZixAuthenticationFailed, pair.receiver.unprotect(received[0..protected.len]));
 }
 
 test "zix media: srtp unprotect, a packet from the wrong key is refused" {
@@ -297,7 +297,7 @@ test "zix media: srtp unprotect, a packet from the wrong key is refused" {
     var received: [64]u8 = undefined;
     @memcpy(received[0..protected.len], protected);
 
-    try std.testing.expectError(error.AuthenticationFailed, pair.receiver.unprotect(received[0..protected.len]));
+    try std.testing.expectError(error.ZixAuthenticationFailed, pair.receiver.unprotect(received[0..protected.len]));
 }
 
 test "zix media: srtp unprotect, the same packet twice is refused" {
@@ -314,7 +314,7 @@ test "zix media: srtp unprotect, the same packet twice is refused" {
 
     _ = try pair.receiver.unprotect(first[0..protected.len]);
 
-    try std.testing.expectError(error.Replayed, pair.receiver.unprotect(second[0..protected.len]));
+    try std.testing.expectError(error.ZixReplayed, pair.receiver.unprotect(second[0..protected.len]));
 }
 
 test "zix media: srtp unprotect, a forged packet leaves the counter alone" {
@@ -336,7 +336,7 @@ test "zix media: srtp unprotect, a forged packet leaves the counter alone" {
     @memset(forged[forged_len..][0..10], 0xFF);
 
     try std.testing.expectError(
-        error.AuthenticationFailed,
+        error.ZixAuthenticationFailed,
         pair.receiver.unprotect(forged[0 .. forged_len + 10]),
     );
 
@@ -428,14 +428,14 @@ test "zix media: srtp, the two profiles cannot open each other's packets" {
     // The receiver takes the last four bytes as the tag and the rest as the packet, so nothing
     // lines up. This is what a mismatched negotiation looks like on the wire.
     try std.testing.expectError(
-        error.AuthenticationFailed,
+        error.ZixAuthenticationFailed,
         receiver.unprotect(received[0..protected.len]),
     );
 }
 
 test "zix media: srtp init, a profile with no keys is refused" {
     try std.testing.expectError(
-        error.UnsupportedProfile,
+        error.ZixUnsupportedProfile,
         Session.init(.SRTP_NULL_HMAC_SHA1_80, TEST_MASTER_KEY, TEST_MASTER_SALT),
     );
 }
@@ -447,8 +447,8 @@ test "zix media: srtp protect, a buffer with no room for the tag is refused" {
     const packet_len = try plainPacket(&buffer, 1, "twelve bytes");
 
     try std.testing.expectEqual(@as(usize, 24), packet_len);
-    try std.testing.expectError(error.NoSpace, pair.sender.protect(&buffer, packet_len));
-    try std.testing.expectError(error.Truncated, pair.sender.protect(&buffer, buffer.len + 1));
+    try std.testing.expectError(error.ZixNoSpace, pair.sender.protect(&buffer, packet_len));
+    try std.testing.expectError(error.ZixTruncated, pair.sender.protect(&buffer, buffer.len + 1));
 }
 
 test "zix media: srtp unprotect, a packet too short to hold a header and a tag is refused" {
@@ -456,8 +456,8 @@ test "zix media: srtp unprotect, a packet too short to hold a header and a tag i
     var packet: [20]u8 = @splat(0);
     packet[0] = 0x80;
 
-    try std.testing.expectError(error.Truncated, pair.receiver.unprotect(&packet));
-    try std.testing.expectError(error.Truncated, pair.receiver.unprotect(packet[0..4]));
+    try std.testing.expectError(error.ZixTruncated, pair.receiver.unprotect(&packet));
+    try std.testing.expectError(error.ZixTruncated, pair.receiver.unprotect(packet[0..4]));
 }
 
 test "zix media: srtp unprotect, a packet that is not rtp is refused" {
@@ -467,7 +467,7 @@ test "zix media: srtp unprotect, a packet that is not rtp is refused" {
     // Version 1, which no RTP packet carries.
     packet[0] = 0x40;
 
-    try std.testing.expectError(error.UnsupportedVersion, pair.receiver.unprotect(&packet));
+    try std.testing.expectError(error.ZixUnsupportedVersion, pair.receiver.unprotect(&packet));
 }
 
 test "zix media: srtp, a packet with a csrc list encrypts from the right place" {

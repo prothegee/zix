@@ -80,15 +80,15 @@ const SEQ_CLIENT_FINISHED: u16 = 3;
 
 pub const Error = error{
     /// The ClientHello did not parse, or offered nothing this server implements.
-    ClientHelloInvalid,
+    ZixClientHelloInvalid,
     /// The client did not offer the one supported cipher suite.
-    NoSharedCipherSuite,
+    ZixNoSharedCipherSuite,
     /// A message arrived that does not belong at this point in the handshake.
-    UnexpectedMessage,
+    ZixUnexpectedMessage,
     /// The client Finished did not match the transcript. The handshake is over.
-    ClientFinishedMismatch,
+    ZixClientFinishedMismatch,
     /// The output buffer cannot hold the flight.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// What the server brings to a handshake.
@@ -224,7 +224,7 @@ pub fn serverHelloVerifyRequest(
     const cookie = signer.generate(peer, hello.paramsForCookie());
 
     var body_buf: [64]u8 = undefined;
-    const body = dtls_hello.writeHelloVerifyRequestBody(&body_buf, &cookie) catch return error.NoSpace;
+    const body = dtls_hello.writeHelloVerifyRequestBody(&body_buf, &cookie) catch return error.ZixNoSpace;
 
     var message_buf: [96]u8 = undefined;
     var fragmenter: dtls_handshake.Fragmenter = .{
@@ -233,10 +233,10 @@ pub fn serverHelloVerifyRequest(
         .body = body,
         .max_fragment_len = body.len,
     };
-    const message = fragmenter.next(&message_buf) orelse return error.NoSpace;
+    const message = fragmenter.next(&message_buf) orelse return error.ZixNoSpace;
 
     return dtls_record.writePlaintext(out, .HANDSHAKE, EPOCH_HANDSHAKE, client_record_seq, message) catch
-        error.NoSpace;
+        error.ZixNoSpace;
 }
 
 /// Whether a ClientHello carries a cookie this server issued to this peer.
@@ -269,9 +269,9 @@ pub fn cookieAccepted(signer: *const dtls_cookie.Signer, peer: IpAddress, hello:
 /// - Flight (records to send plus the state the finish needs)
 /// - Error
 pub fn serverFlight(opts: HandshakeOptions, client_hello_body: []const u8, out: []u8) Error!Flight {
-    const hello = dtls_hello.parseClientHello(client_hello_body) catch return error.ClientHelloInvalid;
+    const hello = dtls_hello.parseClientHello(client_hello_body) catch return error.ZixClientHelloInvalid;
 
-    if (!hello.offersCipherSuite(CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256)) return error.NoSharedCipherSuite;
+    if (!hello.offersCipherSuite(CIPHER_ECDHE_ECDSA_AES128_GCM_SHA256)) return error.ZixNoSharedCipherSuite;
 
     var state: State = .{
         .client_random = hello.random,
@@ -286,7 +286,7 @@ pub fn serverFlight(opts: HandshakeOptions, client_hello_body: []const u8, out: 
     updateTranscript(&state.transcript, .CLIENT_HELLO, hello_message_seq_with_cookie, client_hello_body);
 
     const server_point = (P256.basePoint.mul(state.server_eph_scalar, .big) catch
-        return error.ClientHelloInvalid).toUncompressedSec1();
+        return error.ZixClientHelloInvalid).toUncompressedSec1();
 
     var cursor: usize = 0;
     var body_buf: [2048]u8 = undefined;
@@ -299,7 +299,7 @@ pub fn serverFlight(opts: HandshakeOptions, client_hello_body: []const u8, out: 
 
     {
         var writer = wire.Writer{ .buf = &body_buf };
-        if (opts.certificate_der.len + 6 > body_buf.len) return error.NoSpace;
+        if (opts.certificate_der.len + 6 > body_buf.len) return error.ZixNoSpace;
         writeCertificateBody(&writer, opts.certificate_der);
         cursor += try emitMessage(out[cursor..], &state, .CERTIFICATE, SEQ_CERTIFICATE, writer.slice(), opts.max_fragment_len);
     }
@@ -307,7 +307,7 @@ pub fn serverFlight(opts: HandshakeOptions, client_hello_body: []const u8, out: 
     {
         var writer = wire.Writer{ .buf = &body_buf };
         writeServerKeyExchangeBody(&writer, opts.signing_key, state.client_random, state.server_random, &server_point) catch
-            return error.ClientHelloInvalid;
+            return error.ZixClientHelloInvalid;
         cursor += try emitMessage(out[cursor..], &state, .SERVER_KEY_EXCHANGE, SEQ_SERVER_KEY_EXCHANGE, writer.slice(), opts.max_fragment_len);
     }
 
@@ -341,12 +341,12 @@ pub fn serverFinish(
     out: []u8,
 ) Error!FinishResult {
     var reader = wire.Reader{ .buf = client_key_exchange_body };
-    const point_len = reader.readU8() catch return error.UnexpectedMessage;
-    const client_point = reader.readBytes(point_len) catch return error.UnexpectedMessage;
+    const point_len = reader.readU8() catch return error.ZixUnexpectedMessage;
+    const client_point = reader.readBytes(point_len) catch return error.ZixUnexpectedMessage;
 
     updateTranscript(&state.transcript, .CLIENT_KEY_EXCHANGE, SEQ_CLIENT_KEY_EXCHANGE, client_key_exchange_body);
 
-    const pre_master = ecdheSharedX(state.server_eph_scalar, client_point) catch return error.UnexpectedMessage;
+    const pre_master = ecdheSharedX(state.server_eph_scalar, client_point) catch return error.ZixUnexpectedMessage;
     const master = prf.masterSecret(&pre_master, state.client_random, state.server_random);
     const km = prf.keyMaterial(master, state.client_random, state.server_random);
 
@@ -354,16 +354,16 @@ pub fn serverFinish(
 
     var plain_buf: [128]u8 = undefined;
     const opened = dtls_record.deprotect(&plain_buf, client_finished_record, km.client_write_key, km.client_write_iv) catch
-        return error.UnexpectedMessage;
+        return error.ZixUnexpectedMessage;
 
-    if (opened.header.epoch != EPOCH_APPLICATION) return error.UnexpectedMessage;
+    if (opened.header.epoch != EPOCH_APPLICATION) return error.ZixUnexpectedMessage;
 
-    const finished_header = dtls_handshake.parseHeader(opened.data) catch return error.UnexpectedMessage;
-    if (finished_header.msg_type != .FINISHED) return error.UnexpectedMessage;
+    const finished_header = dtls_handshake.parseHeader(opened.data) catch return error.ZixUnexpectedMessage;
+    if (finished_header.msg_type != .FINISHED) return error.ZixUnexpectedMessage;
 
     const client_verify_data = opened.data[dtls_handshake.HEADER_LEN..];
-    if (client_verify_data.len != VERIFY_DATA_LEN) return error.UnexpectedMessage;
-    if (!std.mem.eql(u8, client_verify_data, &expected)) return error.ClientFinishedMismatch;
+    if (client_verify_data.len != VERIFY_DATA_LEN) return error.ZixUnexpectedMessage;
+    if (!std.mem.eql(u8, client_verify_data, &expected)) return error.ZixClientFinishedMismatch;
 
     updateTranscript(&state.transcript, .FINISHED, SEQ_CLIENT_FINISHED, client_verify_data);
 
@@ -381,7 +381,7 @@ pub fn serverFinish(
 
     // ChangeCipherSpec closes epoch 0, the Finished that follows is the first record of epoch 1.
     const ccs = dtls_record.writePlaintext(out, .CHANGE_CIPHER_SPEC, EPOCH_HANDSHAKE, state.next_record_seq, &[_]u8{1}) catch
-        return error.NoSpace;
+        return error.ZixNoSpace;
     state.next_record_seq += 1;
 
     const finished = dtls_record.protect(
@@ -392,7 +392,7 @@ pub fn serverFinish(
         0,
         km.server_write_key,
         km.server_write_iv,
-    ) catch return error.NoSpace;
+    ) catch return error.ZixNoSpace;
 
     // The master secret exists only inside this function, so the SRTP export happens here or not
     // at all (RFC 5764 4.2). A profile that carries no cipher key exports nothing and is reported
@@ -459,10 +459,10 @@ fn emitMessage(
 
     var written: usize = 0;
     while (fragmenter.next(&message_buf)) |message| {
-        if (written + dtls_record.HEADER_LEN + message.len > out.len) return error.NoSpace;
+        if (written + dtls_record.HEADER_LEN + message.len > out.len) return error.ZixNoSpace;
 
         const bytes = dtls_record.writePlaintext(out[written..], .HANDSHAKE, EPOCH_HANDSHAKE, state.next_record_seq, message) catch
-            return error.NoSpace;
+            return error.ZixNoSpace;
 
         state.next_record_seq += 1;
         written += bytes.len;
@@ -919,8 +919,8 @@ test "zix dtls: connection flight, a hello without the supported suite is refuse
     );
 
     var out: [4096]u8 = undefined;
-    try std.testing.expectError(error.NoSharedCipherSuite, serverFlight(testOptions(key), body, &out));
-    try std.testing.expectError(error.ClientHelloInvalid, serverFlight(testOptions(key), body[0..8], &out));
+    try std.testing.expectError(error.ZixNoSharedCipherSuite, serverFlight(testOptions(key), body, &out));
+    try std.testing.expectError(error.ZixClientHelloInvalid, serverFlight(testOptions(key), body[0..8], &out));
 }
 
 test "zix dtls: connection flight, a large certificate fragments across records" {
@@ -1318,7 +1318,7 @@ test "zix dtls: connection finish, a wrong client finished is rejected" {
     );
 
     var out: [512]u8 = undefined;
-    try std.testing.expectError(error.ClientFinishedMismatch, serverFinish(&state, &cke_body, wrong_finished, &out));
+    try std.testing.expectError(error.ZixClientFinishedMismatch, serverFinish(&state, &cke_body, wrong_finished, &out));
 
     // A Finished sent in the wrong epoch, or one that will not open at all, is unexpected rather
     // than a mismatch.
@@ -1332,8 +1332,8 @@ test "zix dtls: connection finish, a wrong client finished is rejected" {
         km.client_write_key,
         km.client_write_iv,
     );
-    try std.testing.expectError(error.UnexpectedMessage, serverFinish(&wrong_epoch_state, &cke_body, wrong_epoch, &out));
+    try std.testing.expectError(error.ZixUnexpectedMessage, serverFinish(&wrong_epoch_state, &cke_body, wrong_epoch, &out));
 
     var short_state = flight.state;
-    try std.testing.expectError(error.UnexpectedMessage, serverFinish(&short_state, cke_body[0..1], wrong_finished, &out));
+    try std.testing.expectError(error.ZixUnexpectedMessage, serverFinish(&short_state, cke_body[0..1], wrong_finished, &out));
 }

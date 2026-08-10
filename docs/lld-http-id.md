@@ -55,7 +55,7 @@ epollWorker():
 Tidak ada state bersama antar worker. Thread worker memanggil `processRequest` (dispatch/common.zig) langsung: parse/dispatch/send sinkron atas byte yang diantar event. Pipeline yang sama melayani semua dispatch model, sehingga perilaku body identik di ketiganya:
 
 - `Expect: 100-continue` dengan body yang dideklarasikan dijawab sebelum handler berjalan.
-- Body melewati `max_request_body` ditolak di dalam `body()` dan dijawab `413`, framing chunk yang tidak bisa di-parse adalah `error.InvalidChunkedBody` dan dijawab `400` (keduanya hanya saat handler belum menulis apa pun).
+- Body melewati `max_request_body` ditolak di dalam `body()` dan dijawab `413`, framing chunk yang tidak bisa di-parse adalah `error.ZixInvalidChunkedBody` dan dijawab `400` (keduanya hanya saat handler belum menulis apa pun).
 - Setelah handler, koneksi ditutup saat body yang dideklarasikan tidak dikonsumsi seluruhnya: handler tidak pernah memanggil `body()`, peer berhenti lebih awal, atau body chunked tidak sampai akhir. Sisa byte body kalau tidak akan ter-parse sebagai request berikutnya.
 
 Arena di-reset antar request.
@@ -151,9 +151,9 @@ body_cache: ?[]const u8 = null,
 
 `body()` lazy: panggilan pertama menarik body dari socket dan menyimpannya di `body_cache`, panggilan berikutnya langsung return cache.
 
-Untuk body Content-Length, panjang yang dideklarasikan melewati `max_request_body` ditolak dengan `error.RequestBodyTooLarge` bahkan sebelum alokasi dipesan (engine menjawab `413`), sehingga client tidak bisa membuat server mengalokasikan dengan mengklaim ukuran yang tidak pernah dikirim. Loop baca lalu menarik sampai panjang yang dideklarasikan, menunggu `body_read_timeout_ms` antar segmen pada fd non-blocking. Peer yang berhenti lebih awal meninggalkan slice yang dikembalikan lebih pendek dan `bodyComplete()` false.
+Untuk body Content-Length, panjang yang dideklarasikan melewati `max_request_body` ditolak dengan `error.ZixRequestBodyTooLarge` bahkan sebelum alokasi dipesan (engine menjawab `413`), sehingga client tidak bisa membuat server mengalokasikan dengan mengklaim ukuran yang tidak pernah dikirim. Loop baca lalu menarik sampai panjang yang dideklarasikan, menunggu `body_read_timeout_ms` antar segmen pada fd non-blocking. Peer yang berhenti lebih awal meninggalkan slice yang dikembalikan lebih pendek dan `bodyComplete()` false.
 
-Body chunked di-framing dengan menjalani framing chunk (`parser.chunkedEnd`) dan di-decode di tempat di atas read buffer-nya sendiri: baris ukuran yang bukan hex adalah `error.InvalidChunkedBody` (engine menjawab `400`), dan body yang melampaui limit adalah `error.RequestBodyTooLarge` (`413`). Chunked tidak mendeklarasikan panjang di muka, jadi buffer tumbuh menuju limit hanya saat byte benar-benar tiba.
+Body chunked di-framing dengan menjalani framing chunk (`parser.chunkedEnd`) dan di-decode di tempat di atas read buffer-nya sendiri: baris ukuran yang bukan hex adalah `error.ZixInvalidChunkedBody` (engine menjawab `400`), dan body yang melampaui limit adalah `error.ZixRequestBodyTooLarge` (`413`). Chunked tidak mendeklarasikan panjang di muka, jadi buffer tumbuh menuju limit hanya saat byte benar-benar tiba.
 
 `bodyReceived()` menghitung yang dikonsumsi pembacaan (bukan yang diklaim header), dan `bodyComplete()` apakah akhir yang dideklarasikan atau ter-framing tercapai.
 
@@ -181,10 +181,10 @@ Ditulis oleh `Router.matchParam()` saat dispatch. `pathParam(name)` melakukan sc
 addHeader(name, value):
   1. CR/LF guard: scan name dan value untuk \r atau \n (return error jika ditemukan)
   2. if extra_buf == null:
-       initial = min(4, max_response_headers); if 0 -> return error.TooManyHeaders
+       initial = min(4, max_response_headers); if 0 -> return error.ZixTooManyHeaders
        extra_buf = allocator.alloc(HttpHeader, initial)
   3. else if extra_len >= extra_buf.len:
-       if extra_buf.len >= max_response_headers -> return error.TooManyHeaders
+       if extra_buf.len >= max_response_headers -> return error.ZixTooManyHeaders
        new_cap = min(extra_buf.len * 2, max_response_headers)
        new_buf = allocator.alloc(HttpHeader, new_cap)
        @memcpy(new_buf[0..extra_len], extra_buf[0..extra_len])
@@ -402,8 +402,8 @@ Nilai default:
 | Field | Default | Diterapkan di v1? |
 | :- | :- | :- |
 | `connect_timeout_ms` | 0 | Ya, melalui `connectTcpOptions` |
-| `response_timeout_ms` | 0 | Ya, poll readiness sebelum `receiveHead` menghasilkan `error.ResponseTimeout` |
-| `read_timeout_ms` | 0 | Ya, poll readiness di dalam loop baca body menghasilkan `error.ReadTimeout` (hanya body Content-Length) |
+| `response_timeout_ms` | 0 | Ya, poll readiness sebelum `receiveHead` menghasilkan `error.ZixResponseTimeout` |
+| `read_timeout_ms` | 0 | Ya, poll readiness di dalam loop baca body menghasilkan `error.ZixReadTimeout` (hanya body Content-Length) |
 | `max_response_body` | 4 MB | Ya, melalui `allocRemaining` |
 | `follow_redirects` | true | Ya |
 | `max_redirects` | 3 | Ya |
@@ -441,9 +441,9 @@ Memastikan semua request selesai (pool yang digunakan kosong) sebelum menutup.
 ### request()
 
 ```
-1. Uri.parse(url)               -> error.InvalidUrl jika gagal
-2. Protocol.fromUri(uri)        -> error.InvalidUrl jika skema bukan http atau https
-3. uri.getHost(&host_buf)       -> error.InvalidUrl jika komponen host tidak ada
+1. Uri.parse(url)               -> error.ZixUrlMalformed jika gagal
+2. Protocol.fromUri(uri)        -> error.ZixUrlSchemeUnsupported jika skema bukan http atau https
+3. uri.getHost(&host_buf)       -> error.ZixUrlHostMissing jika komponen host tidak ada
 4. uri.port orelse port default (80 untuk plain, 443 untuk tls)
 5. Bangun Io.Timeout:
       connect_ms = opts.connect_timeout_ms orelse config.connect_timeout_ms
@@ -473,7 +473,7 @@ Memastikan semua request selesai (pool yang digunakan kosong) sebelum menutup.
 13. response.reader(&transfer_buf[4096]) -> *Io.Reader
 14. body_reader.allocRemaining(gpa, .limited(max_response_body))
       baca body ke dalam []u8 milik gpa
-      error.StreamTooLong -> return error.BodyTooLarge
+      error.StreamTooLong -> return error.ZixBodyTooLarge
 15. return ClientResponse{ status_code, body_data, head_bytes, allocator }
     defer req.deinit() melepaskan koneksi kembali ke pool
 ```

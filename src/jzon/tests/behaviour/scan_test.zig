@@ -82,10 +82,10 @@ test "jzon behaviour: both widths report the same failure" {
     };
 
     const cases = [_]Case{
-        .{ .document = "", .failure = error.Truncated },
-        .{ .document = "\"never closed", .failure = error.Truncated },
-        .{ .document = "not a string", .failure = error.Unexpected },
-        .{ .document = "\"a raw \x01 control byte\"", .failure = error.Unexpected },
+        .{ .document = "", .failure = error.JzonTruncated },
+        .{ .document = "\"never closed", .failure = error.JzonTruncated },
+        .{ .document = "not a string", .failure = error.JzonUnexpected },
+        .{ .document = "\"a raw \x01 control byte\"", .failure = error.JzonUnexpected },
     };
 
     for (cases) |case| {

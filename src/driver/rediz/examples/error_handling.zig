@@ -28,7 +28,7 @@ pub fn main(process: std.process.Init) !void {
     _ = try conn.command(&.{ "RPUSH", "err:list", "item" });
 
     _ = conn.incr("err:list") catch |err| switch (err) {
-        error.ServerError => {
+        error.RedizServerError => {
             const server_error = conn.lastServerError();
             std.debug.print("prefix: {t}\n", .{server_error.prefix});
             std.debug.print("message: {s}\n", .{server_error.message()});
@@ -38,7 +38,7 @@ pub fn main(process: std.process.Init) !void {
 
     // unknown command through the raw path
     _ = conn.command(&.{"NOSUCHCOMMAND"}) catch |err| switch (err) {
-        error.ServerError => {
+        error.RedizServerError => {
             std.debug.print("unknown command prefix: {t}\n", .{conn.lastServerError().prefix});
         },
         else => return err,

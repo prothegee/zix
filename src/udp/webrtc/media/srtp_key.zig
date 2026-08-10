@@ -70,7 +70,7 @@ pub const SessionKeys = struct {
 ///
 /// Return:
 /// - void
-/// - error.SegmentTooLong for an output past what one counter block may produce
+/// - error.ZixSegmentTooLong for an output past what one counter block may produce
 pub fn derive(
     out: []u8,
     master_key: [MASTER_KEY_LEN]u8,

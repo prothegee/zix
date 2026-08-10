@@ -99,7 +99,7 @@ pub const Connection = struct {
 
     /// readAppData error set: record-layer failures plus the two post-handshake inner-type
     /// conditions a TLS 1.3 server must distinguish (RFC 8446 6, 5.1).
-    pub const ReadError = record.Error || error{ PeerClosed, UnexpectedMessage };
+    pub const ReadError = record.Error || error{ ZixPeerClosed, ZixUnexpectedMessage };
 
     /// Decrypt one client application record and classify its inner content type (RFC 8446 5.1):
     /// - application_data: the plaintext is returned.
@@ -116,10 +116,10 @@ pub const Connection = struct {
             .ALERT => {
                 _ = alert.parseInbound(opened.data) catch {};
 
-                return error.PeerClosed;
+                return error.ZixPeerClosed;
             },
-            .HANDSHAKE => return error.UnexpectedMessage,
-            else => return error.Decode,
+            .HANDSHAKE => return error.ZixUnexpectedMessage,
+            else => return error.ZixDecode,
         }
     }
 
@@ -148,10 +148,10 @@ pub const Connection = struct {
         var plain: [512]u8 = undefined;
         const opened = try record.deprotect(&plain, rec, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
         self.client_hs_seq += 1;
-        if (opened.inner_type != .HANDSHAKE or opened.data.len < 4 + key_schedule.hash_length) return error.ClientFinishedMismatch;
+        if (opened.inner_type != .HANDSHAKE or opened.data.len < 4 + key_schedule.hash_length) return error.ZixClientFinishedMismatch;
 
         const expected = certificate.finishedVerifyData(self.client_finished_key, self.handshake_transcript.current());
-        if (!std.mem.eql(u8, opened.data[4 .. 4 + key_schedule.hash_length], &expected)) return error.ClientFinishedMismatch;
+        if (!std.mem.eql(u8, opened.data[4 .. 4 + key_schedule.hash_length], &expected)) return error.ZixClientFinishedMismatch;
     }
 
     /// mTLS: process the client's Certificate then CertificateVerify (RFC 8446 4.4.2 / 4.4.3),
@@ -172,17 +172,17 @@ pub const Connection = struct {
     ///
     /// Return:
     /// - []const u8 (the client end-entity DER, a sub-slice of out_der)
-    /// - error.ClientCertificateMissing (the client sent an empty certificate_list)
-    /// - error.UnexpectedHandshakeMessage (a record was not the expected message)
+    /// - error.ZixClientCertificateMissing (the client sent an empty certificate_list)
+    /// - error.ZixUnexpectedHandshakeMessage (a record was not the expected message)
     /// - propagates record / signature / key errors otherwise
     pub fn verifyClientCertFlight(self: *Connection, cert_record: []const u8, cert_verify_record: []const u8, out_der: []u8) ![]const u8 {
         var cert_plain: [CLIENT_CERT_RECORD_BUF]u8 = undefined;
         const cert_opened = try record.deprotect(&cert_plain, cert_record, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
         self.client_hs_seq += 1;
-        if (cert_opened.inner_type != .HANDSHAKE or cert_opened.data.len < 4) return error.UnexpectedHandshakeMessage;
-        if (cert_opened.data[0] != @intFromEnum(handshake.HandshakeType.CERTIFICATE)) return error.UnexpectedHandshakeMessage;
+        if (cert_opened.inner_type != .HANDSHAKE or cert_opened.data.len < 4) return error.ZixUnexpectedHandshakeMessage;
+        if (cert_opened.data[0] != @intFromEnum(handshake.HandshakeType.CERTIFICATE)) return error.ZixUnexpectedHandshakeMessage;
 
-        const client_der = (try certificate.parseEndEntityCertificate(cert_opened.data[4..])) orelse return error.ClientCertificateMissing;
+        const client_der = (try certificate.parseEndEntityCertificate(cert_opened.data[4..])) orelse return error.ZixClientCertificateMissing;
         @memcpy(out_der[0..client_der.len], client_der);
         const der = out_der[0..client_der.len];
         self.handshake_transcript.update(cert_opened.data);
@@ -193,8 +193,8 @@ pub const Connection = struct {
         var verify_plain: [2048]u8 = undefined;
         const verify_opened = try record.deprotect(&verify_plain, cert_verify_record, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
         self.client_hs_seq += 1;
-        if (verify_opened.inner_type != .HANDSHAKE or verify_opened.data.len < 4) return error.UnexpectedHandshakeMessage;
-        if (verify_opened.data[0] != @intFromEnum(handshake.HandshakeType.CERTIFICATE_VERIFY)) return error.UnexpectedHandshakeMessage;
+        if (verify_opened.inner_type != .HANDSHAKE or verify_opened.data.len < 4) return error.ZixUnexpectedHandshakeMessage;
+        if (verify_opened.data[0] != @intFromEnum(handshake.HandshakeType.CERTIFICATE_VERIFY)) return error.ZixUnexpectedHandshakeMessage;
 
         const public_key = try cert_verify.peerEcdsaP256PublicKey(der);
         try certificate.verifyClientCertificateVerify(verify_opened.data[4..], public_key, transcript_through_cert);
@@ -216,18 +216,18 @@ pub const Connection = struct {
     ///
     /// Return:
     /// - []const u8 (the client end-entity DER, a sub-slice of out_der)
-    /// - error.ClientCertificateMissing / error.UnexpectedHandshakeMessage / error.ClientFinishedMismatch
+    /// - error.ZixClientCertificateMissing / error.ZixUnexpectedHandshakeMessage / error.ZixClientFinishedMismatch
     /// - propagates record / signature / key errors otherwise
     pub fn verifyClientAuthFlight(self: *Connection, flight_record: []const u8, out_der: []u8) ![]const u8 {
         var plain: [4096]u8 = undefined;
         const opened = try record.deprotect(&plain, flight_record, self.client_hs_key, self.client_hs_iv, self.client_hs_seq);
         self.client_hs_seq += 1;
-        if (opened.inner_type != .HANDSHAKE) return error.UnexpectedHandshakeMessage;
+        if (opened.inner_type != .HANDSHAKE) return error.ZixUnexpectedHandshakeMessage;
 
         var reader = wire.Reader{ .buf = opened.data };
 
         const cert_msg = try readHandshakeMessage(&reader, .CERTIFICATE);
-        const client_der = (try certificate.parseEndEntityCertificate(cert_msg.body)) orelse return error.ClientCertificateMissing;
+        const client_der = (try certificate.parseEndEntityCertificate(cert_msg.body)) orelse return error.ZixClientCertificateMissing;
         @memcpy(out_der[0..client_der.len], client_der);
         const der = out_der[0..client_der.len];
         self.handshake_transcript.update(cert_msg.full);
@@ -242,10 +242,10 @@ pub const Connection = struct {
 
         // the Finished binds the transcript through the CertificateVerify (above).
         const finished_msg = try readHandshakeMessage(&reader, .FINISHED);
-        if (finished_msg.body.len < key_schedule.hash_length) return error.ClientFinishedMismatch;
+        if (finished_msg.body.len < key_schedule.hash_length) return error.ZixClientFinishedMismatch;
 
         const expected = certificate.finishedVerifyData(self.client_finished_key, self.handshake_transcript.current());
-        if (!std.mem.eql(u8, finished_msg.body[0..key_schedule.hash_length], &expected)) return error.ClientFinishedMismatch;
+        if (!std.mem.eql(u8, finished_msg.body[0..key_schedule.hash_length], &expected)) return error.ZixClientFinishedMismatch;
         self.handshake_transcript.update(finished_msg.full);
 
         return der;
@@ -264,7 +264,7 @@ const HandshakeMessage = struct {
 fn readHandshakeMessage(reader: *wire.Reader, want: handshake.HandshakeType) !HandshakeMessage {
     const start = reader.pos;
     const message_type = try reader.readU8();
-    if (message_type != @intFromEnum(want)) return error.UnexpectedHandshakeMessage;
+    if (message_type != @intFromEnum(want)) return error.ZixUnexpectedHandshakeMessage;
 
     const length = try reader.readU24();
     const body = try reader.readBytes(length);
@@ -296,8 +296,8 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
         // Single-flight only for now: emitting a HelloRetryRequest (RFC 8446 4.1.4) and sending
         // alert records (Layer A) are tracked separately. In practice clients offer an X25519 or
         // secp256r1 key_share, so HRR does not trigger.
-        .hello_retry_request => return error.HelloRetryRequestUnsupported,
-        .legacy_version => return error.UnsupportedTlsVersion,
+        .hello_retry_request => return error.ZixHelloRetryRequestUnsupported,
+        .legacy_version => return error.ZixUnsupportedTlsVersion,
         .alert => |a| return alertToError(a),
     };
 
@@ -319,27 +319,27 @@ pub fn serverHandshake(opts: HandshakeOptions, client_hello: []const u8, out: []
 fn completeHandshake(opts: HandshakeOptions, hello: *const handshake.ClientHello, negotiated: handshake.ServerHelloParams, transcript: *key_schedule.Transcript, out: []u8) !HandshakeResult {
     // The key schedule is SHA-256 / AES-128-GCM only (server_cipher_prefs). negotiate() cannot
     // pick another suite, this guards that invariant.
-    if (negotiated.cipher != .AES_128_GCM_SHA256) return error.UnsupportedCipher;
+    if (negotiated.cipher != .AES_128_GCM_SHA256) return error.ZixUnsupportedCipher;
 
     // Layer C: the server can only sign CertificateVerify with its key's scheme (ECDSA P-256 or
     // Ed25519, no SHA-1). The client MUST have offered it, else there is no common scheme and the
     // handshake aborts (RFC 8446 4.4.2.2 / 4.4.3). The std signature_algorithms list never has
     // SHA-1 since our SignatureScheme enum carries only ecdsa_secp256r1_sha256 and ed25519.
-    if (!hello.offersSignatureScheme(opts.signing_key.scheme())) return error.NoCommonSignatureScheme;
+    if (!hello.offersSignatureScheme(opts.signing_key.scheme())) return error.ZixNoCommonSignatureScheme;
 
     // ALPN: select one protocol when the server has prefs and the client offered a list.
     // A client offer with no overlap is the no_application_protocol condition (RFC 7301 3.2).
     var selected_alpn: ?extensions.Alpn = null;
     if (opts.alpn_prefs.len > 0) {
         if (hello.alpn) |client_alpn| {
-            selected_alpn = extensions.negotiateAlpn(client_alpn, opts.alpn_prefs) orelse return error.NoApplicationProtocol;
+            selected_alpn = extensions.negotiateAlpn(client_alpn, opts.alpn_prefs) orelse return error.ZixNoApplicationProtocol;
         }
     }
 
     const client_share = switch (negotiated.group) {
-        .X25519 => hello.x25519_share orelse return error.MissingKeyShare,
-        .SECP256R1 => hello.secp256r1_share orelse return error.MissingKeyShare,
-        else => return error.UnsupportedGroup,
+        .X25519 => hello.x25519_share orelse return error.ZixMissingKeyShare,
+        .SECP256R1 => hello.secp256r1_share orelse return error.ZixMissingKeyShare,
+        else => return error.ZixUnsupportedGroup,
     };
     const kex = try computeKeyExchange(negotiated.group, opts.ephemeral_secret, client_share);
     const ecdhe = kex.shared;
@@ -458,7 +458,7 @@ pub fn serverHelloRetry(opts: HandshakeOptions, client_hello1: []const u8, out: 
     const group = switch (handshake.negotiate(&hello, &.{}, opts.group_prefs)) {
         .hello_retry_request => |g| g,
         .server_hello => return null,
-        .legacy_version => return error.UnsupportedTlsVersion,
+        .legacy_version => return error.ZixUnsupportedTlsVersion,
         .alert => |a| return alertToError(a),
     };
 
@@ -499,11 +499,11 @@ pub fn serverHandshakeAfterRetry(state: RetryState, client_hello2: []const u8, o
 
     const negotiated = switch (handshake.negotiate(&hello, &.{}, state.opts.group_prefs)) {
         .server_hello => |params| params,
-        .hello_retry_request => return error.HelloRetryRequestUnsupported, // one retry only
-        .legacy_version => return error.UnsupportedTlsVersion,
+        .hello_retry_request => return error.ZixHelloRetryRequestUnsupported, // one retry only
+        .legacy_version => return error.ZixUnsupportedTlsVersion,
         .alert => |a| return alertToError(a),
     };
-    if (negotiated.group != state.group) return error.HelloRetryGroupMismatch;
+    if (negotiated.group != state.group) return error.ZixHelloRetryGroupMismatch;
 
     var transcript = state.transcript;
     transcript.update(client_hello2);
@@ -531,7 +531,7 @@ const KeyExchange = struct {
 fn computeKeyExchange(group: NamedGroup, ephemeral_secret: [32]u8, client_public: []const u8) !KeyExchange {
     switch (group) {
         .X25519 => {
-            if (client_public.len != 32) return error.BadKeyShare;
+            if (client_public.len != 32) return error.ZixBadKeyShare;
 
             var client_pub: [32]u8 = undefined;
             @memcpy(&client_pub, client_public);
@@ -555,7 +555,7 @@ fn computeKeyExchange(group: NamedGroup, ephemeral_secret: [32]u8, client_public
                 .shared = shared_point.affineCoordinates().x.toBytes(.big),
             };
         },
-        else => return error.UnsupportedGroup,
+        else => return error.ZixUnsupportedGroup,
     }
 }
 
@@ -573,8 +573,8 @@ fn alertToError(alert_desc: alert.Alert) anyerror {
     return switch (alert_desc) {
         .MISSING_EXTENSION => error.MissingExtension,
         .HANDSHAKE_FAILURE => error.HandshakeFailure,
-        .ILLEGAL_PARAMETER => error.IllegalParameter,
-        .DECODE_ERROR => error.DecodeError,
+        .ILLEGAL_PARAMETER => error.ZixIllegalParameter,
+        .DECODE_ERROR => error.ZixDecodeError,
         else => error.HandshakeFailure,
     };
 }
@@ -583,12 +583,12 @@ fn alertToError(alert_desc: alert.Alert) anyerror {
 /// AlertDescription the server must send before closing. null = no alert defined (close silently).
 pub fn alertForError(err: anyerror) ?alert.Alert {
     return switch (err) {
-        error.NoApplicationProtocol => .NO_APPLICATION_PROTOCOL,
+        error.ZixNoApplicationProtocol => .NO_APPLICATION_PROTOCOL,
         error.MissingExtension => .MISSING_EXTENSION,
-        error.DecodeError => .DECODE_ERROR,
-        error.UnsupportedTlsVersion => .PROTOCOL_VERSION,
-        error.IllegalParameter, error.MissingKeyShare, error.BadKeyShare => .ILLEGAL_PARAMETER,
-        error.HandshakeFailure, error.UnsupportedCipher, error.UnsupportedGroup, error.HelloRetryRequestUnsupported, error.NoCommonSignatureScheme => .HANDSHAKE_FAILURE,
+        error.ZixDecodeError => .DECODE_ERROR,
+        error.ZixUnsupportedTlsVersion => .PROTOCOL_VERSION,
+        error.ZixIllegalParameter, error.ZixMissingKeyShare, error.ZixBadKeyShare => .ILLEGAL_PARAMETER,
+        error.HandshakeFailure, error.ZixUnsupportedCipher, error.ZixUnsupportedGroup, error.ZixHelloRetryRequestUnsupported, error.ZixNoCommonSignatureScheme => .HANDSHAKE_FAILURE,
         else => null,
     };
 }
@@ -789,13 +789,13 @@ test "zix tls: connection, serverHandshake negotiates secp256r1 from a P-256-onl
 }
 
 test "zix tls: connection, condition -> fatal-alert matrix" {
-    try std.testing.expectEqual(alert.Alert.NO_APPLICATION_PROTOCOL, alertForError(error.NoApplicationProtocol).?);
+    try std.testing.expectEqual(alert.Alert.NO_APPLICATION_PROTOCOL, alertForError(error.ZixNoApplicationProtocol).?);
     try std.testing.expectEqual(alert.Alert.MISSING_EXTENSION, alertForError(error.MissingExtension).?);
-    try std.testing.expectEqual(alert.Alert.PROTOCOL_VERSION, alertForError(error.UnsupportedTlsVersion).?);
+    try std.testing.expectEqual(alert.Alert.PROTOCOL_VERSION, alertForError(error.ZixUnsupportedTlsVersion).?);
     try std.testing.expectEqual(alert.Alert.HANDSHAKE_FAILURE, alertForError(error.HandshakeFailure).?);
-    try std.testing.expectEqual(alert.Alert.ILLEGAL_PARAMETER, alertForError(error.MissingKeyShare).?);
-    try std.testing.expectEqual(alert.Alert.DECODE_ERROR, alertForError(error.DecodeError).?);
-    try std.testing.expectEqual(alert.Alert.HANDSHAKE_FAILURE, alertForError(error.NoCommonSignatureScheme).?);
+    try std.testing.expectEqual(alert.Alert.ILLEGAL_PARAMETER, alertForError(error.ZixMissingKeyShare).?);
+    try std.testing.expectEqual(alert.Alert.DECODE_ERROR, alertForError(error.ZixDecodeError).?);
+    try std.testing.expectEqual(alert.Alert.HANDSHAKE_FAILURE, alertForError(error.ZixNoCommonSignatureScheme).?);
     try std.testing.expect(alertForError(error.OutOfMemory) == null);
 
     // the record builder wires through for a representative condition.
@@ -1021,12 +1021,12 @@ test "zix tls: connection, readAppData classifies post-handshake inner types (RF
     // handshake inner type (post-handshake renegotiation / KeyUpdate) -> unexpected_message.
     conn.client_app_seq = 1;
     const hs_rec = record.protect(&rec_buf, &[_]u8{ 1, 0, 0, 0 }, .HANDSHAKE, key, iv, 1);
-    try std.testing.expectError(error.UnexpectedMessage, conn.readAppData(hs_rec, &out));
+    try std.testing.expectError(error.ZixUnexpectedMessage, conn.readAppData(hs_rec, &out));
 
     // alert inner type (a post-handshake closure / fatal alert) -> peer closed.
     conn.client_app_seq = 2;
     const alert_rec = record.protect(&rec_buf, &[_]u8{ 1, 0 }, .ALERT, key, iv, 2);
-    try std.testing.expectError(error.PeerClosed, conn.readAppData(alert_rec, &out));
+    try std.testing.expectError(error.ZixPeerClosed, conn.readAppData(alert_rec, &out));
 }
 
 test "zix tls: connection, writeAppData2 gather round-trips through readAppData" {
@@ -1151,7 +1151,7 @@ test "zix tls: connection, HelloRetryRequest round trip (RFC 8446 4.1.4)" {
     const ch1 = buildHrrClientHello(&ch1_buf, null, &dummy_secp);
 
     var out1: [1024]u8 = undefined;
-    const retry = (try serverHelloRetry(opts, ch1, &out1)) orelse return error.ExpectedRetry;
+    const retry = (try serverHelloRetry(opts, ch1, &out1)) orelse return error.ZixExpectedRetry;
 
     // the emitted record is a ServerHello carrying the HelloRetryRequest random sentinel.
     try std.testing.expectEqual(@as(u8, 22), retry.to_send[0]);

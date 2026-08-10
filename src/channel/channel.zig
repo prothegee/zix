@@ -21,7 +21,7 @@ const ZIG_SEMVER = @import("../lib.zig").ZIG_SEMVER;
 /// defer ch.deinit();
 /// try ch.send(io, 42);
 /// const v = try ch.recv(io);  // v == 42
-/// ch.close(io);               // no more sends: recv drains remaining items then returns error.Closed
+/// ch.close(io);               // no more sends: recv drains remaining items then returns error.ZixClosed
 /// ```
 pub fn Channel(comptime T: type) type {
     return struct {
@@ -62,19 +62,19 @@ pub fn Channel(comptime T: type) type {
         /// Blocking send. Waits when the buffer is full.
         ///
         /// Return:
-        /// - error.Closed if close() was called before or during the wait
+        /// - error.ZixClosed if close() was called before or during the wait
         pub fn send(self: *Self, io: std.Io, value: T) !void {
             self.mutex.lockUncancelable(io);
             while (self.count == self.buf.len) {
                 if (self.closed) {
                     self.mutex.unlock(io);
-                    return error.Closed;
+                    return error.ZixClosed;
                 }
                 self.not_full.waitUncancelable(io, &self.mutex);
             }
             if (self.closed) {
                 self.mutex.unlock(io);
-                return error.Closed;
+                return error.ZixClosed;
             }
             const tail = (self.head + self.count) % self.buf.len;
             self.buf[tail] = value;
@@ -84,13 +84,13 @@ pub fn Channel(comptime T: type) type {
         }
 
         /// Blocking receive. Waits when the buffer is empty.
-        /// Drains remaining items after close() before returning error.Closed.
+        /// Drains remaining items after close() before returning error.ZixClosed.
         pub fn recv(self: *Self, io: std.Io) !T {
             self.mutex.lockUncancelable(io);
             while (self.count == 0) {
                 if (self.closed) {
                     self.mutex.unlock(io);
-                    return error.Closed;
+                    return error.ZixClosed;
                 }
                 self.not_empty.waitUncancelable(io, &self.mutex);
             }

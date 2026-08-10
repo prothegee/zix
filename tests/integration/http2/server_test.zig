@@ -145,8 +145,8 @@ fn recvResponse(fd: std.posix.fd_t, sid: u31, buf: []u8) ![]const u8 {
                 body_len += to_copy;
                 if ((frame.flags & zix.Http2.FLAG_END_STREAM) != 0) return buf[0..body_len];
             },
-            zix.Http2.FRAME_TYPE_GOAWAY => return error.ServerGoaway,
-            zix.Http2.FRAME_TYPE_RST_STREAM => return error.StreamReset,
+            zix.Http2.FRAME_TYPE_GOAWAY => return error.ZixServerGoaway,
+            zix.Http2.FRAME_TYPE_RST_STREAM => return error.ZixStreamReset,
             else => {},
         }
     }
@@ -173,7 +173,7 @@ test "zix integration: Http2Server.run port zero returns PortNotConfigured" {
     var server = zix.Http2.Server.init(empty_router.dispatch, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
-    try std.testing.expectError(error.PortNotConfigured, server.run());
+    try std.testing.expectError(error.ZixPortNotConfigured, server.run());
 }
 
 test "zix integration: Http2 HandlerFn type is a function pointer" {

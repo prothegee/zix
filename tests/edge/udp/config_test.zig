@@ -6,13 +6,13 @@ const zix = @import("zix");
 
 // --------------------------------------------------------- //
 
-test "zix edge: UdpServer.init, port zero returns error.PortNotConfigured" {
+test "zix edge: UdpServer.init, port zero returns error.ZixPortNotConfigured" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
     const S = zix.Udp.Server(extern struct { id: u32 });
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         S.init(.{ .io = threaded.io(), .allocator = std.heap.smp_allocator, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }, .{}),
     );
 }

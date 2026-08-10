@@ -289,11 +289,11 @@ pub fn encode(allocator: std.mem.Allocator, encoding: Encoding, data: []const u8
 ///
 /// Return:
 /// - usize (encoded byte count written into out_buf)
-/// - error.BufferTooSmall when out_buf cannot hold the result
+/// - error.ZixBufferTooSmall when out_buf cannot hold the result
 pub fn encodeInto(allocator: std.mem.Allocator, encoding: Encoding, data: []const u8, out_buf: []u8, level: Level) !usize {
     switch (encoding) {
         .IDENTITY => {
-            if (out_buf.len < data.len) return error.BufferTooSmall;
+            if (out_buf.len < data.len) return error.ZixBufferTooSmall;
 
             @memcpy(out_buf[0..data.len], data);
             return data.len;
@@ -521,7 +521,7 @@ test "zix compression: encodeInto identity copies and rejects a short buffer" {
     try testing.expectEqualStrings("abc", out[0..written]);
 
     var tiny: [2]u8 = undefined;
-    try testing.expectError(error.BufferTooSmall, encodeInto(testing.allocator, .IDENTITY, "abc", &tiny, .DEFAULT));
+    try testing.expectError(error.ZixBufferTooSmall, encodeInto(testing.allocator, .IDENTITY, "abc", &tiny, .DEFAULT));
 }
 
 test "zix compression: negotiate supported_default leads with gzip, brotli when the client prefers it" {

@@ -111,7 +111,7 @@ sequenceDiagram
     S-->>C: reply, reply, reply (in order)
 ```
 
-- `add` past `max_pending_replies` sheds `error.QueueFull`.
+- `add` past `max_pending_replies` sheds `error.RedizQueueFull`.
 - A failed command comes back as its `.err` reply value, so draining the rest continues.
 - Deferred replies owed before the pipeline drain ahead of the batch replies.
 - No other command runs on the connection between `begin` and `sync`.
@@ -126,7 +126,7 @@ flowchart TB
     empty -->|yes| conn[connect with retry, outside the lock]
     empty -->|no| park{process_queue_len allows parking?}
     park -->|yes| wait[enqueue waiter, futex wait]
-    park -->|no| shed[error.PoolExhausted or PoolBusy]
+    park -->|no| shed[error.RedizPoolExhausted or PoolBusy]
     rel[release] --> waiter{waiter parked?}
     waiter -->|yes| grant[hand the connection to the oldest waiter]
     waiter -->|no| back[mark the slot idle]
@@ -136,7 +136,7 @@ flowchart TB
 - Parking sleeps on a futex word per waiter. On Linux this is the raw futex syscall (the fast path stays untouched), on other targets the wait and wake go through the `std.Io` backend with the same semantics.
 - `release` hands a healthy connection directly to the oldest parked waiter (the slot stays held through the handoff), or marks it idle.
 - `discard` frees a broken slot, granting it to a waiter or leaving it for the next acquire.
-- Beyond the waiter bound `acquire` sheds `error.PoolBusy`, with parking off it sheds `error.PoolExhausted`.
+- Beyond the waiter bound `acquire` sheds `error.RedizPoolBusy`, with parking off it sheds `error.RedizPoolExhausted`.
 
 ## Error taxonomy
 
@@ -144,9 +144,9 @@ flowchart TB
 | :- | :- | :- |
 | error reply (`.err`) | the server rejected the command, in `lastServerError` | the connection stays usable |
 | transport errors | the socket failed | discard the connection |
-| `error.QueueFull` | a pipeline hit `max_pending_replies` | sync the queued commands first |
-| `error.PoolExhausted` | the pool is full and parking is off | retry later or raise `process_queue_len` |
-| `error.PoolBusy` | the waiter queue is full | retry later or raise `process_queue_len` |
+| `error.RedizQueueFull` | a pipeline hit `max_pending_replies` | sync the queued commands first |
+| `error.RedizPoolExhausted` | the pool is full and parking is off | retry later or raise `process_queue_len` |
+| `error.RedizPoolBusy` | the waiter queue is full | retry later or raise `process_queue_len` |
 
 ## Config reference
 

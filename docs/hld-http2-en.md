@@ -37,7 +37,7 @@ Use `zix.Http2` for browser-grade or prior-knowledge HTTP/2 with raw frame contr
 
 ## Runtime Model
 
-Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.DispatchModelUnsupported` (ADR-065).
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### .ASYNC: Thread-per-connection over the blocking core
 
@@ -76,13 +76,13 @@ flowchart TD
 - One worker drives many non-blocking connections through the resumable h2 state machine in `mux.zig`, one `MuxConn` per fd, so concurrency is bounded by connection count, not thread count.
 - Every frame a readable batch writes (HEADERS plus DATA per stream, times the streams in the batch) coalesces into a single `write()` through a per-worker sink (`beginCoalesce` / `endCoalesce`), instead of one write per frame.
 - `workers` is the mux worker count (0 = cpu count). A handler runs inline on the worker, so it must stay bounded: a long handler blocks that worker's other connections.
-- Off Linux, `run()` returns `error.DispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
+- Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
 Same shared-nothing, one-listener-per-worker topology as `.EPOLL`, but completion-based: a multishot accept and one recv per connection are submitted as SQEs and reaped as CQEs (ADR-037 Phase 4). Each recv fills the connection's read accumulator, then `mux.processRing` drives the same resumable state machine. The handler still writes its reply straight to the (non-blocking) fd, batched by the same coalescing sink.
 
-`.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. That is a runtime capability gap on Linux. Off Linux the model is rejected outright with `error.DispatchModelUnsupported`.
+`.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. That is a runtime capability gap on Linux. Off Linux the model is rejected outright with `error.ZixDispatchModelUnsupported`.
 
 ---
 
@@ -220,7 +220,7 @@ try server.run();
 
 ## Static File Serving
 
-`public_dir` (ADR-064) serves an unmatched route as a file before the 404. Empty (the default) disables it, and a missing directory fails at `run()` with `error.PublicDirNotFound` rather than 404-ing every file request at runtime.
+`public_dir` (ADR-064) serves an unmatched route as a file before the 404. Empty (the default) disables it, and a missing directory fails at `run()` with `error.ZixPublicDirNotFound` rather than 404-ing every file request at runtime.
 
 ```mermaid
 flowchart TD

@@ -54,14 +54,14 @@ pub const SiteRuntime = struct {
     ///
     /// Return:
     /// - SiteRuntime holding the bound socket
-    /// - error.SiteCfgIncomplete when engine, port, or ip did not survive parse
+    /// - error.ZixerSiteCfgIncomplete when engine, port, or ip did not survive parse
     /// - error.AddressInUse when another listener owns ip:port
-    /// - error.ChallengePortInUse when another listener owns the acme companion port
+    /// - error.ZixerChallengePortInUse when another listener owns the acme companion port
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, name: []const u8, cfg: site_cfg.SiteCfg, options: bind_options.BindOptions) !SiteRuntime {
         const kernel_backlog = options.kernel_backlog;
-        const engine = cfg.engine orelse return error.SiteCfgIncomplete;
-        const port = cfg.port orelse return error.SiteCfgIncomplete;
-        const addr = std.Io.net.IpAddress.parse(cfg.ip, port) catch return error.SiteCfgIncomplete;
+        const engine = cfg.engine orelse return error.ZixerSiteCfgIncomplete;
+        const port = cfg.port orelse return error.ZixerSiteCfgIncomplete;
+        const addr = std.Io.net.IpAddress.parse(cfg.ip, port) catch return error.ZixerSiteCfgIncomplete;
 
         const owned_name = try allocator.dupe(u8, name);
         errdefer allocator.free(owned_name);
@@ -122,8 +122,8 @@ pub const SiteRuntime = struct {
         // renewal, and would leave cleartext clients with no answer at all.
         var challenge: ?*acme_listener.State = null;
         if (companionPort(&cfg)) |challenge_port| {
-            const challenge_addr = std.Io.net.IpAddress.parse(cfg.ip, challenge_port) catch return error.SiteCfgIncomplete;
-            if (port_probe.isTaken(io, challenge_addr)) return error.ChallengePortInUse;
+            const challenge_addr = std.Io.net.IpAddress.parse(cfg.ip, challenge_port) catch return error.ZixerSiteCfgIncomplete;
+            if (port_probe.isTaken(io, challenge_addr)) return error.ZixerChallengePortInUse;
 
             const challenge_server = try challenge_addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 
@@ -203,10 +203,10 @@ test "zix zixer: site runtime, incomplete cfg refuses to bind" {
     const io = threaded.io();
 
     const no_engine = site_cfg.SiteCfg{ .port = 18860 };
-    try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_engine, .{ .kernel_backlog = 64 }));
+    try std.testing.expectError(error.ZixerSiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_engine, .{ .kernel_backlog = 64 }));
 
     const no_port = site_cfg.SiteCfg{ .engine = .HTTP1 };
-    try std.testing.expectError(error.SiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_port, .{ .kernel_backlog = 64 }));
+    try std.testing.expectError(error.ZixerSiteCfgIncomplete, SiteRuntime.bind(std.testing.allocator, io, "a.cfg", no_port, .{ .kernel_backlog = 64 }));
 }
 
 test "zix zixer: site runtime, tcp bind rebinds cleanly after unbind" {

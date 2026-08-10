@@ -5,10 +5,10 @@
 //! - add() only appends to the connection send buffer, nothing hits the
 //!   wire before sync().
 //! - config.max_pending_replies bounds the queued commands (0 = no bound).
-//!   Beyond the bound add() sheds with error.QueueFull instead of growing
+//!   Beyond the bound add() sheds with error.RedizQueueFull instead of growing
 //!   memory.
 //! - sync() returns raw replies in add() order. A failed command comes back
-//!   as its .err reply (data, not error.ServerError): one bad command must
+//!   as its .err reply (data, not error.RedizServerError): one bad command must
 //!   not abort draining the rest of the batch.
 //! - No other commands on the connection between begin and sync.
 
@@ -35,10 +35,10 @@ pub const Pipeline = struct {
     ///
     /// Return:
     /// - void on success
-    /// - error.QueueFull when max_pending_replies is set and reached
+    /// - error.RedizQueueFull when max_pending_replies is set and reached
     pub fn add(self: *Pipeline, args: []const []const u8) !void {
         const bound = self.conn.config.max_pending_replies;
-        if (bound != 0 and self.command_count >= bound) return error.QueueFull;
+        if (bound != 0 and self.command_count >= bound) return error.RedizQueueFull;
 
         try resp.encodeCommand(self.conn.allocator, &self.conn.send_buf, args);
         self.command_count += 1;

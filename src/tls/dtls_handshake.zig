@@ -32,15 +32,15 @@ pub const MAX_MESSAGE_LEN: usize = (1 << 24) - 1;
 
 pub const Error = error{
     /// Fewer bytes than a header, or a fragment shorter than its own fragment_length.
-    Truncated,
+    ZixTruncated,
     /// A fragment reaching past the end of its message, or a zero-length message claiming bytes.
-    BadFragment,
+    ZixBadFragment,
     /// A fragment whose message length disagrees with the fragments already accepted.
-    LengthMismatch,
+    ZixLengthMismatch,
     /// A fragment belonging to a different message than the one being reassembled.
-    SequenceMismatch,
+    ZixSequenceMismatch,
     /// A message larger than the reassembler was built to hold.
-    MessageTooLarge,
+    ZixMessageTooLarge,
 };
 
 /// Handshake message types DTLS 1.2 can carry (RFC 5246 7.4, plus RFC 6347 4.2.1).
@@ -85,7 +85,7 @@ pub const Fragment = struct {
 
 /// Read a handshake message header. Does not touch the body.
 pub fn parseHeader(bytes: []const u8) Error!Header {
-    if (bytes.len < HEADER_LEN) return error.Truncated;
+    if (bytes.len < HEADER_LEN) return error.ZixTruncated;
 
     return .{
         .msg_type = @enumFromInt(bytes[0]),
@@ -117,7 +117,7 @@ pub const FragmentIterator = struct {
         const header = try parseHeader(self.body[self.pos..]);
         const data_start = self.pos + HEADER_LEN;
 
-        if (data_start + header.fragment_length > self.body.len) return error.Truncated;
+        if (data_start + header.fragment_length > self.body.len) return error.ZixTruncated;
 
         const fragment: Fragment = .{
             .header = header,
@@ -222,26 +222,26 @@ pub fn Reassembler(comptime max_message_len: usize) type {
         ///
         /// Return:
         /// - void
-        /// - error.Truncated when the data is shorter than fragment_length says
-        /// - error.BadFragment when the fragment reaches past the end of the message
-        /// - error.MessageTooLarge when the message does not fit CAPACITY
-        /// - error.SequenceMismatch, error.LengthMismatch against the message in progress
+        /// - error.ZixTruncated when the data is shorter than fragment_length says
+        /// - error.ZixBadFragment when the fragment reaches past the end of the message
+        /// - error.ZixMessageTooLarge when the message does not fit CAPACITY
+        /// - error.ZixSequenceMismatch, error.ZixLengthMismatch against the message in progress
         pub fn accept(self: *Self, fragment: Fragment) Error!void {
             const header = fragment.header;
 
-            if (fragment.data.len != header.fragment_length) return error.Truncated;
-            if (@as(usize, header.fragment_offset) + header.fragment_length > header.length) return error.BadFragment;
+            if (fragment.data.len != header.fragment_length) return error.ZixTruncated;
+            if (@as(usize, header.fragment_offset) + header.fragment_length > header.length) return error.ZixBadFragment;
 
             if (!self.started) {
-                if (header.length > CAPACITY) return error.MessageTooLarge;
+                if (header.length > CAPACITY) return error.ZixMessageTooLarge;
 
                 self.msg_type = header.msg_type;
                 self.message_seq = header.message_seq;
                 self.length = header.length;
                 self.started = true;
             } else {
-                if (header.message_seq != self.message_seq) return error.SequenceMismatch;
-                if (header.length != self.length) return error.LengthMismatch;
+                if (header.message_seq != self.message_seq) return error.ZixSequenceMismatch;
+                if (header.length != self.length) return error.ZixLengthMismatch;
             }
 
             @memcpy(self.buf[header.fragment_offset..][0..header.fragment_length], fragment.data);
@@ -338,7 +338,7 @@ test "zix dtls: handshake header, 12 bytes in wire order" {
     try std.testing.expectEqual(@as(u24, 50), header.fragment_length);
     try std.testing.expect(!header.isWholeMessage());
 
-    try std.testing.expectError(error.Truncated, parseHeader(&[_]u8{ 1, 0, 0 }));
+    try std.testing.expectError(error.ZixTruncated, parseHeader(&[_]u8{ 1, 0, 0 }));
 }
 
 test "zix dtls: handshake header, an unfragmented message is the degenerate case" {
@@ -413,7 +413,7 @@ test "zix dtls: handshake iterator, a fragment past the end of the record is rej
     });
 
     var iterator: FragmentIterator = .{ .body = &body };
-    try std.testing.expectError(error.Truncated, iterator.next());
+    try std.testing.expectError(error.ZixTruncated, iterator.next());
 
     var empty: FragmentIterator = .{ .body = body[0..0] };
     try std.testing.expectEqual(@as(?Fragment, null), try empty.next());
@@ -527,27 +527,27 @@ test "zix dtls: handshake reassembly, a malformed or foreign fragment is refused
     // fragment_length longer than the data actually handed over.
     var lying = fragmentOf(&body, 0, 0, 50);
     lying.data = body[0..10];
-    try std.testing.expectError(error.Truncated, reassembler.accept(lying));
+    try std.testing.expectError(error.ZixTruncated, reassembler.accept(lying));
 
     // A fragment reaching past the end of its own message.
     var overrun = fragmentOf(&body, 0, 60, 40);
     overrun.header.length = 80;
-    try std.testing.expectError(error.BadFragment, reassembler.accept(overrun));
+    try std.testing.expectError(error.ZixBadFragment, reassembler.accept(overrun));
 
     // A message too large for this reassembler.
     var oversized = fragmentOf(&body, 0, 0, 100);
     oversized.header.length = 1000;
-    try std.testing.expectError(error.MessageTooLarge, reassembler.accept(oversized));
+    try std.testing.expectError(error.ZixMessageTooLarge, reassembler.accept(oversized));
 
     // Once a message is in progress, fragments of another one do not belong to it.
     try reassembler.accept(fragmentOf(&body, 4, 0, 50));
-    try std.testing.expectError(error.SequenceMismatch, reassembler.accept(fragmentOf(&body, 5, 50, 50)));
+    try std.testing.expectError(error.ZixSequenceMismatch, reassembler.accept(fragmentOf(&body, 5, 50, 50)));
 
     // Internally consistent (50 + 40 fits 90) but disagreeing with the message in progress,
     // which is what separates LengthMismatch from BadFragment.
     var wrong_length = fragmentOf(&body, 4, 50, 40);
     wrong_length.header.length = 90;
-    try std.testing.expectError(error.LengthMismatch, reassembler.accept(wrong_length));
+    try std.testing.expectError(error.ZixLengthMismatch, reassembler.accept(wrong_length));
 }
 
 test "zix dtls: handshake reassembly, reset takes the next message" {

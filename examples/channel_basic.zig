@@ -53,7 +53,7 @@ fn consumer(cap: ConsumerCap) void {
     var total: u32 = 0;
     while (true) {
         const id = cap.ch.recv(cap.io) catch |err| {
-            if (err != error.Closed) std.debug.print("consumer: recv error: {}\n", .{err});
+            if (err != error.ZixClosed) std.debug.print("consumer: recv error: {}\n", .{err});
             break;
         };
         const result = id * id;

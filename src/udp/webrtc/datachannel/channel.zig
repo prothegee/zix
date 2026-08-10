@@ -38,9 +38,9 @@ pub const Error = error{
     OutOfMemory,
     /// A retransmission limit and a lifetime were both asked for. DCEP has no channel type for
     /// that pair (RFC 8832 5.1).
-    ConflictingReliability,
+    ZixConflictingReliability,
     /// A channel type outside the six RFC 8832 5.1 defines.
-    UnknownChannelType,
+    ZixUnknownChannelType,
 };
 
 /// How a channel sends, in the terms an application uses.
@@ -244,10 +244,10 @@ pub const Channel = struct {
 ///
 /// Return:
 /// - dcep.ChannelType
-/// - error.ConflictingReliability if a retransmission limit and a lifetime were both given
+/// - error.ZixConflictingReliability if a retransmission limit and a lifetime were both given
 pub fn channelTypeFor(options: Options) Error!dcep.ChannelType {
     if (options.max_retransmits != null and options.max_lifetime_ms != null) {
-        return error.ConflictingReliability;
+        return error.ZixConflictingReliability;
     }
 
     const unordered: u8 = if (options.ordered) 0 else dcep.UNORDERED_FLAG;
@@ -293,9 +293,9 @@ pub fn reliabilityParameterFor(options: Options) u32 {
 ///
 /// Return:
 /// - Options
-/// - error.UnknownChannelType
+/// - error.ZixUnknownChannelType
 pub fn optionsFor(channel_type: dcep.ChannelType, reliability_parameter: u32) Error!Options {
-    if (!dcep.isKnownChannelType(channel_type)) return error.UnknownChannelType;
+    if (!dcep.isKnownChannelType(channel_type)) return error.ZixUnknownChannelType;
 
     const ordered = !channel_type.isUnordered();
 
@@ -504,7 +504,7 @@ test "zix datachannel: channel channelTypeFor, the four ordered and unordered pa
 
 test "zix datachannel: channel channelTypeFor, a limit and a lifetime together are refused" {
     try std.testing.expectError(
-        error.ConflictingReliability,
+        error.ZixConflictingReliability,
         channelTypeFor(.{ .max_retransmits = 2, .max_lifetime_ms = 500 }),
     );
 }
@@ -540,7 +540,7 @@ test "zix datachannel: channel optionsFor, a retransmission count wider than the
 }
 
 test "zix datachannel: channel optionsFor, an undefined channel type is refused" {
-    try std.testing.expectError(error.UnknownChannelType, optionsFor(@enumFromInt(0x7F), 0));
+    try std.testing.expectError(error.ZixUnknownChannelType, optionsFor(@enumFromInt(0x7F), 0));
 }
 
 test "zix datachannel: channel options, a round trip through DCEP keeps the properties" {

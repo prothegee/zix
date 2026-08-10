@@ -86,7 +86,7 @@ fn run(io: std.Io, server_path: []const u8, port: u16) !void {
     var rounds: usize = 0;
     while (rounds < 64) : (rounds += 1) {
         const got = try fdReadOnce(fd, recv_accum[recv_len..]);
-        if (got == 0) return error.ConnectionClosed;
+        if (got == 0) return error.ZixConnectionClosed;
         recv_len += got;
 
         var off: usize = 0;

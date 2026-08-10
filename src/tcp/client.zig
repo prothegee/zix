@@ -48,9 +48,9 @@ pub const TcpClient = struct {
     /// Connect to the server at config.ip:config.port.
     ///
     /// Return:
-    /// - error.PortNotConfigured if config.port is 0
+    /// - error.ZixPortNotConfigured if config.port is 0
     pub fn connect(config: TcpClientConfig, io: std.Io) !Self {
-        if (config.port == 0) return error.PortNotConfigured;
+        if (config.port == 0) return error.ZixPortNotConfigured;
 
         const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
         const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
@@ -87,15 +87,15 @@ pub const TcpClient = struct {
     /// Frame format: [u32 payload_len, 4 bytes, big-endian] [payload bytes]
     ///
     /// Return:
-    /// - error.MessageTooLarge if msg.len exceeds config.max_recv_buf
-    /// - error.SendTimeout if send_timeout_ms is set and the socket is not writable in time
+    /// - error.ZixMessageTooLarge if msg.len exceeds config.max_recv_buf
+    /// - error.ZixSendTimeout if send_timeout_ms is set and the socket is not writable in time
     pub fn sendMsg(self: *Self, io: std.Io, msg: []const u8) !void {
-        if (msg.len > self.config.max_recv_buf) return error.MessageTooLarge;
+        if (msg.len > self.config.max_recv_buf) return error.ZixMessageTooLarge;
 
         if (self.config.send_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_SNDTIMEO.
             if (!try pollReady(self.stream.socket.handle, POLL_OUT, self.config.send_timeout_ms)) {
-                return error.SendTimeout;
+                return error.ZixSendTimeout;
             }
         }
 
@@ -112,22 +112,22 @@ pub const TcpClient = struct {
     ///
     /// Return:
     /// - payload slice on success
-    /// - error.RecvTimeout if recv_timeout_ms is set and no data arrives in time
-    /// - error.MessageTooLarge if the frame payload exceeds buf.len
-    /// - error.ConnectionClosed if the server closed the connection
+    /// - error.ZixRecvTimeout if recv_timeout_ms is set and no data arrives in time
+    /// - error.ZixMessageTooLarge if the frame payload exceeds buf.len
+    /// - error.ZixConnectionClosed if the server closed the connection
     pub fn recvMsg(self: *Self, io: std.Io, buf: []u8) ![]u8 {
         if (self.config.recv_timeout_ms > 0) {
             // std.Io.Threaded panics on EAGAIN, so use poll instead of SO_RCVTIMEO.
             if (!try pollReady(self.stream.socket.handle, POLL_IN, self.config.recv_timeout_ms)) {
-                return error.RecvTimeout;
+                return error.ZixRecvTimeout;
             }
         }
 
         var read_buf: [4096 + 4]u8 = undefined;
         var reader = self.stream.reader(io, &read_buf);
-        const len = reader.interface.takeVarInt(u32, .big, 4) catch return error.ConnectionClosed;
-        if (len > buf.len) return error.MessageTooLarge;
-        reader.interface.readSliceAll(buf[0..len]) catch return error.ConnectionClosed;
+        const len = reader.interface.takeVarInt(u32, .big, 4) catch return error.ZixConnectionClosed;
+        if (len > buf.len) return error.ZixMessageTooLarge;
+        reader.interface.readSliceAll(buf[0..len]) catch return error.ZixConnectionClosed;
 
         return buf[0..len];
     }
@@ -167,7 +167,7 @@ test "zix tcp: TcpClient.recvMsg does not time out when data arrives immediately
     try std.testing.expectEqualSlices(u8, "hello", reply);
 }
 
-test "zix tcp: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives" {
+test "zix tcp: TcpClient.recvMsg returns error.ZixRecvTimeout when nothing arrives" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
         return;
@@ -191,7 +191,7 @@ test "zix tcp: TcpClient.recvMsg returns error.RecvTimeout when nothing arrives"
     };
 
     var buf: [8]u8 = undefined;
-    try std.testing.expectError(error.RecvTimeout, client.recvMsg(io, &buf));
+    try std.testing.expectError(error.ZixRecvTimeout, client.recvMsg(io, &buf));
 }
 
 test "zix tcp: TcpClient.sendMsg succeeds within send_timeout_ms when the peer drains" {
@@ -223,7 +223,7 @@ test "zix tcp: TcpClient.sendMsg succeeds within send_timeout_ms when the peer d
     try std.testing.expectEqual(@as(usize, 9), n);
 }
 
-test "zix tcp: TcpClient.sendMsg returns error.SendTimeout when the peer's buffer is full" {
+test "zix tcp: TcpClient.sendMsg returns error.ZixSendTimeout when the peer's buffer is full" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
         return;
@@ -259,5 +259,5 @@ test "zix tcp: TcpClient.sendMsg returns error.SendTimeout when the peer's buffe
         .config = .{ .ip = "127.0.0.1", .port = 9300, .send_timeout_ms = 50 },
     };
 
-    try std.testing.expectError(error.SendTimeout, client.sendMsg(io, "hello"));
+    try std.testing.expectError(error.ZixSendTimeout, client.sendMsg(io, "hello"));
 }

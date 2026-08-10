@@ -4,7 +4,7 @@
 
 Setiap respons HTTP di zix dapat membawa header kustom yang ditambahkan melalui `res.addHeader(name, value)`. Jumlah header yang diizinkan dalam satu respons dikendalikan oleh `HttpServerConfig.max_response_headers`, yang menerima nilai `zix.Http.HeaderSize`.
 
-Backing buffer dialokasikan via arena per request dengan ukuran tepat sesuai cap yang dikonfigurasi: tidak ada memori yang terbuang, tidak ada batas palsu. `addHeader()` mengembalikan `error.TooManyHeaders` begitu cap tercapai.
+Backing buffer dialokasikan via arena per request dengan ukuran tepat sesuai cap yang dikonfigurasi: tidak ada memori yang terbuang, tidak ada batas palsu. `addHeader()` mengembalikan `error.ZixTooManyHeaders` begitu cap tercapai.
 
 ---
 
@@ -52,8 +52,8 @@ Jika mencapai 16 header dalam operasi normal, pindah ke `.COMMON`. Jika mencapai
 `addHeader()` menolak `name` atau `value` yang mengandung `\r` (CR) atau `\n` (LF):
 
 ```
-error.InvalidHeaderName   (CR atau LF ditemukan di nama header)
-error.InvalidHeaderValue  (CR atau LF ditemukan di nilai header)
+error.ZixInvalidHeaderName   (CR atau LF ditemukan di nama header)
+error.ZixInvalidHeaderValue  (CR atau LF ditemukan di nilai header)
 ```
 
 **Jangan pernah meneruskan data yang dikontrol pengguna langsung ke `addHeader()` tanpa sanitasi.** Meski sudah ada penjaga CR/LF, nilai header yang mengandung `:` atau menyerupai header lain dapat membingungkan proxy upstream. Jika nilai berasal dari request body, query param, atau path segment, validasi terlebih dahulu sebelum digunakan.
@@ -83,7 +83,7 @@ Ingat bahwa setiap header yang ditambahkan terlihat oleh client (dan proxy mana 
 Memodifikasi atau menambahkan header selama fase respons dikendalikan ketat untuk menjaga performa dan integritas protokol.
 
 1. **Pelanggaran Protokol (Timing)**: HTTP/1.1 mengharuskan status line dan semua header dikirim sebelum body. Jika `res.send()` sudah mulai mengirimkan data, menambahkan header baru secara fisik sudah terlambat.
-2. **Kapasitas Buffer**: Fungsi `send()` menyimpan header sementara di stack buffer berukuran 4096 byte. Set header yang sangat besar atau modifikasi saat runtime yang mendorong total blok header melewati 4 KB akan menghasilkan `error.BufferTooSmall`.
+2. **Kapasitas Buffer**: Fungsi `send()` menyimpan header sementara di stack buffer berukuran 4096 byte. Set header yang sangat besar atau modifikasi saat runtime yang mendorong total blok header melewati 4 KB akan menghasilkan `error.ZixBufferTooSmall`.
 3. **Keamanan Thread**: Di lingkungan multi-threaded, memodifikasi header sementara `send()` memproses buffer dapat menyebabkan race condition dan korupsi data.
 4. **Perlindungan Injeksi**: Modifikasi saat runtime yang menggunakan data eksternal tetap harus menghormati penjaga injeksi CR/LF untuk mencegah celah keamanan.
 
@@ -99,9 +99,9 @@ try res.addHeader("X-Foo", "bar");
 
 // Tangani secara eksplisit: beri client error yang bermakna
 res.addHeader("X-Foo", "bar") catch |err| switch (err) {
-    error.TooManyHeaders    => { res.setStatus(.INTERNAL_SERVER_ERROR); try res.sendJson("{\"error\":\"too many headers\"}"); return; },
-    error.InvalidHeaderName => { res.setStatus(.BAD_REQUEST);           try res.sendJson("{\"error\":\"invalid header name\"}"); return; },
-    error.InvalidHeaderValue => { res.setStatus(.BAD_REQUEST);          try res.sendJson("{\"error\":\"invalid header value\"}"); return; },
+    error.ZixTooManyHeaders    => { res.setStatus(.INTERNAL_SERVER_ERROR); try res.sendJson("{\"error\":\"too many headers\"}"); return; },
+    error.ZixInvalidHeaderName => { res.setStatus(.BAD_REQUEST);           try res.sendJson("{\"error\":\"invalid header name\"}"); return; },
+    error.ZixInvalidHeaderValue => { res.setStatus(.BAD_REQUEST);          try res.sendJson("{\"error\":\"invalid header value\"}"); return; },
     else                    => return err,
 };
 ```

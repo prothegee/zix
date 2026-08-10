@@ -124,7 +124,7 @@ test "zix edge: Http2Server.run rejects port zero" {
     var server = zix.Http2.Server.init(empty_router.dispatch, .{ .io = io, .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC });
     defer server.deinit();
 
-    try std.testing.expectError(error.PortNotConfigured, server.run());
+    try std.testing.expectError(error.ZixPortNotConfigured, server.run());
 }
 
 test "zix edge: HpackDecoder decode of empty block returns zero headers" {

@@ -34,7 +34,7 @@ pub const TIEBREAKER_LEN: usize = 8;
 pub const PRIORITY_LEN: usize = 4;
 
 /// An attribute value whose length does not match its type.
-pub const Error = error{BadAttribute};
+pub const Error = error{ZixBadAttribute};
 
 /// What a responder needs out of a connectivity check.
 ///
@@ -66,7 +66,7 @@ pub const Check = struct {
 ///
 /// Return:
 /// - Check (borrowing the request bytes)
-/// - error.BadAttribute when a value length does not match its type, or both role attributes are
+/// - error.ZixBadAttribute when a value length does not match its type, or both role attributes are
 ///   present at once
 pub fn read(request: message.Message) Error!Check {
     var check: Check = .{};
@@ -75,13 +75,13 @@ pub fn read(request: message.Message) Error!Check {
     if (request.find(.MESSAGE_INTEGRITY)) |_| check.has_integrity = true;
 
     if (request.find(.PRIORITY)) |attr| {
-        if (attr.value.len != PRIORITY_LEN) return error.BadAttribute;
+        if (attr.value.len != PRIORITY_LEN) return error.ZixBadAttribute;
 
         check.priority = std.mem.readInt(u32, attr.value[0..4], .big);
     }
 
     if (request.find(.USE_CANDIDATE)) |attr| {
-        if (attr.value.len != 0) return error.BadAttribute;
+        if (attr.value.len != 0) return error.ZixBadAttribute;
 
         check.use_candidate = true;
     }
@@ -89,10 +89,10 @@ pub fn read(request: message.Message) Error!Check {
     const controlling = request.find(.ICE_CONTROLLING);
     const controlled = request.find(.ICE_CONTROLLED);
 
-    if (controlling != null and controlled != null) return error.BadAttribute;
+    if (controlling != null and controlled != null) return error.ZixBadAttribute;
 
     if (controlling orelse controlled) |attr| {
-        if (attr.value.len != TIEBREAKER_LEN) return error.BadAttribute;
+        if (attr.value.len != TIEBREAKER_LEN) return error.ZixBadAttribute;
 
         check.role = if (controlling != null) .CONTROLLING else .CONTROLLED;
         check.tiebreaker = std.mem.readInt(u64, attr.value[0..8], .big);
@@ -130,7 +130,7 @@ pub const Request = struct {
 ///
 /// Return:
 /// - []const u8 (the check, borrowing out)
-/// - error.NoSpace when out is too small
+/// - error.ZixNoSpace when out is too small
 pub fn writeRequest(out: []u8, request: Request) message.Writer.Error![]const u8 {
     var writer = try message.Writer.init(out, .REQUEST, .BINDING, request.transaction_id);
 
@@ -284,7 +284,7 @@ test "zix ice: check length, the published size matches the bytes written" {
     _ = try writeRequest(&exact, testRequest(false));
 
     var one_short: [requestLen("8hhY:9uB6".len, false) - 1]u8 = undefined;
-    try std.testing.expectError(error.NoSpace, writeRequest(&one_short, testRequest(false)));
+    try std.testing.expectError(error.ZixNoSpace, writeRequest(&one_short, testRequest(false)));
 }
 
 test "zix ice: check read, a request with no ice attributes reads as empty" {
@@ -314,7 +314,7 @@ test "zix ice: check read, an attribute of the wrong length is an error" {
         var writer = try message.Writer.init(&buf, .REQUEST, .BINDING, TEST_TRANSACTION_ID);
         try writer.addAttribute(case.kind, case.value);
 
-        try std.testing.expectError(error.BadAttribute, read(try message.parse(writer.finish())));
+        try std.testing.expectError(error.ZixBadAttribute, read(try message.parse(writer.finish())));
     }
 }
 
@@ -324,7 +324,7 @@ test "zix ice: check read, claiming both roles at once is an error" {
     try addRole(&writer, .CONTROLLING, TEST_TIEBREAKER);
     try addRole(&writer, .CONTROLLED, TEST_TIEBREAKER);
 
-    try std.testing.expectError(error.BadAttribute, read(try message.parse(writer.finish())));
+    try std.testing.expectError(error.ZixBadAttribute, read(try message.parse(writer.finish())));
 }
 
 test "zix ice: check read, integrity presence and validity are separate answers" {

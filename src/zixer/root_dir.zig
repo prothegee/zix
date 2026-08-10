@@ -29,7 +29,7 @@ pub const RootDir = struct {
 ///
 /// Return:
 /// - RootDir (path plus the source that resolved it)
-/// - error.NoHomeDir when nothing resolves
+/// - error.ZixerNoHomeDir when nothing resolves
 pub fn resolve(
     arena: std.mem.Allocator,
     dir_arg: ?[]const u8,
@@ -42,8 +42,8 @@ pub fn resolve(
         if (dir.len != 0) return .{ .path = try arena.dupe(u8, dir), .source = .ENV };
     }
 
-    const home = env_home orelse return error.NoHomeDir;
-    if (home.len == 0) return error.NoHomeDir;
+    const home = env_home orelse return error.ZixerNoHomeDir;
+    if (home.len == 0) return error.ZixerNoHomeDir;
 
     return .{ .path = try std.fs.path.join(arena, &.{ home, ".zixer" }), .source = .HOME };
 }
@@ -115,6 +115,6 @@ test "zix zixer: root dir, nothing resolves is an error" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    try std.testing.expectError(error.NoHomeDir, resolve(arena.allocator(), null, null, null));
-    try std.testing.expectError(error.NoHomeDir, resolve(arena.allocator(), null, null, ""));
+    try std.testing.expectError(error.ZixerNoHomeDir, resolve(arena.allocator(), null, null, null));
+    try std.testing.expectError(error.ZixerNoHomeDir, resolve(arena.allocator(), null, null, ""));
 }

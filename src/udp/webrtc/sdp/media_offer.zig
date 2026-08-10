@@ -30,11 +30,11 @@ pub const RTCP_MUX: []const u8 = "rtcp-mux";
 /// Everything that stops a media section from being read.
 pub const Error = error{
     /// The `m=` line does not frame, or its port does not fit.
-    Malformed,
+    ZixMalformed,
     /// A format field that is not a payload type number.
-    BadPayloadType,
+    ZixBadPayloadType,
     /// More formats than format.MAX_FORMATS.
-    TooManyFormats,
+    ZixTooManyFormats,
 };
 
 /// What kind of media a section carries.
@@ -109,9 +109,9 @@ pub fn isMediaSection(section: session.Section) bool {
 ///
 /// Return:
 /// - MediaOffer borrowing the description
-/// - error.Malformed, error.BadPayloadType, error.TooManyFormats
+/// - error.ZixMalformed, error.ZixBadPayloadType, error.ZixTooManyFormats
 pub fn read(description: session.Description, section: session.Section) Error!MediaOffer {
-    const media_line = section.mediaLine() catch return error.Malformed;
+    const media_line = section.mediaLine() catch return error.ZixMalformed;
     const kind: Kind = if (std.mem.eql(u8, media_line.media, media.VIDEO_MEDIA)) .VIDEO else .AUDIO;
 
     return .{
@@ -321,7 +321,7 @@ test "zix sdp: media offer read, a format list that is not payload types is refu
 
     const found = try sectionAt(wrong, 0);
 
-    try std.testing.expectError(error.BadPayloadType, read(found[0], found[1]));
+    try std.testing.expectError(error.ZixBadPayloadType, read(found[0], found[1]));
 }
 
 test "zix sdp: media offer read, a section with no mid still reads" {

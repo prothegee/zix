@@ -193,13 +193,13 @@ pub const Transport = struct {
     ///
     /// Return:
     /// - *Transport, deinit closes the connections and frees everything
-    /// - error.AsyncUsesPool when model is ASYNC
-    /// - error.TlsUnsupported when config.tls is not OFF
+    /// - error.RedizAsyncUsesPool when model is ASYNC
+    /// - error.RedizTlsUnsupported when config.tls is not OFF
     /// - connect or allocation errors
     pub fn open(allocator: std.mem.Allocator, io: std.Io, config: lib.Config, options: Options) !*Self {
-        if (options.model == .ASYNC) return error.AsyncUsesPool;
-        if (config.tls != .OFF) return error.TlsUnsupported;
-        if (options.conns == 0 or options.window == 0) return error.BadOptions;
+        if (options.model == .ASYNC) return error.RedizAsyncUsesPool;
+        if (config.tls != .OFF) return error.RedizTlsUnsupported;
+        if (options.conns == 0 or options.window == 0) return error.RedizBadOptions;
 
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
@@ -269,7 +269,7 @@ pub const Transport = struct {
     ///
     /// Return:
     /// - usize count of replies delivered this call (0 when idle)
-    /// - error.ConnectionClosed when a peer closed mid-flight
+    /// - error.RedizConnectionClosed when a peer closed mid-flight
     pub fn poll(self: *Self) !usize {
         return switch (self.model) {
             .EPOLL => self.pollEpoll(),
@@ -292,7 +292,7 @@ pub const Transport = struct {
         switch (self.model) {
             .EPOLL => {
                 const created = linux.epoll_create1(0);
-                if (std.posix.errno(created) != .SUCCESS) return error.EpollCreate;
+                if (std.posix.errno(created) != .SUCCESS) return error.RedizEpollCreate;
                 self.epoll_fd = @intCast(created);
 
                 for (self.channels, 0..) |*channel, index| {
@@ -331,7 +331,7 @@ pub const Transport = struct {
 
             if (event.events & linux.EPOLL.IN != 0) {
                 const nread = readNb(channel.fd, channel.in[channel.in_len..]);
-                if (nread == 0) return error.ConnectionClosed;
+                if (nread == 0) return error.RedizConnectionClosed;
 
                 channel.in_len += nread;
                 completed += self.deliver(channel);
@@ -363,7 +363,7 @@ pub const Transport = struct {
             const op = cqe.user_data & 1;
             const channel = &self.channels[index];
 
-            if (cqe.res <= 0) return error.ConnectionClosed;
+            if (cqe.res <= 0) return error.RedizConnectionClosed;
             const done: usize = @intCast(cqe.res);
 
             if (op == OP_SEND) {
@@ -537,7 +537,7 @@ test "rediz dispatch: open rejects ASYNC" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.AsyncUsesPool, Transport.open(testing.allocator, threaded.io(), .{}, .{
+    try testing.expectError(error.RedizAsyncUsesPool, Transport.open(testing.allocator, threaded.io(), .{}, .{
         .model = .ASYNC,
         .conns = 1,
         .on_reply = noopReply,
@@ -553,7 +553,7 @@ test "rediz dispatch: open rejects TLS" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.TlsUnsupported, Transport.open(testing.allocator, threaded.io(), .{
+    try testing.expectError(error.RedizTlsUnsupported, Transport.open(testing.allocator, threaded.io(), .{
         .tls = .REQUIRE,
     }, .{ .model = .EPOLL, .conns = 1, .on_reply = noopReply }));
 }

@@ -50,8 +50,8 @@ pub const UpConn = struct {
 ///
 /// Return:
 /// - void, up_conn is ready for stream traffic
-/// - error.OutOfMemory, error.BadUpstreamAddress, error.ConnectTimeout,
-///   error.ConnectFailed, or any write error
+/// - error.OutOfMemory, error.ZixerBadUpstreamAddress, error.ZixConnectTimeout,
+///   error.ZixConnectFailed, or any write error
 pub fn openInto(up_conn: *UpConn, io: std.Io, allocator: std.mem.Allocator, stream_buf_bytes: usize, host: []const u8, port: u16, slot_index: u32, connect_timeout_ms: u32) !void {
     const buffers = try conn_buffer.Set.init(allocator, stream_buf_bytes, .{ .client = false, .upstream = true });
     errdefer buffers.deinit(allocator);

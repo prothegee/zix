@@ -78,7 +78,7 @@ test "postgrez edge: a wrong cleartext password is refused" {
     var config = harness.config();
     config.password = "wrong";
 
-    try testing.expectError(error.ServerError, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
+    try testing.expectError(error.PostgrezServerError, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "postgrez edge: a wrong scram password fails the proof" {
@@ -89,7 +89,7 @@ test "postgrez edge: a wrong scram password fails the proof" {
     var config = harness.config();
     config.password = "wrong";
 
-    try testing.expectError(error.ServerError, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
+    try testing.expectError(error.PostgrezServerError, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "postgrez edge: an unknown role is refused" {
@@ -100,7 +100,7 @@ test "postgrez edge: an unknown role is refused" {
     var config = harness.config();
     config.password = TEST_PASSWORD;
 
-    try testing.expectError(error.ServerError, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
+    try testing.expectError(error.PostgrezServerError, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "postgrez edge: a server below the supported major is rejected" {
@@ -108,7 +108,7 @@ test "postgrez edge: a server below the supported major is rejected" {
     try harness.start(.{ .server_version = "14.9" });
     defer harness.stop();
 
-    try testing.expectError(error.UnsupportedServerVersion, harness.connect());
+    try testing.expectError(error.PostgrezUnsupportedServerVersion, harness.connect());
 }
 
 test "postgrez edge: connecting to a closed port is refused" {
@@ -145,7 +145,7 @@ test "postgrez edge: a unique violation maps to its sqlstate" {
     const conn = try harness.connect();
     defer conn.deinit();
 
-    try testing.expectError(error.ServerError, conn.exec("INSERT INTO duplicated (email) VALUES ('a@b.c')", .{}));
+    try testing.expectError(error.PostgrezServerError, conn.exec("INSERT INTO duplicated (email) VALUES ('a@b.c')", .{}));
 
     const failure = conn.lastServerError();
     try testing.expectEqual(postgrez.SqlState.UNIQUE_VIOLATION, failure.state);
@@ -160,7 +160,7 @@ test "postgrez edge: an undefined column maps to its sqlstate" {
     const conn = try harness.connect();
     defer conn.deinit();
 
-    try testing.expectError(error.ServerError, conn.exec("SELECT undefined_column FROM users", .{}));
+    try testing.expectError(error.PostgrezServerError, conn.exec("SELECT undefined_column FROM users", .{}));
     try testing.expectEqual(postgrez.SqlState.UNDEFINED_COLUMN, conn.lastServerError().state);
 }
 
@@ -172,7 +172,7 @@ test "postgrez edge: a connection recovers after a failed statement" {
     const conn = try harness.connect();
     defer conn.deinit();
 
-    try testing.expectError(error.ServerError, conn.exec("INSERT INTO duplicated (email) VALUES ('a@b.c')", .{}));
+    try testing.expectError(error.PostgrezServerError, conn.exec("INSERT INTO duplicated (email) VALUES ('a@b.c')", .{}));
 
     // the extended protocol resynchronises on Sync, so the next statement runs
     try testing.expectEqual(@as(u64, 1), try conn.exec("INSERT INTO users (email) VALUES ('b@c.d')", .{}));
@@ -187,7 +187,7 @@ test "postgrez edge: a failed statement inside a transaction leaves it failed" {
     defer conn.deinit();
 
     var transaction = try conn.begin();
-    try testing.expectError(error.ServerError, transaction.exec("INSERT INTO duplicated (email) VALUES ('a@b.c')", .{}));
+    try testing.expectError(error.PostgrezServerError, transaction.exec("INSERT INTO duplicated (email) VALUES ('a@b.c')", .{}));
     try testing.expectEqual(postgrez.backend.TransactionStatus.IN_FAILED_TRANSACTION, conn.transaction_status);
 
     transaction.rollback();
@@ -211,7 +211,7 @@ test "postgrez edge: a prepared statement rejects the wrong argument count" {
         active: bool,
     };
 
-    try testing.expectError(error.ParamCountMismatch, statement.query(User, .{}));
+    try testing.expectError(error.PostgrezParamCountMismatch, statement.query(User, .{}));
 }
 
 test "postgrez edge: max_pending_replies bounds a pipeline batch" {
@@ -228,7 +228,7 @@ test "postgrez edge: max_pending_replies bounds a pipeline batch" {
     var pipe = try conn.pipeline();
     try pipe.add("INSERT INTO users (email) VALUES ('a@b.c')", .{});
     try pipe.add("INSERT INTO users (email) VALUES ('b@c.d')", .{});
-    try testing.expectError(error.QueueFull, pipe.add("INSERT INTO users (email) VALUES ('c@d.e')", .{}));
+    try testing.expectError(error.PostgrezQueueFull, pipe.add("INSERT INTO users (email) VALUES ('c@d.e')", .{}));
 
     const results = try pipe.sync();
     try testing.expectEqual(@as(usize, 2), results.len);
@@ -297,7 +297,7 @@ test "postgrez edge: a pool heals a terminated backend" {
 
     // the idle slot hands back the dead connection: discard and reacquire heals
     const dead = try pool.acquire();
-    try testing.expectError(error.ConnectionClosed, dead.exec("SELECT 1", .{}));
+    try testing.expectError(error.PostgrezConnectionClosed, dead.exec("SELECT 1", .{}));
     pool.discard(dead);
 
     const healed = try pool.acquire();
@@ -313,7 +313,7 @@ test "postgrez edge: a backend that vanishes mid-statement reports the connectio
     const conn = try harness.connect();
     defer conn.deinit();
 
-    try testing.expectError(error.ConnectionClosed, conn.exec("SELECT vanish", .{}));
+    try testing.expectError(error.PostgrezConnectionClosed, conn.exec("SELECT vanish", .{}));
 }
 
 test "postgrez edge: a fully-held pool without parking sheds immediately" {
@@ -331,7 +331,7 @@ test "postgrez edge: a fully-held pool without parking sheds immediately" {
     const held = try pool.acquire();
     defer pool.release(held);
 
-    try testing.expectError(error.PoolExhausted, pool.acquire());
+    try testing.expectError(error.PostgrezPoolExhausted, pool.acquire());
 }
 
 test "postgrez edge: an empty statement answers the empty query response" {
@@ -414,7 +414,7 @@ test "postgrez edge: a required tls connection fails against a cleartext backend
     var config = harness.config();
     config.tls = .REQUIRE;
 
-    try testing.expectError(error.TlsRefused, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
+    try testing.expectError(error.PostgrezTlsRefused, postgrez.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "postgrez edge: a preferred tls connection falls back to cleartext" {

@@ -72,7 +72,7 @@ pub const PeerMedia = struct {
     ///
     /// Return:
     /// - PeerMedia with no stream open yet
-    /// - error.UnsupportedProfile
+    /// - error.ZixUnsupportedProfile
     pub fn init(negotiated: exporter.SrtpProfile, keys: exporter.SrtpKeys) Error!PeerMedia {
         return .{
             .negotiated = negotiated,
@@ -96,10 +96,10 @@ pub const PeerMedia = struct {
     ///
     /// Return:
     /// - Opened, borrowing `buffer`
-    /// - error.Truncated, error.UnsupportedVersion, error.Replayed, error.AuthenticationFailed,
-    ///   error.SegmentTooLong, error.TooManyStreams, error.UnsupportedProfile
+    /// - error.ZixTruncated, error.ZixUnsupportedVersion, error.ZixReplayed, error.ZixAuthenticationFailed,
+    ///   error.ZixSegmentTooLong, error.ZixTooManyStreams, error.ZixUnsupportedProfile
     pub fn open(self: *PeerMedia, buffer: []u8, packet_len: usize) Error!Opened {
-        if (packet_len > buffer.len) return error.Truncated;
+        if (packet_len > buffer.len) return error.ZixTruncated;
 
         const header = (try rtp.read(buffer[0..packet_len])).header;
         const stream = try self.inbound.sessionFor(header.ssrc);
@@ -124,8 +124,8 @@ pub const PeerMedia = struct {
     ///
     /// Return:
     /// - []const u8, the datagram to send to this peer, borrowing `buffer`
-    /// - error.Truncated, error.UnsupportedVersion, error.NoSpace, error.SegmentTooLong,
-    ///   error.TooManyStreams, error.TooManyRoutes, error.UnsupportedProfile
+    /// - error.ZixTruncated, error.ZixUnsupportedVersion, error.ZixNoSpace, error.ZixSegmentTooLong,
+    ///   error.ZixTooManyStreams, error.ZixTooManyRoutes, error.ZixUnsupportedProfile
     pub fn sealFor(self: *PeerMedia, header: rtp.Header, buffer: []u8, body_len: usize) Error![]const u8 {
         const carried = try self.routes.admit(header.ssrc);
         const stream = try self.outbound.sessionFor(carried.mapping.ssrc);
@@ -150,9 +150,9 @@ pub const PeerMedia = struct {
     ///
     /// Return:
     /// - []const u8, the plain compound packet, borrowing `buffer`
-    /// - error.Truncated, error.Replayed, error.AuthenticationFailed, error.SegmentTooLong
+    /// - error.ZixTruncated, error.ZixReplayed, error.ZixAuthenticationFailed, error.ZixSegmentTooLong
     pub fn openControl(self: *PeerMedia, buffer: []u8, packet_len: usize) Error![]const u8 {
-        if (packet_len > buffer.len) return error.Truncated;
+        if (packet_len > buffer.len) return error.ZixTruncated;
 
         return self.control_in.unprotect(buffer[0..packet_len]);
     }
@@ -165,7 +165,7 @@ pub const PeerMedia = struct {
     ///
     /// Return:
     /// - []const u8, the datagram to send to this peer, borrowing `buffer`
-    /// - error.Truncated, error.NoSpace, error.SegmentTooLong, error.IndexExhausted
+    /// - error.ZixTruncated, error.ZixNoSpace, error.ZixSegmentTooLong, error.ZixIndexExhausted
     pub fn sealControl(self: *PeerMedia, buffer: []u8, body_len: usize) Error![]const u8 {
         return self.control_out.protect(buffer, body_len);
     }
@@ -260,7 +260,7 @@ const Browser = struct {
 
 test "zix media: peer media init, a profile with no cipher is refused" {
     try std.testing.expectError(
-        error.UnsupportedProfile,
+        error.ZixUnsupportedProfile,
         PeerMedia.init(.SRTP_NULL_HMAC_SHA1_32, TEST_KEYS),
     );
 }
@@ -287,7 +287,7 @@ test "zix media: peer media open, a packet keyed the other way is refused" {
     var buffer: [256]u8 = undefined;
     const protected = try stranger.send(&buffer, 0x1111_1111, 1, "not from here");
 
-    try std.testing.expectError(error.AuthenticationFailed, media.open(&buffer, protected.len));
+    try std.testing.expectError(error.ZixAuthenticationFailed, media.open(&buffer, protected.len));
 }
 
 test "zix media: peer media, one packet crosses a forwarder to a peer keyed differently" {
@@ -463,7 +463,7 @@ test "zix media: peer media openControl, a control packet keyed the other way is
     var buffer: [256]u8 = undefined;
     const protected = try stranger.askForKeyframe(&buffer, 0x9999_9999, 0x1111_1111);
 
-    try std.testing.expectError(error.AuthenticationFailed, media.openControl(&buffer, protected.len));
+    try std.testing.expectError(error.ZixAuthenticationFailed, media.openControl(&buffer, protected.len));
 }
 
 test "zix media: peer media overhead, it covers what sealFor writes" {
@@ -498,7 +498,7 @@ test "zix media: peer media sealFor, a buffer with no room for the tag is refuse
     @memcpy(tight[0..body_len], opened.plain);
 
     try std.testing.expectError(
-        error.NoSpace,
+        error.ZixNoSpace,
         receiver_media.sealFor(opened.header, tight[0 .. body_len + receiver_media.overhead() - 1], body_len),
     );
 }

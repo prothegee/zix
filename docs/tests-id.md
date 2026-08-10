@@ -36,7 +36,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | Modul | Cakupan |
 | :- | :- |
 | `tcp/config.zig` | `refAllDecls` + perilaku: default `TcpServerConfig` (kernel_backlog=4096, max_recv_buf=4096, workers=0) dengan dispatch_model wajib (disetel eksplisit), nilai backing `DispatchModel` gapless dengan hanya tiga model yang dirawat, nama POOL / MIXED yang dilepas tidak lagi resolve, default `TcpClientConfig` (max_recv_buf=4096) |
-| `tcp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman, konfigurasi EPOLL valid berhasil dan deinit aman |
+| `tcp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.ZixPortNotConfigured`, konfigurasi valid berhasil dan deinit aman, konfigurasi EPOLL valid berhasil dan deinit aman |
 | `tcp/client.zig` | `refAllDecls` |
 
 ### zix.Http
@@ -76,7 +76,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | :- | :- |
 | `udp/config.zig` | `refAllDecls` + default: `UdpServerConfig`, `UdpClientConfig`, default `allow_args`, dan nilai backing enum `Endianness` |
 | `udp/packet.zig` | `refAllDecls` + perilaku: NATIVE tanpa operasi, array u8 tidak ditukar, round-trip LITTLE/BIG, non-native menukar elemen integer dan float array, semua varian `FeedbackResult` |
-| `udp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, port bukan-nol berhasil, field konfigurasi tersimpan |
+| `udp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.ZixPortNotConfigured`, port bukan-nol berhasil, field konfigurasi tersimpan |
 | `udp/client.zig` | `refAllDecls` |
 
 ### zix.Uds
@@ -84,7 +84,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | Modul | Cakupan |
 | :- | :- |
 | `uds/config.zig` | `refAllDecls` + default: `UdsServerConfig` (kernel_backlog=128, max_recv_buf=4096), `UdsClientConfig` |
-| `uds/server.zig` | `refAllDecls` + perilaku: path kosong menghasilkan `error.PathEmpty`, path valid berhasil dan deinit aman |
+| `uds/server.zig` | `refAllDecls` + perilaku: path kosong menghasilkan `error.ZixPathEmpty`, path valid berhasil dan deinit aman |
 | `uds/client.zig` | `refAllDecls` |
 
 ### zix.Http.Client
@@ -109,8 +109,8 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | :- | :- |
 | `tcp/fix/config.zig` | `refAllDecls` + perilaku: field wajib `FixServerConfig` (ip, port, comp_id), dispatch_model wajib (disetel eksplisit), workers default 0, kernel_backlog default 1024, heartbeat_timeout_ms default 0, field wajib `FixClientConfig` (ip, port, comp_id, target_comp_id) |
 | `tcp/fix/core.zig` | `refAllDecls` + perilaku: round-trip `parseFields`, pencarian `getField` dan kasus null, vektor `computeChecksum` yang diketahui, `verifyChecksum` valid/terpotong/salah, `findMessageEnd` lengkap/parsial/tanpa-terminator, `buildMessage` menghasilkan checksum valid |
-| `tcp/fix/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil, deinit aman |
-| `tcp/fix/client.zig` | `refAllDecls` + perilaku: `FixClient.connect` port nol menghasilkan `error.PortNotConfigured` |
+| `tcp/fix/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.ZixPortNotConfigured`, konfigurasi valid berhasil, deinit aman |
+| `tcp/fix/client.zig` | `refAllDecls` + perilaku: `FixClient.connect` port nol menghasilkan `error.ZixPortNotConfigured` |
 | `tcp/fix/router.zig` | `refAllDecls` + perilaku: dispatch memanggil handler yang cocok, tanpa kecocokan handler tidak dipanggil, timeout route menyetel `deadline_ns` |
 
 ### zix.Http2
@@ -121,7 +121,7 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http2/hpack.zig` | `refAllDecls` + perilaku: round-trip encode/decode Huffman, `HpackEncoder.writeHeader` menghasilkan entri terindeks dari static table, `HpackDecoder.decode` mendekode `:method GET` terindeks, eviksi dynamic table menghormati max_size, indeks `HPACK_STATIC` ke-8 adalah `:status 200` |
 | `tcp/http2/core.zig` | `refAllDecls` + perilaku: default struct `ServeOpts`, `HandlerFn` adalah tipe function pointer |
 | `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers default 0, max_streams=128 dan max_frame_size=16384 |
-| `tcp/http2/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil dan deinit aman |
+| `tcp/http2/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.ZixPortNotConfigured`, konfigurasi valid berhasil dan deinit aman |
 | `tcp/http2/static.zig` | `refAllDecls` + perilaku: zero copy ditolak untuk batch coalescing dan fd sentinel, file dibingkai sebagai HEADERS plus DATA dengan END_STREAM, traversal / file hilang / path kepanjangan ditolak, body melebihi max frame size dipotong, file kosong menutup stream di HEADERS, sibling brotli dipilih dari cache |
 
 ### zix.Grpc
@@ -134,8 +134,8 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/http2/grpc/timeout.zig` | `refAllDecls` + perilaku: satuan H/M/S/m/u/n dikonversi dengan benar, karakter tunggal menghasilkan null, kosong menghasilkan null |
 | `tcp/http2/grpc/core.zig` | `refAllDecls` + perilaku: `parsePath` input valid dan tidak valid, `detectContentType` proto/json/tidak diketahui, `GrpcContext.recvMessage` body kosong menghasilkan null, `Route.timeout_ms` default nol, `GrpcContext.isExpired` deadline null/lampau/mendatang, `GrpcServeOpts.handler_timeout_ms` default nol, Router mendispatch ke handler yang cocok |
 | `tcp/http2/grpc/config.zig` | `refAllDecls` + perilaku: field wajib dan default `GrpcServerConfig` (handler_timeout_ms=0), field wajib `GrpcClientConfig` |
-| `tcp/http2/grpc/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.PortNotConfigured`, konfigurasi valid berhasil, deinit aman |
-| `tcp/http2/grpc/client.zig` | `refAllDecls` + perilaku: `GrpcClient.connect` port nol menghasilkan `error.PortNotConfigured` |
+| `tcp/http2/grpc/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.ZixPortNotConfigured`, konfigurasi valid berhasil, deinit aman |
+| `tcp/http2/grpc/client.zig` | `refAllDecls` + perilaku: `GrpcClient.connect` port nol menghasilkan `error.ZixPortNotConfigured` |
 
 ### zix.Http3
 
@@ -215,9 +215,9 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | :- | :- |
 | `TcpServer.init` konfigurasi valid | init dengan ip dan port nyata berhasil, deinit aman |
 | `TcpServer.init` dispatch model EPOLL | init dengan dispatch model `.EPOLL` berhasil, deinit aman |
-| `TcpServer.init` port nol | menghasilkan `error.PortNotConfigured` |
+| `TcpServer.init` port nol | menghasilkan `error.ZixPortNotConfigured` |
 | Pemeriksaan tipe `HandlerFn` | `zix.Tcp.echoHandler` memenuhi `zix.Tcp.HandlerFn` |
-| `TcpClient.connect` port nol | menghasilkan `error.PortNotConfigured` sebelum pemanggilan socket apa pun |
+| `TcpClient.connect` port nol | menghasilkan `error.ZixPortNotConfigured` sebelum pemanggilan socket apa pun |
 
 ### tests/integration/http/
 
@@ -291,7 +291,7 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | Dual listener URING melayani TLS on-ring di tls_port | kaki TLS berjalan di ring |
 | Dual listener ASYNC melayani cleartext di port | kaki cleartext menjawab di model thread |
 | Dual listener ASYNC melayani TLS via accept thread tambahan | kaki TLS mendapat accept thread sendiri |
-| `tls_port` sama dengan `port` ditolak saat run | mengembalikan `error.TlsPortConflict` |
+| `tls_port` sama dengan `port` ditolak saat run | mengembalikan `error.ZixTlsPortConflict` |
 
 #### `static_cache_test.zig`
 
@@ -325,8 +325,8 @@ Menjalankan jalur router sungguhan lewat socketpair, jadi yang diuji adalah byte
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | `UdpServer.init` konfigurasi valid | init dengan ip dan port nyata berhasil |
-| `UdpServer.init` port nol | menghasilkan `error.PortNotConfigured` |
-| `UdpClient.init` bind_port nol | menghasilkan `error.PortNotConfigured` sebelum pemanggilan socket apa pun |
+| `UdpServer.init` port nol | menghasilkan `error.ZixPortNotConfigured` |
+| `UdpClient.init` bind_port nol | menghasilkan `error.ZixPortNotConfigured` sebelum pemanggilan socket apa pun |
 
 #### `packet_test.zig`
 
@@ -376,7 +376,7 @@ Menjalankan jalur router sungguhan lewat socketpair, jadi yang diuji adalah byte
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | `FixServer` init dan deinit tidak error | konfigurasi valid berhasil, deinit aman |
-| `FixServer` init port nol | menghasilkan `error.PortNotConfigured` |
+| `FixServer` init port nol | menghasilkan `error.ZixPortNotConfigured` |
 | Handshake Logon dan round-trip echo berhasil | kirim Logon, terima balasan Logon dengan MsgType=A kirim NewOrderSingle, terima echo, kirim Logout, terima balasan Logout |
 | Beberapa pesan berurutan semuanya di-echo | tiga pesan NewOrderSingle di-echo dengan ClOrdID tersimpan di semua |
 
@@ -389,7 +389,7 @@ Port: 18082-18085.
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | `Http2Server.init` dan deinit tidak error | konfigurasi valid berhasil, deinit aman |
-| `Http2Server.init` port nol | menghasilkan `error.PortNotConfigured` |
+| `Http2Server.init` port nol | menghasilkan `error.ZixPortNotConfigured` |
 | Tipe `Http2 HandlerFn` adalah function pointer | penugasan `zix.Http2.HandlerFn` berhasil dikompilasi |
 | Http2 GET / mengembalikan Hello World melalui h2c direct | round-trip h2c preface PRI + HEADERS + DATA mengembalikan body response |
 | Http2 POST /echo mengembalikan body request | POST dengan frame DATA body, server meng-echo body kembali |
@@ -434,7 +434,7 @@ Port: 18200-18206.
 | Pengujian | Yang diverifikasi |
 | :- | :- |
 | `GrpcServer.init` dan deinit tidak error | konfigurasi valid berhasil, deinit aman |
-| `GrpcServer.init` port nol | menghasilkan `error.PortNotConfigured` |
+| `GrpcServer.init` port nol | menghasilkan `error.ZixPortNotConfigured` |
 | gRPC unary mengembalikan salam | `greetHandler` membaca satu pesan, membalas `"Hello, world!"` |
 | gRPC server streaming mengirim beberapa response | `echoHandler` mengirim dua pesan, client menerima keduanya berurutan |
 | gRPC client streaming mengumpulkan semua pesan | `collectHandler` menyangga tiga pesan, membalas dengan jumlah `"got 3"` |
@@ -453,7 +453,7 @@ Port: 18200-18206.
 | `Channel([]const u8)` berhasil dikompilasi | tipe elemen slice diterima |
 | `Channel(struct)` berhasil dikompilasi | tipe elemen struct diterima |
 | Round-trip send dan recv `Channel(u32)` | send lalu recv mengembalikan nilai yang dikirim |
-| `Channel(u32)` drain setelah close | kirim dua item, close, recv keduanya, recv ketiga menghasilkan `error.Closed` |
+| `Channel(u32)` drain setelah close | kirim dua item, close, recv keduanya, recv ketiga menghasilkan `error.ZixClosed` |
 
 ---
 
@@ -785,7 +785,7 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| `TcpServer.init` port nol | menghasilkan `error.PortNotConfigured` |
+| `TcpServer.init` port nol | menghasilkan `error.ZixPortNotConfigured` |
 | Nilai backing `DispatchModel` stabil | ASYNC=0, EPOLL=1, URING=2 |
 | Nama `DispatchModel` yang dilepas hilang | `stringToEnum` mengembalikan null untuk POOL dan MIXED |
 | Panjang frame TCP maksimum u32 | `maxInt(u32)` di-encode dan di-decode dengan benar melalui big-endian |
@@ -799,7 +799,7 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | `queryParam` key ada dengan nilai kosong | `"?k="` -> `""` (bukan null) |
 | `queryParam` key tidak ada menghasilkan null | key tidak ada dalam query string |
 | `queryParam` tidak ada query string sama sekali menghasilkan null | target tidak memiliki `?` |
-| `body()` chunked hex tidak valid adalah error, bukan body kosong | ukuran chunk `"zz"` -> `error.InvalidChunkedBody`, `bodyComplete()` false (engine menjawab 400) |
+| `body()` chunked hex tidak valid adalah error, bukan body kosong | ukuran chunk `"zz"` -> `error.ZixInvalidChunkedBody`, `bodyComplete()` false (engine menjawab 400) |
 | `body()` chunked chunk terminal yang hilang mengembalikan data parsial | tidak ada `0\r\n\r\n` -> data parsial dikembalikan |
 | `body()` chunked chunk satu-byte | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
 
@@ -858,7 +858,7 @@ Kondisi batas QUERY di engine `zix.Http`.
 | 1 byte menghasilkan null | kurang dari 2 byte |
 | Payload terpotong menghasilkan null | header menyatakan 5 byte tetapi hanya 3 yang ada |
 | Panjang 16-bit extended (tier 126) | payload 130-byte: byte[1] membawa marker 126 |
-| `acceptKey` key terlalu panjang menghasilkan `error.KeyTooLong` | key >= 93 byte melebihi hash_input 128-byte |
+| `acceptKey` key terlalu panjang menghasilkan `error.ZixKeyTooLong` | key >= 93 byte melebihi hash_input 128-byte |
 
 ### tests/edge/udp/
 
@@ -866,7 +866,7 @@ Kondisi batas QUERY di engine `zix.Http`.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Port nol | `UdpServer.init` menghasilkan `error.PortNotConfigured` |
+| Port nol | `UdpServer.init` menghasilkan `error.ZixPortNotConfigured` |
 | Port bukan-nol | `UdpServer.init` berhasil |
 
 #### `packet_test.zig`
@@ -882,9 +882,9 @@ Kondisi batas QUERY di engine `zix.Http`.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Skema tidak didukung menghasilkan `error.InvalidUrl` | skema `ftp://` tidak diterima |
-| Host tidak ada menghasilkan `error.InvalidUrl` | `http://` tanpa host |
-| URL tidak valid menghasilkan `error.InvalidUrl` | `:::bad` gagal saat parse |
+| Skema tidak didukung menghasilkan `error.ZixUrlSchemeUnsupported` | skema `ftp://` tidak diterima |
+| Host tidak ada menghasilkan `error.ZixUrlHostMissing` | `http://` tanpa host |
+| URL tidak valid menghasilkan `error.ZixUrlMalformed` | `:::bad` gagal saat parse |
 | `ClientResponse.header()` nama tidak ada | menghasilkan null |
 | Override `RequestOpts.connect_timeout_ms` | null, 0, dan bukan-nol adalah nilai yang berbeda |
 
@@ -894,7 +894,7 @@ Kondisi batas QUERY di engine `zix.Http`.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| Path kosong menghasilkan `error.PathEmpty` | `UdsServer.init(.{ .path = "" })` menghasilkan PathEmpty |
+| Path kosong menghasilkan `error.ZixPathEmpty` | `UdsServer.init(.{ .path = "" })` menghasilkan PathEmpty |
 
 ### tests/edge/logger/
 
@@ -1009,7 +1009,7 @@ Port: 18100.
 | :- | :- |
 | Preface PRI yang buruk menyebabkan server menutup koneksi | byte preface tidak valid -> server menutup koneksi dengan bersih |
 | Client mengirim GOAWAY dan loop koneksi server keluar | frame GOAWAY -> server keluar dari frame loop tanpa error |
-| `Http2Server.init` menolak port nol | menghasilkan `error.PortNotConfigured` |
+| `Http2Server.init` menolak port nol | menghasilkan `error.ZixPortNotConfigured` |
 | Dekode `HpackDecoder` dari blok kosong menghasilkan nol header | `decode(&.{}, ...)` menghasilkan 0 header tanpa error |
 | `writeFrameHeader` bit tinggi stream_id dihapus saat dibaca | `stream_id = 0x7FFF_FFFF` di-roundtrip dengan benar melalui pipe |
 
@@ -1054,8 +1054,8 @@ Port: 18220-18221.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| `readGrpcPrefix` dengan 4 byte | menghasilkan `error.TooShort` |
-| `readGrpcPrefix` dengan slice kosong | menghasilkan `error.TooShort` |
+| `readGrpcPrefix` dengan 4 byte | menghasilkan `error.ZixTooShort` |
+| `readGrpcPrefix` dengan slice kosong | menghasilkan `error.ZixTooShort` |
 | `GrpcContext.recvMessage` body lebih pendek dari prefix | body memiliki 3 byte (butuh 5 untuk prefix): menghasilkan null |
 | `GrpcContext.recvMessage` msg_len melebihi body | prefix mengklaim 100 byte tetapi body hanya memiliki 5: menghasilkan null |
 | `parsePath` string kosong | menghasilkan null |
@@ -1064,7 +1064,7 @@ Port: 18220-18221.
 | `detectContentType` tanpa header | menghasilkan UNKNOWN |
 | `detectContentType` text/plain | menghasilkan UNKNOWN |
 | `parseTimeout` karakter tunggal | menghasilkan null |
-| `GrpcClient.connect` port nol | menghasilkan `error.PortNotConfigured` |
+| `GrpcClient.connect` port nol | menghasilkan `error.ZixPortNotConfigured` |
 | `serveConn` menutup dengan bersih saat client langsung memutus koneksi | server menerima, client memutus koneksi segera, tanpa crash atau error |
 | gRPC handler finish-only menyampaikan status error ke client | handler hanya memanggil `res.finish(INVALID_ARGUMENT, ...)`, client menerima status error tanpa frame data apa pun |
 
@@ -1077,8 +1077,8 @@ Port: 18220-18221.
 | Kapasitas 1 mengalokasikan tepat satu slot | `buf.len == 1`, `count == 0` |
 | Head ring membungkus di `buf.len` | `(3+1) % 4 == 0` |
 | Batas penuh: `count == buf.len` | indeks tail membungkus kembali ke head |
-| `send` setelah close | menghasilkan `error.Closed` |
-| `recv` pada channel tertutup yang kosong | menghasilkan `error.Closed` |
+| `send` setelah close | menghasilkan `error.ZixClosed` |
+| `recv` pada channel tertutup yang kosong | menghasilkan `error.ZixClosed` |
 
 ---
 

@@ -69,6 +69,6 @@ fn run(io: std.Io, uds_server_path: []const u8, uds_http_path: []const u8) !void
     var resp = try client.get("http://127.0.0.1:9055/data", .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (!std.mem.containsAtLeast(u8, resp.body(), 1, "count")) return error.MissingCountField;
 }

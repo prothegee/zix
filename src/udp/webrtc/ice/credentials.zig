@@ -45,11 +45,11 @@ const ICE_CHARS: []const u8 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw
 
 /// Why a credential or a USERNAME is not usable.
 pub const Error = error{
-    TooShort,
-    TooLong,
-    BadCharacter,
-    MissingSeparator,
-    NoSpace,
+    ZixTooShort,
+    ZixTooLong,
+    ZixBadCharacter,
+    ZixMissingSeparator,
+    ZixNoSpace,
 };
 
 /// One peer's session credentials.
@@ -99,9 +99,9 @@ pub const Username = struct {
 /// - Username (borrowing username)
 /// - Error when the separator is missing, or either half is not a usable ufrag
 pub fn splitUsername(username: []const u8) Error!Username {
-    if (username.len > MAX_USERNAME_LEN) return error.TooLong;
+    if (username.len > MAX_USERNAME_LEN) return error.ZixTooLong;
 
-    const separator = std.mem.indexOfScalar(u8, username, USERNAME_SEPARATOR) orelse return error.MissingSeparator;
+    const separator = std.mem.indexOfScalar(u8, username, USERNAME_SEPARATOR) orelse return error.ZixMissingSeparator;
     const parts: Username = .{
         .destination_ufrag = username[0..separator],
         .source_ufrag = username[separator + 1 ..],
@@ -122,11 +122,11 @@ pub fn splitUsername(username: []const u8) Error!Username {
 ///
 /// Return:
 /// - []const u8 (the value, borrowing out)
-/// - error.NoSpace when out is too small
+/// - error.ZixNoSpace when out is too small
 pub fn writeUsername(out: []u8, destination_ufrag: []const u8, source_ufrag: []const u8) Error![]const u8 {
     const total = destination_ufrag.len + 1 + source_ufrag.len;
 
-    if (total > out.len) return error.NoSpace;
+    if (total > out.len) return error.ZixNoSpace;
 
     @memcpy(out[0..destination_ufrag.len], destination_ufrag);
     out[destination_ufrag.len] = USERNAME_SEPARATOR;
@@ -150,9 +150,9 @@ pub fn writeUsername(out: []u8, destination_ufrag: []const u8, source_ufrag: []c
 ///
 /// Return:
 /// - void
-/// - error.TooShort when entropy is smaller than dst
-pub fn fillIceChars(dst: []u8, entropy: []const u8) error{TooShort}!void {
-    if (entropy.len < dst.len) return error.TooShort;
+/// - error.ZixTooShort when entropy is smaller than dst
+pub fn fillIceChars(dst: []u8, entropy: []const u8) error{ZixTooShort}!void {
+    if (entropy.len < dst.len) return error.ZixTooShort;
 
     for (dst, entropy[0..dst.len]) |*char, byte| char.* = ICE_CHARS[byte % ICE_CHARS.len];
 }
@@ -167,11 +167,11 @@ pub fn isIceChar(byte: u8) bool {
 
 /// Length and alphabet check shared by the ufrag and the password.
 fn validateIceString(text: []const u8, min_len: usize, max_len: usize) Error!void {
-    if (text.len < min_len) return error.TooShort;
-    if (text.len > max_len) return error.TooLong;
+    if (text.len < min_len) return error.ZixTooShort;
+    if (text.len > max_len) return error.ZixTooLong;
 
     for (text) |byte| {
-        if (!isIceChar(byte)) return error.BadCharacter;
+        if (!isIceChar(byte)) return error.ZixBadCharacter;
     }
 }
 
@@ -191,7 +191,7 @@ test "zix ice: credentials validate, the RFC 8445 example passes" {
 
 test "zix ice: credentials validate, a short ufrag or password is rejected" {
     const short_ufrag: Credentials = .{ .ufrag = "abc", .password = TEST_PASSWORD };
-    try std.testing.expectError(error.TooShort, short_ufrag.validate());
+    try std.testing.expectError(error.ZixTooShort, short_ufrag.validate());
 
     // One character below the floor fails, so the boundary is the documented one and not off by
     // one in either direction.
@@ -199,7 +199,7 @@ test "zix ice: credentials validate, a short ufrag or password is rejected" {
     try at_floor.validate();
 
     const below_floor: Credentials = .{ .ufrag = TEST_UFRAG, .password = TEST_PASSWORD[0 .. MIN_PASSWORD_LEN - 1] };
-    try std.testing.expectError(error.TooShort, below_floor.validate());
+    try std.testing.expectError(error.ZixTooShort, below_floor.validate());
 }
 
 test "zix ice: credentials validate, a character outside the alphabet is rejected" {
@@ -208,10 +208,10 @@ test "zix ice: credentials validate, a character outside the alphabet is rejecte
     password[7] = '=';
 
     const creds: Credentials = .{ .ufrag = TEST_UFRAG, .password = &password };
-    try std.testing.expectError(error.BadCharacter, creds.validate());
+    try std.testing.expectError(error.ZixBadCharacter, creds.validate());
 
     const spaced: Credentials = .{ .ufrag = "ab d", .password = TEST_PASSWORD };
-    try std.testing.expectError(error.BadCharacter, spaced.validate());
+    try std.testing.expectError(error.ZixBadCharacter, spaced.validate());
 
     // The separator is deliberately not an ice-char, which is what makes the split unambiguous.
     try std.testing.expect(!isIceChar(USERNAME_SEPARATOR));
@@ -223,7 +223,7 @@ test "zix ice: credentials validate, an over-long half is rejected" {
     var long: [MAX_UFRAG_LEN + 1]u8 = @splat('a');
 
     const creds: Credentials = .{ .ufrag = &long, .password = TEST_PASSWORD };
-    try std.testing.expectError(error.TooLong, creds.validate());
+    try std.testing.expectError(error.ZixTooLong, creds.validate());
 }
 
 test "zix ice: username, a check names the destination first and the source second" {
@@ -238,14 +238,14 @@ test "zix ice: username, a check names the destination first and the source seco
 }
 
 test "zix ice: username split, a malformed value is rejected rather than half read" {
-    try std.testing.expectError(error.MissingSeparator, splitUsername("8hhY9uB6"));
-    try std.testing.expectError(error.TooShort, splitUsername(":9uB6"));
-    try std.testing.expectError(error.TooShort, splitUsername("8hhY:"));
-    try std.testing.expectError(error.TooShort, splitUsername("8hhY:ab"));
-    try std.testing.expectError(error.MissingSeparator, splitUsername(""));
+    try std.testing.expectError(error.ZixMissingSeparator, splitUsername("8hhY9uB6"));
+    try std.testing.expectError(error.ZixTooShort, splitUsername(":9uB6"));
+    try std.testing.expectError(error.ZixTooShort, splitUsername("8hhY:"));
+    try std.testing.expectError(error.ZixTooShort, splitUsername("8hhY:ab"));
+    try std.testing.expectError(error.ZixMissingSeparator, splitUsername(""));
 
     // A second separator lands inside the source half, where it is not an ice-char.
-    try std.testing.expectError(error.BadCharacter, splitUsername("8hhY:9uB6:extra"));
+    try std.testing.expectError(error.ZixBadCharacter, splitUsername("8hhY:9uB6:extra"));
 }
 
 test "zix ice: username write, refuses to overflow the caller buffer" {
@@ -253,7 +253,7 @@ test "zix ice: username write, refuses to overflow the caller buffer" {
     try std.testing.expectEqualStrings("8hhY:9uB6", try writeUsername(&exact, "8hhY", "9uB6"));
 
     var one_short: [8]u8 = undefined;
-    try std.testing.expectError(error.NoSpace, writeUsername(&one_short, "8hhY", "9uB6"));
+    try std.testing.expectError(error.ZixNoSpace, writeUsername(&one_short, "8hhY", "9uB6"));
 }
 
 test "zix ice: fill, entropy maps onto the alphabet and nothing else" {
@@ -280,5 +280,5 @@ test "zix ice: fill, too little entropy is an error and not a short credential" 
     var entropy: [4]u8 = @splat(0);
 
     var password: [MIN_PASSWORD_LEN]u8 = undefined;
-    try std.testing.expectError(error.TooShort, fillIceChars(&password, &entropy));
+    try std.testing.expectError(error.ZixTooShort, fillIceChars(&password, &entropy));
 }

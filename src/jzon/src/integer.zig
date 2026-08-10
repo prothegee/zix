@@ -23,7 +23,7 @@ pub const WriteError = @import("sink.zig").Error;
 
 /// How reading an integer can fail. A value the target type cannot hold reports
 /// the same way a malformed one does: the text is not a number this field takes.
-pub const ReadError = error{BadNumber};
+pub const ReadError = error{JzonBadNumber};
 
 /// Upper bound on the decimal length of any value of T, sign included.
 ///
@@ -127,38 +127,38 @@ pub fn appendTable(sink: *Sink, value: anytype) WriteError!void {
 ///
 /// Return:
 /// - T (the value)
-/// - error.BadNumber when the text is not an integer, or holds one T cannot carry
+/// - error.JzonBadNumber when the text is not an integer, or holds one T cannot carry
 pub fn parse(comptime T: type, text: []const u8) ReadError!T {
     const info = intInfo(T);
     const Magnitude = @Int(.unsigned, @max(info.bits, 8));
     const Wide = @Int(.signed, @max(info.bits, 8) + 1);
 
-    if (text.len == 0) return error.BadNumber;
+    if (text.len == 0) return error.JzonBadNumber;
 
     const negative = text[0] == '-';
     const digits = if (negative) text[1..] else text;
 
-    if (negative and info.signedness == .unsigned) return error.BadNumber;
-    if (digits.len == 0) return error.BadNumber;
-    if (digits[0] == '0' and digits.len > 1) return error.BadNumber;
+    if (negative and info.signedness == .unsigned) return error.JzonBadNumber;
+    if (digits.len == 0) return error.JzonBadNumber;
+    if (digits[0] == '0' and digits.len > 1) return error.JzonBadNumber;
 
     var magnitude: Magnitude = 0;
     for (digits) |byte| {
         const digit = byte -% '0';
-        if (digit > 9) return error.BadNumber;
+        if (digit > 9) return error.JzonBadNumber;
 
         const scaled = @mulWithOverflow(magnitude, 10);
-        if (scaled[1] != 0) return error.BadNumber;
+        if (scaled[1] != 0) return error.JzonBadNumber;
 
         const summed = @addWithOverflow(scaled[0], @as(Magnitude, digit));
-        if (summed[1] != 0) return error.BadNumber;
+        if (summed[1] != 0) return error.JzonBadNumber;
 
         magnitude = summed[0];
     }
 
-    if (!negative) return std.math.cast(T, magnitude) orelse error.BadNumber;
+    if (!negative) return std.math.cast(T, magnitude) orelse error.JzonBadNumber;
 
-    return std.math.cast(T, -@as(Wide, magnitude)) orelse error.BadNumber;
+    return std.math.cast(T, -@as(Wide, magnitude)) orelse error.JzonBadNumber;
 }
 
 /// The integer facts of T, or a compile error naming the type that is not one.
@@ -231,19 +231,19 @@ test "jzon: integer parse reads back what either path wrote" {
 
 test "jzon: integer parse enforces the target type's range" {
     try std.testing.expectEqual(@as(u8, 255), try parse(u8, "255"));
-    try std.testing.expectError(error.BadNumber, parse(u8, "256"));
-    try std.testing.expectError(error.BadNumber, parse(u8, "-1"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u8, "256"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u8, "-1"));
     try std.testing.expectEqual(@as(i8, -128), try parse(i8, "-128"));
-    try std.testing.expectError(error.BadNumber, parse(i8, "-129"));
-    try std.testing.expectError(error.BadNumber, parse(u64, "18446744073709551616"));
+    try std.testing.expectError(error.JzonBadNumber, parse(i8, "-129"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u64, "18446744073709551616"));
 }
 
 test "jzon: integer parse rejects text no integer can be read from" {
-    try std.testing.expectError(error.BadNumber, parse(u32, ""));
-    try std.testing.expectError(error.BadNumber, parse(u32, "-"));
-    try std.testing.expectError(error.BadNumber, parse(u32, "007"));
-    try std.testing.expectError(error.BadNumber, parse(u32, "1.0"));
-    try std.testing.expectError(error.BadNumber, parse(u32, "1e2"));
-    try std.testing.expectError(error.BadNumber, parse(u32, "12a"));
-    try std.testing.expectError(error.BadNumber, parse(i32, "--1"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u32, ""));
+    try std.testing.expectError(error.JzonBadNumber, parse(u32, "-"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u32, "007"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u32, "1.0"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u32, "1e2"));
+    try std.testing.expectError(error.JzonBadNumber, parse(u32, "12a"));
+    try std.testing.expectError(error.JzonBadNumber, parse(i32, "--1"));
 }

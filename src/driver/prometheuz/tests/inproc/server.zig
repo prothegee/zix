@@ -231,9 +231,9 @@ pub const Server = struct {
 // --------------------------------------------------------- //
 
 const RequestError = error{
-    ConnectionClosed,
-    MalformedRequest,
-    RequestTooLarge,
+    PrometheuzConnectionClosed,
+    PrometheuzMalformedRequest,
+    PrometheuzRequestTooLarge,
     OutOfMemory,
 };
 
@@ -242,8 +242,8 @@ fn readRequest(reader: *std.Io.Reader, arena: std.mem.Allocator) RequestError!re
     const request_line = try readLine(reader, arena);
 
     var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method = parts.next() orelse return error.MalformedRequest;
-    const target = parts.next() orelse return error.MalformedRequest;
+    const method = parts.next() orelse return error.PrometheuzMalformedRequest;
+    const target = parts.next() orelse return error.PrometheuzMalformedRequest;
 
     var content_length: usize = 0;
     var content_encoding: []const u8 = "";
@@ -257,14 +257,14 @@ fn readRequest(reader: *std.Io.Reader, arena: std.mem.Allocator) RequestError!re
         const value = std.mem.trim(u8, header[colon + 1 ..], " ");
 
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            content_length = std.fmt.parseInt(usize, value, 10) catch return error.MalformedRequest;
-            if (content_length > MAX_REQUEST) return error.RequestTooLarge;
+            content_length = std.fmt.parseInt(usize, value, 10) catch return error.PrometheuzMalformedRequest;
+            if (content_length > MAX_REQUEST) return error.PrometheuzRequestTooLarge;
         }
         if (std.ascii.eqlIgnoreCase(name, "content-encoding")) content_encoding = value;
     }
 
     const body = try arena.alloc(u8, content_length);
-    if (content_length > 0) reader.readSliceAll(body) catch return error.ConnectionClosed;
+    if (content_length > 0) reader.readSliceAll(body) catch return error.PrometheuzConnectionClosed;
 
     return .{
         .method = method,
@@ -278,8 +278,8 @@ fn readRequest(reader: *std.Io.Reader, arena: std.mem.Allocator) RequestError!re
 /// One CRLF-terminated line, the terminator stripped.
 fn readLine(reader: *std.Io.Reader, arena: std.mem.Allocator) RequestError![]const u8 {
     const raw = reader.takeDelimiterInclusive('\n') catch |err| switch (err) {
-        error.EndOfStream, error.ReadFailed => return error.ConnectionClosed,
-        error.StreamTooLong => return error.RequestTooLarge,
+        error.EndOfStream, error.ReadFailed => return error.PrometheuzConnectionClosed,
+        error.StreamTooLong => return error.PrometheuzRequestTooLarge,
     };
 
     var line = raw[0 .. raw.len - 1];

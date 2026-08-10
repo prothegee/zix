@@ -4,7 +4,7 @@
 //! - Needs the Redis 8 container from containers/redis on 127.0.0.1:63980
 //!   (`zig build test-runner` owns the lifecycle).
 //! - max_pending_replies bounds the batch: add() sheds with
-//!   error.QueueFull beyond it instead of growing memory.
+//!   error.RedizQueueFull beyond it instead of growing memory.
 
 const std = @import("std");
 const rediz = @import("rediz");

@@ -74,11 +74,11 @@ const TEST_FD: std.posix.fd_t = if (@import("builtin").target.os.tag == .windows
 
 test "zix edge: readGrpcPrefix with 4 bytes returns TooShort" {
     const body = [_]u8{ 0, 0, 0, 0 };
-    try std.testing.expectError(error.TooShort, zix.Grpc.readPrefix(&body));
+    try std.testing.expectError(error.ZixTooShort, zix.Grpc.readPrefix(&body));
 }
 
 test "zix edge: readGrpcPrefix with empty slice returns TooShort" {
-    try std.testing.expectError(error.TooShort, zix.Grpc.readPrefix(&.{}));
+    try std.testing.expectError(error.ZixTooShort, zix.Grpc.readPrefix(&.{}));
 }
 
 test "zix edge: GrpcContext.recvMessage body shorter than prefix returns null" {
@@ -126,7 +126,7 @@ test "zix edge: GrpcClient.connect port zero returns PortNotConfigured" {
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = 0 }, io),
     );
 }

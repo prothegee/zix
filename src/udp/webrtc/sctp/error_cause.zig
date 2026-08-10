@@ -90,7 +90,7 @@ pub const Cause = struct {
 ///
 /// Return:
 /// - void
-/// - error.BadLength, error.Truncated
+/// - error.ZixBadLength, error.ZixTruncated
 pub fn validate(region: []const u8) Error!void {
     return parameter.validate(region);
 }
@@ -155,7 +155,7 @@ pub fn find(region: []const u8, code: Code) ?Cause {
 ///
 /// Return:
 /// - []const u8 covering header, value, and padding
-/// - error.NoSpace, error.BadLength
+/// - error.ZixNoSpace, error.ZixBadLength
 pub fn write(out: []u8, code: Code, value: []const u8) Error![]const u8 {
     return parameter.write(out, @enumFromInt(@intFromEnum(code)), value);
 }
@@ -168,7 +168,7 @@ pub fn write(out: []u8, code: Code, value: []const u8) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeStaleCookie(out: []u8, staleness_us: u32) Error![]const u8 {
     var value: [4]u8 = undefined;
     std.mem.writeInt(u32, &value, staleness_us, .big);
@@ -184,7 +184,7 @@ pub fn writeStaleCookie(out: []u8, staleness_us: u32) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeInvalidStreamIdentifier(out: []u8, stream_identifier: u16) Error![]const u8 {
     var value: [4]u8 = undefined;
     std.mem.writeInt(u16, value[0..2], stream_identifier, .big);
@@ -201,7 +201,7 @@ pub fn writeInvalidStreamIdentifier(out: []u8, stream_identifier: u16) Error![]c
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeNoUserData(out: []u8, tsn: u32) Error![]const u8 {
     var value: [4]u8 = undefined;
     std.mem.writeInt(u32, &value, tsn, .big);
@@ -218,7 +218,7 @@ pub fn writeNoUserData(out: []u8, tsn: u32) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace, error.BadLength
+/// - error.ZixNoSpace, error.ZixBadLength
 pub fn writeUnrecognizedChunk(out: []u8, offending: []const u8) Error![]const u8 {
     return write(out, .UNRECOGNIZED_CHUNK_TYPE, offending);
 }
@@ -235,7 +235,7 @@ pub fn writeUnrecognizedChunk(out: []u8, offending: []const u8) Error![]const u8
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace, error.BadLength
+/// - error.ZixNoSpace, error.ZixBadLength
 pub fn writeProtocolViolation(out: []u8, detail: []const u8) Error![]const u8 {
     return write(out, .PROTOCOL_VIOLATION, detail);
 }
@@ -248,7 +248,7 @@ pub fn writeProtocolViolation(out: []u8, detail: []const u8) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace, error.BadLength
+/// - error.ZixNoSpace, error.ZixBadLength
 pub fn writeUserInitiatedAbort(out: []u8, reason: []const u8) Error![]const u8 {
     return write(out, .USER_INITIATED_ABORT, reason);
 }
@@ -260,7 +260,7 @@ pub fn writeUserInitiatedAbort(out: []u8, reason: []const u8) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeOutOfResource(out: []u8) Error![]const u8 {
     return write(out, .OUT_OF_RESOURCE, &.{});
 }
@@ -389,7 +389,7 @@ test "zix sctp: error cause read, a stale cookie of the wrong size reports nothi
 test "zix sctp: error cause write, a buffer too small errors" {
     var buf: [4]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeStaleCookie(&buf, 1));
+    try std.testing.expectError(error.ZixNoSpace, writeStaleCookie(&buf, 1));
 }
 
 test "zix sctp: error cause validate, an empty region is accepted" {

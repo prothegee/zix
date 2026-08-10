@@ -6,7 +6,7 @@ const IP: []const u8 = "127.0.0.1";
 const PORT: u16 = 9043;
 // Pick the model per target at comptime (ADR-065): .URING is the Linux shared-nothing
 // completion loop, .ASYNC the portable model. .EPOLL and .URING are Linux-only, and run()
-// returns error.DispatchModelUnsupported rather than silently serving a different model.
+// returns error.ZixDispatchModelUnsupported rather than silently serving a different model.
 const DISPATCH_MODEL: zix.Tcp.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
 const WORKERS: usize = 0; // 0 = cpu_count workers under .EPOLL / .URING, ignored by .ASYNC
 

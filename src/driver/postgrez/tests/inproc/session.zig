@@ -34,15 +34,15 @@ const REPLY_BUF_SIZE = 256 * 1024;
 const SYNTAX_ERROR = "42601";
 
 pub const Error = error{
-    ConnectionClosed,
-    MalformedMessage,
-    MessageTooLarge,
-    Truncated,
+    PostgrezConnectionClosed,
+    PostgrezMalformedMessage,
+    PostgrezMessageTooLarge,
+    PostgrezTruncated,
     WriteFailed,
     OutOfMemory,
     /// The client sent Terminate, or the connection is finished for any other
     /// orderly reason.
-    Done,
+    PostgrezDone,
 };
 
 /// A parsed statement: its text plus whatever parameter types the client
@@ -140,7 +140,7 @@ pub const Session = struct {
         }
 
         if (msg == .flush) return self.flushReply();
-        if (msg == .terminate) return error.Done;
+        if (msg == .terminate) return error.PostgrezDone;
 
         if (self.failed) return;
 
@@ -161,7 +161,7 @@ pub const Session = struct {
     }
 
     fn flushReply(self: *Self) Error!void {
-        const bytes = self.reply.finish() catch return error.Truncated;
+        const bytes = self.reply.finish() catch return error.PostgrezTruncated;
         try self.transport.send(bytes);
         self.reply.reset();
     }
@@ -322,7 +322,7 @@ pub const Session = struct {
     ) Error!void {
         if (self.options.drop_on_statement) |marker| {
             const trimmed = catalog_mod.normalize(sql);
-            if (std.mem.startsWith(u8, trimmed, marker)) return error.ConnectionClosed;
+            if (std.mem.startsWith(u8, trimmed, marker)) return error.PostgrezConnectionClosed;
         }
 
         if (try self.runBuiltin(sql, parameters, binary, describe_rows)) return;
@@ -386,7 +386,7 @@ pub const Session = struct {
                 .copy_data => |chunk| rows_seen += std.mem.count(u8, chunk, "\n"),
                 .copy_done => break,
                 .copy_fail => |text| return self.fail(text, "57014"),
-                .terminate => return error.Done,
+                .terminate => return error.PostgrezDone,
                 else => return self.fail("unexpected message during copy", SYNTAX_ERROR),
             }
         }

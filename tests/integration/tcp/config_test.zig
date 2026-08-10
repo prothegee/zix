@@ -53,7 +53,7 @@ test "zix integration: TcpServer.init, port zero returns PortNotConfigured" {
         .port = 0,
         .dispatch_model = .ASYNC,
     });
-    try std.testing.expectError(error.PortNotConfigured, result);
+    try std.testing.expectError(error.ZixPortNotConfigured, result);
 }
 
 test "zix integration: HandlerFn, echoHandler satisfies the type" {
@@ -69,7 +69,7 @@ test "zix integration: TcpClient.connect, port zero returns PortNotConfigured" {
         .ip = "127.0.0.1",
         .port = 0,
     }, io);
-    try std.testing.expectError(error.PortNotConfigured, result);
+    try std.testing.expectError(error.ZixPortNotConfigured, result);
 }
 
 test "zix integration: TcpClient, recv_timeout_ms fires when server sends no data" {

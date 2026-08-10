@@ -38,11 +38,11 @@ pub fn run(io: std.Io, arena: std.mem.Allocator, out: *std.Io.Writer, root: root
     const request_line = try std.fmt.allocPrint(arena, "stop {s}", .{name});
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     const reply = control_client.call(io, socket_path, request_line, &reply_buf) catch |err| switch (err) {
-        error.DaemonNotRunning => {
+        error.ZixerDaemonNotRunning => {
             try out.writeAll("daemon is not running, nothing is started\n");
             return 1;
         },
-        error.UdsNotSupported => {
+        error.ZixerUdsNotSupported => {
             try out.writeAll("unix sockets are not supported on this platform\n");
             return 1;
         },

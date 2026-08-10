@@ -56,7 +56,7 @@ const cases = [_]Case{
         .route = "/order",
         .body = EXTRA_KEY_BODY,
         .want_status = 400,
-        .want_body_substr = "UnknownField",
+        .want_body_substr = "JzonUnknownField",
     },
     .{
         .what = "the same unknown key is stepped over on the lenient route",
@@ -72,7 +72,7 @@ const cases = [_]Case{
         .route = "/order",
         .body = "{\"id\":42,\"customer\":\"Ada\",\"status\":\"GONE\",\"tags\":[],\"lines\":[]}",
         .want_status = 400,
-        .want_body_substr = "UnknownEnumValue",
+        .want_body_substr = "JzonUnknownEnumValue",
     },
     .{
         .what = "a body that stops mid-document is refused",
@@ -80,7 +80,7 @@ const cases = [_]Case{
         .route = "/order",
         .body = "{\"id\":42,\"customer\":\"Ada\"",
         .want_status = 400,
-        .want_body_substr = "Truncated",
+        .want_body_substr = "JzonTruncated",
     },
     .{
         .what = "a body missing a field the record declares is refused",
@@ -88,7 +88,7 @@ const cases = [_]Case{
         .route = "/order",
         .body = "{\"id\":42,\"customer\":\"Ada\",\"status\":\"PENDING\",\"tags\":[]}",
         .want_status = 400,
-        .want_body_substr = "MissingField",
+        .want_body_substr = "JzonMissingField",
     },
     .{
         .what = "an empty body is refused before the parse runs",
@@ -213,7 +213,7 @@ pub fn runJzon(io: std.Io, server_path: []const u8, port: u16) !void {
 
         if (status != case.want_status) {
             std.debug.print("FAIL jzon case: {s}, got {d} want {d}\n", .{ case.what, status, case.want_status });
-            return error.UnexpectedStatus;
+            return error.ZixUnexpectedStatus;
         }
 
         if (case.want_body_substr) |want| {

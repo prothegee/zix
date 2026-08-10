@@ -159,8 +159,8 @@ fn recvReply(fd: std.posix.fd_t, sid: u31, buf: []u8, encoding_buf: []u8) !Reply
                     return .{ .status = status, .body = buf[0..body_len], .content_encoding = encoding_buf[0..encoding_len], .content_range = replyRange(range_buf[0..range_len]) };
                 }
             },
-            zix.Http2.FRAME_TYPE_GOAWAY => return error.ServerGoaway,
-            zix.Http2.FRAME_TYPE_RST_STREAM => return error.StreamReset,
+            zix.Http2.FRAME_TYPE_GOAWAY => return error.ZixServerGoaway,
+            zix.Http2.FRAME_TYPE_RST_STREAM => return error.ZixStreamReset,
             else => {},
         }
     }

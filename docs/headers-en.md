@@ -4,7 +4,7 @@
 
 Every HTTP response in zix can carry custom headers added via `res.addHeader(name, value)`. The number of headers a single response is allowed to carry is controlled by `HttpServerConfig.max_response_headers`, which accepts a `zix.Http.HeaderSize` value.
 
-The backing buffer is arena-allocated per request to exactly the configured cap: no wasted memory, no false ceiling. `addHeader()` returns `error.TooManyHeaders` once the cap is reached.
+The backing buffer is arena-allocated per request to exactly the configured cap: no wasted memory, no false ceiling. `addHeader()` returns `error.ZixTooManyHeaders` once the cap is reached.
 
 ---
 
@@ -52,8 +52,8 @@ If you reach 16 headers in normal operation, move to `.COMMON`. If you reach 32,
 `addHeader()` rejects any `name` or `value` that contains `\r` (CR) or `\n` (LF):
 
 ```
-error.InvalidHeaderName   (CR or LF found in header name)
-error.InvalidHeaderValue  (CR or LF found in header value)
+error.ZixInvalidHeaderName   (CR or LF found in header name)
+error.ZixInvalidHeaderValue  (CR or LF found in header value)
 ```
 
 **Never pass user-controlled data directly into `addHeader()` without sanitization.** Even with the CR/LF guard, header values that include `:` or resemble other headers can confuse upstream proxies. If a value comes from a request body, query param, or path segment, validate it before use.
@@ -83,7 +83,7 @@ Remember that every header you add is visible to the client (and any proxy betwe
 Modifying or adding headers during the response phase is strictly controlled to maintain performance and protocol integrity.
 
 1. **Protocol Violation (Timing)**: HTTP/1.1 requires the status line and all headers to be sent before the body. If `res.send()` has already begun transmitting data, it is physically too late to add new headers.
-2. **Buffer Capacity**: The `send()` function stages headers in a 4096-byte stack buffer. Extremely large header sets or runtime modifications that push the total header block size beyond 4KB will result in `error.BufferTooSmall`.
+2. **Buffer Capacity**: The `send()` function stages headers in a 4096-byte stack buffer. Extremely large header sets or runtime modifications that push the total header block size beyond 4KB will result in `error.ZixBufferTooSmall`.
 3. **Concurrency Safety**: In a multi-threaded environment, modifying headers while `send()` is processing the buffer can lead to race conditions and data corruption.
 4. **Injection Protection**: Any runtime modification using external data must continue to respect the CR/LF injection guards to prevent security vulnerabilities.
 
@@ -99,9 +99,9 @@ try res.addHeader("X-Foo", "bar");
 
 // Handle explicitly: give the client a meaningful error
 res.addHeader("X-Foo", "bar") catch |err| switch (err) {
-    error.TooManyHeaders    => { res.setStatus(.INTERNAL_SERVER_ERROR); try res.sendJson("{\"error\":\"too many headers\"}"); return; },
-    error.InvalidHeaderName => { res.setStatus(.BAD_REQUEST);           try res.sendJson("{\"error\":\"invalid header name\"}"); return; },
-    error.InvalidHeaderValue => { res.setStatus(.BAD_REQUEST);          try res.sendJson("{\"error\":\"invalid header value\"}"); return; },
+    error.ZixTooManyHeaders    => { res.setStatus(.INTERNAL_SERVER_ERROR); try res.sendJson("{\"error\":\"too many headers\"}"); return; },
+    error.ZixInvalidHeaderName => { res.setStatus(.BAD_REQUEST);           try res.sendJson("{\"error\":\"invalid header name\"}"); return; },
+    error.ZixInvalidHeaderValue => { res.setStatus(.BAD_REQUEST);          try res.sendJson("{\"error\":\"invalid header value\"}"); return; },
     else                    => return err,
 };
 ```

@@ -53,7 +53,7 @@ test "jzon edge: an escape the rules do not spell is refused" {
 
     for (broken) |raw| {
         try std.testing.expectError(
-            error.BadEscape,
+            error.JzonBadEscape,
             string_value.take(allocator, .{ .raw = raw, .escaped = true }, .{}),
         );
     }

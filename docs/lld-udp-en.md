@@ -105,7 +105,7 @@ Same as server, fires at build time.
 ### init()
 
 ```
-1. if bind_port == 0 or server_port == 0: return error.PortNotConfigured
+1. if bind_port == 0 or server_port == 0: return error.ZixPortNotConfigured
 2. bind_addr = IpAddress.parse(config.bind_ip, bind_port)
 3. socket = bind_addr.bind(io, .dgram .udp)  // one socket for both send and receive
 4. dest = IpAddress.parse(config.ip, server_port)
@@ -125,7 +125,7 @@ socket.send(io, &dest, std.mem.asBytes(&wire))
 
 ```
 if config.recv_timeout_ms > 0:
-    if poll(socket, recv_timeout_ms) not ready: return error.RecvTimeout  // poll, not SO_RCVTIMEO
+    if poll(socket, recv_timeout_ms) not ready: return error.ZixRecvTimeout  // poll, not SO_RCVTIMEO
 buf: [@sizeOf(Packet)]u8 = undefined
 msg = socket.receive(io, &buf)         // blocking unless the poll above timed out
 if msg.data.len == 1:
@@ -134,7 +134,7 @@ if msg.data.len == 1:
 if msg.data.len == @sizeOf(Packet):
     wire_pkt: Packet = @bitCast(buf)
     return .{ .packet = fromEndian(Packet, wire_pkt, config.endianness) }
-return error.UnexpectedPacketSize
+return error.ZixUnexpectedPacketSize
 ```
 
 Length dispatch is the decoding mechanism. ACK/NACK are single-byte responses, a full packet echo or broadcast relay has exactly `@sizeOf(Packet)` bytes.
@@ -187,7 +187,7 @@ Both functions return a new value while the original is not modified.
 
 ### allow_args gate
 
-Both configs carry `allow_args: bool = false`. `init(config, args)` reads `--ip` / `--port` (server) or `--bind-ip` / `--bind-port` / `--server-port` (client) from `args` only when the flag is set, through `applyServerArgs` / `applyClientArgs`. A missing or unrecognized flag keeps the config value. The arg parse is compiled only when `args` is a real `std.process.Args`, so passing `.{}` (no CLI) skips it at comptime. The port guard runs regardless: a zero resolved port yields `error.PortNotConfigured`.
+Both configs carry `allow_args: bool = false`. `init(config, args)` reads `--ip` / `--port` (server) or `--bind-ip` / `--bind-port` / `--server-port` (client) from `args` only when the flag is set, through `applyServerArgs` / `applyClientArgs`. A missing or unrecognized flag keeps the config value. The arg parse is compiled only when `args` is a real `std.process.Args`, so passing `.{}` (no CLI) skips it at comptime. The port guard runs regardless: a zero resolved port yields `error.ZixPortNotConfigured`.
 
 ### Enum backing values
 

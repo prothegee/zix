@@ -26,7 +26,7 @@ pub const MAX_ROUTES: usize = 8;
 /// What stops a route from being admitted.
 pub const Error = error{
     /// This receiver already carries MAX_ROUTES sources.
-    TooManyRoutes,
+    ZixTooManyRoutes,
 };
 
 /// One source, as one receiver sees it.
@@ -81,11 +81,11 @@ pub const Table = struct {
     ///
     /// Return:
     /// - *Route, valid until this table is written over
-    /// - error.TooManyRoutes
+    /// - error.ZixTooManyRoutes
     pub fn admit(self: *Table, source_ssrc: u32) Error!*Route {
         if (self.find(source_ssrc)) |known| return known;
 
-        if (self.live == MAX_ROUTES) return error.TooManyRoutes;
+        if (self.live == MAX_ROUTES) return error.ZixTooManyRoutes;
 
         self.entries[self.live] = .{
             .source_ssrc = source_ssrc,
@@ -148,7 +148,7 @@ pub const Table = struct {
     ///
     /// Return:
     /// - *Route for the new source
-    /// - error.TooManyRoutes
+    /// - error.ZixTooManyRoutes
     pub fn switchSource(
         self: *Table,
         carried_ssrc: u32,
@@ -306,6 +306,6 @@ test "zix media: route admit, a receiver past the ceiling is refused" {
         _ = try routes.admit(@intCast(index + 1));
     }
 
-    try std.testing.expectError(error.TooManyRoutes, routes.admit(0xFFFF_FFFF));
+    try std.testing.expectError(error.ZixTooManyRoutes, routes.admit(0xFFFF_FFFF));
     try std.testing.expect(routes.find(1) != null);
 }

@@ -11,7 +11,7 @@ const zix = @import("zix");
 // zix.Http.Client speaks HTTP/1.1 over std.http.Client, so it works against the
 // raw zix.Http1 server. The version selector is forward-looking: HTTP_1 is the
 // default and the only implemented backend today. Selecting HTTP_2 or HTTP_3
-// yields error.UnsupportedVersion until those backends are wired.
+// yields error.ZixUnsupportedVersion until those backends are wired.
 
 pub fn main(process: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);

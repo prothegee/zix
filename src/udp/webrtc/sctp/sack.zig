@@ -34,11 +34,11 @@ pub const DUPLICATE_LEN: usize = 4;
 /// Everything that stops a SACK from being read or built.
 pub const Error = error{
     /// Fewer bytes than the fixed fields and the lists the counts announce.
-    Truncated,
+    ZixTruncated,
     /// More blocks or duplicates than the 16-bit counts can hold.
-    TooManyEntries,
+    ZixTooManyEntries,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// One run of TSNs that arrived after a hole.
@@ -191,9 +191,9 @@ pub fn valueLen(gap_block_count: usize, duplicate_count: usize) usize {
 ///
 /// Return:
 /// - Sack borrowing `value`
-/// - error.Truncated if the body is shorter than the counts in its own header claim
+/// - error.ZixTruncated if the body is shorter than the counts in its own header claim
 pub fn read(value: []const u8) Error!Sack {
-    if (value.len < FIXED_LEN) return error.Truncated;
+    if (value.len < FIXED_LEN) return error.ZixTruncated;
 
     const gap_block_count = std.mem.readInt(u16, value[8..10], .big);
     const duplicate_count = std.mem.readInt(u16, value[10..12], .big);
@@ -201,7 +201,7 @@ pub fn read(value: []const u8) Error!Sack {
     const blocks_len = @as(usize, gap_block_count) * GAP_BLOCK_LEN;
     const duplicates_len = @as(usize, duplicate_count) * DUPLICATE_LEN;
 
-    if (value.len < FIXED_LEN + blocks_len + duplicates_len) return error.Truncated;
+    if (value.len < FIXED_LEN + blocks_len + duplicates_len) return error.ZixTruncated;
 
     return .{
         .cumulative_tsn_ack = std.mem.readInt(u32, value[0..4], .big),
@@ -225,15 +225,15 @@ pub fn read(value: []const u8) Error!Sack {
 ///
 /// Return:
 /// - []const u8 chunk value
-/// - error.TooManyEntries if either list is longer than 65535
-/// - error.NoSpace if the buffer cannot hold the fixed fields and both lists
+/// - error.ZixTooManyEntries if either list is longer than 65535
+/// - error.ZixNoSpace if the buffer cannot hold the fixed fields and both lists
 pub fn write(out: []u8, fields: Fields) Error![]const u8 {
-    if (fields.gap_blocks.len > std.math.maxInt(u16)) return error.TooManyEntries;
-    if (fields.duplicates.len > std.math.maxInt(u16)) return error.TooManyEntries;
+    if (fields.gap_blocks.len > std.math.maxInt(u16)) return error.ZixTooManyEntries;
+    if (fields.duplicates.len > std.math.maxInt(u16)) return error.ZixTooManyEntries;
 
     const total = valueLen(fields.gap_blocks.len, fields.duplicates.len);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     std.mem.writeInt(u32, out[0..4], fields.cumulative_tsn_ack, .big);
     std.mem.writeInt(u32, out[4..8], fields.advertised_rwnd, .big);
@@ -382,7 +382,7 @@ test "zix sctp: sack read, an index past either list returns nothing" {
 test "zix sctp: sack read, a body shorter than the fixed fields errors" {
     const short: [11]u8 = @splat(0);
 
-    try std.testing.expectError(error.Truncated, read(&short));
+    try std.testing.expectError(error.ZixTruncated, read(&short));
 }
 
 test "zix sctp: sack read, a block count larger than the body errors" {
@@ -391,7 +391,7 @@ test "zix sctp: sack read, a block count larger than the body errors" {
 
     std.mem.writeInt(u16, buf[8..10], 4, .big);
 
-    try std.testing.expectError(error.Truncated, read(value));
+    try std.testing.expectError(error.ZixTruncated, read(value));
 }
 
 test "zix sctp: sack read, a duplicate count larger than the body errors" {
@@ -404,13 +404,13 @@ test "zix sctp: sack read, a duplicate count larger than the body errors" {
 
     std.mem.writeInt(u16, buf[10..12], 9, .big);
 
-    try std.testing.expectError(error.Truncated, read(value));
+    try std.testing.expectError(error.ZixTruncated, read(value));
 }
 
 test "zix sctp: sack write, a buffer too small errors" {
     var buf: [FIXED_LEN]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, .{
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, .{
         .cumulative_tsn_ack = 1,
         .advertised_rwnd = 1500,
         .gap_blocks = &.{.{ .start = 1, .end = 1 }},

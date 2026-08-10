@@ -18,7 +18,7 @@ const zix = @import("zix");
 const SERVER_IP: []const u8 = "127.0.0.1";
 const SERVER_PORT: u16 = 9065;
 // Pick the model per target at comptime (ADR-065). .EPOLL and .URING are Linux-only, and run()
-// returns error.DispatchModelUnsupported rather than silently serving a different model.
+// returns error.ZixDispatchModelUnsupported rather than silently serving a different model.
 const DISPATCH_MODEL: zix.Http2.DispatchModel = if (builtin.os.tag == .linux) .URING else .ASYNC;
 
 // --------------------------------------------------------- //

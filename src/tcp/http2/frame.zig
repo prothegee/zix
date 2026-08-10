@@ -172,8 +172,8 @@ fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
 pub fn recvExact(fd: std.posix.fd_t, buf: []u8) !void {
     var filled: usize = 0;
     while (filled < buf.len) {
-        const n = readOnceFD(fd, buf[filled..]) catch return error.Closed;
-        if (n == 0) return error.Closed;
+        const n = readOnceFD(fd, buf[filled..]) catch return error.ZixClosed;
+        if (n == 0) return error.ZixClosed;
         filled += n;
     }
 }

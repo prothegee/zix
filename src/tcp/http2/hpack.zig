@@ -355,7 +355,7 @@ pub fn huffDecode(src: []const u8, out: []u8) !usize {
                 const shift: u6 = @intCast(bits - sym.bits);
                 const extracted: u32 = @intCast((acc >> shift) & (@as(u64, 1) << sym.bits) - 1);
                 if (extracted == sym.code) {
-                    if (out_pos >= out.len) return error.OutputTooSmall;
+                    if (out_pos >= out.len) return error.ZixOutputTooSmall;
                     out[out_pos] = @intCast(sym_idx);
                     out_pos += 1;
                     acc &= (@as(u64, 1) << shift) - 1;
@@ -367,7 +367,7 @@ pub fn huffDecode(src: []const u8, out: []u8) !usize {
             if (!matched) break;
         }
     }
-    if (bits > 7) return error.InvalidHuffman;
+    if (bits > 7) return error.ZixInvalidHuffman;
     return out_pos;
 }
 
@@ -386,7 +386,7 @@ pub fn huffEncode(src: []const u8, out: []u8) !usize {
         bits += sym.bits;
         while (bits >= 8) {
             bits -= 8;
-            if (pos >= out.len) return error.OutputTooSmall;
+            if (pos >= out.len) return error.ZixOutputTooSmall;
             out[pos] = @intCast((acc >> @as(u6, @intCast(bits))) & 0xFF);
             pos += 1;
         }
@@ -394,7 +394,7 @@ pub fn huffEncode(src: []const u8, out: []u8) !usize {
     if (bits > 0) {
         const pad_bits: u6 = @intCast(8 - bits);
         const padded: u8 = @intCast(((acc << pad_bits) | ((@as(u64, 1) << pad_bits) - 1)) & 0xFF);
-        if (pos >= out.len) return error.OutputTooSmall;
+        if (pos >= out.len) return error.ZixOutputTooSmall;
         out[pos] = padded;
         pos += 1;
     }
@@ -500,33 +500,33 @@ pub const HpackDecoder = struct {
     }
 
     fn decodeInt(src: []const u8, pos: *usize, prefix_bits: u3) !u64 {
-        if (pos.* >= src.len) return error.UnexpectedEOF;
+        if (pos.* >= src.len) return error.ZixUnexpectedEOF;
         const mask: u8 = (@as(u8, 1) << prefix_bits) - 1;
         var val: u64 = src[pos.*] & mask;
         pos.* += 1;
         if (val < mask) return val;
         var shift: u6 = 0;
         while (true) {
-            if (pos.* >= src.len) return error.UnexpectedEOF;
+            if (pos.* >= src.len) return error.ZixUnexpectedEOF;
             const b = src[pos.*];
             pos.* += 1;
             val += (@as(u64, b & 0x7F)) << shift;
             shift += 7;
             if ((b & 0x80) == 0) break;
-            if (shift > 56) return error.IntegerOverflow;
+            if (shift > 56) return error.ZixIntegerOverflow;
         }
         return val;
     }
 
     fn decodeString(src: []const u8, pos: *usize, scratch: []u8, scratch_pos: *usize) ![]const u8 {
-        if (pos.* >= src.len) return error.UnexpectedEOF;
+        if (pos.* >= src.len) return error.ZixUnexpectedEOF;
         const hbit = (src[pos.*] & 0x80) != 0;
         const slen: usize = @intCast(try decodeInt(src, pos, 7));
-        if (pos.* + slen > src.len) return error.UnexpectedEOF;
+        if (pos.* + slen > src.len) return error.ZixUnexpectedEOF;
         const raw = src[pos.*..][0..slen];
         pos.* += slen;
         if (!hbit) {
-            if (scratch_pos.* + slen > scratch.len) return error.ScratchFull;
+            if (scratch_pos.* + slen > scratch.len) return error.ZixScratchFull;
             @memcpy(scratch[scratch_pos.*..][0..slen], raw);
             const out = scratch[scratch_pos.*..][0..slen];
             scratch_pos.* += slen;
@@ -534,7 +534,7 @@ pub const HpackDecoder = struct {
         }
         const out_start = scratch_pos.*;
         const available = scratch.len - out_start;
-        if (available == 0) return error.ScratchFull;
+        if (available == 0) return error.ZixScratchFull;
         const n = try huffDecode(raw, scratch[out_start..]);
         const out = scratch[out_start..][0..n];
         scratch_pos.* += n;
@@ -544,7 +544,7 @@ pub const HpackDecoder = struct {
     // Copy src into scratch[pos..] and advance pos. All decoded output (including
     // indexed lookups) goes through scratch so callers get a stable, mutable slice.
     fn copyIntoScratch(src: []const u8, scratch: []u8, pos: *usize) ![]const u8 {
-        if (pos.* + src.len > scratch.len) return error.ScratchFull;
+        if (pos.* + src.len > scratch.len) return error.ZixScratchFull;
 
         @memcpy(scratch[pos.*..][0..src.len], src);
         const result = scratch[pos.*..][0..src.len];
@@ -570,14 +570,14 @@ pub const HpackDecoder = struct {
         var scratch_pos: usize = 0;
 
         while (pos < block.len) {
-            if (n_out >= out.len) return error.TooManyHeaders;
+            if (n_out >= out.len) return error.ZixTooManyHeaders;
             const first = block[pos];
 
             if ((first & 0x80) != 0) {
                 // Indexed: copy from static/dynamic table into scratch so callers get
                 // stable slices even when dyn[] points into dyn_buf across requests.
                 const idx: usize = @intCast(try decodeInt(block, &pos, 7));
-                const entry = self.getEntry(idx) orelse return error.InvalidIndex;
+                const entry = self.getEntry(idx) orelse return error.ZixInvalidIndex;
                 out[n_out] = .{
                     .name = try copyIntoScratch(entry.name, scratch, &scratch_pos),
                     .value = try copyIntoScratch(entry.value, scratch, &scratch_pos),
@@ -588,7 +588,7 @@ pub const HpackDecoder = struct {
                 const name = if (idx == 0) blk: {
                     break :blk try decodeString(block, &pos, scratch, &scratch_pos);
                 } else blk: {
-                    const entry = self.getEntry(idx) orelse return error.InvalidIndex;
+                    const entry = self.getEntry(idx) orelse return error.ZixInvalidIndex;
                     break :blk try copyIntoScratch(entry.name, scratch, &scratch_pos);
                 };
                 const value = try decodeString(block, &pos, scratch, &scratch_pos);
@@ -605,7 +605,7 @@ pub const HpackDecoder = struct {
                 const name = if (idx == 0) blk: {
                     break :blk try decodeString(block, &pos, scratch, &scratch_pos);
                 } else blk: {
-                    const entry = self.getEntry(idx) orelse return error.InvalidIndex;
+                    const entry = self.getEntry(idx) orelse return error.ZixInvalidIndex;
                     break :blk try copyIntoScratch(entry.name, scratch, &scratch_pos);
                 };
                 const value = try decodeString(block, &pos, scratch, &scratch_pos);
@@ -634,22 +634,22 @@ pub const HpackEncoder = struct {
     fn writeInt(self: *HpackEncoder, val: u64, prefix_bits: u3, first_byte_high: u8) !void {
         const mask: u64 = (@as(u64, 1) << prefix_bits) - 1;
         if (val < mask) {
-            if (self.pos >= self.buf.len) return error.BufferFull;
+            if (self.pos >= self.buf.len) return error.ZixBufferFull;
             self.buf[self.pos] = first_byte_high | @as(u8, @intCast(val));
             self.pos += 1;
             return;
         }
-        if (self.pos >= self.buf.len) return error.BufferFull;
+        if (self.pos >= self.buf.len) return error.ZixBufferFull;
         self.buf[self.pos] = first_byte_high | @as(u8, @intCast(mask));
         self.pos += 1;
         var rem = val - mask;
         while (rem >= 0x80) {
-            if (self.pos >= self.buf.len) return error.BufferFull;
+            if (self.pos >= self.buf.len) return error.ZixBufferFull;
             self.buf[self.pos] = @intCast((rem & 0x7F) | 0x80);
             self.pos += 1;
             rem >>= 7;
         }
-        if (self.pos >= self.buf.len) return error.BufferFull;
+        if (self.pos >= self.buf.len) return error.ZixBufferFull;
         self.buf[self.pos] = @intCast(rem);
         self.pos += 1;
     }
@@ -661,12 +661,12 @@ pub const HpackEncoder = struct {
         const hn: ?usize = huffEncode(str, &hbuf) catch null;
         if (hn != null and hn.? < str.len) {
             try self.writeInt(hn.?, 7, 0x80);
-            if (self.pos + hn.? > self.buf.len) return error.BufferFull;
+            if (self.pos + hn.? > self.buf.len) return error.ZixBufferFull;
             @memcpy(self.buf[self.pos..][0..hn.?], hbuf[0..hn.?]);
             self.pos += hn.?;
         } else {
             try self.writeInt(str.len, 7, 0x00);
-            if (self.pos + str.len > self.buf.len) return error.BufferFull;
+            if (self.pos + str.len > self.buf.len) return error.ZixBufferFull;
             @memcpy(self.buf[self.pos..][0..str.len], str);
             self.pos += str.len;
         }

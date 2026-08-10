@@ -18,7 +18,7 @@ pub const EncodeError = @import("sink.zig").Error;
 
 /// How decoding can fail: no room for the decoded bytes, or an escape the rules
 /// do not spell.
-pub const DecodeError = error{ NoSpaceLeft, BadEscape };
+pub const DecodeError = error{ NoSpaceLeft, JzonBadEscape };
 
 const HEX_DIGITS = "0123456789abcdef";
 
@@ -171,7 +171,7 @@ pub fn encodeBody(sink: *Sink, text: []const u8) EncodeError!void {
 ///   `Cursor.stringSpan` hands back.
 /// - A `\u` escape becomes UTF-8. A high surrogate must be followed immediately
 ///   by a low one in `\u` notation, the rule std.json holds to, so an unpaired
-///   half is error.BadEscape rather than a replacement character.
+///   half is error.JzonBadEscape rather than a replacement character.
 ///
 /// Param:
 /// sink - *Sink (where the decoded bytes go)
@@ -180,7 +180,7 @@ pub fn encodeBody(sink: *Sink, text: []const u8) EncodeError!void {
 /// Return:
 /// - void
 /// - error.NoSpaceLeft when the decoded form does not fit
-/// - error.BadEscape on an escape the rules do not spell
+/// - error.JzonBadEscape on an escape the rules do not spell
 pub fn decode(sink: *Sink, raw: []const u8) DecodeError!void {
     var index: usize = 0;
 
@@ -194,7 +194,7 @@ pub fn decode(sink: *Sink, raw: []const u8) DecodeError!void {
         }
 
         index += 1;
-        if (index == raw.len) return error.BadEscape;
+        if (index == raw.len) return error.JzonBadEscape;
 
         const spelling = raw[index];
         index += 1;
@@ -209,7 +209,7 @@ pub fn decode(sink: *Sink, raw: []const u8) DecodeError!void {
             'r' => try sink.byte('\r'),
             't' => try sink.byte('\t'),
             'u' => index = try decodeUnicode(sink, raw, index),
-            else => return error.BadEscape,
+            else => return error.JzonBadEscape,
         }
     }
 }
@@ -220,7 +220,7 @@ pub fn decode(sink: *Sink, raw: []const u8) DecodeError!void {
 /// Return:
 /// - usize (the position just past the escape that was decoded)
 /// - error.NoSpaceLeft when the encoded code point does not fit
-/// - error.BadEscape on a short escape, a bad hex digit, or an unpaired half
+/// - error.JzonBadEscape on a short escape, a bad hex digit, or an unpaired half
 fn decodeUnicode(sink: *Sink, raw: []const u8, index: usize) DecodeError!usize {
     const first = try hexQuad(raw, index);
     const after_first = index + 4;
@@ -231,12 +231,12 @@ fn decodeUnicode(sink: *Sink, raw: []const u8, index: usize) DecodeError!usize {
         return after_first;
     }
 
-    if (first > 0xdbff) return error.BadEscape;
-    if (after_first + 6 > raw.len) return error.BadEscape;
-    if (raw[after_first] != '\\' or raw[after_first + 1] != 'u') return error.BadEscape;
+    if (first > 0xdbff) return error.JzonBadEscape;
+    if (after_first + 6 > raw.len) return error.JzonBadEscape;
+    if (raw[after_first] != '\\' or raw[after_first + 1] != 'u') return error.JzonBadEscape;
 
     const second = try hexQuad(raw, after_first + 2);
-    if (second < 0xdc00 or second > 0xdfff) return error.BadEscape;
+    if (second < 0xdc00 or second > 0xdfff) return error.JzonBadEscape;
 
     const codepoint: u21 = 0x10000 +
         ((@as(u21, first) - 0xd800) << 10) +
@@ -248,7 +248,7 @@ fn decodeUnicode(sink: *Sink, raw: []const u8, index: usize) DecodeError!usize {
 
 /// Read the four hex digits of a `\u` escape.
 fn hexQuad(raw: []const u8, index: usize) DecodeError!u16 {
-    if (index + 4 > raw.len) return error.BadEscape;
+    if (index + 4 > raw.len) return error.JzonBadEscape;
 
     var value: u16 = 0;
     for (raw[index..][0..4]) |byte| {
@@ -256,7 +256,7 @@ fn hexQuad(raw: []const u8, index: usize) DecodeError!u16 {
             '0'...'9' => byte - '0',
             'a'...'f' => byte - 'a' + 10,
             'A'...'F' => byte - 'A' + 10,
-            else => return error.BadEscape,
+            else => return error.JzonBadEscape,
         };
 
         value = value * 16 + digit;
@@ -268,7 +268,7 @@ fn hexQuad(raw: []const u8, index: usize) DecodeError!u16 {
 /// Write one code point as UTF-8.
 fn writeUtf8(sink: *Sink, codepoint: u21) DecodeError!void {
     var encoded: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(codepoint, &encoded) catch return error.BadEscape;
+    const len = std.unicode.utf8Encode(codepoint, &encoded) catch return error.JzonBadEscape;
 
     try sink.bytes(encoded[0..len]);
 }
@@ -416,11 +416,11 @@ test "jzon: decode rejects an unpaired surrogate half" {
     var buf: [16]u8 = undefined;
 
     var lone_high: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, decode(&lone_high, "\\ud83d"));
+    try std.testing.expectError(error.JzonBadEscape, decode(&lone_high, "\\ud83d"));
 
     var lone_low: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, decode(&lone_low, "\\udca9"));
+    try std.testing.expectError(error.JzonBadEscape, decode(&lone_low, "\\udca9"));
 
     var high_then_plain: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, decode(&high_then_plain, "\\ud83d\\u0041"));
+    try std.testing.expectError(error.JzonBadEscape, decode(&high_then_plain, "\\ud83d\\u0041"));
 }

@@ -134,10 +134,10 @@ Every generated parser needs the same two answers, so `fields.zig` owns them: on
 flowchart TB
     key[a key arrives] --> known{does T declare it?}
     known -- no --> unknown{unknown option}
-    unknown -- REJECT --> uf[error.UnknownField]
+    unknown -- REJECT --> uf[error.JzonUnknownField]
     unknown -- SKIP --> step[skip the whole value]
     known -- yes --> seen{already marked?}
-    seen -- yes --> dup[error.Unexpected]
+    seen -- yes --> dup[error.JzonUnexpected]
     seen -- no --> read[read the value, mark the field]
     read --> done[document ends]
     step --> done
@@ -145,7 +145,7 @@ flowchart TB
     fill -- yes --> ok[the value]
     fill -- no --> def{unmarked field declares a default?}
     def -- yes --> apply[apply it]
-    def -- no --> mf[error.MissingField]
+    def -- no --> mf[error.JzonMissingField]
 ```
 
 The same key twice is `Unexpected`, not a silent last-one-wins.
@@ -200,9 +200,9 @@ Every serialize strategy writes bytes every deserialize strategy reads back, so 
 
 | Document | `.STD` | `.SCANNER` | `.GENERATED` and `.GENERATED_VECTOR` |
 | :- | :- | :- | :- |
-| `[104,105]` into a `[]const u8` | fills it, giving `"hi"` | `error.Unexpected` | `error.Unexpected` |
-| `-0` into an unsigned field | reads the digits, giving `0` | `error.BadNumber` | `error.BadNumber` |
-| `"\q"` | `error.Unexpected`, a syntax error | `error.Unexpected`, a syntax error | `error.BadEscape` |
+| `[104,105]` into a `[]const u8` | fills it, giving `"hi"` | `error.JzonUnexpected` | `error.JzonUnexpected` |
+| `-0` into an unsigned field | reads the digits, giving `0` | `error.JzonBadNumber` | `error.JzonBadNumber` |
+| `"\q"` | `error.JzonUnexpected`, a syntax error | `error.JzonUnexpected`, a syntax error | `error.JzonBadEscape` |
 
 The reasoning in each case:
 

@@ -35,7 +35,7 @@ pub const ANSWER_LEN: usize = 2 + 2 + 2 + PROFILE_LEN + 1;
 /// What stops the extension from being read.
 pub const Error = error{
     /// The bytes do not frame as an extensions block or as a UseSRTPData value.
-    Malformed,
+    ZixMalformed,
 };
 
 /// What a client offered, borrowed from the hello it came in.
@@ -101,7 +101,7 @@ pub const Offered = struct {
 ///
 /// Return:
 /// - ?[]const u8, the extension_data alone, borrowing `extensions`
-/// - error.Malformed when an entry runs past the end of the block, or use_srtp appears twice
+/// - error.ZixMalformed when an entry runs past the end of the block, or use_srtp appears twice
 pub fn find(extensions: []const u8) Error!?[]const u8 {
     var found: ?[]const u8 = null;
     var at: usize = 0;
@@ -111,10 +111,10 @@ pub fn find(extensions: []const u8) Error!?[]const u8 {
         const len = std.mem.readInt(u16, extensions[at + 2 ..][0..2], .big);
         const body_at = at + 4;
 
-        if (body_at + len > extensions.len) return error.Malformed;
+        if (body_at + len > extensions.len) return error.ZixMalformed;
 
         if (kind == EXTENSION_TYPE) {
-            if (found != null) return error.Malformed;
+            if (found != null) return error.ZixMalformed;
 
             found = extensions[body_at..][0..len];
         }
@@ -122,7 +122,7 @@ pub fn find(extensions: []const u8) Error!?[]const u8 {
         at = body_at + len;
     }
 
-    if (at != extensions.len) return error.Malformed;
+    if (at != extensions.len) return error.ZixMalformed;
 
     return found;
 }
@@ -134,20 +134,20 @@ pub fn find(extensions: []const u8) Error!?[]const u8 {
 ///
 /// Return:
 /// - Offered borrowing `extension_data`
-/// - error.Malformed for a truncated value, an odd profile list, an empty list, or trailing bytes
+/// - error.ZixMalformed for a truncated value, an odd profile list, an empty list, or trailing bytes
 pub fn read(extension_data: []const u8) Error!Offered {
-    if (extension_data.len < 3) return error.Malformed;
+    if (extension_data.len < 3) return error.ZixMalformed;
 
     const profiles_len = std.mem.readInt(u16, extension_data[0..2], .big);
 
-    if (profiles_len == 0) return error.Malformed;
-    if (profiles_len % PROFILE_LEN != 0) return error.Malformed;
-    if (2 + @as(usize, profiles_len) >= extension_data.len) return error.Malformed;
+    if (profiles_len == 0) return error.ZixMalformed;
+    if (profiles_len % PROFILE_LEN != 0) return error.ZixMalformed;
+    if (2 + @as(usize, profiles_len) >= extension_data.len) return error.ZixMalformed;
 
     const mki_at = 2 + @as(usize, profiles_len);
     const mki_len = extension_data[mki_at];
 
-    if (mki_at + 1 + @as(usize, mki_len) != extension_data.len) return error.Malformed;
+    if (mki_at + 1 + @as(usize, mki_len) != extension_data.len) return error.ZixMalformed;
 
     return .{
         .profiles = extension_data[2..mki_at],
@@ -183,9 +183,9 @@ pub fn select(offered: Offered, preferences: []const exporter.SrtpProfile) ?expo
 ///
 /// Return:
 /// - []const u8 of exactly ANSWER_LEN bytes
-/// - error.NoSpace
-pub fn writeAnswer(out: []u8, chosen: exporter.SrtpProfile) error{NoSpace}![]const u8 {
-    if (out.len < ANSWER_LEN) return error.NoSpace;
+/// - error.ZixNoSpace
+pub fn writeAnswer(out: []u8, chosen: exporter.SrtpProfile) error{ZixNoSpace}![]const u8 {
+    if (out.len < ANSWER_LEN) return error.ZixNoSpace;
 
     std.mem.writeInt(u16, out[0..2], EXTENSION_TYPE, .big);
     std.mem.writeInt(u16, out[2..4], PROFILE_LEN + 2 + 1, .big);
@@ -235,22 +235,22 @@ test "zix dtls: use_srtp read, a master key identifier is reported and not dropp
 
 test "zix dtls: use_srtp read, a bad value is refused" {
     // Too short to hold a list length and an MKI length.
-    try std.testing.expectError(error.Malformed, read(&[_]u8{ 0x00, 0x02 }));
+    try std.testing.expectError(error.ZixMalformed, read(&[_]u8{ 0x00, 0x02 }));
 
     // An odd profile list, so one entry is half there.
-    try std.testing.expectError(error.Malformed, read(&[_]u8{ 0x00, 0x03, 0x00, 0x01, 0x00, 0x00 }));
+    try std.testing.expectError(error.ZixMalformed, read(&[_]u8{ 0x00, 0x03, 0x00, 0x01, 0x00, 0x00 }));
 
     // An empty profile list, which offers nothing to agree on.
-    try std.testing.expectError(error.Malformed, read(&[_]u8{ 0x00, 0x00, 0x00 }));
+    try std.testing.expectError(error.ZixMalformed, read(&[_]u8{ 0x00, 0x00, 0x00 }));
 
     // The list runs past the value.
-    try std.testing.expectError(error.Malformed, read(&[_]u8{ 0x00, 0x08, 0x00, 0x01, 0x00 }));
+    try std.testing.expectError(error.ZixMalformed, read(&[_]u8{ 0x00, 0x08, 0x00, 0x01, 0x00 }));
 
     // The MKI length disagrees with what follows it.
-    try std.testing.expectError(error.Malformed, read(&[_]u8{ 0x00, 0x02, 0x00, 0x01, 0x04, 0xAA }));
+    try std.testing.expectError(error.ZixMalformed, read(&[_]u8{ 0x00, 0x02, 0x00, 0x01, 0x04, 0xAA }));
 
     // Trailing bytes after the MKI.
-    try std.testing.expectError(error.Malformed, read(&[_]u8{ 0x00, 0x02, 0x00, 0x01, 0x00, 0xFF }));
+    try std.testing.expectError(error.ZixMalformed, read(&[_]u8{ 0x00, 0x02, 0x00, 0x01, 0x00, 0xFF }));
 }
 
 test "zix dtls: use_srtp read, an unregistered profile number still reads" {
@@ -287,11 +287,11 @@ test "zix dtls: use_srtp find, a block without it gives null" {
 }
 
 test "zix dtls: use_srtp find, an entry running past the block is refused" {
-    try std.testing.expectError(error.Malformed, find(&[_]u8{ 0x00, 0x0E, 0x00, 0x08, 0x00 }));
+    try std.testing.expectError(error.ZixMalformed, find(&[_]u8{ 0x00, 0x0E, 0x00, 0x08, 0x00 }));
 
     // A trailing stub too short to be an entry is not a block this walk can trust, and the walk
     // reaches it only because a match does not end it.
-    try std.testing.expectError(error.Malformed, find(&[_]u8{ 0x00, 0x0E, 0x00, 0x00, 0x00 }));
+    try std.testing.expectError(error.ZixMalformed, find(&[_]u8{ 0x00, 0x0E, 0x00, 0x00, 0x00 }));
 }
 
 test "zix dtls: use_srtp find, the extension appearing twice is refused" {
@@ -300,7 +300,7 @@ test "zix dtls: use_srtp find, the extension appearing twice is refused" {
         0x00, 0x0E, 0x00, 0x05, 0x00, 0x02, 0x00, 0x02, 0x00,
     };
 
-    try std.testing.expectError(error.Malformed, find(&twice));
+    try std.testing.expectError(error.ZixMalformed, find(&twice));
 }
 
 test "zix dtls: use_srtp select, the server order decides" {
@@ -343,7 +343,7 @@ test "zix dtls: use_srtp writeAnswer, the answer names exactly one profile" {
 test "zix dtls: use_srtp writeAnswer, a short buffer errors" {
     var buf: [ANSWER_LEN - 1]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeAnswer(&buf, .SRTP_AES128_CM_HMAC_SHA1_80));
+    try std.testing.expectError(error.ZixNoSpace, writeAnswer(&buf, .SRTP_AES128_CM_HMAC_SHA1_80));
 }
 
 test "zix dtls: use_srtp, the chosen profile is the one keys derive from" {
@@ -363,7 +363,7 @@ test "zix dtls: use_srtp, the chosen profile is the one keys derive from" {
     try std.testing.expect(!std.mem.eql(u8, &keys.client_write_key, &keys.server_write_key));
 
     try std.testing.expectError(
-        error.UnsupportedProfile,
+        error.ZixUnsupportedProfile,
         exporter.srtpKeys(.SRTP_NULL_HMAC_SHA1_80, master, client_random, server_random),
     );
 }

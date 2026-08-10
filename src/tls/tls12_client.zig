@@ -70,12 +70,12 @@ pub const FinishResult = struct {
     ///
     /// Return:
     /// - void on a trusted, hostname-matching certificate
-    /// - error.NoServerCertificate (the server sent no Certificate)
+    /// - error.ZixNoServerCertificate (the server sent no Certificate)
     /// - error.CertificateExpired / error.CertificateNotYetValid / error.CertificateIssuerMismatch
     /// - error.CertificateHostMismatch (no SAN/CN entry matches hostname)
     pub fn verifyServerCert(self: *const FinishResult, anchor_der: []const u8, hostname: []const u8, now_sec: i64) !void {
         const der = self.serverCertDer();
-        if (der.len == 0) return error.NoServerCertificate;
+        if (der.len == 0) return error.ZixNoServerCertificate;
 
         try cert_verify.verifyCertChain(der, anchor_der, now_sec);
         try cert_verify.verifyCertHostname(der, hostname);
@@ -107,8 +107,8 @@ pub const ClientConnection = struct {
     pub fn verifyServerFinished(self: *const ClientConnection, finished_record: []const u8, expected: [12]u8) !void {
         var plain: [64]u8 = undefined;
         const msg = try record.deprotect(&plain, finished_record, self.km.server_write_key, self.km.server_write_iv, 0);
-        if (msg.len < 16 or msg[0] != 20) return error.UnexpectedMessage;
-        if (!std.mem.eql(u8, msg[4..16], &expected)) return error.ServerFinishedMismatch;
+        if (msg.len < 16 or msg[0] != 20) return error.ZixUnexpectedMessage;
+        if (!std.mem.eql(u8, msg[4..16], &expected)) return error.ZixServerFinishedMismatch;
     }
 };
 
@@ -166,7 +166,7 @@ pub fn start(opts: HandshakeOptions, out: []u8) StartResult {
 pub fn finish(state: *State, server_flight1: []const u8, out: []u8) !FinishResult {
     // the flight is one handshake record carrying SH + Certificate + ServerKeyExchange + ServerHelloDone.
     var rr = wire.Reader{ .buf = server_flight1 };
-    if (try rr.readU8() != 22) return error.UnexpectedRecord;
+    if (try rr.readU8() != 22) return error.ZixUnexpectedRecord;
     _ = try rr.readU16();
     const body_len = try rr.readU16();
     const body = try rr.readBytes(body_len);
@@ -219,7 +219,7 @@ pub fn finish(state: *State, server_flight1: []const u8, out: []u8) !FinishResul
     const total = w.len + fin_rec.len;
 
     // surface the server end-entity cert so the caller can chain + hostname validate it (RFC 5280 / 6125).
-    if (parsed.cert_der.len > max_server_cert_der) return error.CertificateTooLarge;
+    if (parsed.cert_der.len > max_server_cert_der) return error.ZixCertificateTooLarge;
 
     var result: FinishResult = .{ .to_send = out[0..total], .connection = .{ .km = km }, .expected_server_finished = expected_server };
     @memcpy(result.server_cert[0..parsed.cert_der.len], parsed.cert_der);

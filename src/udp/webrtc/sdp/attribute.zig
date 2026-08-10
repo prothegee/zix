@@ -26,7 +26,7 @@ pub const SEPARATOR: u8 = ':';
 /// Everything that stops an attribute from being built.
 pub const Error = error{
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// One attribute, borrowed from the description it came from.
@@ -159,14 +159,14 @@ pub fn writtenLen(name: []const u8, value: ?[]const u8) usize {
 ///
 /// Return:
 /// - []const u8, the whole line
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn write(out: []u8, name: []const u8, value: ?[]const u8) Error![]const u8 {
     const carried = value orelse
-        return line.write(out, .ATTRIBUTE, name) catch return error.NoSpace;
+        return line.write(out, .ATTRIBUTE, name) catch return error.ZixNoSpace;
 
     const total = lineLen(name.len + 1 + carried.len);
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     // Built in place, because the name and value only become one string on the wire.
     out[0] = @intFromEnum(line.Kind.ATTRIBUTE);
@@ -291,8 +291,8 @@ test "zix sdp: attribute write, the bare form" {
 test "zix sdp: attribute write, a buffer one byte short errors" {
     var buf: [8]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, "mid", "0"));
-    try std.testing.expectError(error.NoSpace, write(buf[0..5], "ice-lite", null));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, "mid", "0"));
+    try std.testing.expectError(error.ZixNoSpace, write(buf[0..5], "ice-lite", null));
 }
 
 test "zix sdp: attribute write, what was written reads back the same" {

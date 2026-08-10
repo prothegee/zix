@@ -20,8 +20,8 @@ pub const DecodeValueError = binary.DecodeValueError;
 ///
 /// Return:
 /// - T on success
-/// - error.ValueOutOfRange when the number does not fit T
-/// - error.BadCell when the text does not parse as T
+/// - error.PostgrezValueOutOfRange when the number does not fit T
+/// - error.PostgrezBadCell when the text does not parse as T
 pub fn decode(comptime T: type, oid: Oid, bytes: []const u8) DecodeValueError!T {
     _ = oid;
 
@@ -30,16 +30,16 @@ pub fn decode(comptime T: type, oid: Oid, bytes: []const u8) DecodeValueError!T 
             if (bytes.len == 1 and bytes[0] == 't') return true;
             if (bytes.len == 1 and bytes[0] == 'f') return false;
 
-            return error.BadCell;
+            return error.PostgrezBadCell;
         },
         .int => {
             return std.fmt.parseInt(T, bytes, 10) catch |err| switch (err) {
-                error.Overflow => error.ValueOutOfRange,
-                error.InvalidCharacter => error.BadCell,
+                error.Overflow => error.PostgrezValueOutOfRange,
+                error.InvalidCharacter => error.PostgrezBadCell,
             };
         },
         .float => {
-            return std.fmt.parseFloat(T, bytes) catch error.BadCell;
+            return std.fmt.parseFloat(T, bytes) catch error.PostgrezBadCell;
         },
         .pointer => {
             if (T != []const u8) @compileError("postgrez text.decode: unsupported slice type " ++ @typeName(T) ++ ", use []const u8");
@@ -59,8 +59,8 @@ pub fn decode(comptime T: type, oid: Oid, bytes: []const u8) DecodeValueError!T 
 
 /// Parse the canonical uuid text form (8-4-4-4-12 hex) into 16 bytes.
 fn parseUuid(text: []const u8) DecodeValueError![16]u8 {
-    if (text.len != 36) return error.BadCell;
-    if (text[8] != '-' or text[13] != '-' or text[18] != '-' or text[23] != '-') return error.BadCell;
+    if (text.len != 36) return error.PostgrezBadCell;
+    if (text[8] != '-' or text[13] != '-' or text[18] != '-' or text[23] != '-') return error.PostgrezBadCell;
 
     var out: [16]u8 = undefined;
     var out_index: usize = 0;
@@ -71,13 +71,13 @@ fn parseUuid(text: []const u8) DecodeValueError![16]u8 {
             continue;
         }
 
-        const high = hexNibble(text[pos]) orelse return error.BadCell;
-        const low = hexNibble(text[pos + 1]) orelse return error.BadCell;
+        const high = hexNibble(text[pos]) orelse return error.PostgrezBadCell;
+        const low = hexNibble(text[pos + 1]) orelse return error.PostgrezBadCell;
         out[out_index] = (high << 4) | low;
         out_index += 1;
         pos += 2;
     }
-    if (out_index != 16) return error.BadCell;
+    if (out_index != 16) return error.PostgrezBadCell;
 
     return out;
 }
@@ -145,15 +145,15 @@ test "postgrez types: text decode bool" {
     try testing.expectEqual(true, try decode(bool, .BOOL, "t"));
     try testing.expectEqual(false, try decode(bool, .BOOL, "f"));
 
-    try testing.expectError(error.BadCell, decode(bool, .BOOL, "true"));
+    try testing.expectError(error.PostgrezBadCell, decode(bool, .BOOL, "true"));
 }
 
 test "postgrez types: text decode integers" {
     try testing.expectEqual(@as(i64, -42), try decode(i64, .INT8, "-42"));
     try testing.expectEqual(@as(u16, 300), try decode(u16, .INT4, "300"));
 
-    try testing.expectError(error.ValueOutOfRange, decode(u8, .INT4, "300"));
-    try testing.expectError(error.BadCell, decode(i32, .INT4, "4x2"));
+    try testing.expectError(error.PostgrezValueOutOfRange, decode(u8, .INT4, "300"));
+    try testing.expectError(error.PostgrezBadCell, decode(i32, .INT4, "4x2"));
 }
 
 test "postgrez types: text decode floats and numeric fallback" {
@@ -161,7 +161,7 @@ test "postgrez types: text decode floats and numeric fallback" {
     // numeric has no binary decoder, its text form parses into a float
     try testing.expectEqual(@as(f64, 12345.678), try decode(f64, .NUMERIC, "12345.678"));
 
-    try testing.expectError(error.BadCell, decode(f64, .NUMERIC, "abc"));
+    try testing.expectError(error.PostgrezBadCell, decode(f64, .NUMERIC, "abc"));
 }
 
 test "postgrez types: text decode raw slice passthrough" {
@@ -197,6 +197,6 @@ test "postgrez types: text decode uuid" {
         0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
     }, &parsed);
 
-    try testing.expectError(error.BadCell, decode([16]u8, .UUID, "550e8400"));
-    try testing.expectError(error.BadCell, decode([16]u8, .UUID, "550e8400-e29b-41d4-a716-44665544000z"));
+    try testing.expectError(error.PostgrezBadCell, decode([16]u8, .UUID, "550e8400"));
+    try testing.expectError(error.PostgrezBadCell, decode([16]u8, .UUID, "550e8400-e29b-41d4-a716-44665544000z"));
 }

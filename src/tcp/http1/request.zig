@@ -264,8 +264,8 @@ test "zix http1: an unimplemented method never reaches a Request" {
 
     // The parser refuses these now, so no handler ever sees one mislabelled as a
     // GET. The caller answers 501 from the error instead.
-    try std.testing.expectError(error.UnknownMethod, core.parseHead("BREW /pot HTTP/1.1\r\n\r\n"));
-    try std.testing.expectError(error.UnknownMethod, core.parseHead("VERYLONGMETHOD /x HTTP/1.1\r\n\r\n"));
+    try std.testing.expectError(error.ZixUnknownMethod, core.parseHead("BREW /pot HTTP/1.1\r\n\r\n"));
+    try std.testing.expectError(error.ZixUnknownMethod, core.parseHead("VERYLONGMETHOD /x HTTP/1.1\r\n\r\n"));
 
     const post = try core.parseHead("POST /x HTTP/1.1\r\n\r\n");
     const post_req = Request.init(&post.head, "", -1);

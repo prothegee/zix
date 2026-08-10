@@ -15,7 +15,7 @@
 //! - Without the interleaving extension (RFC 8260, not implemented) a sender may only fragment
 //!   one message at a time, so exactly one message is ever under assembly. A fragment that
 //!   arrives while another message is open is a protocol violation, not a second buffer.
-//! - A chunk that does not fit the pending limits is refused with error.NoSpace, and the caller
+//! - A chunk that does not fit the pending limits is refused with error.ZixNoSpace, and the caller
 //!   must then NOT acknowledge that TSN. Dropping a chunk is legal and the sender retransmits.
 //!   Acknowledging one that was dropped is not: the sender would never send it again.
 //! - The payload of a returned message is borrowed and stays valid only until the next call.
@@ -42,11 +42,11 @@ pub const Limits = struct {
 pub const Error = error{
     OutOfMemory,
     /// A fragment that cannot belong to the message being assembled.
-    ProtocolViolation,
+    ZixProtocolViolation,
     /// A message grew past max_message_bytes.
-    MessageTooLarge,
+    ZixMessageTooLarge,
     /// No room to hold this chunk. Do not acknowledge its TSN.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// One complete user message.
@@ -89,7 +89,7 @@ const Partial = struct {
 /// defer reassembler.deinit();
 ///
 /// reassembler.accept(chunk) catch |err| switch (err) {
-///     error.NoSpace => {}, // dropped, so leave the TSN unacknowledged
+///     error.ZixNoSpace => {}, // dropped, so leave the TSN unacknowledged
 ///     else => return err,
 /// };
 ///
@@ -173,7 +173,7 @@ pub const Reassembler = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace if the pending limits are reached, in which case the TSN must be left
+    /// - error.ZixNoSpace if the pending limits are reached, in which case the TSN must be left
     ///   unacknowledged
     /// - error.OutOfMemory
     pub fn accept(self: *Reassembler, item: data.Data) Error!void {
@@ -181,8 +181,8 @@ pub const Reassembler = struct {
 
         const at = self.insertionIndex(item.tsn) orelse return;
 
-        if (self.pending.items.len >= self.limits.max_pending_chunks) return error.NoSpace;
-        if (self.pending_bytes + item.payload.len > self.limits.max_pending_bytes) return error.NoSpace;
+        if (self.pending.items.len >= self.limits.max_pending_chunks) return error.ZixNoSpace;
+        if (self.pending_bytes + item.payload.len > self.limits.max_pending_bytes) return error.ZixNoSpace;
 
         const owned = try self.allocator.dupe(u8, item.payload);
         errdefer self.allocator.free(owned);
@@ -209,8 +209,8 @@ pub const Reassembler = struct {
     ///
     /// Return:
     /// - ?Message borrowing memory valid until the next call
-    /// - error.ProtocolViolation if a fragment cannot belong to the open message
-    /// - error.MessageTooLarge if a message grew past the limit
+    /// - error.ZixProtocolViolation if a fragment cannot belong to the open message
+    /// - error.ZixMessageTooLarge if a message grew past the limit
     /// - error.OutOfMemory
     pub fn next(self: *Reassembler) Error!?Message {
         self.releaseDelivered();
@@ -295,7 +295,7 @@ pub const Reassembler = struct {
         errdefer self.allocator.free(head.payload);
 
         if (head.beginning) {
-            if (self.partial != null) return error.ProtocolViolation;
+            if (self.partial != null) return error.ZixProtocolViolation;
 
             // A whole message needs no assembly buffer at all, which is the common case: every
             // message that fits the path MTU arrives as one chunk.
@@ -319,14 +319,14 @@ pub const Reassembler = struct {
                 .unordered = head.unordered,
             };
         } else {
-            const open = self.partial orelse return error.ProtocolViolation;
+            const open = self.partial orelse return error.ZixProtocolViolation;
 
-            if (open.stream_identifier != head.stream_identifier) return error.ProtocolViolation;
-            if (open.unordered != head.unordered) return error.ProtocolViolation;
-            if (!open.unordered and open.stream_sequence != head.stream_sequence) return error.ProtocolViolation;
+            if (open.stream_identifier != head.stream_identifier) return error.ZixProtocolViolation;
+            if (open.unordered != head.unordered) return error.ZixProtocolViolation;
+            if (!open.unordered and open.stream_sequence != head.stream_sequence) return error.ZixProtocolViolation;
         }
 
-        if (self.assembling.items.len + head.payload.len > self.limits.max_message_bytes) return error.MessageTooLarge;
+        if (self.assembling.items.len + head.payload.len > self.limits.max_message_bytes) return error.ZixMessageTooLarge;
 
         try self.assembling.appendSlice(self.allocator, head.payload);
 
@@ -492,7 +492,7 @@ test "zix sctp: reassembly fragment, a fragment with no message open is a violat
 
     try reassembler.accept(fragmentAt(500, 7, "middle", false, false));
 
-    try std.testing.expectError(error.ProtocolViolation, reassembler.next());
+    try std.testing.expectError(error.ZixProtocolViolation, reassembler.next());
 }
 
 test "zix sctp: reassembly fragment, a second message opening mid-message is a violation" {
@@ -503,7 +503,7 @@ test "zix sctp: reassembly fragment, a second message opening mid-message is a v
     try reassembler.accept(fragmentAt(501, 8, "open again", true, false));
 
     // One call drains both chunks, so the violation surfaces on the first.
-    try std.testing.expectError(error.ProtocolViolation, reassembler.next());
+    try std.testing.expectError(error.ZixProtocolViolation, reassembler.next());
 }
 
 test "zix sctp: reassembly fragment, a piece from another stream is a violation" {
@@ -516,7 +516,7 @@ test "zix sctp: reassembly fragment, a piece from another stream is a violation"
     try reassembler.accept(fragmentAt(500, 7, "open", true, false));
     try reassembler.accept(stray);
 
-    try std.testing.expectError(error.ProtocolViolation, reassembler.next());
+    try std.testing.expectError(error.ZixProtocolViolation, reassembler.next());
 }
 
 test "zix sctp: reassembly fragment, a message past the size limit errors" {
@@ -526,7 +526,7 @@ test "zix sctp: reassembly fragment, a message past the size limit errors" {
     try reassembler.accept(fragmentAt(500, 7, "12345", true, false));
     try reassembler.accept(fragmentAt(501, 7, "67890", false, true));
 
-    try std.testing.expectError(error.MessageTooLarge, reassembler.next());
+    try std.testing.expectError(error.ZixMessageTooLarge, reassembler.next());
 }
 
 test "zix sctp: reassembly unordered, an unordered message is delivered like any other" {
@@ -572,7 +572,7 @@ test "zix sctp: reassembly unordered, mixing ordered and unordered pieces is a v
     try reassembler.accept(fragmentAt(100, 4, "head", true, false));
     try reassembler.accept(second);
 
-    try std.testing.expectError(error.ProtocolViolation, reassembler.next());
+    try std.testing.expectError(error.ZixProtocolViolation, reassembler.next());
 }
 
 test "zix sctp: reassembly skip, moving past an abandoned message delivers what follows" {
@@ -637,7 +637,7 @@ test "zix sctp: reassembly limits, too many held chunks refuses the next one" {
     try reassembler.accept(chunkAt(102, 2, "a"));
     try reassembler.accept(chunkAt(103, 3, "b"));
 
-    try std.testing.expectError(error.NoSpace, reassembler.accept(chunkAt(104, 4, "c")));
+    try std.testing.expectError(error.ZixNoSpace, reassembler.accept(chunkAt(104, 4, "c")));
 }
 
 test "zix sctp: reassembly limits, too many held bytes refuses the next one" {
@@ -646,7 +646,7 @@ test "zix sctp: reassembly limits, too many held bytes refuses the next one" {
 
     try reassembler.accept(chunkAt(102, 2, "12345"));
 
-    try std.testing.expectError(error.NoSpace, reassembler.accept(chunkAt(103, 3, "6789")));
+    try std.testing.expectError(error.ZixNoSpace, reassembler.accept(chunkAt(103, 3, "6789")));
 
     // The refused chunk left nothing behind, so a smaller one still fits.
     try reassembler.accept(chunkAt(103, 3, "678"));

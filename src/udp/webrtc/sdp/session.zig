@@ -28,11 +28,11 @@ pub const VERSION: []const u8 = "0";
 /// Everything that stops a description from being read.
 pub const Error = error{
     /// A line without a type character followed by an equals sign.
-    Malformed,
+    ZixMalformed,
     /// A version this parser does not implement.
-    UnsupportedVersion,
+    ZixUnsupportedVersion,
     /// One of the four fields RFC 8866 5 makes mandatory is missing.
-    MissingField,
+    ZixMissingField,
 };
 
 /// One media section, borrowed from the description it came from.
@@ -46,7 +46,7 @@ pub const Section = struct {
     ///
     /// Return:
     /// - media.Media borrowing this section
-    /// - error.Malformed, error.BadPort
+    /// - error.ZixMalformed, error.ZixBadPort
     pub fn mediaLine(self: Section) media.Error!media.Media {
         return media.read(self.media_value);
     }
@@ -133,18 +133,18 @@ pub const Description = struct {
 ///
 /// Return:
 /// - Description borrowing `text`
-/// - error.Malformed if any line is not a type, an equals sign, and a value
-/// - error.UnsupportedVersion
-/// - error.MissingField
+/// - error.ZixMalformed if any line is not a type, an equals sign, and a value
+/// - error.ZixUnsupportedVersion
+/// - error.ZixMissingField
 pub fn parse(text: []const u8) Error!Description {
-    line.validate(text) catch return error.Malformed;
+    line.validate(text) catch return error.ZixMalformed;
 
-    const version = line.find(text, .VERSION) orelse return error.MissingField;
+    const version = line.find(text, .VERSION) orelse return error.ZixMissingField;
 
-    if (!std.mem.eql(u8, version.value, VERSION)) return error.UnsupportedVersion;
-    if (line.find(text, .ORIGIN) == null) return error.MissingField;
-    if (line.find(text, .SESSION_NAME) == null) return error.MissingField;
-    if (line.find(text, .TIME) == null) return error.MissingField;
+    if (!std.mem.eql(u8, version.value, VERSION)) return error.ZixUnsupportedVersion;
+    if (line.find(text, .ORIGIN) == null) return error.ZixMissingField;
+    if (line.find(text, .SESSION_NAME) == null) return error.ZixMissingField;
+    if (line.find(text, .TIME) == null) return error.ZixMissingField;
 
     const first_media = line.find(text, .MEDIA);
     const session_end = if (first_media) |item| item.offset else text.len;
@@ -202,19 +202,19 @@ test "zix sdp: session parse, a description with no media section is all session
 }
 
 test "zix sdp: session parse, a malformed line is refused" {
-    try std.testing.expectError(error.Malformed, parse("v=0\r\nbroken\r\n"));
+    try std.testing.expectError(error.ZixMalformed, parse("v=0\r\nbroken\r\n"));
 }
 
 test "zix sdp: session parse, a missing mandatory field is refused" {
-    try std.testing.expectError(error.MissingField, parse("v=0\r\ns=-\r\nt=0 0\r\n"));
-    try std.testing.expectError(error.MissingField, parse("v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\nt=0 0\r\n"));
-    try std.testing.expectError(error.MissingField, parse("v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\n"));
-    try std.testing.expectError(error.MissingField, parse("o=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n"));
+    try std.testing.expectError(error.ZixMissingField, parse("v=0\r\ns=-\r\nt=0 0\r\n"));
+    try std.testing.expectError(error.ZixMissingField, parse("v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\nt=0 0\r\n"));
+    try std.testing.expectError(error.ZixMissingField, parse("v=0\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\n"));
+    try std.testing.expectError(error.ZixMissingField, parse("o=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n"));
 }
 
 test "zix sdp: session parse, a version other than zero is refused" {
     try std.testing.expectError(
-        error.UnsupportedVersion,
+        error.ZixUnsupportedVersion,
         parse("v=1\r\no=- 1 2 IN IP4 1.2.3.4\r\ns=-\r\nt=0 0\r\n"),
     );
 }

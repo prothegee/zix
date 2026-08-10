@@ -451,7 +451,7 @@ pub fn pollReady(handle: windows.HANDLE, events: i16, timeout_ms: u32) error{Bro
 var cng_handle: ?windows.HANDLE = null;
 var cng_ready: std.atomic.Value(bool) = .init(false);
 
-fn getCngDevice() error{EntropyUnavailable}!windows.HANDLE {
+fn getCngDevice() error{ZixEntropyUnavailable}!windows.HANDLE {
     if (cng_ready.load(.acquire)) return cng_handle.?;
 
     var fresh_handle: windows.HANDLE = undefined;
@@ -467,7 +467,7 @@ fn getCngDevice() error{EntropyUnavailable}!windows.HANDLE {
         .VALID_FLAGS,
         .{ .IO = .SYNCHRONOUS_NONALERT },
     );
-    if (status != .SUCCESS) return error.EntropyUnavailable;
+    if (status != .SUCCESS) return error.ZixEntropyUnavailable;
 
     cng_handle = fresh_handle;
     cng_ready.store(true, .release);
@@ -478,8 +478,8 @@ fn getCngDevice() error{EntropyUnavailable}!windows.HANDLE {
 ///
 /// Return:
 /// - void
-/// - error.EntropyUnavailable if the device open or the read fails
-pub fn secureRandom(buf: []u8) error{EntropyUnavailable}!void {
+/// - error.ZixEntropyUnavailable if the device open or the read fails
+pub fn secureRandom(buf: []u8) error{ZixEntropyUnavailable}!void {
     if (buf.len == 0) return;
 
     const handle = try getCngDevice();
@@ -498,5 +498,5 @@ pub fn secureRandom(buf: []u8) error{EntropyUnavailable}!void {
         buf.ptr,
         len,
     );
-    if (status != .SUCCESS) return error.EntropyUnavailable;
+    if (status != .SUCCESS) return error.ZixEntropyUnavailable;
 }

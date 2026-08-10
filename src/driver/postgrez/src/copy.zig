@@ -35,9 +35,9 @@ pub const CopyIn = struct {
                     conn.last_server_error.capture(fields);
                     try drainToReady(conn);
 
-                    return error.ServerError;
+                    return error.PostgrezServerError;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -55,7 +55,7 @@ pub const CopyIn = struct {
     ///
     /// Return:
     /// - rows copied (CommandComplete tag)
-    /// - error.ServerError when the server rejected the data
+    /// - error.PostgrezServerError when the server rejected the data
     pub fn finish(self: *CopyIn) !u64 {
         const conn = self.conn;
 
@@ -76,11 +76,11 @@ pub const CopyIn = struct {
                 },
                 .ready_for_query => |status| {
                     conn.transaction_status = status;
-                    if (failed) return error.ServerError;
+                    if (failed) return error.PostgrezServerError;
 
                     return affected;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -104,7 +104,7 @@ pub const CopyIn = struct {
 
                     return;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -131,9 +131,9 @@ pub const CopyOut = struct {
                     conn.last_server_error.capture(fields);
                     try drainToReady(conn);
 
-                    return error.ServerError;
+                    return error.PostgrezServerError;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -156,11 +156,11 @@ pub const CopyOut = struct {
                 .ready_for_query => |status| {
                     self.conn.transaction_status = status;
                     self.done = true;
-                    if (self.failed) return error.ServerError;
+                    if (self.failed) return error.PostgrezServerError;
 
                     return null;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }

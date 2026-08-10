@@ -55,9 +55,9 @@ pub const Row = struct {
     ///
     /// Return:
     /// - T on success
-    /// - error.ColumnIndexOutOfRange / decode errors / error.NullIntoNonOptional
+    /// - error.PostgrezColumnIndexOutOfRange / decode errors / error.PostgrezNullIntoNonOptional
     pub fn get(self: Row, comptime T: type, index: usize) !T {
-        if (index >= self.cells.len) return error.ColumnIndexOutOfRange;
+        if (index >= self.cells.len) return error.PostgrezColumnIndexOutOfRange;
 
         return row_mod.decodeField(T, self.arena, self.columns[index], self.cells[index]);
     }
@@ -87,7 +87,7 @@ pub const Result = struct {
             switch (msg) {
                 .bind_complete, .no_data => {},
                 .data_row => |data| {
-                    if (data.column_count != self.columns.len) return error.ProtocolViolation;
+                    if (data.column_count != self.columns.len) return error.PostgrezProtocolViolation;
 
                     var cell_it = data.iterator();
                     var index: usize = 0;
@@ -119,11 +119,11 @@ pub const Result = struct {
                 .ready_for_query => |status| {
                     self.conn.transaction_status = status;
                     self.done = true;
-                    if (self.failed) return error.ServerError;
+                    if (self.failed) return error.PostgrezServerError;
 
                     return null;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -181,7 +181,7 @@ pub const Conn = struct {
     batch_flushed: bool = false,
     /// Set when a batched statement failed with results still pending: the
     /// server discarded the rest of the batch until Sync, the remaining
-    /// awaitRows calls report error.BatchAborted.
+    /// awaitRows calls report error.PostgrezBatchAborted.
     batch_aborted: bool = false,
 
     const Self = @This();
@@ -192,13 +192,13 @@ pub const Conn = struct {
     ///
     /// Return:
     /// - *Conn ready for queries
-    /// - error.PortNotConfigured / connect errors
-    /// - error.UnsupportedServerVersion (server below PostgreSQL 15)
-    /// - error.ProtocolNotSupported (strict .V3_2 refused)
-    /// - error.UnsupportedAuth (MD5 or another method out of scope)
-    /// - error.ServerError (startup rejected, see lastServerError)
+    /// - error.PostgrezPortNotConfigured / connect errors
+    /// - error.PostgrezUnsupportedServerVersion (server below PostgreSQL 15)
+    /// - error.PostgrezProtocolNotSupported (strict .V3_2 refused)
+    /// - error.PostgrezUnsupportedAuth (MD5 or another method out of scope)
+    /// - error.PostgrezServerError (startup rejected, see lastServerError)
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, config: lib.Config) !*Self {
-        if (config.port == 0) return error.PortNotConfigured;
+        if (config.port == 0) return error.PostgrezPortNotConfigured;
 
         const stream = try connectTcp(io, config.ip, config.port);
 
@@ -258,7 +258,7 @@ pub const Conn = struct {
             if (maybe_session) |session| {
                 self.tls_session = session;
             } else if (config.tls == .REQUIRE) {
-                return error.TlsRefused;
+                return error.PostgrezTlsRefused;
             }
         }
 
@@ -299,7 +299,7 @@ pub const Conn = struct {
     ///
     /// Return:
     /// - affected row count from CommandComplete (0 for tag-less commands)
-    /// - error.ServerError with lastServerError filled
+    /// - error.PostgrezServerError with lastServerError filled
     pub fn exec(self: *Self, sql: []const u8, args: anytype) !u64 {
         _ = self.query_arena.reset(.retain_capacity);
         const arena = self.query_arena.allocator();
@@ -333,11 +333,11 @@ pub const Conn = struct {
                 },
                 .ready_for_query => |status| {
                     self.transaction_status = status;
-                    if (failed) return error.ServerError;
+                    if (failed) return error.PostgrezServerError;
 
                     return affected;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -372,9 +372,9 @@ pub const Conn = struct {
                     self.last_server_error.capture(fields);
                     try self.syncAndDrain();
 
-                    return error.ServerError;
+                    return error.PostgrezServerError;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
 
@@ -538,7 +538,7 @@ pub const Conn = struct {
                                 cbind_data = &cbind_hash;
                             }
                         }
-                        if (!mechanisms.has(mechanism.name())) return error.UnsupportedAuth;
+                        if (!mechanisms.has(mechanism.name())) return error.PostgrezUnsupportedAuth;
 
                         var raw_nonce: [18]u8 = undefined;
                         self.io.random(&raw_nonce);
@@ -557,7 +557,7 @@ pub const Conn = struct {
                         try self.flushSend();
                     },
                     .sasl_continue => |server_first| {
-                        if (!exchange_active) return error.ProtocolViolation;
+                        if (!exchange_active) return error.PostgrezProtocolViolation;
 
                         const client_final = try exchange.handleServerFirst(server_first);
 
@@ -566,12 +566,12 @@ pub const Conn = struct {
                         try self.flushSend();
                     },
                     .sasl_final => |server_final| {
-                        if (!exchange_active) return error.ProtocolViolation;
+                        if (!exchange_active) return error.PostgrezProtocolViolation;
 
                         try exchange.handleServerFinal(server_final);
                     },
-                    .md5_password => return error.UnsupportedAuth,
-                    .unsupported => return error.UnsupportedAuth,
+                    .md5_password => return error.PostgrezUnsupportedAuth,
+                    .unsupported => return error.PostgrezUnsupportedAuth,
                 },
                 .parameter_status => |status| {
                     if (std.mem.eql(u8, status.name, "server_version")) {
@@ -587,7 +587,7 @@ pub const Conn = struct {
                 .error_response => |fields| {
                     self.last_server_error.capture(fields);
 
-                    return error.ServerError;
+                    return error.PostgrezServerError;
                 },
                 .notice_response => {},
                 .ready_for_query => |status| {
@@ -595,7 +595,7 @@ pub const Conn = struct {
 
                     return;
                 },
-                else => return error.ProtocolViolation,
+                else => return error.PostgrezProtocolViolation,
             }
         }
     }
@@ -606,7 +606,7 @@ pub const Conn = struct {
         var header_bytes: [5]u8 = undefined;
         try self.transportReadAll(&header_bytes);
         const header = try backend.parseHeader(header_bytes);
-        if (header.payload_len > MAX_MESSAGE_LEN) return error.ProtocolViolation;
+        if (header.payload_len > MAX_MESSAGE_LEN) return error.PostgrezProtocolViolation;
 
         self.msg_buf.clearRetainingCapacity();
         try self.msg_buf.resize(self.allocator, header.payload_len);
@@ -618,12 +618,12 @@ pub const Conn = struct {
     /// Read exactly buf.len bytes through the transport (TLS or cleartext).
     fn transportReadAll(self: *Self, buf: []u8) !void {
         if (self.tls_session) |session| {
-            session.readAll(&self.stream_reader.interface, buf) catch return error.ConnectionClosed;
+            session.readAll(&self.stream_reader.interface, buf) catch return error.PostgrezConnectionClosed;
 
             return;
         }
 
-        self.stream_reader.interface.readSliceAll(buf) catch return error.ConnectionClosed;
+        self.stream_reader.interface.readSliceAll(buf) catch return error.PostgrezConnectionClosed;
     }
 
     /// Internal: readMessage + transparent capture of notifications.
@@ -647,11 +647,11 @@ pub const Conn = struct {
         const writer = &self.stream_writer.interface;
 
         if (self.tls_session) |session| {
-            session.writeAll(writer, self.send_buf.items) catch return error.ConnectionClosed;
+            session.writeAll(writer, self.send_buf.items) catch return error.PostgrezConnectionClosed;
         } else {
-            writer.writeAll(self.send_buf.items) catch return error.ConnectionClosed;
+            writer.writeAll(self.send_buf.items) catch return error.PostgrezConnectionClosed;
         }
-        writer.flush() catch return error.ConnectionClosed;
+        writer.flush() catch return error.PostgrezConnectionClosed;
         self.send_buf.clearRetainingCapacity();
     }
 
@@ -695,8 +695,8 @@ pub const Conn = struct {
         }};
         const timeout_ms: i32 = @intCast(@min(self.config.conn_timeout_ms, @as(u32, std.math.maxInt(i32))));
 
-        const ready = std.posix.poll(&poll_fds, timeout_ms) catch return error.ConnectionClosed;
-        if (ready == 0) return error.ConnectTimeout;
+        const ready = std.posix.poll(&poll_fds, timeout_ms) catch return error.PostgrezConnectionClosed;
+        if (ready == 0) return error.PostgrezConnectTimeout;
     }
 
     fn storeNotification(self: *Self, note: backend.Notification) !void {
@@ -958,7 +958,7 @@ test "postgrez: conn mock server below 15 hard rejects" {
     try appendServerMsg(testing.allocator, &script, 'v', &.{ 0, 0x03, 0, 0, 0, 0, 0, 0 });
     try appendStartupOk(testing.allocator, &script, "14.8");
 
-    try testing.expectError(error.UnsupportedServerVersion, connectScripted(threaded.io(), script.items, TEST_CONFIG));
+    try testing.expectError(error.PostgrezUnsupportedServerVersion, connectScripted(threaded.io(), script.items, TEST_CONFIG));
 }
 
 test "postgrez: conn mock strict V3_2 refuses negotiation" {
@@ -973,7 +973,7 @@ test "postgrez: conn mock strict V3_2 refuses negotiation" {
     var config = TEST_CONFIG;
     config.protocol_version = .V3_2;
 
-    try testing.expectError(error.ProtocolNotSupported, connectScripted(threaded.io(), script.items, config));
+    try testing.expectError(error.PostgrezProtocolNotSupported, connectScripted(threaded.io(), script.items, config));
 }
 
 test "postgrez: conn mock cleartext auth flow" {
@@ -1000,7 +1000,7 @@ test "postgrez: conn mock md5 auth is rejected" {
     defer script.deinit(testing.allocator);
     try appendServerMsg(testing.allocator, &script, 'R', &.{ 0, 0, 0, 5, 1, 2, 3, 4 });
 
-    try testing.expectError(error.UnsupportedAuth, connectScripted(threaded.io(), script.items, TEST_CONFIG));
+    try testing.expectError(error.PostgrezUnsupportedAuth, connectScripted(threaded.io(), script.items, TEST_CONFIG));
 }
 
 test "postgrez: conn mock startup ErrorResponse surfaces state" {
@@ -1011,7 +1011,7 @@ test "postgrez: conn mock startup ErrorResponse surfaces state" {
     defer script.deinit(testing.allocator);
     try appendServerMsg(testing.allocator, &script, 'E', "SFATAL\x00C28P01\x00Mpassword authentication failed\x00\x00");
 
-    try testing.expectError(error.ServerError, connectScripted(threaded.io(), script.items, TEST_CONFIG));
+    try testing.expectError(error.PostgrezServerError, connectScripted(threaded.io(), script.items, TEST_CONFIG));
 }
 
 test "postgrez: conn mock exec returns affected rows" {
@@ -1050,7 +1050,7 @@ test "postgrez: conn mock exec server error maps SQLSTATE" {
     defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
-    try testing.expectError(error.ServerError, conn.exec("INSERT ...", .{}));
+    try testing.expectError(error.PostgrezServerError, conn.exec("INSERT ...", .{}));
     try testing.expectEqual(sqlstate.SqlState.UNIQUE_VIOLATION, conn.lastServerError().state);
     try testing.expectEqualStrings("duplicate key", conn.lastServerError().message());
 }
@@ -1156,7 +1156,7 @@ test "postgrez: conn mock rows streams with row.get" {
     try testing.expectEqual(@as(i64, 8), try second.get(i64, 0));
 
     try testing.expectEqual(@as(?Row, null), try result.next());
-    try testing.expectError(error.ColumnIndexOutOfRange, second.get(i64, 5));
+    try testing.expectError(error.PostgrezColumnIndexOutOfRange, second.get(i64, 5));
 }
 
 test "postgrez: conn mock queryRow returns null on empty result" {
@@ -1209,7 +1209,7 @@ test "postgrez: conn mock parse error recovers via sync" {
     defer scripted.deinit(threaded.io());
     const conn = scripted.conn;
 
-    try testing.expectError(error.ServerError, conn.rows("SELEC 1", .{}));
+    try testing.expectError(error.PostgrezServerError, conn.rows("SELEC 1", .{}));
     try testing.expectEqual(sqlstate.SqlState.SYNTAX_ERROR, conn.lastServerError().state);
 
     const affected = try conn.exec("UPDATE t SET x = 1", .{});
@@ -1394,7 +1394,7 @@ test "postgrez: conn mock pipeline sheds beyond max_pending_replies" {
     var pipe = try scripted.conn.pipeline();
     try pipe.add("INSERT INTO logs (msg) VALUES ($1)", .{"a"});
     try pipe.add("INSERT INTO logs (msg) VALUES ($1)", .{"b"});
-    try testing.expectError(error.QueueFull, pipe.add("INSERT INTO logs (msg) VALUES ($1)", .{"c"}));
+    try testing.expectError(error.PostgrezQueueFull, pipe.add("INSERT INTO logs (msg) VALUES ($1)", .{"c"}));
 
     const results = try pipe.sync();
     try testing.expectEqual(@as(usize, 2), results.len);
@@ -1518,7 +1518,7 @@ test "postgrez: conn mock tls REQUIRE fails on N" {
     var config = TEST_CONFIG;
     config.tls = .REQUIRE;
 
-    try testing.expectError(error.TlsRefused, connectScripted(threaded.io(), script.items, config));
+    try testing.expectError(error.PostgrezTlsRefused, connectScripted(threaded.io(), script.items, config));
 }
 
 test "postgrez: conn mock notification is captured while pumping" {
@@ -1643,13 +1643,13 @@ test "postgrez: conn mock statement batch sheds beyond max_pending_replies" {
 
     try prepared.sendRows(.{@as(i64, 7)});
     try prepared.sendRows(.{@as(i64, 8)});
-    try testing.expectError(error.QueueFull, prepared.sendRows(.{@as(i64, 9)}));
+    try testing.expectError(error.PostgrezQueueFull, prepared.sendRows(.{@as(i64, 9)}));
 
     var first_result = try prepared.awaitRows();
     first_result.deinit();
     var second_result = try prepared.awaitRows();
     second_result.deinit();
-    try testing.expectError(error.BatchEmpty, prepared.awaitRows());
+    try testing.expectError(error.PostgrezBatchEmpty, prepared.awaitRows());
 
     prepared.arena.deinit();
 }
@@ -1690,10 +1690,10 @@ test "postgrez: conn mock statement batch failure aborts the rest" {
     try testing.expectEqual(@as(?Row, null), try first_result.next());
 
     var second_result = try prepared.awaitRows();
-    try testing.expectError(error.ServerError, second_result.next());
+    try testing.expectError(error.PostgrezServerError, second_result.next());
     try testing.expectEqual(sqlstate.SqlState.UNIQUE_VIOLATION, scripted.conn.lastServerError().state);
 
-    try testing.expectError(error.BatchAborted, prepared.awaitRows());
+    try testing.expectError(error.PostgrezBatchAborted, prepared.awaitRows());
     try testing.expectEqual(@as(usize, 0), scripted.conn.batch_pending);
 
     const affected = try scripted.conn.exec("UPDATE t SET x = 1", .{});

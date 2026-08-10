@@ -244,7 +244,7 @@ Range parsing itself is not local: it comes from `src/utils/http_range.zig`, sha
 
 ## dispatch/ and tls_mux.zig
 
-`server.zig` holds the public `Http2Server` type and a thin `run()` switch: `.ASYNC` keeps the accept-thread structure (`common.ConnTask` plus `common.dispatchConn`) and calls `core.serveConn`, `.EPOLL` calls `epoll.runEpoll`, `.URING` calls `uring.runUring`, and `config.tls != null` routes `.EPOLL` / `.URING` to `tls_mux.runTlsMux`, everything else to `tls_serve.runTls`. Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.DispatchModelUnsupported` (ADR-065).
+`server.zig` holds the public `Http2Server` type and a thin `run()` switch: `.ASYNC` keeps the accept-thread structure (`common.ConnTask` plus `common.dispatchConn`) and calls `core.serveConn`, `.EPOLL` calls `epoll.runEpoll`, `.URING` calls `uring.runUring`, and `config.tls != null` routes `.EPOLL` / `.URING` to `tls_mux.runTlsMux`, everything else to `tls_serve.runTls`. Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### dispatch/epoll.zig
 

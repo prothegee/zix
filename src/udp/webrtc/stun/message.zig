@@ -123,10 +123,10 @@ pub const Attribute = struct {
 ///   expected outcome when another protocol shares the port. The rest mean it looked like STUN
 ///   but did not hold together.
 pub const ParseError = error{
-    Truncated,
-    NotStun,
-    BadLength,
-    BadAttribute,
+    ZixTruncated,
+    ZixNotStun,
+    ZixBadLength,
+    ZixBadAttribute,
 };
 
 /// A validated STUN message. Borrows the datagram, it copies nothing.
@@ -241,25 +241,25 @@ pub const AttributeIterator = struct {
 /// - Message (borrowing datagram)
 /// - ParseError
 pub fn parse(datagram: []const u8) ParseError!Message {
-    if (datagram.len < HEADER_LEN) return error.Truncated;
-    if (datagram[0] & 0xC0 != 0) return error.NotStun;
-    if (std.mem.readInt(u32, datagram[4..8], .big) != MAGIC_COOKIE) return error.NotStun;
+    if (datagram.len < HEADER_LEN) return error.ZixTruncated;
+    if (datagram[0] & 0xC0 != 0) return error.ZixNotStun;
+    if (std.mem.readInt(u32, datagram[4..8], .big) != MAGIC_COOKIE) return error.ZixNotStun;
 
     const message_type = std.mem.readInt(u16, datagram[0..2], .big);
     const body_len = std.mem.readInt(u16, datagram[2..4], .big);
 
-    if (body_len % 4 != 0) return error.BadLength;
-    if (HEADER_LEN + body_len > datagram.len) return error.Truncated;
-    if (HEADER_LEN + body_len < datagram.len) return error.BadLength;
+    if (body_len % 4 != 0) return error.ZixBadLength;
+    if (HEADER_LEN + body_len > datagram.len) return error.ZixTruncated;
+    if (HEADER_LEN + body_len < datagram.len) return error.ZixBadLength;
 
     var pos: usize = HEADER_LEN;
     while (pos < datagram.len) {
-        if (pos + ATTRIBUTE_HEADER_LEN > datagram.len) return error.BadAttribute;
+        if (pos + ATTRIBUTE_HEADER_LEN > datagram.len) return error.ZixBadAttribute;
 
         const value_len = std.mem.readInt(u16, datagram[pos + 2 ..][0..2], .big);
         const attr_len = ATTRIBUTE_HEADER_LEN + padTo4(value_len);
 
-        if (pos + attr_len > datagram.len) return error.BadAttribute;
+        if (pos + attr_len > datagram.len) return error.ZixBadAttribute;
 
         pos += attr_len;
     }
@@ -278,7 +278,7 @@ pub const Writer = struct {
     buf: []u8,
     len: usize,
 
-    pub const Error = error{NoSpace};
+    pub const Error = error{ZixNoSpace};
 
     /// Start a message with an empty attribute region.
     ///
@@ -290,9 +290,9 @@ pub const Writer = struct {
     ///
     /// Return:
     /// - Writer
-    /// - error.NoSpace when buf cannot hold the header
+    /// - error.ZixNoSpace when buf cannot hold the header
     pub fn init(buf: []u8, class: Class, method: Method, transaction_id: [TRANSACTION_ID_LEN]u8) Error!Writer {
-        if (buf.len < HEADER_LEN) return error.NoSpace;
+        if (buf.len < HEADER_LEN) return error.ZixNoSpace;
 
         const class_bits: u16 = @intFromEnum(class);
         const method_bits: u16 = @intFromEnum(method);
@@ -416,11 +416,11 @@ pub const Writer = struct {
     /// Space for one attribute value, padding included. The TLV header is written by the caller,
     /// which is why this hands back the value slice and not the whole attribute.
     fn reserve(self: *Writer, value_len: usize) Error![]u8 {
-        if (value_len > std.math.maxInt(u16)) return error.NoSpace;
+        if (value_len > std.math.maxInt(u16)) return error.ZixNoSpace;
 
         const attr_len = ATTRIBUTE_HEADER_LEN + padTo4(value_len);
 
-        if (self.len + attr_len > self.buf.len) return error.NoSpace;
+        if (self.len + attr_len > self.buf.len) return error.ZixNoSpace;
 
         const value_start = self.len + ATTRIBUTE_HEADER_LEN;
         @memset(self.buf[value_start .. self.len + attr_len], 0);
@@ -487,9 +487,9 @@ pub fn encodeXorMappedAddress(out: []u8, peer: IpAddress, transaction_id: *const
 ///
 /// Return:
 /// - IpAddress
-/// - error.BadAttribute when the length does not match the family, or the family is unknown
-pub fn decodeXorMappedAddress(value: []const u8, transaction_id: *const [TRANSACTION_ID_LEN]u8) error{BadAttribute}!IpAddress {
-    if (value.len < 4) return error.BadAttribute;
+/// - error.ZixBadAttribute when the length does not match the family, or the family is unknown
+pub fn decodeXorMappedAddress(value: []const u8, transaction_id: *const [TRANSACTION_ID_LEN]u8) error{ZixBadAttribute}!IpAddress {
+    if (value.len < 4) return error.ZixBadAttribute;
 
     var mask: [16]u8 = undefined;
     std.mem.writeInt(u32, mask[0..4], MAGIC_COOKIE, .big);
@@ -499,7 +499,7 @@ pub fn decodeXorMappedAddress(value: []const u8, transaction_id: *const [TRANSAC
 
     switch (value[1]) {
         FAMILY_IP4 => {
-            if (value.len != 8) return error.BadAttribute;
+            if (value.len != 8) return error.ZixBadAttribute;
 
             var bytes: [4]u8 = value[4..8].*;
             for (&bytes, 0..) |*byte, i| byte.* ^= mask[i];
@@ -507,14 +507,14 @@ pub fn decodeXorMappedAddress(value: []const u8, transaction_id: *const [TRANSAC
             return .{ .ip4 = .{ .bytes = bytes, .port = port } };
         },
         FAMILY_IP6 => {
-            if (value.len != 20) return error.BadAttribute;
+            if (value.len != 20) return error.ZixBadAttribute;
 
             var bytes: [16]u8 = value[4..20].*;
             for (&bytes, 0..) |*byte, i| byte.* ^= mask[i];
 
             return .{ .ip6 = .{ .bytes = bytes, .port = port } };
         },
-        else => return error.BadAttribute,
+        else => return error.ZixBadAttribute,
     }
 }
 
@@ -676,23 +676,23 @@ test "zix stun: message parse, non-stun bytes are rejected before anything else"
     var buf: [64]u8 = undefined;
     const datagram = testBindingRequest(&buf);
 
-    try std.testing.expectError(error.Truncated, parse(datagram[0 .. HEADER_LEN - 1]));
-    try std.testing.expectError(error.Truncated, parse(&[_]u8{}));
+    try std.testing.expectError(error.ZixTruncated, parse(datagram[0 .. HEADER_LEN - 1]));
+    try std.testing.expectError(error.ZixTruncated, parse(&[_]u8{}));
 
     // A DTLS handshake record shares the port and must not read as STUN (RFC 7983).
     var dtls_record: [23]u8 = @splat(0);
     dtls_record[0] = 0x16;
     dtls_record[1] = 0xfe;
     dtls_record[2] = 0xfd;
-    try std.testing.expectError(error.NotStun, parse(&dtls_record));
+    try std.testing.expectError(error.ZixNotStun, parse(&dtls_record));
 
     var wrong_cookie: [HEADER_LEN]u8 = datagram[0..HEADER_LEN].*;
     wrong_cookie[4] = 0x00;
-    try std.testing.expectError(error.NotStun, parse(&wrong_cookie));
+    try std.testing.expectError(error.ZixNotStun, parse(&wrong_cookie));
 
     var high_bits: [HEADER_LEN]u8 = datagram[0..HEADER_LEN].*;
     high_bits[0] = 0x40;
-    try std.testing.expectError(error.NotStun, parse(&high_bits));
+    try std.testing.expectError(error.ZixNotStun, parse(&high_bits));
 }
 
 test "zix stun: message parse, length field must agree with the datagram" {
@@ -701,16 +701,16 @@ test "zix stun: message parse, length field must agree with the datagram" {
 
     var not_multiple: [HEADER_LEN]u8 = datagram[0..HEADER_LEN].*;
     std.mem.writeInt(u16, not_multiple[2..4], 3, .big);
-    try std.testing.expectError(error.BadLength, parse(&not_multiple));
+    try std.testing.expectError(error.ZixBadLength, parse(&not_multiple));
 
     var claims_more: [HEADER_LEN]u8 = datagram[0..HEADER_LEN].*;
     std.mem.writeInt(u16, claims_more[2..4], 8, .big);
-    try std.testing.expectError(error.Truncated, parse(&claims_more));
+    try std.testing.expectError(error.ZixTruncated, parse(&claims_more));
 
     var trailing: [HEADER_LEN + 4]u8 = undefined;
     @memcpy(trailing[0..HEADER_LEN], datagram[0..HEADER_LEN]);
     @memset(trailing[HEADER_LEN..], 0);
-    try std.testing.expectError(error.BadLength, parse(&trailing));
+    try std.testing.expectError(error.ZixBadLength, parse(&trailing));
 }
 
 test "zix stun: message parse, an attribute running past the end is rejected" {
@@ -723,7 +723,7 @@ test "zix stun: message parse, an attribute running past the end is rejected" {
 
     // Value length 8 needs 12 bytes of attribute, only 8 are present.
     std.mem.writeInt(u16, overrun[HEADER_LEN + 2 ..][0..2], 8, .big);
-    try std.testing.expectError(error.BadAttribute, parse(&overrun));
+    try std.testing.expectError(error.ZixBadAttribute, parse(&overrun));
 }
 
 test "zix stun: message attributes, padding is written and skipped" {
@@ -805,14 +805,14 @@ test "zix stun: xor-mapped-address, ipv6 masks with the transaction id" {
 
 test "zix stun: xor-mapped-address, a bad family or length is rejected" {
     var value: [8]u8 = .{ 0x00, 0x09, 0xA1, 0x47, 0xE1, 0x12, 0xA6, 0x43 };
-    try std.testing.expectError(error.BadAttribute, decodeXorMappedAddress(&value, &TEST_TRANSACTION_ID));
+    try std.testing.expectError(error.ZixBadAttribute, decodeXorMappedAddress(&value, &TEST_TRANSACTION_ID));
 
     value[1] = FAMILY_IP4;
-    try std.testing.expectError(error.BadAttribute, decodeXorMappedAddress(value[0..7], &TEST_TRANSACTION_ID));
-    try std.testing.expectError(error.BadAttribute, decodeXorMappedAddress(value[0..3], &TEST_TRANSACTION_ID));
+    try std.testing.expectError(error.ZixBadAttribute, decodeXorMappedAddress(value[0..7], &TEST_TRANSACTION_ID));
+    try std.testing.expectError(error.ZixBadAttribute, decodeXorMappedAddress(value[0..3], &TEST_TRANSACTION_ID));
 
     value[1] = FAMILY_IP6;
-    try std.testing.expectError(error.BadAttribute, decodeXorMappedAddress(&value, &TEST_TRANSACTION_ID));
+    try std.testing.expectError(error.ZixBadAttribute, decodeXorMappedAddress(&value, &TEST_TRANSACTION_ID));
 }
 
 test "zix stun: xor-mapped-address, the writer reports the peer it was handed" {
@@ -862,11 +862,11 @@ test "zix stun: writer, refuses to overflow the caller buffer" {
     var writer = try Writer.init(&buf, .REQUEST, .BINDING, TEST_TRANSACTION_ID);
 
     // 4 bytes of TLV header plus a padded 4-byte value needs 8, only 7 are left.
-    try std.testing.expectError(error.NoSpace, writer.addAttribute(.SOFTWARE, "zix"));
+    try std.testing.expectError(error.ZixNoSpace, writer.addAttribute(.SOFTWARE, "zix"));
     try std.testing.expectEqual(@as(usize, HEADER_LEN), writer.finish().len);
 
     var too_small: [HEADER_LEN - 1]u8 = undefined;
-    try std.testing.expectError(error.NoSpace, Writer.init(&too_small, .REQUEST, .BINDING, TEST_TRANSACTION_ID));
+    try std.testing.expectError(error.ZixNoSpace, Writer.init(&too_small, .REQUEST, .BINDING, TEST_TRANSACTION_ID));
 }
 
 test "zix stun: attribute ranges, comprehension-required and known are separate questions" {
@@ -1032,6 +1032,6 @@ test "zix stun: message-integrity, the writer refuses to overflow the caller buf
     var buf: [HEADER_LEN + MESSAGE_INTEGRITY_LEN - 1]u8 = undefined;
     var writer = try Writer.init(&buf, .REQUEST, .BINDING, TEST_TRANSACTION_ID);
 
-    try std.testing.expectError(error.NoSpace, writer.addMessageIntegrity("password"));
+    try std.testing.expectError(error.ZixNoSpace, writer.addMessageIntegrity("password"));
     try std.testing.expectEqual(@as(usize, HEADER_LEN), writer.finish().len);
 }

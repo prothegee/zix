@@ -38,9 +38,9 @@ pub const SRTP_MASTER_SALT_LEN: usize = 14;
 
 pub const Error = error{
     /// The context is longer than MAX_CONTEXT_LEN.
-    ContextTooLong,
+    ZixContextTooLong,
     /// The profile has no cipher key to export.
-    UnsupportedProfile,
+    ZixUnsupportedProfile,
 };
 
 /// SRTP protection profiles negotiated by the use_srtp extension (RFC 5764 4.1.2).
@@ -80,7 +80,7 @@ pub const SrtpKeys = struct {
 ///
 /// Return:
 /// - void
-/// - error.ContextTooLong when the context is over MAX_CONTEXT_LEN
+/// - error.ZixContextTooLong when the context is over MAX_CONTEXT_LEN
 pub fn exportKeyingMaterial(
     out: []u8,
     master_secret: [48]u8,
@@ -96,7 +96,7 @@ pub fn exportKeyingMaterial(
     var seed_len: usize = 64;
 
     if (context) |bytes| {
-        if (bytes.len > MAX_CONTEXT_LEN) return error.ContextTooLong;
+        if (bytes.len > MAX_CONTEXT_LEN) return error.ZixContextTooLong;
 
         std.mem.writeInt(u16, seed[seed_len..][0..2], @intCast(bytes.len), .big);
         seed_len += 2;
@@ -122,7 +122,7 @@ pub fn exportKeyingMaterial(
 ///
 /// Return:
 /// - SrtpKeys
-/// - error.UnsupportedProfile for a profile without a cipher key
+/// - error.ZixUnsupportedProfile for a profile without a cipher key
 pub fn srtpKeys(
     profile: SrtpProfile,
     master_secret: [48]u8,
@@ -131,7 +131,7 @@ pub fn srtpKeys(
 ) Error!SrtpKeys {
     switch (profile) {
         .SRTP_AES128_CM_HMAC_SHA1_80, .SRTP_AES128_CM_HMAC_SHA1_32 => {},
-        else => return error.UnsupportedProfile,
+        else => return error.ZixUnsupportedProfile,
     }
 
     var material: [2 * (SRTP_MASTER_KEY_LEN + SRTP_MASTER_SALT_LEN)]u8 = undefined;
@@ -236,7 +236,7 @@ test "zix dtls: exporter, a context over the ceiling is refused" {
     const too_long: [MAX_CONTEXT_LEN + 1]u8 = @splat(0);
 
     try std.testing.expectError(
-        error.ContextTooLong,
+        error.ZixContextTooLong,
         exportKeyingMaterial(&exported, TEST_MASTER, TEST_CLIENT_RANDOM, TEST_SERVER_RANDOM, "label", &too_long),
     );
 
@@ -268,11 +268,11 @@ test "zix dtls: srtp keys, both aes128 profiles derive alike and null profiles a
     try std.testing.expectEqualSlices(u8, &tag_80.client_write_key, &tag_32.client_write_key);
 
     try std.testing.expectError(
-        error.UnsupportedProfile,
+        error.ZixUnsupportedProfile,
         srtpKeys(.SRTP_NULL_HMAC_SHA1_80, TEST_MASTER, TEST_CLIENT_RANDOM, TEST_SERVER_RANDOM),
     );
     try std.testing.expectError(
-        error.UnsupportedProfile,
+        error.ZixUnsupportedProfile,
         srtpKeys(@enumFromInt(0xFFFF), TEST_MASTER, TEST_CLIENT_RANDOM, TEST_SERVER_RANDOM),
     );
 }

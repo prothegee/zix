@@ -162,9 +162,9 @@ test "zix behaviour: Http1 a method it does not implement draws 501, not a wrong
     // QUERY used to land here: unknown tokens resolved to GET, so the engine
     // answered a question it had not read. An unimplemented method now says so
     // (RFC 9110 section 15.6.2) instead of being served as something else.
-    try std.testing.expectError(error.UnknownMethod, zix.Http1.parseHead("BREW /pot HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try std.testing.expectError(error.ZixUnknownMethod, zix.Http1.parseHead("BREW /pot HTTP/1.1\r\nHost: x\r\n\r\n"));
 
-    const answer = zix.Http1.parseErrorResponse(error.UnknownMethod);
+    const answer = zix.Http1.parseErrorResponse(error.ZixUnknownMethod);
     try std.testing.expect(std.mem.startsWith(u8, answer, "HTTP/1.1 501 Not Implemented\r\n"));
     try std.testing.expect(std.mem.endsWith(u8, answer, "\r\n\r\n"));
 }

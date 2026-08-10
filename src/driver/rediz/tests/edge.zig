@@ -73,7 +73,7 @@ test "rediz edge: a wrong password surfaces WRONGPASS" {
     config.user = ACL_USER;
     config.password = "wrong";
 
-    try testing.expectError(error.ServerError, rediz.Conn.connect(harness.allocator(), harness.io(), config));
+    try testing.expectError(error.RedizServerError, rediz.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "rediz edge: connecting with no credentials to a guarded server is refused" {
@@ -83,7 +83,7 @@ test "rediz edge: connecting with no credentials to a guarded server is refused"
 
     // no password in the config, so HELLO carries no AUTH clause and the
     // server answers NOAUTH before anything else can run
-    try testing.expectError(error.ServerError, harness.connect());
+    try testing.expectError(error.RedizServerError, harness.connect());
 }
 
 test "rediz edge: a strict resp3 config fails against a server without hello" {
@@ -94,7 +94,7 @@ test "rediz edge: a strict resp3 config fails against a server without hello" {
     var config = harness.config();
     config.protocol_version = .RESP3;
 
-    try testing.expectError(error.ProtocolNotSupported, rediz.Conn.connect(harness.allocator(), harness.io(), config));
+    try testing.expectError(error.RedizProtocolNotSupported, rediz.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "rediz edge: connecting to a closed port is refused" {
@@ -133,7 +133,7 @@ test "rediz edge: wrongtype surfaces the mapped prefix" {
 
     _ = try conn.command(&.{ "RPUSH", "wrong:list", "item" });
 
-    try testing.expectError(error.ServerError, conn.incr("wrong:list"));
+    try testing.expectError(error.RedizServerError, conn.incr("wrong:list"));
     try testing.expectEqual(rediz.Prefix.WRONGTYPE, conn.lastServerError().prefix);
 }
 
@@ -147,7 +147,7 @@ test "rediz edge: incrementing a non-numeric value surfaces the ERR prefix" {
 
     _ = try conn.set("word", "abc", .{});
 
-    try testing.expectError(error.ServerError, conn.incr("word"));
+    try testing.expectError(error.RedizServerError, conn.incr("word"));
     try testing.expectEqual(rediz.Prefix.ERR, conn.lastServerError().prefix);
 }
 
@@ -184,7 +184,7 @@ test "rediz edge: max_pending_replies bounds a pipeline batch" {
     var pipe = try conn.pipeline();
     try pipe.add(&.{ "SET", "bound:a", "1" });
     try pipe.add(&.{ "SET", "bound:b", "2" });
-    try testing.expectError(error.QueueFull, pipe.add(&.{ "SET", "bound:c", "3" }));
+    try testing.expectError(error.RedizQueueFull, pipe.add(&.{ "SET", "bound:c", "3" }));
 
     const replies = try pipe.sync();
     try testing.expectEqual(@as(usize, 2), replies.len);
@@ -262,7 +262,7 @@ test "rediz edge: a pool heals a killed connection" {
 
     // the idle slot hands back the dead connection: discard + reacquire heals
     const dead = try pool.acquire();
-    try testing.expectError(error.ConnectionClosed, dead.ping());
+    try testing.expectError(error.RedizConnectionClosed, dead.ping());
     pool.discard(dead);
 
     const healed = try pool.acquire();
@@ -285,7 +285,7 @@ test "rediz edge: a fully-held pool without parking sheds immediately" {
     const held = try pool.acquire();
     defer pool.release(held);
 
-    try testing.expectError(error.PoolExhausted, pool.acquire());
+    try testing.expectError(error.RedizPoolExhausted, pool.acquire());
 }
 
 test "rediz edge: select rejects an index outside the database range" {
@@ -296,7 +296,7 @@ test "rediz edge: select rejects an index outside the database range" {
     const conn = try harness.connect();
     defer conn.deinit();
 
-    try testing.expectError(error.ServerError, conn.select(99));
+    try testing.expectError(error.RedizServerError, conn.select(99));
     try testing.expectEqual(rediz.Prefix.ERR, conn.lastServerError().prefix);
 
     // the connection is still usable after a rejected command
@@ -311,7 +311,7 @@ test "rediz edge: an unknown command is an error reply, not a dead connection" {
     const conn = try harness.connect();
     defer conn.deinit();
 
-    try testing.expectError(error.ServerError, conn.command(&.{ "NOSUCHCOMMAND", "x" }));
+    try testing.expectError(error.RedizServerError, conn.command(&.{ "NOSUCHCOMMAND", "x" }));
     try testing.expectEqual(rediz.Prefix.ERR, conn.lastServerError().prefix);
 
     try conn.ping();
@@ -333,7 +333,7 @@ test "rediz edge: a command on a killed connection reports it closed" {
     const id_text = try std.fmt.bufPrint(&id_buf, "{d}", .{id_reply.integer});
     _ = try killer.command(&.{ "CLIENT", "KILL", "ID", id_text });
 
-    try testing.expectError(error.ConnectionClosed, victim.ping());
+    try testing.expectError(error.RedizConnectionClosed, victim.ping());
 }
 
 test "rediz edge: an empty value round trips without being mistaken for a miss" {
@@ -399,7 +399,7 @@ test "rediz edge: a cleartext client against a tls server does not connect" {
 
     // the config leaves tls off, so the driver sends RESP where the server
     // expects a ClientHello and the connection dies rather than hanging
-    try testing.expectError(error.ConnectionClosed, harness.connect());
+    try testing.expectError(error.RedizConnectionClosed, harness.connect());
 }
 
 test "rediz edge: a tls client against a cleartext server does not connect" {
@@ -410,7 +410,7 @@ test "rediz edge: a tls client against a cleartext server does not connect" {
     var config = harness.config();
     config.tls = .REQUIRE;
 
-    try testing.expectError(error.ConnectionClosed, rediz.Conn.connect(harness.allocator(), harness.io(), config));
+    try testing.expectError(error.RedizConnectionClosed, rediz.Conn.connect(harness.allocator(), harness.io(), config));
 }
 
 test "rediz edge: an expired key reads back as a miss" {

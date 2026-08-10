@@ -725,8 +725,8 @@ const ConnReader = struct {
             self.end = n;
         }
 
-        const got = readOnceFD(self.fd, self.buf[self.end..]) catch return error.Closed;
-        if (got == 0) return error.Closed;
+        const got = readOnceFD(self.fd, self.buf[self.end..]) catch return error.ZixClosed;
+        if (got == 0) return error.ZixClosed;
         self.end += got;
     }
 
@@ -1075,7 +1075,7 @@ fn serveGrpcConnInner(comptime RouterType: type, fd: std.posix.fd_t, opts: GrpcS
         @memcpy(preface[3..], &rest);
         if (!std.mem.eql(u8, &preface, h2.PREFACE)) {
             h2.sendGoawayFD(fd, 0, h2.ERR_PROTOCOL_ERROR) catch {};
-            return error.BadPreface;
+            return error.ZixBadPreface;
         }
         try h2.sendSettingsFD(fd, &.{
             .{ h2.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
@@ -1114,20 +1114,20 @@ fn serveGrpcUpgrade(comptime RouterType: type, fd: std.posix.fd_t, opts: GrpcSer
     var filled: usize = 3;
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
-        if (filled >= head_buf.len) return error.HeaderTooLarge;
-        const n = readOnceFD(fd, head_buf[filled..]) catch return error.Closed;
-        if (n == 0) return error.Closed;
+        if (filled >= head_buf.len) return error.ZixHeaderTooLarge;
+        const n = readOnceFD(fd, head_buf[filled..]) catch return error.ZixClosed;
+        if (n == 0) return error.ZixClosed;
         filled += n;
     }
     const hdr_end = std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n").? + 4;
 
     const upgrade_val = getHttp1Header(head_buf[0..hdr_end], "upgrade") orelse {
         h2.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
-        return error.BadRequest;
+        return error.ZixBadRequest;
     };
     if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_val, " "), "h2c")) {
         h2.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
-        return error.BadRequest;
+        return error.ZixBadRequest;
     }
 
     var path: []const u8 = "/";
@@ -1146,7 +1146,7 @@ fn serveGrpcUpgrade(comptime RouterType: type, fd: std.posix.fd_t, opts: GrpcSer
     try h2.recvExact(fd, &preface);
     if (!std.mem.eql(u8, &preface, h2.PREFACE)) {
         h2.sendGoawayFD(fd, 0, h2.ERR_PROTOCOL_ERROR) catch {};
-        return error.BadPreface;
+        return error.ZixBadPreface;
     }
 
     var hpack_dec = h2.HpackDecoder.init();
@@ -1268,7 +1268,7 @@ fn serveGrpcLoop(
                 defer conn_mutex.unlock();
                 h2.sendGoawayFD(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
             }
-            return error.FrameTooLarge;
+            return error.ZixFrameTooLarge;
         }
 
         try reader.ensure(frame_header.length);
@@ -1305,7 +1305,7 @@ fn serveGrpcLoop(
                         defer conn_mutex.unlock();
                         h2.sendGoawayFD(fd, last_stream_id, h2.ERR_FRAME_SIZE_ERROR) catch {};
                     }
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 var ping_payload: [8]u8 = undefined;
                 @memcpy(&ping_payload, payload[0..8]);
@@ -1324,7 +1324,7 @@ fn serveGrpcLoop(
                         defer conn_mutex.unlock();
                         h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 if (stream_id <= last_stream_id and stream_id % 2 == 1) {
                     {
@@ -1365,7 +1365,7 @@ fn serveGrpcLoop(
                         defer conn_mutex.unlock();
                         h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 block = block[offset .. block.len - pad_len];
 
@@ -1395,7 +1395,7 @@ fn serveGrpcLoop(
                         defer conn_mutex.unlock();
                         h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 };
                 const stream = &streams[slot];
                 const count = hpack_dec.decode(payload, stream.headers[stream.header_count..], stream.header_scratch) catch {
@@ -1423,7 +1423,7 @@ fn serveGrpcLoop(
                         defer conn_mutex.unlock();
                         h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 const slot = findSlot(stream_id, streams, stream_slots) orelse {
                     {
@@ -1447,7 +1447,7 @@ fn serveGrpcLoop(
                         defer conn_mutex.unlock();
                         h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
                     }
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 data = data[0 .. data.len - pad_len];
 

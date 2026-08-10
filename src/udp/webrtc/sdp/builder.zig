@@ -8,7 +8,7 @@
 //! - This exists because a description is written by more than one file. answer.zig writes the
 //!   session level and media_answer.zig writes a section, both into the same buffer, and each
 //!   keeping its own copy of the same append loop is how the two drift apart.
-//! - Every append is bounds-checked and reports error.NoSpace rather than truncating. A truncated
+//! - Every append is bounds-checked and reports error.ZixNoSpace rather than truncating. A truncated
 //!   description parses as a valid shorter one, so silently dropping the tail produces an answer
 //!   that looks fine and is missing a fingerprint.
 //! - `at` is public so a caller can take the slice written so far, and hand the remaining room to
@@ -25,7 +25,7 @@ pub const MAX_DIGITS: usize = 20;
 /// What stops a line from being appended.
 pub const Error = error{
     /// The output buffer has no room left.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// Appends lines to one buffer, tracking how far along it is.
@@ -58,9 +58,9 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn addLine(self: *Builder, kind: line.Kind, value: []const u8) Error!void {
-        const wrote = line.write(self.out[self.at..], kind, value) catch return error.NoSpace;
+        const wrote = line.write(self.out[self.at..], kind, value) catch return error.ZixNoSpace;
 
         self.at += wrote.len;
     }
@@ -73,9 +73,9 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn addAttribute(self: *Builder, name: []const u8, value: ?[]const u8) Error!void {
-        const wrote = attribute.write(self.out[self.at..], name, value) catch return error.NoSpace;
+        const wrote = attribute.write(self.out[self.at..], name, value) catch return error.ZixNoSpace;
 
         self.at += wrote.len;
     }
@@ -88,7 +88,7 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn addNumber(self: *Builder, name: []const u8, value: u64) Error!void {
         var digits: [MAX_DIGITS]u8 = undefined;
 
@@ -180,8 +180,8 @@ test "zix sdp: builder, a full buffer errors rather than truncating" {
 
     try builder.addLine(.VERSION, "0");
 
-    try std.testing.expectError(error.NoSpace, builder.addLine(.SESSION_NAME, "-"));
-    try std.testing.expectError(error.NoSpace, builder.addAttribute("mid", "0"));
+    try std.testing.expectError(error.ZixNoSpace, builder.addLine(.SESSION_NAME, "-"));
+    try std.testing.expectError(error.ZixNoSpace, builder.addAttribute("mid", "0"));
     try std.testing.expectEqual(@as(usize, 5), builder.at);
 }
 

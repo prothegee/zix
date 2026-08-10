@@ -71,16 +71,16 @@ test "jzon edge: escape decode refuses an escape that never completes" {
     var buf: [16]u8 = undefined;
 
     var lone_backslash: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&lone_backslash, "ab\\"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&lone_backslash, "ab\\"));
 
     var unknown_spelling: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&unknown_spelling, "a\\qb"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&unknown_spelling, "a\\qb"));
 
     var short_unicode: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&short_unicode, "\\u12"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&short_unicode, "\\u12"));
 
     var bad_hex: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&bad_hex, "\\u12g4"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&bad_hex, "\\u12g4"));
 }
 
 test "jzon edge: escape decode reads hex digits in either case" {
@@ -100,19 +100,19 @@ test "jzon edge: escape decode refuses every unpaired surrogate half" {
     var buf: [16]u8 = undefined;
 
     var high_alone: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&high_alone, "\\ud800"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&high_alone, "\\ud800"));
 
     var low_alone: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&low_alone, "\\udc00"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&low_alone, "\\udc00"));
 
     var high_then_text: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&high_then_text, "\\ud800abc"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&high_then_text, "\\ud800abc"));
 
     var high_then_high: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&high_then_high, "\\ud800\\ud800"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&high_then_high, "\\ud800\\ud800"));
 
     var high_then_plain: Sink = .init(&buf);
-    try std.testing.expectError(error.BadEscape, escape.decode(&high_then_plain, "\\ud800\\u0041"));
+    try std.testing.expectError(error.JzonBadEscape, escape.decode(&high_then_plain, "\\ud800\\u0041"));
 }
 
 test "jzon edge: escape decode carries the surrogate range boundaries" {

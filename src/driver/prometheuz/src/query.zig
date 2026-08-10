@@ -57,8 +57,8 @@ pub const QueryResult = struct {
 ///
 /// Return:
 /// - *QueryResult (caller must result.deinit()), result_type = .vector
-/// - error.QueryFailed (non-200 response, or "status":"error" in the body)
-/// - error.InvalidResponse (malformed JSON or an unexpected shape)
+/// - error.PrometheuzQueryFailed (non-200 response, or "status":"error" in the body)
+/// - error.PrometheuzInvalidResponse (malformed JSON or an unexpected shape)
 pub fn query(allocator: std.mem.Allocator, io: std.Io, config: QueryConfig, expr: []const u8) !*QueryResult {
     return runQuery(allocator, io, config, "/api/v1/query", &.{
         .{ .name = "query", .value = expr },
@@ -71,8 +71,8 @@ pub fn query(allocator: std.mem.Allocator, io: std.Io, config: QueryConfig, expr
 ///
 /// Return:
 /// - *QueryResult (caller must result.deinit()), result_type = .matrix
-/// - error.QueryFailed (non-200 response, or "status":"error" in the body)
-/// - error.InvalidResponse (malformed JSON or an unexpected shape)
+/// - error.PrometheuzQueryFailed (non-200 response, or "status":"error" in the body)
+/// - error.PrometheuzInvalidResponse (malformed JSON or an unexpected shape)
 pub fn queryRange(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -120,7 +120,7 @@ fn runQuery(allocator: std.mem.Allocator, io: std.Io, config: QueryConfig, path:
     });
     defer response.deinit();
 
-    if (response.status() != 200) return error.QueryFailed;
+    if (response.status() != 200) return error.PrometheuzQueryFailed;
 
     return parseResponse(allocator, response.body());
 }
@@ -150,15 +150,15 @@ fn parseResponse(allocator: std.mem.Allocator, body: []const u8) !*QueryResult {
     errdefer self.arena.deinit();
     const arena = self.arena.allocator();
 
-    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return error.InvalidResponse;
-    const root_object = jsonObject(root) orelse return error.InvalidResponse;
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return error.PrometheuzInvalidResponse;
+    const root_object = jsonObject(root) orelse return error.PrometheuzInvalidResponse;
 
-    const status = jsonString(root_object.get("status")) orelse return error.InvalidResponse;
-    if (!std.mem.eql(u8, status, "success")) return error.QueryFailed;
+    const status = jsonString(root_object.get("status")) orelse return error.PrometheuzInvalidResponse;
+    if (!std.mem.eql(u8, status, "success")) return error.PrometheuzQueryFailed;
 
-    const data = jsonObject(root_object.get("data") orelse return error.InvalidResponse) orelse return error.InvalidResponse;
-    const result_type_str = jsonString(data.get("resultType")) orelse return error.InvalidResponse;
-    const result_array = jsonArray(data.get("result") orelse return error.InvalidResponse) orelse return error.InvalidResponse;
+    const data = jsonObject(root_object.get("data") orelse return error.PrometheuzInvalidResponse) orelse return error.PrometheuzInvalidResponse;
+    const result_type_str = jsonString(data.get("resultType")) orelse return error.PrometheuzInvalidResponse;
+    const result_array = jsonArray(data.get("result") orelse return error.PrometheuzInvalidResponse) orelse return error.PrometheuzInvalidResponse;
 
     self.allocator = allocator;
     self.vector = &.{};
@@ -185,10 +185,10 @@ fn parseVector(arena: std.mem.Allocator, entries: []const std.json.Value) ![]con
     var out = try arena.alloc(VectorEntry, entries.len);
 
     for (entries, 0..) |entry_value, index| {
-        const entry_object = jsonObject(entry_value) orelse return error.InvalidResponse;
+        const entry_object = jsonObject(entry_value) orelse return error.PrometheuzInvalidResponse;
         const metric = try parseMetric(arena, entry_object.get("metric"));
-        const point_array = jsonArray(entry_object.get("value") orelse return error.InvalidResponse) orelse return error.InvalidResponse;
-        if (point_array.len != 2) return error.InvalidResponse;
+        const point_array = jsonArray(entry_object.get("value") orelse return error.PrometheuzInvalidResponse) orelse return error.PrometheuzInvalidResponse;
+        if (point_array.len != 2) return error.PrometheuzInvalidResponse;
 
         out[index] = .{
             .metric = metric,
@@ -204,14 +204,14 @@ fn parseMatrix(arena: std.mem.Allocator, entries: []const std.json.Value) ![]con
     var out = try arena.alloc(MatrixEntry, entries.len);
 
     for (entries, 0..) |entry_value, index| {
-        const entry_object = jsonObject(entry_value) orelse return error.InvalidResponse;
+        const entry_object = jsonObject(entry_value) orelse return error.PrometheuzInvalidResponse;
         const metric = try parseMetric(arena, entry_object.get("metric"));
-        const points_array = jsonArray(entry_object.get("values") orelse return error.InvalidResponse) orelse return error.InvalidResponse;
+        const points_array = jsonArray(entry_object.get("values") orelse return error.PrometheuzInvalidResponse) orelse return error.PrometheuzInvalidResponse;
 
         var points = try arena.alloc(Point, points_array.len);
         for (points_array, 0..) |point_value, point_index| {
-            const point_array = jsonArray(point_value) orelse return error.InvalidResponse;
-            if (point_array.len != 2) return error.InvalidResponse;
+            const point_array = jsonArray(point_value) orelse return error.PrometheuzInvalidResponse;
+            if (point_array.len != 2) return error.PrometheuzInvalidResponse;
 
             points[point_index] = .{
                 .timestamp = try jsonNumber(point_array[0]),
@@ -270,8 +270,8 @@ fn jsonNumber(value: std.json.Value) !f64 {
     return switch (value) {
         .float => |number| number,
         .integer => |number| @floatFromInt(number),
-        .string, .number_string => |text| std.fmt.parseFloat(f64, text) catch error.InvalidResponse,
-        else => error.InvalidResponse,
+        .string, .number_string => |text| std.fmt.parseFloat(f64, text) catch error.PrometheuzInvalidResponse,
+        else => error.PrometheuzInvalidResponse,
     };
 }
 
@@ -327,11 +327,11 @@ test "prometheuz: query surfaces an error status" {
         \\{"status":"error","errorType":"bad_data","error":"parse error"}
     ;
 
-    try testing.expectError(error.QueryFailed, parseResponse(testing.allocator, body));
+    try testing.expectError(error.PrometheuzQueryFailed, parseResponse(testing.allocator, body));
 }
 
 test "prometheuz: query rejects malformed json" {
-    try testing.expectError(error.InvalidResponse, parseResponse(testing.allocator, "not json"));
+    try testing.expectError(error.PrometheuzInvalidResponse, parseResponse(testing.allocator, "not json"));
 }
 
 test "prometheuz: query url-encodes the expression" {

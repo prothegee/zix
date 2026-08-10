@@ -79,37 +79,37 @@ test "jzon edge: integer parse carries the extremes of its target type" {
 }
 
 test "jzon edge: integer parse refuses a value one past the target type" {
-    try std.testing.expectError(error.BadNumber, integer.parse(u8, "256"));
-    try std.testing.expectError(error.BadNumber, integer.parse(i8, "128"));
-    try std.testing.expectError(error.BadNumber, integer.parse(i8, "-129"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u64, "18446744073709551616"));
-    try std.testing.expectError(error.BadNumber, integer.parse(i64, "9223372036854775808"));
-    try std.testing.expectError(error.BadNumber, integer.parse(i64, "-9223372036854775809"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u8, "256"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(i8, "128"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(i8, "-129"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u64, "18446744073709551616"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(i64, "9223372036854775808"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(i64, "-9223372036854775809"));
 }
 
 test "jzon edge: integer parse refuses a negative value for an unsigned type" {
-    try std.testing.expectError(error.BadNumber, integer.parse(u8, "-1"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u64, "-0"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u8, "-1"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u64, "-0"));
 }
 
 test "jzon edge: integer parse refuses a leading zero RFC 8259 does not allow" {
     try std.testing.expectEqual(@as(u32, 0), try integer.parse(u32, "0"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "00"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "007"));
-    try std.testing.expectError(error.BadNumber, integer.parse(i32, "-01"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "00"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "007"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(i32, "-01"));
 }
 
 test "jzon edge: integer parse refuses text that is not a whole number" {
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, ""));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "-"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "+1"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, " 1"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "1 "));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "1.0"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "1e2"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "0x10"));
-    try std.testing.expectError(error.BadNumber, integer.parse(u32, "1_000"));
-    try std.testing.expectError(error.BadNumber, integer.parse(i32, "--1"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, ""));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "-"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "+1"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, " 1"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "1 "));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "1.0"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "1e2"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "0x10"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(u32, "1_000"));
+    try std.testing.expectError(error.JzonBadNumber, integer.parse(i32, "--1"));
 }
 
 test "jzon edge: maxDigits bounds the widest value of every width" {

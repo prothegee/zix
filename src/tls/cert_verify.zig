@@ -115,15 +115,15 @@ fn sanHasIp4(san: []const u8, ip: [4]u8) bool {
 ///
 /// Return:
 /// - EcdsaP256.PublicKey
-/// - error.UnsupportedPeerKey (cert key is not ECDSA on the P-256 / prime256v1 curve)
+/// - error.ZixUnsupportedPeerKey (cert key is not ECDSA on the P-256 / prime256v1 curve)
 pub fn peerEcdsaP256PublicKey(end_entity_der: []const u8) !EcdsaP256.PublicKey {
     const ee = try (Certificate{ .buffer = end_entity_der, .index = 0 }).parse();
     switch (ee.pub_key_algo) {
-        .X9_62_id_ecPublicKey => |curve| if (curve != .X9_62_prime256v1) return error.UnsupportedPeerKey,
-        else => return error.UnsupportedPeerKey,
+        .X9_62_id_ecPublicKey => |curve| if (curve != .X9_62_prime256v1) return error.ZixUnsupportedPeerKey,
+        else => return error.ZixUnsupportedPeerKey,
     }
 
-    return EcdsaP256.PublicKey.fromSec1(ee.pubKey()) catch error.UnsupportedPeerKey;
+    return EcdsaP256.PublicKey.fromSec1(ee.pubKey()) catch error.ZixUnsupportedPeerKey;
 }
 
 // --------------------------------------------------------------- //
@@ -232,12 +232,12 @@ fn pathConstraints(bytes: []const u8) !PathConstraints {
 ///
 /// Return:
 /// - void on a valid, constrained chain
-/// - error.EmptyChain (chain_der has no certs)
-/// - error.IssuerNotCertificateAuthority / error.IssuerKeyUsageForbidsSigning
-/// - error.PathLenConstraintExceeded / error.UnrecognizedCriticalExtension
+/// - error.ZixEmptyChain (chain_der has no certs)
+/// - error.ZixIssuerNotCertificateAuthority / error.ZixIssuerKeyUsageForbidsSigning
+/// - error.ZixPathLenConstraintExceeded / error.ZixUnrecognizedCriticalExtension
 /// - propagates std.crypto.Certificate verify errors (signature / validity / issuer mismatch)
 pub fn verifyChain(chain_der: []const []const u8, trust_anchor_der: []const u8, now_sec: i64) !void {
-    if (chain_der.len == 0) return error.EmptyChain;
+    if (chain_der.len == 0) return error.ZixEmptyChain;
 
     const anchor = try (Certificate{ .buffer = trust_anchor_der, .index = 0 }).parse();
 
@@ -251,15 +251,15 @@ pub fn verifyChain(chain_der: []const []const u8, trust_anchor_der: []const u8, 
         try subject.verify(issuer, now_sec);
 
         const issuer_constraints = try pathConstraints(issuer_der);
-        if (!issuer_constraints.is_ca) return error.IssuerNotCertificateAuthority;
-        if (issuer_constraints.has_key_usage and !issuer_constraints.key_cert_sign) return error.IssuerKeyUsageForbidsSigning;
+        if (!issuer_constraints.is_ca) return error.ZixIssuerNotCertificateAuthority;
+        if (issuer_constraints.has_key_usage and !issuer_constraints.key_cert_sign) return error.ZixIssuerKeyUsageForbidsSigning;
         if (issuer_constraints.path_len) |pl| {
             // intermediates strictly between this issuer and the end-entity (chain[1..idx]).
-            if (idx > pl) return error.PathLenConstraintExceeded;
+            if (idx > pl) return error.ZixPathLenConstraintExceeded;
         }
 
         const subject_constraints = try pathConstraints(chain_der[idx]);
-        if (subject_constraints.unknown_critical) return error.UnrecognizedCriticalExtension;
+        if (subject_constraints.unknown_critical) return error.ZixUnrecognizedCriticalExtension;
     }
 }
 
@@ -384,5 +384,5 @@ test "zix tls: cert verify, multi-cert chain rejects wrong anchor / expiry / emp
     try std.testing.expectError(error.CertificateExpired, verifyChain(&chain, root, 2_200_000_000));
 
     // an empty chain has no end-entity to anchor.
-    try std.testing.expectError(error.EmptyChain, verifyChain(&[_][]const u8{}, root, chain_now_sec));
+    try std.testing.expectError(error.ZixEmptyChain, verifyChain(&[_][]const u8{}, root, chain_now_sec));
 }

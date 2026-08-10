@@ -48,7 +48,7 @@ const FLAG_FORWARD_TSN: u8 = 1 << 0;
 const FLAG_RECONFIG: u8 = 1 << 1;
 
 /// The output buffer cannot hold a cookie.
-pub const Error = error{NoSpace};
+pub const Error = error{ZixNoSpace};
 
 /// Everything the responder has to remember between the INIT and the COOKIE ECHO.
 pub const Contents = struct {
@@ -129,9 +129,9 @@ pub const Signer = struct {
     ///
     /// Return:
     /// - []const u8 of exactly COOKIE_LEN bytes
-    /// - error.NoSpace if the buffer is smaller than that
+    /// - error.ZixNoSpace if the buffer is smaller than that
     pub fn sign(self: Signer, contents: Contents, out: []u8) Error![]const u8 {
-        if (out.len < COOKIE_LEN) return error.NoSpace;
+        if (out.len < COOKIE_LEN) return error.ZixNoSpace;
 
         writeBody(out[0..BODY_LEN], contents);
 
@@ -430,7 +430,7 @@ test "zix sctp: cookie sign, a buffer smaller than one cookie errors" {
     const signer = Signer.init(test_secret);
 
     var buf: [COOKIE_LEN - 1]u8 = undefined;
-    try std.testing.expectError(error.NoSpace, signer.sign(sampleContents(), &buf));
+    try std.testing.expectError(error.ZixNoSpace, signer.sign(sampleContents(), &buf));
 }
 
 test "zix sctp: cookie sign, two different port pairs give different cookies" {

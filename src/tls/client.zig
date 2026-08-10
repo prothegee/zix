@@ -81,12 +81,12 @@ pub const FinishResult = struct {
     ///
     /// Return:
     /// - void on a trusted, hostname-matching certificate
-    /// - error.NoServerCertificate (the server sent no Certificate)
+    /// - error.ZixNoServerCertificate (the server sent no Certificate)
     /// - error.CertificateExpired / error.CertificateNotYetValid / error.CertificateIssuerMismatch
     /// - error.CertificateHostMismatch (no SAN/CN entry matches hostname)
     pub fn verifyServerCert(self: *const FinishResult, anchor_der: []const u8, hostname: []const u8, now_sec: i64) !void {
         const der = self.serverCertDer();
-        if (der.len == 0) return error.NoServerCertificate;
+        if (der.len == 0) return error.ZixNoServerCertificate;
 
         try cert_verify.verifyCertChain(der, anchor_der, now_sec);
         try cert_verify.verifyCertHostname(der, hostname);
@@ -113,7 +113,7 @@ pub const ClientConnection = struct {
     pub fn readAppData(self: *ClientConnection, rec: []const u8, out: []u8) record.Error![]const u8 {
         const opened = try record.deprotect(out, rec, self.server_app_key, self.server_app_iv, self.server_seq);
         self.server_seq += 1;
-        if (opened.inner_type != .APPLICATION_DATA) return error.Decode;
+        if (opened.inner_type != .APPLICATION_DATA) return error.ZixDecode;
 
         return opened.data;
     }
@@ -144,7 +144,7 @@ pub fn finish(state: *State, server_flight: []const u8, out: []u8) !FinishResult
     var r = wire.Reader{ .buf = server_flight };
 
     // record 1: ServerHello (plaintext handshake).
-    if (try r.readU8() != 22) return error.UnexpectedRecord;
+    if (try r.readU8() != 22) return error.ZixUnexpectedRecord;
     _ = try r.readU16();
     const sh_len = try r.readU16();
     const sh_msg = try r.readBytes(sh_len);
@@ -152,14 +152,14 @@ pub fn finish(state: *State, server_flight: []const u8, out: []u8) !FinishResult
     state.transcript.update(sh_msg);
 
     // record 2: ChangeCipherSpec (skipped).
-    if (try r.readU8() != 20) return error.UnexpectedRecord;
+    if (try r.readU8() != 20) return error.ZixUnexpectedRecord;
     _ = try r.readU16();
     const ccs_len = try r.readU16();
     _ = try r.readBytes(ccs_len);
 
     // record 3: the encrypted flight.
     const flight_pos = r.pos;
-    if (try r.readU8() != 23) return error.UnexpectedRecord;
+    if (try r.readU8() != 23) return error.ZixUnexpectedRecord;
     _ = try r.readU16();
     const flight_len = try r.readU16();
     const flight_record = server_flight[flight_pos .. flight_pos + 5 + flight_len];
@@ -189,7 +189,7 @@ pub fn finish(state: *State, server_flight: []const u8, out: []u8) !FinishResult
     // decrypt the flight, fold each inner message (EE, Cert, CertVerify, Finished) into the transcript.
     var flight_plain: [4096]u8 = undefined;
     const opened = try record.deprotect(&flight_plain, flight_record, server_hs_key, server_hs_iv, 0);
-    if (opened.inner_type != .HANDSHAKE) return error.UnexpectedRecord;
+    if (opened.inner_type != .HANDSHAKE) return error.ZixUnexpectedRecord;
 
     var fr = wire.Reader{ .buf = opened.data };
     var server_finished_vd: []const u8 = &.{};
@@ -226,7 +226,7 @@ pub fn finish(state: *State, server_flight: []const u8, out: []u8) !FinishResult
     const server_finished_key = certificate.finishedKey(server_hs_traffic);
     const expected = certificate.finishedVerifyData(server_finished_key, transcript_before_finished.current());
     if (server_finished_vd.len != key_schedule.hash_length or !std.mem.eql(u8, server_finished_vd, &expected)) {
-        return error.ServerFinishedMismatch;
+        return error.ZixServerFinishedMismatch;
     }
 
     // application key schedule from the transcript through the server Finished.
@@ -257,7 +257,7 @@ pub fn finish(state: *State, server_flight: []const u8, out: []u8) !FinishResult
     // surface the server end-entity cert so the caller can chain + hostname validate it. Copy it
     // out of the decrypted flight (a stack buffer that dies with finish), the caller owns the trust.
     const leaf = try leafCertDer(cert_msg);
-    if (leaf.len > max_server_cert_der) return error.CertificateTooLarge;
+    if (leaf.len > max_server_cert_der) return error.ZixCertificateTooLarge;
 
     var result: FinishResult = .{ .client_finished = client_finished, .connection = conn, .alpn = parseSelectedAlpn(ee_msg) };
     @memcpy(result.server_cert[0..leaf.len], leaf);
@@ -396,13 +396,13 @@ fn verifyCertificateVerify(cert_msg: []const u8, certverify_msg: []const u8, tra
             const Ed25519 = std.crypto.sign.Ed25519;
             if (sig_bytes.len != Ed25519.Signature.encoded_length) return error.InvalidSignature;
             const pub_raw = parsed.pubKey();
-            if (pub_raw.len != 32) return error.UnsupportedSignatureScheme;
+            if (pub_raw.len != 32) return error.ZixUnsupportedSignatureScheme;
 
             const pub_key = try Ed25519.PublicKey.fromBytes(pub_raw[0..32].*);
             const sig = Ed25519.Signature.fromBytes(sig_bytes[0..64].*);
             try sig.verify(content, pub_key);
         },
-        else => return error.UnsupportedSignatureScheme,
+        else => return error.ZixUnsupportedSignatureScheme,
     }
 }
 
@@ -410,7 +410,7 @@ const ServerHelloParsed = struct { server_random: [32]u8, server_public: [32]u8 
 
 fn parseServerHello(sh_msg: []const u8) !ServerHelloParsed {
     var hr = wire.Reader{ .buf = sh_msg };
-    if (try hr.readU8() != 2) return error.NotServerHello;
+    if (try hr.readU8() != 2) return error.ZixNotServerHello;
     _ = try hr.readU24();
     _ = try hr.readU16(); // legacy_version
     var out: ServerHelloParsed = undefined;
@@ -437,7 +437,7 @@ fn parseServerHello(sh_msg: []const u8) !ServerHelloParsed {
         }
     }
 
-    return error.NoServerKeyShare;
+    return error.ZixNoServerKeyShare;
 }
 
 // --------------------------------------------------------------- //
@@ -516,7 +516,7 @@ test "zix tls: client, verifyServerCert trusts a good cert and rejects bad host 
     try std.testing.expectError(error.CertificateNotYetValid, result.verifyServerCert(cert_der, "localhost", 1_700_000_000));
 
     var empty: FinishResult = .{ .client_finished = &.{}, .connection = undefined };
-    try std.testing.expectError(error.NoServerCertificate, empty.verifyServerCert(cert_der, "localhost", now_sec));
+    try std.testing.expectError(error.ZixNoServerCertificate, empty.verifyServerCert(cert_der, "localhost", now_sec));
 }
 
 // --------------------------------------------------------------- //
@@ -536,7 +536,7 @@ fn readExactFd(fd: std.posix.fd_t, buf: []u8) !void {
     while (n < buf.len) {
         const rc = linux.read(fd, buf[n..].ptr, buf.len - n);
         if (std.posix.errno(rc) != .SUCCESS) return error.ReadFailed;
-        if (rc == 0) return error.Eof;
+        if (rc == 0) return error.ZixEof;
         n += rc;
     }
 }

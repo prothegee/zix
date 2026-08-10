@@ -106,7 +106,7 @@ Primitive level rendah, diekspos agar sebuah peer dapat membangun sisi lain dari
 | Method | Deskripsi |
 | :- | :- |
 | `init(handler, config)` | Menyimpan config, tanpa validasi dan tanpa error. Mengikuti `zix.Http1.Server.init`. |
-| `run()` | Validasi dulu (`error.PortNotConfigured` pada port nol, `error.TlsRequired` pada TLS context null), lalu bind dan serve pada model di `config.dispatch_model`. Blok sampai error. Linux-only. |
+| `run()` | Validasi dulu (`error.ZixPortNotConfigured` pada port nol, `error.ZixTlsRequired` pada TLS context null), lalu bind dan serve pada model di `config.dispatch_model`. Blok sampai error. Linux-only. |
 | `deinit()` | Melepas resource (no-op saat ini, disimpan untuk simetri API). |
 
 ---
@@ -183,7 +183,7 @@ Query string di-strip sebelum matching (matching melihat path sampai `?`), handl
 
 ## Penyajian File Static
 
-`public_dir` (ADR-064) menyajikan route yang tidak cocok sebagai file sebelum 404, dengan `..` ditolak. Direktori yang tidak ada gagal saat `run()` dengan `error.PublicDirNotFound`.
+`public_dir` (ADR-064) menyajikan route yang tidak cocok sebagai file sebelum 404, dengan `..` ditolak. Direktori yang tidak ada gagal saat `run()` dengan `error.ZixPublicDirNotFound`.
 
 **Engine ini berbeda dari ketiga lainnya, dan perbedaannya bukan optimisasi.** Pada `zix.Http`, `zix.Http1`, dan `zix.Http2` response ditulis di dalam pemanggilan handler, jadi body bisa datang dari descriptor yang hanya terbuka selama pemanggilan itu. Di sini tidak bisa: `Response` adalah pemegang nilai, dan body yang terlalu besar untuk satu paket diparkir di slot send-stream, difragmentasi pump ke banyak paket, ditahan sampai setiap range di-ack, lalu di-rewind dan dikirim ulang saat loss atau probe timeout. Body harus berupa memori stabil yang bisa dibaca acak dan hidup lebih lama dari handler.
 

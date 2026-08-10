@@ -191,7 +191,7 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
     // RFC 6455 1.3 - this exact GUID is mandated by the WebSocket spec, do not change it.
     const rfc6455_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     var hash_input: [WS_ACCEPT_HASH_INPUT_SIZE]u8 = undefined;
-    if (key.len + rfc6455_guid.len > hash_input.len) return error.KeyTooLong;
+    if (key.len + rfc6455_guid.len > hash_input.len) return error.ZixKeyTooLong;
 
     @memcpy(hash_input[0..key.len], key);
     @memcpy(hash_input[key.len..][0..rfc6455_guid.len], rfc6455_guid);

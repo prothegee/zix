@@ -301,7 +301,7 @@ fn maybeCloseAfterDrain(session: *Session) void {
 
 fn processFrame(session: *Session) ProcessResult {
     const frame = http2_frames.readFrame(session.client_r, &session.payload_buf) catch |err| {
-        if (err == error.FrameTooLarge) return connError(session, Http2.ERR_FRAME_SIZE_ERROR);
+        if (err == error.ZixerFrameTooLarge) return connError(session, Http2.ERR_FRAME_SIZE_ERROR);
 
         return .CLOSED;
     };
@@ -1711,10 +1711,10 @@ fn waitReady(io: std.Io, fake: *FakeGrpcUpstream) !void {
         if (fake.bind_failed.load(.acquire)) {
             std.log.err("zix zixer: grpc edge, the fake upstream could not take port {d} in {d} tries", .{ fake.port, BIND_TRIES });
 
-            return error.FakeBindFailed;
+            return error.ZixerFakeBindFailed;
         }
 
-        if (spins > 5000) return error.FakeNeverReady;
+        if (spins > 5000) return error.ZixerFakeNeverReady;
 
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
@@ -2225,7 +2225,7 @@ test "zix zixer: grpc edge, client reset forwards to the upstream stream" {
 
     var spins: usize = 0;
     while (fake.rst_seen.load(.acquire) == 0) : (spins += 1) {
-        if (spins > 5000) return error.RstNeverForwarded;
+        if (spins > 5000) return error.ZixerRstNeverForwarded;
 
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }

@@ -17,14 +17,14 @@ pub const Varint = struct { value: u64, len: usize };
 ///
 /// Return:
 /// - Varint (value plus consumed length)
-/// - error.Truncated when fewer bytes are present than the length prefix demands
-pub fn read(data: []const u8) error{Truncated}!Varint {
-    if (data.len == 0) return error.Truncated;
+/// - error.ZixTruncated when fewer bytes are present than the length prefix demands
+pub fn read(data: []const u8) error{ZixTruncated}!Varint {
+    if (data.len == 0) return error.ZixTruncated;
 
     const prefix = data[0] >> 6;
     const length: usize = @as(usize, 1) << @intCast(prefix);
 
-    if (data.len < length) return error.Truncated;
+    if (data.len < length) return error.ZixTruncated;
 
     var value: u64 = data[0] & 0x3f;
     for (1..length) |i| value = (value << 8) + data[i];
@@ -85,8 +85,8 @@ test "zix http3: RFC 9000 A.1 varint decode" {
     try std.testing.expectEqual(@as(u64, 37), non_minimal.value);
     try std.testing.expectEqual(@as(usize, 2), non_minimal.len);
 
-    try std.testing.expectError(error.Truncated, read(&[_]u8{}));
-    try std.testing.expectError(error.Truncated, read(&hexBytes("c2")));
+    try std.testing.expectError(error.ZixTruncated, read(&[_]u8{}));
+    try std.testing.expectError(error.ZixTruncated, read(&hexBytes("c2")));
 }
 
 test "zix http3: RFC 9000 16 varint encode and length boundaries" {

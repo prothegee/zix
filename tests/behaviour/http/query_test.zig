@@ -112,22 +112,22 @@ test "zix behaviour: Http a method it does not implement draws 501, not 400" {
     // The request line tokenized, so the request was not malformed. Answering 400
     // told a client to fix a request that had nothing wrong with it.
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http.Request.fromRaw("BREW /pot HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
     );
 
-    const answer = zix.Http.parseErrorResponse(error.UnknownMethod);
+    const answer = zix.Http.parseErrorResponse(error.ZixUnknownMethod);
     try std.testing.expect(std.mem.startsWith(u8, answer, "HTTP/1.1 501 Not Implemented\r\n"));
     try std.testing.expect(std.mem.endsWith(u8, answer, "\r\n\r\n"));
 }
 
 test "zix behaviour: Http and Http1 answer an unimplemented method identically" {
     try std.testing.expectEqualStrings(
-        zix.Http.parseErrorResponse(error.UnknownMethod),
-        zix.Http1.parseErrorResponse(error.UnknownMethod),
+        zix.Http.parseErrorResponse(error.ZixUnknownMethod),
+        zix.Http1.parseErrorResponse(error.ZixUnknownMethod),
     );
     try std.testing.expectEqualStrings(
-        zix.Http.parseErrorResponse(error.InvalidRequest),
-        zix.Http1.parseErrorResponse(error.InvalidRequest),
+        zix.Http.parseErrorResponse(error.ZixInvalidRequest),
+        zix.Http1.parseErrorResponse(error.ZixInvalidRequest),
     );
 }

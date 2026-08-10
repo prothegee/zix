@@ -32,7 +32,7 @@ pub fn runHttp1(io: std.Io, port: u16) !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
 
-    if (resp.status() != 200) return error.UnexpectedStatus;
+    if (resp.status() != 200) return error.ZixUnexpectedStatus;
     if (resp.header("Via") == null) return error.MissingVia;
     if (std.mem.indexOf(u8, resp.body(), "upstream: proxies/http1") == null) return error.NotFromUpstream;
     if (std.mem.indexOf(u8, resp.body(), "via: 1.1 zixer") == null) return error.UpstreamMissedVia;
@@ -109,7 +109,7 @@ pub fn runStatic(io: std.Io, port: u16) !void {
     var index = try client.get(index_url, .{});
     defer index.deinit();
 
-    if (index.status() != 200) return error.UnexpectedStatus;
+    if (index.status() != 200) return error.ZixUnexpectedStatus;
     if (std.mem.indexOf(u8, index.body(), "Served by zixer") == null) return error.NotTheIndexPage;
     if (index.header("Vary") == null) return error.MissingVary;
 
@@ -189,7 +189,7 @@ pub fn runRoundRobin(io: std.Io, port: u16, first_port: u16, second_port: u16) !
         var resp = try client.get(url, .{});
         defer resp.deinit();
 
-        if (resp.status() != 200) return error.UnexpectedStatus;
+        if (resp.status() != 200) return error.ZixUnexpectedStatus;
         if (std.mem.indexOf(u8, resp.body(), first_mark) != null) saw_first = true;
         if (std.mem.indexOf(u8, resp.body(), second_mark) != null) saw_second = true;
     }

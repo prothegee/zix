@@ -38,11 +38,11 @@ pub const UNSPECIFIED_IP6: []const u8 = "::";
 /// Everything that stops an address from being read or written.
 pub const Error = error{
     /// A connection line without all three of its fields.
-    Malformed,
+    ZixMalformed,
     /// A network type or address type this endpoint does not use.
-    Unsupported,
+    ZixUnsupported,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// Which kind of address is being spelled.
@@ -90,23 +90,23 @@ pub fn familyOf(address: IpAddress) Family {
 ///
 /// Return:
 /// - Connection borrowing `value`
-/// - error.Malformed if any of the three fields is missing
-/// - error.Unsupported for a network or address type this endpoint does not use
+/// - error.ZixMalformed if any of the three fields is missing
+/// - error.ZixUnsupported for a network or address type this endpoint does not use
 pub fn readConnection(value: []const u8) Error!Connection {
     var fields = std.mem.tokenizeScalar(u8, value, ' ');
 
-    const net_type = fields.next() orelse return error.Malformed;
-    const addr_type = fields.next() orelse return error.Malformed;
-    const address = fields.next() orelse return error.Malformed;
+    const net_type = fields.next() orelse return error.ZixMalformed;
+    const addr_type = fields.next() orelse return error.ZixMalformed;
+    const address = fields.next() orelse return error.ZixMalformed;
 
-    if (!std.mem.eql(u8, net_type, NET_TYPE)) return error.Unsupported;
+    if (!std.mem.eql(u8, net_type, NET_TYPE)) return error.ZixUnsupported;
 
     const family: Family = if (std.mem.eql(u8, addr_type, "IP4"))
         .IP4
     else if (std.mem.eql(u8, addr_type, "IP6"))
         .IP6
     else
-        return error.Unsupported;
+        return error.ZixUnsupported;
 
     return .{ .family = family, .address = address };
 }
@@ -120,11 +120,11 @@ pub fn readConnection(value: []const u8) Error!Connection {
 ///
 /// Return:
 /// - []const u8, the value alone, with no line type and no terminator
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeConnection(out: []u8, family: Family, address: []const u8) Error![]const u8 {
     const total = NET_TYPE.len + 1 + family.name().len + 1 + address.len;
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     var at: usize = 0;
     at += copy(out[at..], NET_TYPE);
@@ -146,7 +146,7 @@ pub fn writeConnection(out: []u8, family: Family, address: []const u8) Error![]c
 ///
 /// Return:
 /// - []const u8
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn writeAddress(out: []u8, address: IpAddress) Error![]const u8 {
     return switch (address) {
         .ip4 => |addr| writeIp4(out, addr.bytes),
@@ -174,7 +174,7 @@ fn writeIp4(out: []u8, bytes: [4]u8) Error![]const u8 {
 
     for (bytes, 0..) |byte, index| {
         if (index != 0) {
-            if (at >= out.len) return error.NoSpace;
+            if (at >= out.len) return error.ZixNoSpace;
 
             out[at] = '.';
             at += 1;
@@ -200,7 +200,7 @@ fn writeIp6(out: []u8, bytes: [16]u8) Error![]const u8 {
     while (index < groups.len) {
         if (run.len >= 2 and index == run.start) {
             // One colon here plus the one the next group writes makes the "::".
-            if (at + 1 >= out.len) return error.NoSpace;
+            if (at + 1 >= out.len) return error.ZixNoSpace;
 
             out[at] = ':';
             at += 1;
@@ -216,7 +216,7 @@ fn writeIp6(out: []u8, bytes: [16]u8) Error![]const u8 {
         // A run starting at zero already wrote the first colon, and the index has moved past it
         // by the time this is reached, so one test covers both cases.
         if (index != 0) {
-            if (at >= out.len) return error.NoSpace;
+            if (at >= out.len) return error.ZixNoSpace;
 
             out[at] = ':';
             at += 1;
@@ -268,7 +268,7 @@ fn writeDecimal(out: []u8, value: u16) Error!usize {
         if (left == 0) break;
     }
 
-    if (out.len < count) return error.NoSpace;
+    if (out.len < count) return error.ZixNoSpace;
 
     for (0..count) |index| out[index] = digits[count - 1 - index];
 
@@ -291,7 +291,7 @@ fn writeHex(out: []u8, value: u16) Error!usize {
         if (left == 0) break;
     }
 
-    if (out.len < count) return error.NoSpace;
+    if (out.len < count) return error.ZixNoSpace;
 
     for (0..count) |index| out[index] = digits[count - 1 - index];
 
@@ -331,14 +331,14 @@ test "zix sdp: address readConnection, IPv6 is read the same way" {
 }
 
 test "zix sdp: address readConnection, a missing field is refused" {
-    try std.testing.expectError(error.Malformed, readConnection("IN IP4"));
-    try std.testing.expectError(error.Malformed, readConnection("IN"));
-    try std.testing.expectError(error.Malformed, readConnection(""));
+    try std.testing.expectError(error.ZixMalformed, readConnection("IN IP4"));
+    try std.testing.expectError(error.ZixMalformed, readConnection("IN"));
+    try std.testing.expectError(error.ZixMalformed, readConnection(""));
 }
 
 test "zix sdp: address readConnection, another network type is refused" {
-    try std.testing.expectError(error.Unsupported, readConnection("XX IP4 192.0.2.3"));
-    try std.testing.expectError(error.Unsupported, readConnection("IN IP9 192.0.2.3"));
+    try std.testing.expectError(error.ZixUnsupported, readConnection("XX IP4 192.0.2.3"));
+    try std.testing.expectError(error.ZixUnsupported, readConnection("IN IP9 192.0.2.3"));
 }
 
 test "zix sdp: address readConnection, a host name is handed back unresolved" {
@@ -357,7 +357,7 @@ test "zix sdp: address writeConnection, the value is the three fields in order" 
 test "zix sdp: address writeConnection, a short buffer errors" {
     var buf: [8]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, writeConnection(&buf, .IP4, "192.0.2.3"));
+    try std.testing.expectError(error.ZixNoSpace, writeConnection(&buf, .IP4, "192.0.2.3"));
 }
 
 test "zix sdp: address writeAddress, a dotted quad" {
@@ -428,7 +428,7 @@ test "zix sdp: address writeAddress, a short buffer errors" {
     var buf: [4]u8 = undefined;
     const address: IpAddress = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 0 } };
 
-    try std.testing.expectError(error.NoSpace, writeAddress(&buf, address));
+    try std.testing.expectError(error.ZixNoSpace, writeAddress(&buf, address));
 }
 
 test "zix sdp: address familyOf, the union tag decides" {

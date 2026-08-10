@@ -45,7 +45,7 @@ pub const ContentType = enum(u8) {
     _,
 };
 
-pub const Error = error{ RecordOverflow, BadRecordMac, Decode };
+pub const Error = error{ RedizRecordOverflow, RedizBadRecordMac, RedizDecode };
 
 /// The opened inner of a protected record: the true content type and the data.
 pub const Opened = struct {
@@ -141,26 +141,26 @@ pub fn protect2(out: []u8, a: []const u8, b: []const u8, inner_type: ContentType
 ///
 /// Return:
 /// - Opened
-/// - error.RecordOverflow if the ciphertext exceeds 2^14 + 256
-/// - error.BadRecordMac if the AEAD tag does not verify
-/// - error.Decode if the record is truncated or all-zero (no content type)
+/// - error.RedizRecordOverflow if the ciphertext exceeds 2^14 + 256
+/// - error.RedizBadRecordMac if the AEAD tag does not verify
+/// - error.RedizDecode if the record is truncated or all-zero (no content type)
 pub fn deprotect(out: []u8, record: []const u8, key: [KEY_LENGTH]u8, iv: [IV_LENGTH]u8, sequence: u64) Error!Opened {
-    if (record.len < 5 + TAG_LENGTH) return error.Decode;
+    if (record.len < 5 + TAG_LENGTH) return error.RedizDecode;
 
     const header = record[0..5];
     const body = record[5..];
-    if (body.len > MAX_CIPHERTEXT) return error.RecordOverflow;
+    if (body.len > MAX_CIPHERTEXT) return error.RedizRecordOverflow;
 
     const ciphertext = body[0 .. body.len - TAG_LENGTH];
     var tag: [TAG_LENGTH]u8 = undefined;
     @memcpy(&tag, body[body.len - TAG_LENGTH ..]);
 
     const plaintext = out[0..ciphertext.len];
-    Aes128Gcm.decrypt(plaintext, ciphertext, tag, header, nonce(iv, sequence), key) catch return error.BadRecordMac;
+    Aes128Gcm.decrypt(plaintext, ciphertext, tag, header, nonce(iv, sequence), key) catch return error.RedizBadRecordMac;
 
     var end = plaintext.len;
     while (end > 0 and plaintext[end - 1] == 0) end -= 1;
-    if (end == 0) return error.Decode;
+    if (end == 0) return error.RedizDecode;
 
     return .{ .inner_type = @enumFromInt(plaintext[end - 1]), .data = plaintext[0 .. end - 1] };
 }
@@ -228,13 +228,13 @@ test "rediz tls: record deprotect failures: bad tag, wrong seq, overflow" {
     var tampered: [256]u8 = undefined;
     @memcpy(tampered[0..record.len], record);
     tampered[record.len - 1] ^= 0x01;
-    try std.testing.expectError(error.BadRecordMac, deprotect(&plain_buf, tampered[0..record.len], key, iv, 0));
+    try std.testing.expectError(error.RedizBadRecordMac, deprotect(&plain_buf, tampered[0..record.len], key, iv, 0));
 
-    try std.testing.expectError(error.BadRecordMac, deprotect(&plain_buf, record, key, iv, 1));
+    try std.testing.expectError(error.RedizBadRecordMac, deprotect(&plain_buf, record, key, iv, 1));
 
     var oversize: [5 + MAX_CIPHERTEXT + 1]u8 = undefined;
     oversize[0] = 23;
     std.mem.writeInt(u16, oversize[1..3], LEGACY_RECORD_VERSION, .big);
     std.mem.writeInt(u16, oversize[3..5], MAX_CIPHERTEXT + 1, .big);
-    try std.testing.expectError(error.RecordOverflow, deprotect(&plain_buf, &oversize, key, iv, 0));
+    try std.testing.expectError(error.RedizRecordOverflow, deprotect(&plain_buf, &oversize, key, iv, 0));
 }

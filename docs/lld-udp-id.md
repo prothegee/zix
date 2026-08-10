@@ -105,7 +105,7 @@ Sama seperti server, dijalankan saat build.
 ### init()
 
 ```
-1. if bind_port == 0 or server_port == 0: return error.PortNotConfigured
+1. if bind_port == 0 or server_port == 0: return error.ZixPortNotConfigured
 2. bind_addr = IpAddress.parse(config.bind_ip, bind_port)
 3. socket = bind_addr.bind(io, .dgram .udp)  // satu socket untuk kirim dan terima
 4. dest = IpAddress.parse(config.ip, server_port)
@@ -125,7 +125,7 @@ socket.send(io, &dest, std.mem.asBytes(&wire))
 
 ```
 if config.recv_timeout_ms > 0:
-    if poll(socket, recv_timeout_ms) not ready: return error.RecvTimeout  // poll, not SO_RCVTIMEO
+    if poll(socket, recv_timeout_ms) not ready: return error.ZixRecvTimeout  // poll, not SO_RCVTIMEO
 buf: [@sizeOf(Packet)]u8 = undefined
 msg = socket.receive(io, &buf)         // blocking unless the poll above timed out
 if msg.data.len == 1:
@@ -134,7 +134,7 @@ if msg.data.len == 1:
 if msg.data.len == @sizeOf(Packet):
     wire_pkt: Packet = @bitCast(buf)
     return .{ .packet = fromEndian(Packet, wire_pkt, config.endianness) }
-return error.UnexpectedPacketSize
+return error.ZixUnexpectedPacketSize
 ```
 
 Dispatch berdasarkan panjang adalah mekanisme decoding. ACK/NACK adalah respons satu byte, echo packet penuh atau broadcast relay memiliki tepat `@sizeOf(Packet)` byte.
@@ -187,7 +187,7 @@ Kedua fungsi mengembalikan nilai baru sementara nilai aslinya tidak dimodifikasi
 
 ### Gate allow_args
 
-Kedua config membawa `allow_args: bool = false`. `init(config, args)` membaca `--ip` / `--port` (server) atau `--bind-ip` / `--bind-port` / `--server-port` (client) dari `args` hanya saat flag diset, lewat `applyServerArgs` / `applyClientArgs`. Flag yang hilang atau tidak dikenali mempertahankan nilai konfigurasi. Parse args hanya di-compile saat `args` berupa `std.process.Args` nyata, jadi memberikan `.{}` (tanpa CLI) melewatinya saat comptime. Guard port tetap jalan: port hasil bernilai nol menghasilkan `error.PortNotConfigured`.
+Kedua config membawa `allow_args: bool = false`. `init(config, args)` membaca `--ip` / `--port` (server) atau `--bind-ip` / `--bind-port` / `--server-port` (client) dari `args` hanya saat flag diset, lewat `applyServerArgs` / `applyClientArgs`. Flag yang hilang atau tidak dikenali mempertahankan nilai konfigurasi. Parse args hanya di-compile saat `args` berupa `std.process.Args` nyata, jadi memberikan `.{}` (tanpa CLI) melewatinya saat comptime. Guard port tetap jalan: port hasil bernilai nol menghasilkan `error.ZixPortNotConfigured`.
 
 ### Nilai backing enum
 

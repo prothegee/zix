@@ -6,7 +6,7 @@ Dokumen ini mencakup detail wire-level dan internal. Untuk bentuk driver baca `h
 
 Client menulis request line, `Host`, `Connection: close`, header milik pemanggil, lalu `Content-Length` dan body (body kosong mengirim `Content-Length: 0`). Ia membaca response dalam dua fase:
 
-1. Baca ke `HEAD_SCAN_BUF` tetap (8192 byte) sampai `"\r\n\r\n"` ditemukan. `error.InvalidResponse` bila head tidak pernah berakhir dalam buffer itu, `error.ConnectionClosed` bila peer menutup lebih dulu.
+1. Baca ke `HEAD_SCAN_BUF` tetap (8192 byte) sampai `"\r\n\r\n"` ditemukan. `error.PrometheuzInvalidResponse` bila head tidak pernah berakhir dalam buffer itu, `error.PrometheuzConnectionClosed` bila peer menutup lebih dulu.
 2. Parse status line dan, dari head, `Content-Length` dan `Transfer-Encoding`. Lalu baca body sesuai framing yang dideklarasikan response:
 
 ```mermaid
@@ -70,7 +70,7 @@ Sample          { double value = 1; int64 timestamp = 2 }
 
 Byte `WriteRequest` yang sudah di-encode lalu dikompres snappy (`snappy.zig`) sebelum POST. `snappy.zig` menulis preamble panjang-tak-terkompresi bervarint, lalu memecah input menjadi elemen literal maksimal 60 byte (`MAX_LITERAL_CHUNK`), masing-masing dengan tag satu-byte `(chunk_len - 1) << 2` (wire type `00` = literal, sehingga setiap tag muat satu byte). Ini spec-valid tapi tidak mengompres: tidak pernah mengeluarkan elemen copy/back-reference, decoder snappy asli menerima stream all-literal secara desain. Lihat keputusan desain di `hld-id.md` untuk alasan ini adalah potongan cakupan v1 yang disengaja, bukan defect.
 
-`checkStatus` menerima status 2xx apa pun, selain itu (termasuk kegagalan jaringan) muncul sebagai `error.RemoteWriteRejected` atau error transport yang mendasarinya.
+`checkStatus` menerima status 2xx apa pun, selain itu (termasuk kegagalan jaringan) muncul sebagai `error.PrometheuzRemoteWriteRejected` atau error transport yang mendasarinya.
 
 ## Decode response PromQL (`query.zig`)
 
@@ -80,7 +80,7 @@ Byte `WriteRequest` yang sudah di-encode lalu dikompres snappy (`snappy.zig`) se
 ]}}
 ```
 
-`parseResponse` mem-parse body dengan `std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{})`, lalu menelusuri tree-nya secara manual (helper `jsonObject`/`jsonArray`/`jsonString`/`jsonNumber`) alih-alih parse struct typed: satu titik PromQL adalah array JSON dua elemen `[number, "string"]` (nilainya berjalan sebagai string demi menjaga presisi float penuh), bentuk yang tidak bisa dideskripsikan struct tetap. `"status": "error"` di body (query yang well-formed tapi gagal) muncul sebagai `error.QueryFailed`, sama seperti status HTTP non-200, body yang gagal diparse sebagai JSON, atau punya bentuk tak terduga di langkah mana pun, muncul sebagai `error.InvalidResponse`.
+`parseResponse` mem-parse body dengan `std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{})`, lalu menelusuri tree-nya secara manual (helper `jsonObject`/`jsonArray`/`jsonString`/`jsonNumber`) alih-alih parse struct typed: satu titik PromQL adalah array JSON dua elemen `[number, "string"]` (nilainya berjalan sebagai string demi menjaga presisi float penuh), bentuk yang tidak bisa dideskripsikan struct tetap. `"status": "error"` di body (query yang well-formed tapi gagal) muncul sebagai `error.PrometheuzQueryFailed`, sama seperti status HTTP non-200, body yang gagal diparse sebagai JSON, atau punya bentuk tak terduga di langkah mana pun, muncul sebagai `error.PrometheuzInvalidResponse`.
 
 `resultType: "vector"` mengisi `QueryResult.vector` (`[]VectorEntry`, satu `(label metric, timestamp, value)` per series), `"matrix"` mengisi `.matrix` (`[]MatrixEntry`, satu `(label metric, []Point)` per series - panggilan `queryRange`, satu titik per step). Hasil `"scalar"`/`"string"` mengatur `result_type` tapi membiarkan kedua slice kosong (belum ada contoh atau pemanggil di driver ini yang butuh keduanya di-decode lebih lanjut).
 
@@ -91,15 +91,15 @@ Ekspresi query di-URL-encode lewat `urlEncodeAppend`: alfanumerik dan `-_.~` lew
 | Error | Permukaan | Arti |
 | :- | :- | :- |
 | `Snapshot.up = false`, `.last_error` terisi | `scrapeOnce`/`Scraper` | scrape gagal (connect, non-200, parse) - diamati lewat nilainya, tidak pernah dilempar |
-| `error.InvalidSample` | `parser.parse` | block label, value, atau timestamp yang malformed |
-| `error.UnsupportedScheme` | `url.zig` | URL target bukan `http://` |
-| `error.InvalidUrl` | `url.zig` | host atau port yang malformed di URL target |
-| `error.ConnectionClosed` | `http_client` | peer menutup sebelum head atau body penuh tiba |
-| `error.InvalidResponse` | `http_client` | tidak ada `"\r\n\r\n"` dalam `HEAD_SCAN_BUF`, atau baris ukuran chunk yang malformed |
-| `error.BodyTooLarge` | `http_client` | body response melebihi `max_response_body` |
-| `error.RemoteWriteRejected` | `remote_write` | receiver mengembalikan status non-2xx |
-| `error.QueryFailed` | `query`/`queryRange` | response non-200, atau `"status": "error"` pada body yang sebenarnya well-formed |
-| `error.InvalidResponse` | `query`/`queryRange` | JSON malformed, atau bentuk tak terduga pada body JSON yang sebenarnya valid |
+| `error.PrometheuzInvalidSample` | `parser.parse` | block label, value, atau timestamp yang malformed |
+| `error.PrometheuzUnsupportedScheme` | `url.zig` | URL target bukan `http://` |
+| `error.PrometheuzInvalidUrl` | `url.zig` | host atau port yang malformed di URL target |
+| `error.PrometheuzConnectionClosed` | `http_client` | peer menutup sebelum head atau body penuh tiba |
+| `error.PrometheuzInvalidResponse` | `http_client` | tidak ada `"\r\n\r\n"` dalam `HEAD_SCAN_BUF`, atau baris ukuran chunk yang malformed |
+| `error.PrometheuzBodyTooLarge` | `http_client` | body response melebihi `max_response_body` |
+| `error.PrometheuzRemoteWriteRejected` | `remote_write` | receiver mengembalikan status non-2xx |
+| `error.PrometheuzQueryFailed` | `query`/`queryRange` | response non-200, atau `"status": "error"` pada body yang sebenarnya well-formed |
+| `error.PrometheuzInvalidResponse` | `query`/`queryRange` | JSON malformed, atau bentuk tak terduga pada body JSON yang sebenarnya valid |
 
 ## Referensi config
 

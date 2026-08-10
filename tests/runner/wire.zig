@@ -56,10 +56,10 @@ pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
     var filled: usize = 0;
 
     while (filled < buf.len) {
-        if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ReadTimeout;
+        if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ZixReadTimeout;
 
         const got = try fd_io.readOnce(fd, buf[filled..]);
-        if (got == 0) return error.ConnectionClosed;
+        if (got == 0) return error.ZixConnectionClosed;
 
         filled += got;
     }
@@ -83,9 +83,9 @@ pub fn tlsReadAll(fd: std.posix.fd_t, buf: []u8) !void {
 ///
 /// Return:
 /// - usize bytes read, 0 when the peer closed
-/// - error.ReadTimeout when nothing arrived inside the bound
+/// - error.ZixReadTimeout when nothing arrived inside the bound
 pub fn readOnceBounded(fd: std.posix.fd_t, buf: []u8) !usize {
-    if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ReadTimeout;
+    if (!socket_poll.readableWithin(fd, RAW_READ_TIMEOUT_MS)) return error.ZixReadTimeout;
 
     return fd_io.readOnce(fd, buf);
 }
@@ -105,7 +105,7 @@ pub fn readOnceBounded(fd: std.posix.fd_t, buf: []u8) !usize {
 ///
 /// Return:
 /// - []const u8, a slice into buf, ending at the close or at buf.len
-/// - error.ReadTimeout when nothing arrived inside the bound
+/// - error.ZixReadTimeout when nothing arrived inside the bound
 pub fn readUntilClose(fd: std.posix.fd_t, buf: []u8) ![]const u8 {
     var len: usize = 0;
 

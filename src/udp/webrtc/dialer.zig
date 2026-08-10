@@ -62,7 +62,7 @@ pub const State = enum {
     FAILED,
 };
 
-pub const Error = datachannel.Error || error{NoSpace};
+pub const Error = datachannel.Error || error{ZixNoSpace};
 
 /// What one datagram, or one tick, did.
 pub const Outcome = struct {
@@ -182,7 +182,7 @@ pub const Dialer = struct {
     ///
     /// Return:
     /// - Dialer in CHECKING, with a check already waiting in `nextOutbound`
-    /// - error.OutOfMemory, error.NoSpace
+    /// - error.OutOfMemory, error.ZixNoSpace
     pub fn init(allocator: std.mem.Allocator, options: Options, now_ms: u64) Error!Dialer {
         const queue = try allocator.alloc(u8, MAX_QUEUED * (options.max_datagram_bytes + DTLS_OVERHEAD));
         errdefer allocator.free(queue);
@@ -242,7 +242,7 @@ pub const Dialer = struct {
         };
 
         const username = ice_credentials.writeUsername(&dialer.username, options.peer_ufrag, options.local_ufrag) catch
-            return error.NoSpace;
+            return error.ZixNoSpace;
         dialer.username_len = username.len;
 
         // The whole session gets one budget. Nothing below it is allowed to hang forever.
@@ -352,7 +352,7 @@ pub const Dialer = struct {
     /// - ?[]const u8 (borrowing out)
     pub fn nextOutbound(self: *Dialer, now_ms: u64, out: []u8) Error!?[]const u8 {
         if (self.takeQueued()) |datagram| {
-            if (out.len < datagram.len) return error.NoSpace;
+            if (out.len < datagram.len) return error.ZixNoSpace;
 
             @memcpy(out[0..datagram.len], datagram);
 
@@ -363,7 +363,7 @@ pub const Dialer = struct {
             if (self.connection == null) return null;
 
             const packet = (try channels.nextOutbound(now_ms, self.scratch)) orelse return null;
-            const wrapped = self.connection.?.writeAppData(packet, out) catch return error.NoSpace;
+            const wrapped = self.connection.?.writeAppData(packet, out) catch return error.ZixNoSpace;
 
             self.syncDeadlines(now_ms);
 
@@ -407,13 +407,13 @@ pub const Dialer = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSuchChannel before a channel is open
+    /// - error.ZixNoSuchChannel before a channel is open
     pub fn send(self: *Dialer, kind: core.Kind, bytes: []const u8, now_ms: u64) Error!void {
-        const identifier = self.channel orelse return error.NoSuchChannel;
+        const identifier = self.channel orelse return error.ZixNoSuchChannel;
 
         if (self.channels) |*channels| return channels.sendMessage(identifier, kind, bytes, now_ms);
 
-        return error.NoSuchChannel;
+        return error.ZixNoSuchChannel;
     }
 
     /// Build and queue one connectivity check (RFC 8445 7.1.1).
@@ -426,7 +426,7 @@ pub const Dialer = struct {
             .role = .CONTROLLING,
             .tiebreaker = self.options.tiebreaker,
             .use_candidate = true,
-        }) catch return error.NoSpace;
+        }) catch return error.ZixNoSpace;
 
         self.enqueue(check);
         self.deadlines.armIn(.ICE_CONSENT, now_ms, self.options.check_interval_ms);
@@ -452,7 +452,7 @@ pub const Dialer = struct {
 
     /// Build and queue a ClientHello, keeping it for retransmission.
     fn sendHello(self: *Dialer, cookie: []const u8, now_ms: u64) Error!void {
-        const record = dtls_client.writeHello(&self.handshake, cookie, self.scratch) catch return error.NoSpace;
+        const record = dtls_client.writeHello(&self.handshake, cookie, self.scratch) catch return error.ZixNoSpace;
 
         self.keepFlight(record);
         self.enqueue(record);
@@ -699,7 +699,7 @@ pub const Dialer = struct {
         if (self.connection == null) return;
         if (self.queue_count >= MAX_QUEUED) return;
 
-        const wrapped = self.connection.?.writeAppData(packet, self.queue[self.queue_used..]) catch return error.NoSpace;
+        const wrapped = self.connection.?.writeAppData(packet, self.queue[self.queue_used..]) catch return error.ZixNoSpace;
 
         self.queue_len[self.queue_count] = wrapped.len;
         self.queue_count += 1;

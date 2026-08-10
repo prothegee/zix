@@ -18,7 +18,7 @@ Defined once in `src/tcp/config.zig`. Re-exported by `src/tcp/http/config.zig` (
 
 `.EPOLL = 1` is Linux-only. `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. `.URING = 2` is also Linux-only and native in `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, and `zix.Fix`. The `zix.Tcp` per-connection handler folds to `.EPOLL` (the `zix.Tcp` framed callback runs the ring natively). See the Dispatch Model Comparison table below.
 
-Off Linux there is no silent downgrade: `run()` returns `error.DispatchModelUnsupported` when the model is `.EPOLL` or `.URING`, so a caller never believes it got a model it did not (ADR-065). A portable caller picks the model per target at comptime:
+Off Linux there is no silent downgrade: `run()` returns `error.ZixDispatchModelUnsupported` when the model is `.EPOLL` or `.URING`, so a caller never believes it got a model it did not (ADR-065). A portable caller picks the model per target at comptime:
 
 ```zig
 const builtin = @import("builtin");
@@ -161,7 +161,7 @@ try server.run();
 
 | Item | Detail |
 | :- | :- |
-| Platform | Linux only (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Off Linux, `run()` returns `error.DispatchModelUnsupported` after logging which model was rejected |
+| Platform | Linux only (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected |
 | Availability | `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux |
 | Accept model (`zix.Http`) | Each worker binds its own `SO_REUSEPORT` listener. The kernel distributes connections across workers: no shared accept queue |
 | gRPC difference | `zix.Grpc` uses a multiplexed shared-nothing model: one worker drives many non-blocking h2 connections via a resumable state machine. See ADR-031 |
@@ -180,7 +180,7 @@ try server.run();
 
 `.URING` is the completion-based sibling of `.EPOLL`: the same shared-nothing, thread-per-core topology (one `SO_REUSEPORT` listener and one ring per worker, no shared queue, no cross-thread fd handoff), but accepts, reads, and writes are submitted as io_uring SQEs and reaped as CQEs instead of waiting on `epoll_wait` readiness. Most syscall transitions are batched into the ring (ADR-037 Phase 4).
 
-- Native engines: `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. The `zix.Tcp` per-connection handler has no native ring and folds to `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Off Linux, `run()` returns `error.DispatchModelUnsupported`.
+- Native engines: `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. The `zix.Tcp` per-connection handler has no native ring and folds to `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`.
 - `workers` sizes the worker count on every engine, exactly as `.EPOLL`.
 - On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. On a many-core box the ring close (`prep_close`, ADR-041) keeps the worker reaping completions through connection churn instead of blocking in a synchronous `close`, so `.URING` reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
 - When io_uring itself is unavailable on the host (an old kernel, a low `RLIMIT_MEMLOCK`, a sandbox), the engine folds to the `.EPOLL` loop with a logged notice. That is a runtime capability gap on a supported platform, not the platform rejection above.
@@ -273,7 +273,7 @@ Like `.EPOLL` and `.URING` today, these backends are family-wide: every engine t
 
 There is no auto-select keyword. Portable code either picks `.ASYNC` outright or names the exact backend with a one-line comptime switch on `builtin.os.tag`. Two mismatches are handled differently:
 
-- A backend that cannot run on the target OS (for example `.EPOLL` off Linux) is rejected by `run()` with `error.DispatchModelUnsupported`. This is a config error, reported rather than worked around (ADR-065).
+- A backend that cannot run on the target OS (for example `.EPOLL` off Linux) is rejected by `run()` with `error.ZixDispatchModelUnsupported`. This is a config error, reported rather than worked around (ADR-065).
 - A backend that exists but the machine cannot use at runtime (for example `.URING` on an old kernel) folds to a working model with a logged notice. This is a capability gap on a platform that does support the model.
 
 Until the macOS and Windows backends land, `.ASYNC` is the model for every non-Linux target. `.KQUEUE` and `.IOCP` are reserved names only, not yet implemented and not present as source files. They also need a maintainer before they can land: the models zix keeps are the models it can maintain, which is why `.POOL` and `.MIXED` were dropped in ADR-065. See ADR-050 and ADR-065.

@@ -29,7 +29,7 @@ test "jzon edge: seen refuses the same field twice" {
     var seen: fields.Seen(Pair) = .{};
 
     try seen.mark(1);
-    try std.testing.expectError(error.Unexpected, seen.mark(1));
+    try std.testing.expectError(error.JzonUnexpected, seen.mark(1));
 
     // The first mark still stands after the second was refused.
     try std.testing.expect(seen.isMarked(1));
@@ -49,7 +49,7 @@ test "jzon edge: seen owes an optional that declares no default" {
     var seen: fields.Seen(Bare) = .{};
     var bare: Bare = undefined;
 
-    try std.testing.expectError(error.MissingField, seen.fill(&bare));
+    try std.testing.expectError(error.JzonMissingField, seen.fill(&bare));
 }
 
 test "jzon edge: seen gives an optional with a default its null" {
@@ -67,7 +67,7 @@ test "jzon edge: seen fills the fields ahead of the one it cannot answer for" {
     var seen: fields.Seen(Pair) = .{};
     var pair: Pair = undefined;
 
-    try std.testing.expectError(error.MissingField, seen.fill(&pair));
+    try std.testing.expectError(error.JzonMissingField, seen.fill(&pair));
 
     var marked: fields.Seen(Pair) = .{};
     try marked.mark(0);

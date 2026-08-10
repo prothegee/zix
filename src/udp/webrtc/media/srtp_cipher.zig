@@ -40,7 +40,7 @@ pub const MAX_SEGMENT_LEN: usize = MAX_BLOCKS * BLOCK_LEN;
 /// What stops a keystream from being produced.
 pub const Error = error{
     /// More than 2^16 blocks were asked for from one counter block.
-    SegmentTooLong,
+    ZixSegmentTooLong,
 };
 
 /// Build the counter block for one packet (RFC 3711 4.1.1).
@@ -82,9 +82,9 @@ pub fn counterBlock(salt: [SALT_LEN]u8, ssrc: u32, index: u48) [BLOCK_LEN]u8 {
 ///
 /// Return:
 /// - void
-/// - error.SegmentTooLong
+/// - error.ZixSegmentTooLong
 pub fn keystream(out: []u8, key: [KEY_LEN]u8, counter: [BLOCK_LEN]u8) Error!void {
-    if (out.len > MAX_SEGMENT_LEN) return error.SegmentTooLong;
+    if (out.len > MAX_SEGMENT_LEN) return error.ZixSegmentTooLong;
 
     const context = Aes128.initEnc(key);
     var block = counter;
@@ -114,9 +114,9 @@ pub fn keystream(out: []u8, key: [KEY_LEN]u8, counter: [BLOCK_LEN]u8) Error!void
 ///
 /// Return:
 /// - void
-/// - error.SegmentTooLong
+/// - error.ZixSegmentTooLong
 pub fn apply(data: []u8, key: [KEY_LEN]u8, counter: [BLOCK_LEN]u8) Error!void {
-    if (data.len > MAX_SEGMENT_LEN) return error.SegmentTooLong;
+    if (data.len > MAX_SEGMENT_LEN) return error.ZixSegmentTooLong;
 
     const context = Aes128.initEnc(key);
     var block = counter;
@@ -301,11 +301,11 @@ test "zix media: srtp cipher, a segment past the block ceiling is refused" {
     @memset(too_long, 0);
 
     try std.testing.expectError(
-        error.SegmentTooLong,
+        error.ZixSegmentTooLong,
         apply(too_long, VECTOR_KEY, counterBlock(VECTOR_SALT, 0, 0)),
     );
     try std.testing.expectError(
-        error.SegmentTooLong,
+        error.ZixSegmentTooLong,
         keystream(too_long, VECTOR_KEY, counterBlock(VECTOR_SALT, 0, 0)),
     );
 }

@@ -28,7 +28,7 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 | nilai | arti |
 | :- | :- |
 | `.ASYNC` | satu accept thread, satu `io.async()` per koneksi. Terbaik untuk latency rendah pada jumlah koneksi sedang. |
-| `.EPOLL` | shared-nothing: tiap worker memiliki satu listener SO_REUSEPORT plus satu instance epoll. Terbaik untuk jumlah koneksi sangat tinggi. Khusus Linux, di luar Linux `run()` mengembalikan `error.DispatchModelUnsupported`. |
+| `.EPOLL` | shared-nothing: tiap worker memiliki satu listener SO_REUSEPORT plus satu instance epoll. Terbaik untuk jumlah koneksi sangat tinggi. Khusus Linux, di luar Linux `run()` mengembalikan `error.ZixDispatchModelUnsupported`. |
 | `.URING` | io_uring shared-nothing: topologi per-core yang sama dengan `.EPOLL`, berbasis completion sehingga sebagian besar syscall di-batch. Khusus Linux, memeriksa ring saat startup lalu melipat ke `.EPOLL` saat io_uring tidak tersedia. |
 
 ## HTTP/1 (`Http1ServerConfig`)
@@ -57,7 +57,7 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 | conn_timeout_ms | 0 | penjaga umur koneksi (ms), 0 = nonaktif (ADR-062) | eviction timer latar pada `.ASYNC` | atur untuk meng-evict koneksi berumur panjang pada model blocking | koneksi diputus lebih cepat | koneksi berumur lebih panjang | no-op terdokumentasi pada `.EPOLL`/`.URING` (event loop-nya memiliki umur koneksi) |
 | handler_timeout_ms | 0 | budget eksekusi per handler (ms), 0 = nonaktif | deadline kooperatif | atur untuk membatasi handler lambat | handler dihentikan lebih cepat | handler lambat berjalan lebih lama | handler harus cek isExpired() agar berlaku |
 | send_date_header | true | sertakan header Date di setiap respons (RFC 7231) | 37 byte per respons | biarkan on untuk kepatuhan, off untuk memperkecil respons | | | off menghilangkan header standar |
-| public_dir | "" | direktori root untuk serve file statis, kosong menonaktifkan | I/O disk saat hit statis | atur untuk melayani file statis pada route yang tidak match handler | | | non-empty divalidasi saat run(), direktori yang tidak ada menghasilkan error.PublicDirNotFound |
+| public_dir | "" | direktori root untuk serve file statis, kosong menonaktifkan | I/O disk saat hit statis | atur untuk melayani file statis pada route yang tidak match handler | | | non-empty divalidasi saat run(), direktori yang tidak ada menghasilkan error.ZixPublicDirNotFound |
 | public_dir_upload | "u" | subdirektori upload di bawah public_dir, path deklaratif yang ditulis handler upload secara konvensi | | atur path upload | | | relatif terhadap public_dir, engine tidak auto-wire upload |
 | public_dir_cache_ttl_ms | 0 | berapa lama file static yang sudah di-resolve tetap di-cache (ms), 0 = tidak pernah di-cache (ADR-064) | satu descriptor terbuka per varian cache, bukan open plus stat per request | atur di atas 0 agar file static tetap terbuka dan header 200-nya sudah dirender | setiap request membuka dan membaca ulang file | file yang diedit di disk butuh sampai satu window untuk terlihat | 0 sama persis dengan perilaku sebelum ADR-064 |
 | public_dir_cache_max_entries | 256 | jumlah slot cache static, satu slot per file plus sibling .br dan .gz-nya | descriptor dan tabel slot demand-paged | naikkan untuk public_dir yang lebih besar | file di luar tabel disajikan tanpa cache | lebih banyak descriptor ditahan | dibulatkan turun ke pangkat dua, di-clamp terhadap budget descriptor proses |
@@ -367,5 +367,5 @@ Bangun satu Logger dengan config ini dan lampirkan lewat pointer ke field `logge
 
 - Field wajib (`io`, `ip`, `port`, `allocator`, `path`, `comp_id`, `cert_path`, `key_path`, `ice_ufrag`, `ice_password`) tidak punya default dan harus diisi. Port nol ditolak saat init oleh `zix.Tcp` / `zix.Udp` / `zix.Fix` (dan client-nya), dan saat `run()` oleh `zix.Http2` / `zix.Grpc` / `zix.Http3` / `zix.Webrtc`. `zix.Http1` dan `zix.Http` tidak memvalidasinya (port 0 bind ke port ephemeral pilihan kernel).
 - `io`, `logger`, dan `tls` dimiliki pemanggil: dilewatkan lewat handle atau pointer dan harus hidup lebih lama dari server.
-- `.EPOLL` dan `.URING` khusus Linux. Di luar Linux `run()` mengembalikan `error.DispatchModelUnsupported`, jadi pilih `.ASYNC` di sana. Jalur TLS mengikuti model: `.EPOLL` / `.URING` terminasi di worker tls_mux yang multiplexed, `.ASYNC` di tls_serve.
+- `.EPOLL` dan `.URING` khusus Linux. Di luar Linux `run()` mengembalikan `error.ZixDispatchModelUnsupported`, jadi pilih `.ASYNC` di sana. Jalur TLS mengikuti model: `.EPOLL` / `.URING` terminasi di worker tls_mux yang multiplexed, `.ASYNC` di tls_serve.
 - Fitur compression dan response-cache aktif hanya pada `.EPOLL` dan `.URING` (shared-nothing, satu pemilik per worker).

@@ -2,7 +2,7 @@
 //!
 //! The dispatch model is picked per target at comptime (ADR-065): .URING on Linux,
 //! .ASYNC everywhere else. .EPOLL and .URING are Linux-only, and run() returns
-//! error.DispatchModelUnsupported rather than silently serving a different model.
+//! error.ZixDispatchModelUnsupported rather than silently serving a different model.
 //!
 //! .URING for gRPC runs a shared-nothing io_uring ring per worker: one
 //! SO_REUSEPORT listener and one completion loop per worker thread, each

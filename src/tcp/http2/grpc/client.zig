@@ -80,9 +80,9 @@ pub const GrpcClient = struct {
     ///
     /// Return:
     /// - !Self
-    /// - error.PortNotConfigured if config.port is 0
+    /// - error.ZixPortNotConfigured if config.port is 0
     pub fn connect(config: GrpcClientConfig, io: std.Io) !Self {
-        if (config.port == 0) return error.PortNotConfigured;
+        if (config.port == 0) return error.ZixPortNotConfigured;
 
         const addr = try std.Io.net.IpAddress.resolve(io, config.ip, config.port);
         const stream = try addr.connect(io, .{ .mode = .stream, .protocol = .tcp });
@@ -197,7 +197,7 @@ pub const GrpcClient = struct {
     ///
     /// Return:
     /// - !GrpcClientResponse (.data for each gRPC response message, .status for the trailer)
-    /// - error.RecvTimeout when recv_timeout_ms is set and no frame arrives in
+    /// - error.ZixRecvTimeout when recv_timeout_ms is set and no frame arrives in
     ///   time on Windows (POSIX targets time out through SO_RCVTIMEO instead)
     pub fn recvResponse(self: *Self, sid: u31, buf: []u8) !GrpcClientResponse {
         while (true) {
@@ -208,7 +208,7 @@ pub const GrpcClient = struct {
                 const compress_flag = self.data_rest[0] != 0;
                 const msg_len = std.mem.readInt(u32, self.data_rest[1..frm.grpc_prefix_len], .big);
                 const msg_end = frm.grpc_prefix_len + @as(usize, msg_len);
-                if (msg_end > self.data_rest.len) return error.TruncatedMessage;
+                if (msg_end > self.data_rest.len) return error.ZixTruncatedMessage;
 
                 const msg = self.data_rest[frm.grpc_prefix_len..msg_end];
                 self.data_rest = self.data_rest[msg_end..];
@@ -232,13 +232,13 @@ pub const GrpcClient = struct {
                 // the blocking frame read with a poll on Windows.
                 if (self.recv_timeout_ms > 0) {
                     if (!try win_io.pollReady(self.fd, win_io.POLLIN, self.recv_timeout_ms)) {
-                        return error.RecvTimeout;
+                        return error.ZixRecvTimeout;
                     }
                 }
             }
 
             const fh = try h2.readFrameHeader(self.fd);
-            if (fh.length > self.payload_scratch.len) return error.FrameTooLarge;
+            if (fh.length > self.payload_scratch.len) return error.ZixFrameTooLarge;
             const payload = self.payload_scratch[0..fh.length];
             if (fh.length > 0) try h2.recvExact(self.fd, payload);
 
@@ -278,8 +278,8 @@ pub const GrpcClient = struct {
                     self.data_rest = payload;
                     self.data_end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
                 },
-                h2.FRAME_TYPE_GOAWAY => return error.ServerGoaway,
-                h2.FRAME_TYPE_RST_STREAM => return error.StreamReset,
+                h2.FRAME_TYPE_GOAWAY => return error.ZixServerGoaway,
+                h2.FRAME_TYPE_RST_STREAM => return error.ZixStreamReset,
                 else => {},
             }
         }
@@ -292,7 +292,7 @@ pub const GrpcClient = struct {
             var decomp = std.compress.flate.Decompress.init(&in_reader, .gzip, &.{});
             var out_writer = std.Io.Writer.fixed(buf);
 
-            return decomp.reader.stream(&out_writer, .unlimited) catch return error.DecompressFailed;
+            return decomp.reader.stream(&out_writer, .unlimited) catch return error.ZixDecompressFailed;
         }
 
         const data_len = @min(msg.len, buf.len);
@@ -324,7 +324,7 @@ pub const GrpcClient = struct {
             switch (resp) {
                 .data => |d| got_data = d,
                 .status => |st| {
-                    if (@intFromEnum(st) != 0) return error.GrpcError;
+                    if (@intFromEnum(st) != 0) return error.ZixGrpcError;
                     return got_data orelse &.{};
                 },
             }
@@ -341,7 +341,7 @@ test "zix grpc: GrpcClient.connect port zero returns PortNotConfigured" {
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         GrpcClient.connect(.{ .ip = "127.0.0.1", .port = 0 }, io),
     );
 }

@@ -23,9 +23,9 @@ pub const ATTRIBUTE: []const u8 = "fmtp";
 /// What stops a parameter line from being read.
 pub const Error = error{
     /// Not a payload type, a space, and at least one parameter byte.
-    Malformed,
+    ZixMalformed,
     /// A payload type that is not a number, or one past 127.
-    BadPayloadType,
+    ZixBadPayloadType,
 };
 
 /// One payload type's settings.
@@ -42,18 +42,18 @@ pub const Fmtp = struct {
 ///
 /// Return:
 /// - Fmtp borrowing `value`
-/// - error.Malformed, error.BadPayloadType
+/// - error.ZixMalformed, error.ZixBadPayloadType
 pub fn read(value: []const u8) Error!Fmtp {
-    const space = std.mem.indexOfScalar(u8, value, ' ') orelse return error.Malformed;
+    const space = std.mem.indexOfScalar(u8, value, ' ') orelse return error.ZixMalformed;
 
-    if (space == 0) return error.BadPayloadType;
+    if (space == 0) return error.ZixBadPayloadType;
 
     const parameters = value[space + 1 ..];
 
-    if (parameters.len == 0) return error.Malformed;
+    if (parameters.len == 0) return error.ZixMalformed;
 
     return .{
-        .payload_type = std.fmt.parseInt(u7, value[0..space], 10) catch return error.BadPayloadType,
+        .payload_type = std.fmt.parseInt(u7, value[0..space], 10) catch return error.ZixBadPayloadType,
         .parameters = parameters,
     };
 }
@@ -114,8 +114,8 @@ pub fn valueLen(entry: Fmtp) usize {
 ///
 /// Return:
 /// - []const u8, the value alone, with no attribute name and no terminator
-/// - error.NoSpace
-pub fn write(out: []u8, entry: Fmtp) error{NoSpace}![]const u8 {
+/// - error.ZixNoSpace
+pub fn write(out: []u8, entry: Fmtp) error{ZixNoSpace}![]const u8 {
     var digits: [3]u8 = undefined;
     var count: usize = 0;
     var left: u8 = entry.payload_type;
@@ -130,7 +130,7 @@ pub fn write(out: []u8, entry: Fmtp) error{NoSpace}![]const u8 {
 
     const total = count + 1 + entry.parameters.len;
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     for (0..count) |index| out[index] = digits[count - 1 - index];
 
@@ -168,15 +168,15 @@ test "zix sdp: fmtp read, the parameters keep their semicolons and spaces" {
 }
 
 test "zix sdp: fmtp read, a malformed value is refused" {
-    try std.testing.expectError(error.Malformed, read("111"));
-    try std.testing.expectError(error.Malformed, read("111 "));
-    try std.testing.expectError(error.Malformed, read(""));
+    try std.testing.expectError(error.ZixMalformed, read("111"));
+    try std.testing.expectError(error.ZixMalformed, read("111 "));
+    try std.testing.expectError(error.ZixMalformed, read(""));
 }
 
 test "zix sdp: fmtp read, a bad payload type is refused" {
-    try std.testing.expectError(error.BadPayloadType, read(" minptime=10"));
-    try std.testing.expectError(error.BadPayloadType, read("x minptime=10"));
-    try std.testing.expectError(error.BadPayloadType, read("128 minptime=10"));
+    try std.testing.expectError(error.ZixBadPayloadType, read(" minptime=10"));
+    try std.testing.expectError(error.ZixBadPayloadType, read("x minptime=10"));
+    try std.testing.expectError(error.ZixBadPayloadType, read("128 minptime=10"));
 }
 
 test "zix sdp: fmtp find, a section is searched by payload type" {
@@ -212,7 +212,7 @@ test "zix sdp: fmtp write, a one-digit payload type writes one digit" {
 test "zix sdp: fmtp write, a short buffer errors" {
     var buf: [4]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, .{ .payload_type = 111, .parameters = "minptime=10" }));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, .{ .payload_type = 111, .parameters = "minptime=10" }));
 }
 
 test "zix sdp: fmtp valueLen, the estimate covers what was written" {

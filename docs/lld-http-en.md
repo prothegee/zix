@@ -55,7 +55,7 @@ epollWorker():
 No shared state between workers. The worker thread calls `processRequest` (dispatch/common.zig) directly: a synchronous parse/dispatch/send over the delivered bytes. The same pipeline serves every dispatch model, so body behaviour is identical on all three:
 
 - `Expect: 100-continue` with a declared body is answered before the handler runs.
-- A body past `max_request_body` is refused inside `body()` and answered `413`, a chunk framing that cannot be parsed is `error.InvalidChunkedBody` and answered `400` (both only when the handler wrote nothing yet).
+- A body past `max_request_body` is refused inside `body()` and answered `413`, a chunk framing that cannot be parsed is `error.ZixInvalidChunkedBody` and answered `400` (both only when the handler wrote nothing yet).
 - After the handler, the connection closes when a declared body was not fully consumed: the handler never called `body()`, the peer stopped early, or a chunked body fell short. Leftover body bytes would otherwise be parsed as the next request.
 
 The arena is reset between requests.
@@ -151,9 +151,9 @@ body_cache: ?[]const u8 = null,
 
 `body()` is lazy: the first call pulls the body off the socket and stores it in `body_cache`, later calls return the cache directly.
 
-For a Content-Length body, a declared length past `max_request_body` is refused with `error.RequestBodyTooLarge` before the allocation is even reserved (the engine answers `413`), so a client cannot make the server allocate by claiming a size it never sends. The read loop then pulls until the declared length, waiting out `body_read_timeout_ms` between segments on a non-blocking fd. A peer that stops early leaves the returned slice short and `bodyComplete()` false.
+For a Content-Length body, a declared length past `max_request_body` is refused with `error.ZixRequestBodyTooLarge` before the allocation is even reserved (the engine answers `413`), so a client cannot make the server allocate by claiming a size it never sends. The read loop then pulls until the declared length, waiting out `body_read_timeout_ms` between segments on a non-blocking fd. A peer that stops early leaves the returned slice short and `bodyComplete()` false.
 
-A chunked body is framed by walking the chunk framing (`parser.chunkedEnd`) and decoded in place over its own read buffer: a size line that is not hex is `error.InvalidChunkedBody` (the engine answers `400`), and a body that outgrows the limit is `error.RequestBodyTooLarge` (`413`). Chunked declares no length up front, so the buffer grows toward the limit only as bytes actually arrive.
+A chunked body is framed by walking the chunk framing (`parser.chunkedEnd`) and decoded in place over its own read buffer: a size line that is not hex is `error.ZixInvalidChunkedBody` (the engine answers `400`), and a body that outgrows the limit is `error.ZixRequestBodyTooLarge` (`413`). Chunked declares no length up front, so the buffer grows toward the limit only as bytes actually arrive.
 
 `bodyReceived()` counts what the reads consumed (not what the header claimed), and `bodyComplete()` whether the declared or framed end was reached.
 
@@ -181,10 +181,10 @@ Written by `Router.matchParam()` during dispatch. `pathParam(name)` does a linea
 addHeader(name, value):
   1. CR/LF guard: scan name and value for \r or \n (return error if found)
   2. if extra_buf == null:
-       initial = min(4, max_response_headers); if 0 -> return error.TooManyHeaders
+       initial = min(4, max_response_headers); if 0 -> return error.ZixTooManyHeaders
        extra_buf = allocator.alloc(HttpHeader, initial)
   3. else if extra_len >= extra_buf.len:
-       if extra_buf.len >= max_response_headers -> return error.TooManyHeaders
+       if extra_buf.len >= max_response_headers -> return error.ZixTooManyHeaders
        new_cap = min(extra_buf.len * 2, max_response_headers)
        new_buf = allocator.alloc(HttpHeader, new_cap)
        @memcpy(new_buf[0..extra_len], extra_buf[0..extra_len])
@@ -402,8 +402,8 @@ Default values:
 | Field | Default | Enforced in v1? |
 | :- | :- | :- |
 | `connect_timeout_ms` | 0 | Yes, via `connectTcpOptions` |
-| `response_timeout_ms` | 0 | Yes, a readiness poll before `receiveHead` yields `error.ResponseTimeout` |
-| `read_timeout_ms` | 0 | Yes, a readiness poll inside the body read loop yields `error.ReadTimeout` (Content-Length bodies only) |
+| `response_timeout_ms` | 0 | Yes, a readiness poll before `receiveHead` yields `error.ZixResponseTimeout` |
+| `read_timeout_ms` | 0 | Yes, a readiness poll inside the body read loop yields `error.ZixReadTimeout` (Content-Length bodies only) |
 | `max_response_body` | 4 MB | Yes, via `allocRemaining` |
 | `follow_redirects` | true | Yes |
 | `max_redirects` | 3 | Yes |
@@ -441,9 +441,9 @@ Asserts all requests are complete (used pool is empty) before closing.
 ### request()
 
 ```
-1. Uri.parse(url)               -> error.InvalidUrl on failure
-2. Protocol.fromUri(uri)        -> error.InvalidUrl if scheme is not http or https
-3. uri.getHost(&host_buf)       -> error.InvalidUrl if host component is absent
+1. Uri.parse(url)               -> error.ZixUrlMalformed on failure
+2. Protocol.fromUri(uri)        -> error.ZixUrlSchemeUnsupported if scheme is not http or https
+3. uri.getHost(&host_buf)       -> error.ZixUrlHostMissing if host component is absent
 4. uri.port orelse default port (80 for plain, 443 for tls)
 5. Build Io.Timeout:
       connect_ms = opts.connect_timeout_ms orelse config.connect_timeout_ms
@@ -473,7 +473,7 @@ Asserts all requests are complete (used pool is empty) before closing.
 13. response.reader(&transfer_buf[4096]) -> *Io.Reader
 14. body_reader.allocRemaining(gpa, .limited(max_response_body))
       reads body into gpa-owned []u8
-      error.StreamTooLong -> return error.BodyTooLarge
+      error.StreamTooLong -> return error.ZixBodyTooLarge
 15. return ClientResponse{ status_code, body_data, head_bytes, allocator }
     defer req.deinit() releases connection back to pool
 ```

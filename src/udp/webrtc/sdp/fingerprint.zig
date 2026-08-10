@@ -37,11 +37,11 @@ pub const ATTRIBUTE: []const u8 = "fingerprint";
 /// `write` carries that one on its own.
 pub const Error = error{
     /// A value without a hash function name and a digest.
-    Malformed,
+    ZixMalformed,
     /// A hash function this endpoint does not implement.
-    UnsupportedFunction,
+    ZixUnsupportedFunction,
     /// Hex that is not pairs separated by colons, or a length the function does not produce.
-    BadDigest,
+    ZixBadDigest,
 };
 
 /// The hash functions RFC 8122 5 lists that this endpoint implements.
@@ -126,28 +126,28 @@ pub const Fingerprint = struct {
 ///
 /// Return:
 /// - Fingerprint, owning a copy of the digest
-/// - error.Malformed if the name or the digest is missing
-/// - error.UnsupportedFunction
-/// - error.BadDigest if the hex is not pairs, or is the wrong length for the function
+/// - error.ZixMalformed if the name or the digest is missing
+/// - error.ZixUnsupportedFunction
+/// - error.ZixBadDigest if the hex is not pairs, or is the wrong length for the function
 pub fn read(value: []const u8) Error!Fingerprint {
     var fields = std.mem.tokenizeScalar(u8, value, ' ');
 
-    const function_name = fields.next() orelse return error.Malformed;
-    const hex = fields.next() orelse return error.Malformed;
+    const function_name = fields.next() orelse return error.ZixMalformed;
+    const hex = fields.next() orelse return error.ZixMalformed;
     const function = try functionFor(function_name);
 
     var parsed: Fingerprint = .{ .function = function, .digest = @splat(0), .len = 0 };
 
     var pairs = std.mem.splitScalar(u8, hex, SEPARATOR);
     while (pairs.next()) |pair| {
-        if (pair.len != 2) return error.BadDigest;
-        if (parsed.len >= MAX_DIGEST_LEN) return error.BadDigest;
+        if (pair.len != 2) return error.ZixBadDigest;
+        if (parsed.len >= MAX_DIGEST_LEN) return error.ZixBadDigest;
 
         parsed.digest[parsed.len] = ((try hexDigit(pair[0])) << 4) | (try hexDigit(pair[1]));
         parsed.len += 1;
     }
 
-    if (parsed.len != function.digestLen()) return error.BadDigest;
+    if (parsed.len != function.digestLen()) return error.ZixBadDigest;
 
     return parsed;
 }
@@ -160,14 +160,14 @@ pub fn read(value: []const u8) Error!Fingerprint {
 ///
 /// Return:
 /// - []const u8, the value alone, with no attribute name
-/// - error.NoSpace
-pub fn write(out: []u8, value: *const Fingerprint) error{NoSpace}![]const u8 {
+/// - error.ZixNoSpace
+pub fn write(out: []u8, value: *const Fingerprint) error{ZixNoSpace}![]const u8 {
     const alphabet = "0123456789ABCDEF";
     const function_name = value.function.name();
     const total = function_name.len + 1 + value.len * 3 - 1;
 
-    if (value.len == 0) return error.NoSpace;
-    if (out.len < total) return error.NoSpace;
+    if (value.len == 0) return error.ZixNoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     @memcpy(out[0..function_name.len], function_name);
     out[function_name.len] = ' ';
@@ -220,24 +220,24 @@ pub fn compute(certificate_der: []const u8, function: Function) Fingerprint {
 ///
 /// Return:
 /// - Function
-/// - error.UnsupportedFunction
-pub fn functionFor(text: []const u8) error{UnsupportedFunction}!Function {
+/// - error.ZixUnsupportedFunction
+pub fn functionFor(text: []const u8) error{ZixUnsupportedFunction}!Function {
     if (std.ascii.eqlIgnoreCase(text, "sha-1")) return .SHA_1;
     if (std.ascii.eqlIgnoreCase(text, "sha-224")) return .SHA_224;
     if (std.ascii.eqlIgnoreCase(text, "sha-256")) return .SHA_256;
     if (std.ascii.eqlIgnoreCase(text, "sha-384")) return .SHA_384;
     if (std.ascii.eqlIgnoreCase(text, "sha-512")) return .SHA_512;
 
-    return error.UnsupportedFunction;
+    return error.ZixUnsupportedFunction;
 }
 
 /// One hex digit, in either case.
-fn hexDigit(character: u8) error{BadDigest}!u8 {
+fn hexDigit(character: u8) error{ZixBadDigest}!u8 {
     return switch (character) {
         '0'...'9' => character - '0',
         'a'...'f' => character - 'a' + 10,
         'A'...'F' => character - 'A' + 10,
-        else => error.BadDigest,
+        else => error.ZixBadDigest,
     };
 }
 
@@ -281,27 +281,27 @@ test "zix sdp: fingerprint read, lower case hex is taken" {
 }
 
 test "zix sdp: fingerprint read, a missing field is refused" {
-    try std.testing.expectError(error.Malformed, read("sha-256"));
-    try std.testing.expectError(error.Malformed, read(""));
+    try std.testing.expectError(error.ZixMalformed, read("sha-256"));
+    try std.testing.expectError(error.ZixMalformed, read(""));
 }
 
 test "zix sdp: fingerprint read, an unlisted function is refused" {
-    try std.testing.expectError(error.UnsupportedFunction, read("md5 AB:CD"));
-    try std.testing.expectError(error.UnsupportedFunction, read("sha3-256 AB:CD"));
+    try std.testing.expectError(error.ZixUnsupportedFunction, read("md5 AB:CD"));
+    try std.testing.expectError(error.ZixUnsupportedFunction, read("sha3-256 AB:CD"));
 }
 
 test "zix sdp: fingerprint read, a digest of the wrong length for its function is refused" {
-    try std.testing.expectError(error.BadDigest, read("sha-256 AB:CD:EF"));
-    try std.testing.expectError(error.BadDigest, read("sha-1 " ++ sample_value[8..]));
+    try std.testing.expectError(error.ZixBadDigest, read("sha-256 AB:CD:EF"));
+    try std.testing.expectError(error.ZixBadDigest, read("sha-1 " ++ sample_value[8..]));
 }
 
 test "zix sdp: fingerprint read, hex that is not pairs is refused" {
-    try std.testing.expectError(error.BadDigest, read("sha-1 A:CD:EF"));
-    try std.testing.expectError(error.BadDigest, read("sha-1 ABCDEF"));
+    try std.testing.expectError(error.ZixBadDigest, read("sha-1 A:CD:EF"));
+    try std.testing.expectError(error.ZixBadDigest, read("sha-1 ABCDEF"));
 }
 
 test "zix sdp: fingerprint read, a digit that is not hex is refused" {
-    try std.testing.expectError(error.BadDigest, read("sha-1 GG:CD:EF"));
+    try std.testing.expectError(error.ZixBadDigest, read("sha-1 GG:CD:EF"));
 }
 
 test "zix sdp: fingerprint write, the hex goes out upper case" {
@@ -332,7 +332,7 @@ test "zix sdp: fingerprint write, a short buffer errors" {
 
     var buf: [16]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, &parsed));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, &parsed));
 }
 
 test "zix sdp: fingerprint compute, the digest is the one the hash gives" {

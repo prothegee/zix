@@ -145,13 +145,13 @@ pub const ParseResult = union(enum) {
     alert: Alert,
 };
 
-const ParseError = error{ Truncated, IllegalParameter };
+const ParseError = error{ ZixTruncated, ZixIllegalParameter };
 
 /// Parse a ClientHello message into its fields, or the fatal alert it triggers.
 pub fn parseClientHello(bytes: []const u8) ParseResult {
     const hello = parseClientHelloInner(bytes) catch |err| return .{ .alert = switch (err) {
-        error.IllegalParameter => .ILLEGAL_PARAMETER,
-        error.Truncated => .DECODE_ERROR,
+        error.ZixIllegalParameter => .ILLEGAL_PARAMETER,
+        error.ZixTruncated => .DECODE_ERROR,
     } };
 
     return .{ .ok = hello };
@@ -160,7 +160,7 @@ pub fn parseClientHello(bytes: []const u8) ParseResult {
 fn parseClientHelloInner(bytes: []const u8) ParseError!ClientHello {
     var r = Reader{ .buf = bytes };
 
-    if (try r.readU8() != @intFromEnum(HandshakeType.CLIENT_HELLO)) return error.IllegalParameter;
+    if (try r.readU8() != @intFromEnum(HandshakeType.CLIENT_HELLO)) return error.ZixIllegalParameter;
     _ = try r.readU24();
 
     const legacy_version = try r.readU16();
@@ -173,7 +173,7 @@ fn parseClientHelloInner(bytes: []const u8) ParseError!ClientHello {
 
     const compression_len = try r.readU8();
     const compression = try r.readBytes(compression_len);
-    if (compression_len != 1 or compression[0] != 0) return error.IllegalParameter;
+    if (compression_len != 1 or compression[0] != 0) return error.ZixIllegalParameter;
 
     var hello = ClientHello{
         .legacy_version = legacy_version,

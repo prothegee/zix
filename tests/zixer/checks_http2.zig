@@ -74,7 +74,7 @@ pub fn runHttp2(io: std.Io, port: u16) !void {
     while (rounds < MAX_ROUNDS) : (rounds += 1) {
         var chunk: [READ_BUF]u8 = undefined;
         const got = try wire.readOnceBounded(fd, &chunk);
-        if (got == 0) return error.ConnectionClosed;
+        if (got == 0) return error.ZixerConnectionClosed;
 
         if (try scanner.push(chunk[0..got])) return;
     }

@@ -32,17 +32,17 @@ pub const VERIFICATION_TAG_OFFSET: usize = 4;
 /// Everything that stops a packet from being read or built.
 pub const Error = error{
     /// Fewer bytes than the common header needs.
-    ShortHeader,
+    ZixShortHeader,
     /// A chunk runs past the end of the packet.
-    Truncated,
+    ZixTruncated,
     /// A chunk claims a length below the chunk header size.
-    BadLength,
+    ZixBadLength,
     /// The CRC32c in the header does not match the bytes.
-    BadChecksum,
+    ZixBadChecksum,
     /// A common header with no chunks after it, which RFC 9260 3 does not allow.
-    Empty,
+    ZixEmpty,
     /// The output buffer cannot hold what was asked for.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// A parsed packet, borrowing the bytes it was read from.
@@ -128,11 +128,11 @@ pub fn mustTravelAlone(kind: chunk.Type) bool {
 ///
 /// Return:
 /// - Packet borrowing `datagram`
-/// - error.ShortHeader, error.BadChecksum, error.Empty, error.Truncated, error.BadLength
+/// - error.ZixShortHeader, error.ZixBadChecksum, error.ZixEmpty, error.ZixTruncated, error.ZixBadLength
 pub fn parse(datagram: []const u8) Error!Packet {
-    if (datagram.len < COMMON_HEADER_LEN) return error.ShortHeader;
-    if (datagram.len == COMMON_HEADER_LEN) return error.Empty;
-    if (!checksum.verify(datagram)) return error.BadChecksum;
+    if (datagram.len < COMMON_HEADER_LEN) return error.ZixShortHeader;
+    if (datagram.len == COMMON_HEADER_LEN) return error.ZixEmpty;
+    if (!checksum.verify(datagram)) return error.ZixBadChecksum;
 
     try chunk.validate(datagram[COMMON_HEADER_LEN..]);
 
@@ -173,9 +173,9 @@ pub const Writer = struct {
     ///
     /// Return:
     /// - Writer
-    /// - error.NoSpace if the buffer cannot hold a common header
+    /// - error.ZixNoSpace if the buffer cannot hold a common header
     pub fn init(buf: []u8, source_port: u16, destination_port: u16, verification_tag: u32) Error!Writer {
-        if (buf.len < COMMON_HEADER_LEN) return error.NoSpace;
+        if (buf.len < COMMON_HEADER_LEN) return error.ZixNoSpace;
 
         std.mem.writeInt(u16, buf[0..2], source_port, .big);
         std.mem.writeInt(u16, buf[2..4], destination_port, .big);
@@ -214,16 +214,16 @@ pub const Writer = struct {
     ///
     /// Return:
     /// - []u8 to write the body into
-    /// - error.NoSpace if the padded chunk does not fit
-    /// - error.BadLength if the body is too long for the 16-bit length field
+    /// - error.ZixNoSpace if the padded chunk does not fit
+    /// - error.ZixBadLength if the body is too long for the 16-bit length field
     pub fn reserveChunk(self: *Writer, kind: chunk.Type, flags: u8, value_len: usize) Error![]u8 {
         const len = chunk.HEADER_LEN + value_len;
 
-        if (len > chunk.MAX_CHUNK_LEN) return error.BadLength;
+        if (len > chunk.MAX_CHUNK_LEN) return error.ZixBadLength;
 
         const total = chunk.paddedLen(len);
 
-        if (self.remaining() < total) return error.NoSpace;
+        if (self.remaining() < total) return error.ZixNoSpace;
 
         const start = self.len;
         self.buf[start] = @intFromEnum(kind);
@@ -245,7 +245,7 @@ pub const Writer = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace, error.BadLength
+    /// - error.ZixNoSpace, error.ZixBadLength
     pub fn addChunk(self: *Writer, kind: chunk.Type, flags: u8, value: []const u8) Error!void {
         const body = try self.reserveChunk(kind, flags, value.len);
 
@@ -259,11 +259,11 @@ pub const Writer = struct {
     ///
     /// Return:
     /// - []const u8, the whole packet
-    /// - error.Empty if no chunk was ever added
+    /// - error.ZixEmpty if no chunk was ever added
     pub fn finish(self: *Writer) Error![]const u8 {
-        if (self.isEmpty()) return error.Empty;
+        if (self.isEmpty()) return error.ZixEmpty;
 
-        checksum.insert(self.buf[0..self.len]) catch return error.NoSpace;
+        checksum.insert(self.buf[0..self.len]) catch return error.ZixNoSpace;
 
         return self.buf[0..self.len];
     }
@@ -346,7 +346,7 @@ test "zix sctp: packet writer, a chunk that does not fit errors and leaves the p
     var writer = try Writer.init(&buf, 5000, 5000, 1);
     try writer.addChunk(.COOKIE_ACK, 0, &.{});
 
-    try std.testing.expectError(error.NoSpace, writer.addChunk(.HEARTBEAT, 0, "0123456789"));
+    try std.testing.expectError(error.ZixNoSpace, writer.addChunk(.HEARTBEAT, 0, "0123456789"));
 
     // The failed append wrote nothing, so what was already there still ships.
     const parsed = try parse(try writer.finish());
@@ -356,14 +356,14 @@ test "zix sctp: packet writer, a chunk that does not fit errors and leaves the p
 test "zix sctp: packet writer, a buffer smaller than the common header errors" {
     var buf: [8]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, Writer.init(&buf, 5000, 5000, 1));
+    try std.testing.expectError(error.ZixNoSpace, Writer.init(&buf, 5000, 5000, 1));
 }
 
 test "zix sctp: packet writer, finishing with no chunks errors" {
     var buf: [64]u8 = undefined;
     var writer = try Writer.init(&buf, 5000, 5000, 1);
 
-    try std.testing.expectError(error.Empty, writer.finish());
+    try std.testing.expectError(error.ZixEmpty, writer.finish());
 }
 
 test "zix sctp: packet parse, a flipped byte fails the checksum" {
@@ -376,7 +376,7 @@ test "zix sctp: packet parse, a flipped byte fails the checksum" {
     // 12 common header, 4 chunk header, 4 body, so the last payload byte is index 19.
     buf[19] ^= 0x01;
 
-    try std.testing.expectError(error.BadChecksum, parse(bytes));
+    try std.testing.expectError(error.ZixBadChecksum, parse(bytes));
 }
 
 test "zix sctp: packet parse, a common header with no chunks errors" {
@@ -386,13 +386,13 @@ test "zix sctp: packet parse, a common header with no chunks errors" {
 
     try checksum.insert(&buf);
 
-    try std.testing.expectError(error.Empty, parse(&buf));
+    try std.testing.expectError(error.ZixEmpty, parse(&buf));
 }
 
 test "zix sctp: packet parse, fewer bytes than the common header errors" {
     const short: [11]u8 = @splat(0);
 
-    try std.testing.expectError(error.ShortHeader, parse(&short));
+    try std.testing.expectError(error.ZixShortHeader, parse(&short));
 }
 
 test "zix sctp: packet parse, a broken chunk length errors after the checksum passes" {
@@ -405,7 +405,7 @@ test "zix sctp: packet parse, a broken chunk length errors after the checksum pa
     const bytes = buf[0..writer.len];
     try checksum.insert(bytes);
 
-    try std.testing.expectError(error.Truncated, parse(bytes));
+    try std.testing.expectError(error.ZixTruncated, parse(bytes));
 }
 
 test "zix sctp: packet bundling, only the three solitary chunk types report it" {

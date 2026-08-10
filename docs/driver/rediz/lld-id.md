@@ -111,7 +111,7 @@ sequenceDiagram
     S-->>C: reply, reply, reply (berurutan)
 ```
 
-- `add` melewati `max_pending_replies` shed `error.QueueFull`.
+- `add` melewati `max_pending_replies` shed `error.RedizQueueFull`.
 - Command yang gagal kembali sebagai nilai reply `.err`-nya, jadi menguras sisanya berlanjut.
 - Reply deferred yang tertunggak sebelum pipeline diuras mendahului reply batch.
 - Tidak ada command lain yang berjalan pada koneksi antara `begin` dan `sync`.
@@ -126,7 +126,7 @@ flowchart TB
     empty -->|ya| conn[connect dengan retry, di luar lock]
     empty -->|tidak| park{process_queue_len izinkan parkir?}
     park -->|ya| wait[antre waiter, futex wait]
-    park -->|tidak| shed[error.PoolExhausted atau PoolBusy]
+    park -->|tidak| shed[error.RedizPoolExhausted atau PoolBusy]
     rel[release] --> waiter{ada waiter parkir?}
     waiter -->|ya| grant[serahkan koneksi ke waiter tertua]
     waiter -->|tidak| back[tandai slot idle]
@@ -136,7 +136,7 @@ flowchart TB
 - Parkir tidur di satu futex word per waiter. Di Linux ini syscall futex raw (fast path tetap tak tersentuh), di target lain wait dan wake lewat backend `std.Io` dengan semantik yang sama.
 - `release` menyerahkan koneksi sehat langsung ke waiter parkir tertua (slot tetap dipegang lewat handoff), atau menandainya idle.
 - `discard` membebaskan slot rusak, memberikannya ke waiter atau membiarkannya untuk acquire berikutnya.
-- Melewati batas waiter `acquire` shed `error.PoolBusy`, dengan parkir mati ia shed `error.PoolExhausted`.
+- Melewati batas waiter `acquire` shed `error.RedizPoolBusy`, dengan parkir mati ia shed `error.RedizPoolExhausted`.
 
 ## Taksonomi error
 
@@ -144,9 +144,9 @@ flowchart TB
 | :- | :- | :- |
 | reply error (`.err`) | server menolak command, ada di `lastServerError` | koneksi tetap bisa dipakai |
 | error transport | socket gagal | discard koneksi |
-| `error.QueueFull` | pipeline mencapai `max_pending_replies` | sync command yang antre dulu |
-| `error.PoolExhausted` | pool penuh dan parkir mati | ulang nanti atau naikkan `process_queue_len` |
-| `error.PoolBusy` | antrean waiter penuh | ulang nanti atau naikkan `process_queue_len` |
+| `error.RedizQueueFull` | pipeline mencapai `max_pending_replies` | sync command yang antre dulu |
+| `error.RedizPoolExhausted` | pool penuh dan parkir mati | ulang nanti atau naikkan `process_queue_len` |
+| `error.RedizPoolBusy` | antrean waiter penuh | ulang nanti atau naikkan `process_queue_len` |
 
 ## Rujukan config
 

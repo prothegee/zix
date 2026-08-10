@@ -17,7 +17,7 @@ pub const UdsServer = struct {
 // Per-connection factory: handler baked into the type, io from config.io.
 fn UdsServerImpl(comptime handler: HandlerFn) type {
     // config: UdsServerConfig
-    // pub fn init(config) !Self          -> error.PathEmpty if config.path is empty
+    // pub fn init(config) !Self          -> error.ZixPathEmpty if config.path is empty
     // pub fn deinit(self) void           -> no-op: resources released inside run()
     // pub fn run(self) !void             -> reads config.io, runs the accept loop
 }
@@ -90,7 +90,7 @@ pub const UdsClient = struct {
 
 ```
 if config.send_timeout_ms > 0:
-    poll(fd, POLLOUT, config.send_timeout_ms) -> error.SendTimeout on 0 ready   // SO_SNDTIMEO is not used: std.Io.Threaded panics on EAGAIN
+    poll(fd, POLLOUT, config.send_timeout_ms) -> error.ZixSendTimeout on 0 ready   // SO_SNDTIMEO is not used: std.Io.Threaded panics on EAGAIN
 write [u32 len, BE][payload]
 flush
 ```
@@ -101,10 +101,10 @@ Stack write buffer (4096 bytes). Blocks until the frame is sent.
 
 ```
 if config.recv_timeout_ms > 0:
-    poll(fd, POLLIN, config.recv_timeout_ms) -> error.RecvTimeout on 0 ready   // SO_RCVTIMEO is not used: std.Io.Threaded panics on EAGAIN
+    poll(fd, POLLIN, config.recv_timeout_ms) -> error.ZixRecvTimeout on 0 ready   // SO_RCVTIMEO is not used: std.Io.Threaded panics on EAGAIN
 read 4-byte header (loop until 4 bytes)
 len = readInt(u32, &hdr, .big)
-if len > buf.len: return error.MessageTooLarge
+if len > buf.len: return error.ZixMessageTooLarge
 read len payload bytes into buf[0..len]
 return buf[0..len]
 ```

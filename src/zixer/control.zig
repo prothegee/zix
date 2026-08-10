@@ -32,7 +32,7 @@ pub const Reply = struct {
     text: []const u8,
 };
 
-pub const PathError = error{ DirectoryUnavailable, OutOfMemory };
+pub const PathError = error{ ZixerDirectoryUnavailable, OutOfMemory };
 
 /// Absolute path of the control socket under the root dir.
 ///
@@ -48,14 +48,14 @@ pub const PathError = error{ DirectoryUnavailable, OutOfMemory };
 ///
 /// Return:
 /// - []const u8 absolute socket path
-/// - error.DirectoryUnavailable when the working directory cannot be read
+/// - error.ZixerDirectoryUnavailable when the working directory cannot be read
 pub fn socketPath(io: std.Io, arena: std.mem.Allocator, root_path: []const u8) PathError![]const u8 {
     if (std.fs.path.isAbsolute(root_path)) {
         return std.fs.path.join(arena, &.{ root_path, SOCKET_FILE });
     }
 
     var cwd_buf: [512]u8 = undefined;
-    const cwd_len = std.process.currentPath(io, &cwd_buf) catch return error.DirectoryUnavailable;
+    const cwd_len = std.process.currentPath(io, &cwd_buf) catch return error.ZixerDirectoryUnavailable;
 
     return std.fs.path.join(arena, &.{ cwd_buf[0..cwd_len], root_path, SOCKET_FILE });
 }

@@ -89,13 +89,13 @@ pub const Config = struct {
     /// dispatch.Transport (cleartext only, so keep tls = OFF for them).
     dispatch_model: DispatchModel = .ASYNC,
     /// Bounds replies a connection may owe: commands queued by a Pipeline
-    /// (sheds error.QueueFull at the bound, 0 = no bound) and outstanding
+    /// (sheds error.RedizQueueFull at the bound, 0 = no bound) and outstanding
     /// deferred commands (drained at the bound, 0 acts as one at a time).
     max_pending_replies: usize = 16,
     /// Pool only: acquires parked on a fully-held pool (FIFO handoff on
     /// release), 0 = off (acquire sheds immediately with
-    /// error.PoolExhausted). Beyond the bound acquire sheds with
-    /// error.PoolBusy.
+    /// error.RedizPoolExhausted). Beyond the bound acquire sheds with
+    /// error.RedizPoolBusy.
     process_queue_len: usize = 0,
     /// Pool only: connections per pool.
     pool_size: usize = 6,

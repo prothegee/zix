@@ -1678,7 +1678,7 @@ pub fn main(process: std.process.Init) !void {
     defer arg_iter.deinit();
 
     _ = arg_iter.skip();
-    const out_path = arg_iter.next() orelse return error.MissingOutputPath;
+    const out_path = arg_iter.next() orelse return error.ZixMissingOutputPath;
 
     // the embedded base64 is a multiline literal, so strip the newlines before decoding.
     const clean = try allocator.alloc(u8, DICT_B64.len);
@@ -1698,8 +1698,8 @@ pub fn main(process: std.process.Init) !void {
     const out = try allocator.alloc(u8, size);
     try decoder.decode(out, clean[0..ci]);
 
-    if (out.len != 122784) return error.DictionarySizeMismatch;
-    if (crc32(out) != 0x5136cb04) return error.DictionaryCrcMismatch;
+    if (out.len != 122784) return error.ZixDictionarySizeMismatch;
+    if (crc32(out) != 0x5136cb04) return error.ZixDictionaryCrcMismatch;
 
     const io = process.io;
     const cwd = std.Io.Dir.cwd();

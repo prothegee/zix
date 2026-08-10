@@ -15,11 +15,11 @@ test "jzon edge: cursor over an empty document has nothing to give" {
 
     try std.testing.expect(cursor.atEnd());
     try std.testing.expectEqual(@as(usize, 0), cursor.remaining());
-    try std.testing.expectError(error.Truncated, cursor.peek());
-    try std.testing.expectError(error.Truncated, cursor.take());
-    try std.testing.expectError(error.Truncated, cursor.expect('{'));
-    try std.testing.expectError(error.Truncated, cursor.stringSpan());
-    try std.testing.expectError(error.Truncated, cursor.numberSpan());
+    try std.testing.expectError(error.JzonTruncated, cursor.peek());
+    try std.testing.expectError(error.JzonTruncated, cursor.take());
+    try std.testing.expectError(error.JzonTruncated, cursor.expect('{'));
+    try std.testing.expectError(error.JzonTruncated, cursor.stringSpan());
+    try std.testing.expectError(error.JzonTruncated, cursor.numberSpan());
     try std.testing.expect(!cursor.accept('{'));
 
     cursor.skipSpace();
@@ -36,24 +36,24 @@ test "jzon edge: cursor over an all-whitespace document lands at the end" {
 
 test "jzon edge: cursor on a string that never closes reports truncation" {
     var open: Cursor = .init("\"unterminated");
-    try std.testing.expectError(error.Truncated, open.stringSpan());
+    try std.testing.expectError(error.JzonTruncated, open.stringSpan());
 
     var trailing_backslash: Cursor = .init("\"broken\\");
-    try std.testing.expectError(error.Truncated, trailing_backslash.stringSpan());
+    try std.testing.expectError(error.JzonTruncated, trailing_backslash.stringSpan());
 
     var escaped_close: Cursor = .init("\"never done\\\"");
-    try std.testing.expectError(error.Truncated, escaped_close.stringSpan());
+    try std.testing.expectError(error.JzonTruncated, escaped_close.stringSpan());
 }
 
 test "jzon edge: cursor rejects a raw control byte inside a string" {
     var newline: Cursor = .init("\"line\nbreak\"");
-    try std.testing.expectError(error.Unexpected, newline.stringSpan());
+    try std.testing.expectError(error.JzonUnexpected, newline.stringSpan());
 
     var nul: Cursor = .init("\"has\x00nul\"");
-    try std.testing.expectError(error.Unexpected, nul.stringSpan());
+    try std.testing.expectError(error.JzonUnexpected, nul.stringSpan());
 
     var unit_separator: Cursor = .init("\"has\x1fseparator\"");
-    try std.testing.expectError(error.Unexpected, unit_separator.stringSpan());
+    try std.testing.expectError(error.JzonUnexpected, unit_separator.stringSpan());
 }
 
 test "jzon edge: cursor accepts the boundary bytes a string may carry raw" {
@@ -79,16 +79,16 @@ test "jzon edge: cursor on an empty string token gives an empty span" {
 
 test "jzon edge: cursor tells a wrong byte apart from a spent document" {
     var wrong: Cursor = .init("}");
-    try std.testing.expectError(error.Unexpected, wrong.expect('{'));
+    try std.testing.expectError(error.JzonUnexpected, wrong.expect('{'));
 
     var spent: Cursor = .init("");
-    try std.testing.expectError(error.Truncated, spent.expect('{'));
+    try std.testing.expectError(error.JzonTruncated, spent.expect('{'));
 
     var not_a_string: Cursor = .init("42");
-    try std.testing.expectError(error.Unexpected, not_a_string.stringSpan());
+    try std.testing.expectError(error.JzonUnexpected, not_a_string.stringSpan());
 
     var not_a_number: Cursor = .init("\"42\"");
-    try std.testing.expectError(error.Unexpected, not_a_number.numberSpan());
+    try std.testing.expectError(error.JzonUnexpected, not_a_number.numberSpan());
 }
 
 test "jzon edge: cursor number span runs to the end of the document" {
@@ -113,6 +113,6 @@ test "jzon edge: cursor literal at the very end of the document" {
     try std.testing.expect(exact.atEnd());
 
     var one_short: Cursor = .init("fals");
-    try std.testing.expectError(error.Truncated, one_short.literal("false"));
+    try std.testing.expectError(error.JzonTruncated, one_short.literal("false"));
     try std.testing.expectEqual(@as(usize, 4), one_short.remaining());
 }

@@ -295,12 +295,12 @@ fn applyTransform(transform: Transform, base: []const u8, out: []u8) usize {
 
 /// Resolve a dictionary reference (sec 8) into out, returning the bytes written.
 fn dictionaryWord(length: u32, distance: u32, max_allowed: u32, out: []u8) !usize {
-    if (length < 4 or length > 24) return error.InvalidDictionaryLength;
+    if (length < 4 or length > 24) return error.ZixInvalidDictionaryLength;
 
     const word_id = distance - (max_allowed + 1);
     const index = word_id % numWords(length);
     const transform_id = word_id >> NDBITS[length];
-    if (transform_id > 120) return error.InvalidTransform;
+    if (transform_id > 120) return error.ZixInvalidTransform;
 
     const offset = DOFFSET[length] + index * length;
     const base = DICT[offset .. offset + length];
@@ -372,7 +372,7 @@ const HuffmanDecoder = struct {
         var nonzero: u16 = 0;
         var last_nonzero: u16 = 0;
         for (lengths, 0..) |len, sym| {
-            if (len > MAX_CODE_LEN) return error.InvalidCode;
+            if (len > MAX_CODE_LEN) return error.ZixInvalidCode;
             if (len != 0) {
                 self.count[len] += 1;
                 nonzero += 1;
@@ -420,7 +420,7 @@ const HuffmanDecoder = struct {
             }
         }
 
-        return error.InvalidCode;
+        return error.ZixInvalidCode;
     }
 };
 
@@ -506,9 +506,9 @@ fn readSimplePrefixCode(br: *BitReader, alphabet_size: usize) !HuffmanDecoder {
     var i: u32 = 0;
     while (i < nsym) : (i += 1) {
         const s: u16 = @intCast(try br.readBits(abits));
-        if (s >= alphabet_size) return error.InvalidSymbol;
+        if (s >= alphabet_size) return error.ZixInvalidSymbol;
         var j: u32 = 0;
-        while (j < i) : (j += 1) if (syms[j] == s) return error.DuplicateSymbol;
+        while (j < i) : (j += 1) if (syms[j] == s) return error.ZixDuplicateSymbol;
         syms[i] = s;
     }
 
@@ -597,7 +597,7 @@ const BLOCK_COUNT_EXTRA = [_]u6{ 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
 /// One block count: a block-count code symbol then its extra bits (sec 6).
 fn readBlockCount(br: *BitReader, code: *const HuffmanDecoder) !u32 {
     const sym = try code.readSymbol(br);
-    if (sym >= BLOCK_COUNT_BASE.len) return error.InvalidBlockCountCode;
+    if (sym >= BLOCK_COUNT_BASE.len) return error.ZixInvalidBlockCountCode;
 
     return BLOCK_COUNT_BASE[sym] + (try br.readBits(BLOCK_COUNT_EXTRA[sym]));
 }
@@ -664,7 +664,7 @@ fn readContextMap(br: *BitReader, ntrees: u32, map_size: usize, out: []u8) !void
             i += 1;
         } else if (sym <= rlemax) {
             const run = (@as(u32, 1) << @intCast(sym)) + (try br.readBits(@intCast(sym)));
-            if (i + run > map_size) return error.ContextMapOverflow;
+            if (i + run > map_size) return error.ZixContextMapOverflow;
 
             var k: u32 = 0;
             while (k < run) : (k += 1) {
@@ -825,7 +825,7 @@ fn shortDistance(code: u16, ring: *const DistanceRing) i64 {
 fn readDistance(br: *BitReader, code: u16, ring: *const DistanceRing, npostfix: u32, ndirect: u32) !Distance {
     if (code < 16) {
         const value = shortDistance(code, ring);
-        if (value <= 0) return error.InvalidDistance;
+        if (value <= 0) return error.ZixInvalidDistance;
 
         return .{ .value = @intCast(value), .push = code != 0 };
     }
@@ -878,7 +878,7 @@ const BlockCategory = struct {
                 1 => (self.btype + 1) % self.nbltypes,
                 else => @as(u32, sym) - 2,
             };
-            if (next >= self.nbltypes) return error.InvalidBlockType;
+            if (next >= self.nbltypes) return error.ZixInvalidBlockType;
 
             self.prev_btype = self.btype;
             self.btype = next;
@@ -934,7 +934,7 @@ const Decoder = struct {
 
                 // bound the total output before producing the block, so a bomb is rejected
                 // up front with no per-byte check in the hot copy loop.
-                if (self.out.items.len + mlen > self.limit) return error.OutputTooLarge;
+                if (self.out.items.len + mlen > self.limit) return error.ZixOutputTooLarge;
 
                 var is_uncompressed = false;
                 if (is_last == 0) is_uncompressed = (try self.br.readBit() == 1);
@@ -956,7 +956,7 @@ const Decoder = struct {
     fn skipMetadata(self: *Decoder) !void {
         self.stats.meta_blocks += 1;
         self.stats.metadata += 1;
-        if (try self.br.readBit() != 0) return error.BadReservedBit;
+        if (try self.br.readBit() != 0) return error.ZixBadReservedBit;
 
         const mskipbytes = try self.br.readBits(2);
         var mskiplen: u32 = 0;
@@ -1092,9 +1092,9 @@ const Decoder = struct {
 /// InputTooLarge guards the single-meta-block compressed path. The store path splits instead,
 /// so it is the compressed encoder's limit.
 pub const EncodeError = error{
-    InvalidWindowBits,
-    InputTooLarge,
-    BufferTooSmall,
+    ZixInvalidWindowBits,
+    ZixInputTooLarge,
+    ZixBufferTooSmall,
     OutOfMemory,
 };
 
@@ -1175,7 +1175,7 @@ fn buildCanonicalCodes(lengths: []const u8, codes_out: []u16) void {
 
 /// Emit the stream window size, the inverse of the decoder's readWindowBits (sec 9.1).
 fn writeWindowBits(bw: *BitWriter, allocator: std.mem.Allocator, wbits: u6) EncodeError!void {
-    if (wbits < 10 or wbits > 24) return error.InvalidWindowBits;
+    if (wbits < 10 or wbits > 24) return error.ZixInvalidWindowBits;
 
     if (wbits == 16) {
         try bw.writeBit(allocator, 0);
@@ -1924,7 +1924,7 @@ fn buildLitModel(scratch: std.mem.Allocator, input: []const u8, commands: []cons
 /// Encode input as a single compressed brotli meta-block: greedy LZ77 with the static
 /// dictionary, ring-buffer distances, and optimal per-block Huffman codes (sec 3..8).
 fn encodeCompressedAlloc(allocator: std.mem.Allocator, input: []const u8, wbits: u6, params: Params) EncodeError![]u8 {
-    if (input.len > MAX_META_BLOCK_LEN) return error.InputTooLarge;
+    if (input.len > MAX_META_BLOCK_LEN) return error.ZixInputTooLarge;
 
     var bw: BitWriter = .{};
     errdefer bw.deinit(allocator);
@@ -2052,9 +2052,9 @@ fn qualityParams(quality: u8) Params {
 /// the alloc variant (decompression-bomb guard) is OutputTooLarge. An output that overflows the
 /// caller buffer on decompressBrotli is BufferTooSmall.
 pub const DecodeError = error{
-    DecompressFailed,
-    OutputTooLarge,
-    BufferTooSmall,
+    ZixDecompressFailed,
+    ZixOutputTooLarge,
+    ZixBufferTooSmall,
     OutOfMemory,
 };
 
@@ -2096,7 +2096,7 @@ pub fn compressBound(input_len: usize) usize {
 ///
 /// Return:
 /// - []u8 (a valid brotli stream, caller frees)
-/// - error.InvalidWindowBits / error.InputTooLarge / error.OutOfMemory
+/// - error.ZixInvalidWindowBits / error.ZixInputTooLarge / error.OutOfMemory
 pub fn compressQualityAlloc(allocator: std.mem.Allocator, data: []const u8, quality: u8, wbits: u6) EncodeError![]u8 {
     const params = qualityParams(quality);
 
@@ -2149,7 +2149,7 @@ pub fn compressQualityAlloc(allocator: std.mem.Allocator, data: []const u8, qual
 ///
 /// Return:
 /// - []u8 (a valid brotli stream, caller frees)
-/// - error.InvalidWindowBits / error.InputTooLarge / error.OutOfMemory
+/// - error.ZixInvalidWindowBits / error.ZixInputTooLarge / error.OutOfMemory
 pub fn compressBrotliAlloc(allocator: std.mem.Allocator, data: []const u8, level: Level) EncodeError![]u8 {
     const quality: u8 = switch (level) {
         .FASTEST => 5,
@@ -2178,13 +2178,13 @@ pub fn compressBrotliAlloc(allocator: std.mem.Allocator, data: []const u8, level
 ///
 /// Return:
 /// - usize (compressed byte count written into out_buf)
-/// - error.BufferTooSmall if out_buf cannot hold the result
-/// - error.InvalidWindowBits / error.InputTooLarge / error.OutOfMemory
+/// - error.ZixBufferTooSmall if out_buf cannot hold the result
+/// - error.ZixInvalidWindowBits / error.ZixInputTooLarge / error.OutOfMemory
 pub fn compressBrotli(allocator: std.mem.Allocator, data: []const u8, out_buf: []u8, level: Level) EncodeError!usize {
     const stream = try compressBrotliAlloc(allocator, data, level);
     defer allocator.free(stream);
 
-    if (out_buf.len < stream.len) return error.BufferTooSmall;
+    if (out_buf.len < stream.len) return error.ZixBufferTooSmall;
 
     @memcpy(out_buf[0..stream.len], stream);
 
@@ -2197,12 +2197,12 @@ pub fn compressBrotli(allocator: std.mem.Allocator, data: []const u8, out_buf: [
 /// Param:
 /// allocator - std.mem.Allocator (owns the returned slice)
 /// compressed - []const u8 (brotli bytes)
-/// max_out - usize (largest output accepted before error.OutputTooLarge)
+/// max_out - usize (largest output accepted before error.ZixOutputTooLarge)
 ///
 /// Return:
 /// - []u8 (the decoded bytes, caller frees)
-/// - error.OutputTooLarge if the output would exceed max_out
-/// - error.DecompressFailed if the stream is malformed
+/// - error.ZixOutputTooLarge if the output would exceed max_out
+/// - error.ZixDecompressFailed if the stream is malformed
 /// - error.OutOfMemory
 pub fn decompressBrotliAlloc(allocator: std.mem.Allocator, compressed: []const u8, max_out: usize) DecodeError![]u8 {
     var stats: Stats = .{};
@@ -2211,8 +2211,8 @@ pub fn decompressBrotliAlloc(allocator: std.mem.Allocator, compressed: []const u
 
     return decoder.run() catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.OutputTooLarge => error.OutputTooLarge,
-        else => error.DecompressFailed,
+        error.ZixOutputTooLarge => error.ZixOutputTooLarge,
+        else => error.ZixDecompressFailed,
     };
 }
 
@@ -2222,7 +2222,7 @@ pub fn decompressBrotliAlloc(allocator: std.mem.Allocator, compressed: []const u
 /// Note:
 /// - flate.decompressGzip takes no allocator (std streams inflate without a history window). brotli's
 ///   decoder needs heap (the output ring it back-references plus the Huffman tables), so this takes
-///   one. Output beyond out_buf.len surfaces as error.BufferTooSmall, matching flate's caller-buffer
+///   one. Output beyond out_buf.len surfaces as error.ZixBufferTooSmall, matching flate's caller-buffer
 ///   semantics, not OutputTooLarge (which is the alloc variant's decompression-bomb guard).
 ///
 /// Param:
@@ -2232,12 +2232,12 @@ pub fn decompressBrotliAlloc(allocator: std.mem.Allocator, compressed: []const u
 ///
 /// Return:
 /// - usize (inflated byte count written into out_buf)
-/// - error.BufferTooSmall if the inflated result does not fit out_buf
-/// - error.DecompressFailed if the stream is malformed
+/// - error.ZixBufferTooSmall if the inflated result does not fit out_buf
+/// - error.ZixDecompressFailed if the stream is malformed
 /// - error.OutOfMemory
 pub fn decompressBrotli(allocator: std.mem.Allocator, compressed: []const u8, out_buf: []u8) DecodeError!usize {
     const decoded = decompressBrotliAlloc(allocator, compressed, out_buf.len) catch |err| switch (err) {
-        error.OutputTooLarge => return error.BufferTooSmall,
+        error.ZixOutputTooLarge => return error.ZixBufferTooSmall,
         else => return err,
     };
     defer allocator.free(decoded);
@@ -2352,8 +2352,8 @@ test "zix compression: brotli Level mapping round-trips both efforts" {
 }
 
 test "zix compression: brotli out-of-range window bits is rejected" {
-    try testing.expectError(error.InvalidWindowBits, compressQualityAlloc(testing.allocator, "abc", 5, 9));
-    try testing.expectError(error.InvalidWindowBits, compressQualityAlloc(testing.allocator, "abc", 5, 25));
+    try testing.expectError(error.ZixInvalidWindowBits, compressQualityAlloc(testing.allocator, "abc", 5, 9));
+    try testing.expectError(error.ZixInvalidWindowBits, compressQualityAlloc(testing.allocator, "abc", 5, 25));
 }
 
 test "zix compression: brotli decode past the cap errors" {
@@ -2365,7 +2365,7 @@ test "zix compression: brotli decode past the cap errors" {
     const stream = try compressQualityAlloc(testing.allocator, buf.items, 9, 22);
     defer testing.allocator.free(stream);
 
-    try testing.expectError(error.OutputTooLarge, decompressBrotliAlloc(testing.allocator, stream, 16));
+    try testing.expectError(error.ZixOutputTooLarge, decompressBrotliAlloc(testing.allocator, stream, 16));
 }
 
 test "zix compression: brotli truncated compressed stream errors as DecompressFailed" {
@@ -2378,7 +2378,7 @@ test "zix compression: brotli truncated compressed stream errors as DecompressFa
     defer testing.allocator.free(stream);
 
     // cut the stream mid-compressed-block: the command loop runs out of bits and fails.
-    try testing.expectError(error.DecompressFailed, decompressBrotliAlloc(testing.allocator, stream[0 .. stream.len / 2], 1 << 20));
+    try testing.expectError(error.ZixDecompressFailed, decompressBrotliAlloc(testing.allocator, stream[0 .. stream.len / 2], 1 << 20));
 }
 
 test "zix compression: brotli decodes an external brotli CLI vector (interop)" {
@@ -2483,7 +2483,7 @@ test "zix compression: brotli compressBrotli reports BufferTooSmall on an unders
     for (&input, 0..) |*b, i| b.* = @truncate((i *% 2654435761) >> 11);
 
     var tiny: [8]u8 = undefined;
-    try testing.expectError(error.BufferTooSmall, compressBrotli(testing.allocator, &input, &tiny, .DEFAULT));
+    try testing.expectError(error.ZixBufferTooSmall, compressBrotli(testing.allocator, &input, &tiny, .DEFAULT));
 }
 
 test "zix compression: brotli decompressBrotli reports BufferTooSmall when output exceeds the buffer" {
@@ -2494,7 +2494,7 @@ test "zix compression: brotli decompressBrotli reports BufferTooSmall when outpu
     defer testing.allocator.free(stream);
 
     var tiny: [4]u8 = undefined;
-    try testing.expectError(error.BufferTooSmall, decompressBrotli(testing.allocator, stream, &tiny));
+    try testing.expectError(error.ZixBufferTooSmall, decompressBrotli(testing.allocator, stream, &tiny));
 }
 
 // edge: empty and single-byte inputs through the caller-buffer pair.
@@ -2523,7 +2523,7 @@ test "zix compression: brotli compressBrotli succeeds at the exact size and fail
 
     const short = try testing.allocator.alloc(u8, ref.len - 1);
     defer testing.allocator.free(short);
-    try testing.expectError(error.BufferTooSmall, compressBrotli(testing.allocator, input, short, .DEFAULT));
+    try testing.expectError(error.ZixBufferTooSmall, compressBrotli(testing.allocator, input, short, .DEFAULT));
 }
 
 // edge: the BufferTooSmall boundary for decompress is exactly the inflated length.
@@ -2539,7 +2539,7 @@ test "zix compression: brotli decompressBrotli succeeds at the exact size and fa
     try testing.expectEqualSlices(u8, input, exact[0..n]);
 
     var short: [input.len - 1]u8 = undefined;
-    try testing.expectError(error.BufferTooSmall, decompressBrotli(testing.allocator, stream, &short));
+    try testing.expectError(error.ZixBufferTooSmall, decompressBrotli(testing.allocator, stream, &short));
 }
 
 // behaviour: the buffer variant is a faithful copy of the alloc variant, byte for byte.

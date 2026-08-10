@@ -32,7 +32,7 @@ A cell is left blank when it does not apply (a required handle has no tuning tra
 | tls | `.OFF` | TLS behavior: `.OFF`, `.REQUIRE` | a separate perf band (handshake plus per-record AEAD) | `.REQUIRE` over an untrusted network (or a `rediss://` URL) | | | a Redis TLS port is TLS from the first byte, there is no in-band upgrade |
 | dispatch_model | `.ASYNC` | transport that multiplexes socket I/O: `.ASYNC` (Pool), `.EPOLL`, `.URING` | picks the execution model, not a hot-path knob | leave `.ASYNC` for the pooled path, pick `.EPOLL` or `.URING` for the single-thread multiplexed transport | | | `.EPOLL` and `.URING` are cleartext only, so keep tls = `.OFF` for them |
 | max_pending_replies | `16` | replies one connection may owe: the pipeline bound and the outstanding-deferred bound, 0 = no bound | hot: batch depth and deferred backpressure | match to the batch you pipeline (see the sizing section) | shallower batches, more round trips | a stalled server grows the send buffer | 0 removes the bound, an unbounded producer can grow memory |
-| process_queue_len | `0` | pool only: parked-acquire bound, 0 = no parking | acquire behavior under a full pool | set to worker count plus a margin (see the sizing section) | acquire sheds instead of parking | more threads park (block) instead of shedding | 0 sheds `error.PoolExhausted` at once, beyond the bound sheds `error.PoolBusy` |
+| process_queue_len | `0` | pool only: parked-acquire bound, 0 = no parking | acquire behavior under a full pool | set to worker count plus a margin (see the sizing section) | acquire sheds instead of parking | more threads park (block) instead of shedding | 0 sheds `error.RedizPoolExhausted` at once, beyond the bound sheds `error.RedizPoolBusy` |
 | pool_size | `6` | pool only: connections per pool | throughput is roughly `pool_size / round_trip` | raise for more concurrent commands (see the sizing section) | commands queue on the pool | more server connections and memory | each connection is one server-side client, stay under the server `maxclients` |
 | retry_max | `3` | pool only: connect attempts per acquire beyond the first | acquire latency on a flaky connect | raise for a flaky network | acquire gives up on connect sooner | acquire retries longer before failing | total attempts is `retry_max + 1` |
 | retry_delay_ms | `250` | pool only: delay between connect retries | acquire latency during retries | lower for faster retry, raise to back off | tighter retry loop | slower recovery, gentler on the server | the delay applies between attempts, not before the first |
@@ -66,7 +66,7 @@ syscalls  : about 2K   ->  about 2   (one send of all K, one receive burst)
 wall time : K x round_trip  ->  round_trip + K x server_exec
 ```
 
-`max_pending_replies` is the depth bound: `Pipeline.add` past the bound sheds `error.QueueFull`, so a runaway producer cannot grow the send buffer without limit. Set it to the batch depth you actually pipeline. Too low serializes into more round trips, too high lets a stalled server buffer unbounded, 0 removes the bound.
+`max_pending_replies` is the depth bound: `Pipeline.add` past the bound sheds `error.RedizQueueFull`, so a runaway producer cannot grow the send buffer without limit. Set it to the batch depth you actually pipeline. Too low serializes into more round trips, too high lets a stalled server buffer unbounded, 0 removes the bound.
 
 ### max_pending_replies for the deferred write-behind path
 
@@ -86,13 +86,13 @@ The owed-reply count is bounded by `max_pending_replies` (0 acts as one at a tim
 ```mermaid
 flowchart LR
     acq[acquire on a full pool] --> q{waiters < process_queue_len?}
-    q -->|0| shed0[error.PoolExhausted]
+    q -->|0| shed0[error.RedizPoolExhausted]
     q -->|under bound| park[park FIFO, wait for a release]
-    q -->|at bound| shed1[error.PoolBusy]
+    q -->|at bound| shed1[error.RedizPoolBusy]
 ```
 
-- 0 means no parking: a full pool sheds `error.PoolExhausted` at once. Choose this for immediate backpressure to the caller.
-- `N` parks up to `N` acquires FIFO and hands each released connection to the oldest waiter. Beyond `N`, acquire sheds `error.PoolBusy`.
+- 0 means no parking: a full pool sheds `error.RedizPoolExhausted` at once. Choose this for immediate backpressure to the caller.
+- `N` parks up to `N` acquires FIFO and hands each released connection to the oldest waiter. Beyond `N`, acquire sheds `error.RedizPoolBusy`.
 - Rule of thumb: the worker count plus a small margin, so a transient stall parks and a real overload sheds.
 
 ### pool_size: how many connections

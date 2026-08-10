@@ -14,11 +14,11 @@ test "zix edge: Http matches the QUERY token exactly, as it does every method" {
     // is not the QUERY method, so it reads as a method this engine does not
     // implement.
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http.Request.fromRaw("query /search HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
     );
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http.Request.fromRaw("QuErY /search HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
     );
 }
@@ -27,11 +27,11 @@ test "zix edge: Http a five-byte token that is not QUERY is still refused" {
     // QUERY shares its length with PATCH and TRACE, so the length arm must not
     // become a catch-all for anything five bytes long.
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http.Request.fromRaw("QUERX /search HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
     );
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http.Request.fromRaw("BREWS /search HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
     );
 }
@@ -41,12 +41,12 @@ test "zix edge: Http an unimplemented method answers 501, a broken line answers 
     // distinguishable all the way to the wire.
     try std.testing.expect(std.mem.startsWith(
         u8,
-        zix.Http.parseErrorResponse(error.UnknownMethod),
+        zix.Http.parseErrorResponse(error.ZixUnknownMethod),
         "HTTP/1.1 501 Not Implemented\r\n",
     ));
     try std.testing.expect(std.mem.startsWith(
         u8,
-        zix.Http.parseErrorResponse(error.InvalidRequest),
+        zix.Http.parseErrorResponse(error.ZixInvalidRequest),
         "HTTP/1.1 400 Bad Request\r\n",
     ));
 }

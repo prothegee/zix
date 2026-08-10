@@ -37,11 +37,11 @@ pub const MAX_VALUE_LEN: usize = ice.MAX_FOUNDATION_LEN + 1 + 3 + 1 + 3 + 1 + 10
 /// Everything that stops a candidate from being read or written.
 pub const Error = error{
     /// Fewer fields than a candidate needs, or one that is not a number.
-    Malformed,
+    ZixMalformed,
     /// A transport, address form, or candidate type this endpoint does not use.
-    Unsupported,
+    ZixUnsupported,
     /// The output buffer is too small.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// One candidate as it was written, borrowed from the description it came from.
@@ -63,31 +63,31 @@ pub const Parsed = struct {
 ///
 /// Return:
 /// - Parsed borrowing `value`
-/// - error.Malformed if a field is missing or is not a number
-/// - error.Unsupported for a transport, component, or type this endpoint does not use
+/// - error.ZixMalformed if a field is missing or is not a number
+/// - error.ZixUnsupported for a transport, component, or type this endpoint does not use
 pub fn read(value: []const u8) Error!Parsed {
     var fields = std.mem.tokenizeScalar(u8, value, ' ');
 
-    const foundation = fields.next() orelse return error.Malformed;
-    const component_field = fields.next() orelse return error.Malformed;
-    const transport_field = fields.next() orelse return error.Malformed;
-    const priority_field = fields.next() orelse return error.Malformed;
-    const host = fields.next() orelse return error.Malformed;
-    const port_field = fields.next() orelse return error.Malformed;
-    const typ = fields.next() orelse return error.Malformed;
-    const kind_field = fields.next() orelse return error.Malformed;
+    const foundation = fields.next() orelse return error.ZixMalformed;
+    const component_field = fields.next() orelse return error.ZixMalformed;
+    const transport_field = fields.next() orelse return error.ZixMalformed;
+    const priority_field = fields.next() orelse return error.ZixMalformed;
+    const host = fields.next() orelse return error.ZixMalformed;
+    const port_field = fields.next() orelse return error.ZixMalformed;
+    const typ = fields.next() orelse return error.ZixMalformed;
+    const kind_field = fields.next() orelse return error.ZixMalformed;
 
-    if (!std.mem.eql(u8, typ, "typ")) return error.Malformed;
-    if (foundation.len == 0 or foundation.len > ice.MAX_FOUNDATION_LEN) return error.Malformed;
-    if (!isAddress(host)) return error.Unsupported;
+    if (!std.mem.eql(u8, typ, "typ")) return error.ZixMalformed;
+    if (foundation.len == 0 or foundation.len > ice.MAX_FOUNDATION_LEN) return error.ZixMalformed;
+    if (!isAddress(host)) return error.ZixUnsupported;
 
     return .{
         .foundation = foundation,
         .component = try componentFor(component_field),
         .transport = try transportFor(transport_field),
-        .priority = std.fmt.parseInt(u32, priority_field, 10) catch return error.Malformed,
+        .priority = std.fmt.parseInt(u32, priority_field, 10) catch return error.ZixMalformed,
         .address = host,
-        .port = std.fmt.parseInt(u16, port_field, 10) catch return error.Malformed,
+        .port = std.fmt.parseInt(u16, port_field, 10) catch return error.ZixMalformed,
         .kind = try typeFor(kind_field),
     };
 }
@@ -104,13 +104,13 @@ pub fn read(value: []const u8) Error!Parsed {
 ///
 /// Return:
 /// - []const u8, the value alone, with no attribute name
-/// - error.NoSpace
+/// - error.ZixNoSpace
 pub fn write(out: []u8, entry: ice.Candidate) Error![]const u8 {
     var foundation: [ice.MAX_FOUNDATION_LEN]u8 = undefined;
-    const foundation_text = ice.writeFoundation(&foundation, entry) catch return error.NoSpace;
+    const foundation_text = ice.writeFoundation(&foundation, entry) catch return error.ZixNoSpace;
 
     var host: [address.MAX_ADDRESS_LEN]u8 = undefined;
-    const host_text = address.writeAddress(&host, entry.address) catch return error.NoSpace;
+    const host_text = address.writeAddress(&host, entry.address) catch return error.ZixNoSpace;
 
     var at: usize = 0;
     at += try put(out[at..], foundation_text);
@@ -178,12 +178,12 @@ fn isAddress(text: []const u8) bool {
 
 /// The component a number stands for.
 fn componentFor(text: []const u8) Error!ice.Component {
-    const number = std.fmt.parseInt(u16, text, 10) catch return error.Malformed;
+    const number = std.fmt.parseInt(u16, text, 10) catch return error.ZixMalformed;
 
     return switch (number) {
         1 => .RTP,
         2 => .RTCP,
-        else => error.Unsupported,
+        else => error.ZixUnsupported,
     };
 }
 
@@ -192,7 +192,7 @@ fn transportFor(text: []const u8) Error!ice.Transport {
     if (std.ascii.eqlIgnoreCase(text, "udp")) return .UDP;
     if (std.ascii.eqlIgnoreCase(text, "tcp")) return .TCP;
 
-    return error.Unsupported;
+    return error.ZixUnsupported;
 }
 
 /// The candidate type a name stands for.
@@ -202,12 +202,12 @@ fn typeFor(text: []const u8) Error!ice.Type {
     if (std.mem.eql(u8, text, "prflx")) return .PEER_REFLEXIVE;
     if (std.mem.eql(u8, text, "relay")) return .RELAYED;
 
-    return error.Unsupported;
+    return error.ZixUnsupported;
 }
 
 /// Copy text into a buffer, checking there is room.
 fn put(out: []u8, text: []const u8) Error!usize {
-    if (out.len < text.len) return error.NoSpace;
+    if (out.len < text.len) return error.ZixNoSpace;
 
     @memcpy(out[0..text.len], text);
 
@@ -228,7 +228,7 @@ fn putNumber(out: []u8, value: u32) Error!usize {
         if (left == 0) break;
     }
 
-    if (out.len < count) return error.NoSpace;
+    if (out.len < count) return error.ZixNoSpace;
 
     for (0..count) |index| out[index] = digits[count - 1 - index];
 
@@ -274,40 +274,40 @@ test "zix sdp: candidate read, the trailing fields of a reflexive candidate are 
 }
 
 test "zix sdp: candidate read, a missing field is refused" {
-    try std.testing.expectError(error.Malformed, read("1 1 UDP 100 192.0.2.1 9 typ"));
-    try std.testing.expectError(error.Malformed, read("1 1 UDP 100 192.0.2.1 9"));
-    try std.testing.expectError(error.Malformed, read(""));
+    try std.testing.expectError(error.ZixMalformed, read("1 1 UDP 100 192.0.2.1 9 typ"));
+    try std.testing.expectError(error.ZixMalformed, read("1 1 UDP 100 192.0.2.1 9"));
+    try std.testing.expectError(error.ZixMalformed, read(""));
 }
 
 test "zix sdp: candidate read, a missing typ keyword is refused" {
-    try std.testing.expectError(error.Malformed, read("1 1 UDP 100 192.0.2.1 9 xyz host"));
+    try std.testing.expectError(error.ZixMalformed, read("1 1 UDP 100 192.0.2.1 9 xyz host"));
 }
 
 test "zix sdp: candidate read, a host name is refused" {
     // RFC 8839 5.1 says to ignore these, and nothing here resolves a name.
-    try std.testing.expectError(error.Unsupported, read("1 1 UDP 100 host.example.com 9 typ host"));
+    try std.testing.expectError(error.ZixUnsupported, read("1 1 UDP 100 host.example.com 9 typ host"));
 }
 
 test "zix sdp: candidate read, an unknown transport is refused" {
-    try std.testing.expectError(error.Unsupported, read("1 1 SCTP 100 192.0.2.1 9 typ host"));
+    try std.testing.expectError(error.ZixUnsupported, read("1 1 SCTP 100 192.0.2.1 9 typ host"));
 }
 
 test "zix sdp: candidate read, an unknown candidate type is refused" {
-    try std.testing.expectError(error.Unsupported, read("1 1 UDP 100 192.0.2.1 9 typ other"));
+    try std.testing.expectError(error.ZixUnsupported, read("1 1 UDP 100 192.0.2.1 9 typ other"));
 }
 
 test "zix sdp: candidate read, a component outside the two is refused" {
-    try std.testing.expectError(error.Unsupported, read("1 3 UDP 100 192.0.2.1 9 typ host"));
+    try std.testing.expectError(error.ZixUnsupported, read("1 3 UDP 100 192.0.2.1 9 typ host"));
 }
 
 test "zix sdp: candidate read, a priority that is not a number is refused" {
-    try std.testing.expectError(error.Malformed, read("1 1 UDP high 192.0.2.1 9 typ host"));
+    try std.testing.expectError(error.ZixMalformed, read("1 1 UDP high 192.0.2.1 9 typ host"));
 }
 
 test "zix sdp: candidate read, a foundation longer than the field allows is refused" {
     const long = "1234567890123456789012345678901234567890";
 
-    try std.testing.expectError(error.Malformed, read(long ++ " 1 UDP 100 192.0.2.1 9 typ host"));
+    try std.testing.expectError(error.ZixMalformed, read(long ++ " 1 UDP 100 192.0.2.1 9 typ host"));
 }
 
 test "zix sdp: candidate write, a host candidate comes out in RFC 8839 order" {
@@ -367,7 +367,7 @@ test "zix sdp: candidate write, a short buffer errors" {
 
     var buf: [8]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, write(&buf, entry));
+    try std.testing.expectError(error.ZixNoSpace, write(&buf, entry));
 }
 
 test "zix sdp: candidate write, the component number is the one ICE assigns" {

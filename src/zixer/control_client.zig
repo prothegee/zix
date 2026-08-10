@@ -5,10 +5,10 @@ const std = @import("std");
 const control = @import("control.zig");
 
 pub const CallError = error{
-    UdsNotSupported,
-    ControlPathTooLong,
-    DaemonNotRunning,
-    ConnectionLost,
+    ZixerUdsNotSupported,
+    ZixerControlPathTooLong,
+    ZixerDaemonNotRunning,
+    ZixerConnectionLost,
     BadReply,
 };
 
@@ -26,27 +26,27 @@ pub const CallError = error{
 ///
 /// Return:
 /// - control.Reply, text is a slice of reply_buf
-/// - error.DaemonNotRunning when nothing answers on socket_path
+/// - error.ZixerDaemonNotRunning when nothing answers on socket_path
 /// - error.BadReply when the answer carries neither ok nor error prefix
 pub fn call(io: std.Io, socket_path: []const u8, request_line: []const u8, reply_buf: []u8) CallError!control.Reply {
-    if (comptime !std.Io.net.has_unix_sockets) return error.UdsNotSupported;
-    if (!control.fitsSocket(socket_path)) return error.ControlPathTooLong;
+    if (comptime !std.Io.net.has_unix_sockets) return error.ZixerUdsNotSupported;
+    if (!control.fitsSocket(socket_path)) return error.ZixerControlPathTooLong;
 
-    const unix_addr = std.Io.net.UnixAddress.init(socket_path) catch return error.ControlPathTooLong;
-    const stream = unix_addr.connect(io) catch return error.DaemonNotRunning;
+    const unix_addr = std.Io.net.UnixAddress.init(socket_path) catch return error.ZixerControlPathTooLong;
+    const stream = unix_addr.connect(io) catch return error.ZixerDaemonNotRunning;
     defer stream.close(io);
 
     var write_buf: [control.MAX_LINE]u8 = undefined;
     var writer = stream.writer(io, &write_buf);
-    writer.interface.writeAll(request_line) catch return error.ConnectionLost;
-    writer.interface.writeAll("\n") catch return error.ConnectionLost;
-    writer.interface.flush() catch return error.ConnectionLost;
+    writer.interface.writeAll(request_line) catch return error.ZixerConnectionLost;
+    writer.interface.writeAll("\n") catch return error.ZixerConnectionLost;
+    writer.interface.flush() catch return error.ZixerConnectionLost;
 
     var read_buf: [control.MAX_LINE]u8 = undefined;
     var reader = stream.reader(io, &read_buf);
     var len: usize = 0;
     while (len < reply_buf.len) {
-        const got = reader.interface.readSliceShort(reply_buf[len .. len + 1]) catch return error.ConnectionLost;
+        const got = reader.interface.readSliceShort(reply_buf[len .. len + 1]) catch return error.ZixerConnectionLost;
         if (got == 0) break;
         if (reply_buf[len] == '\n') break;
         len += got;
@@ -78,7 +78,7 @@ test "zix zixer: control client, dead socket path reports DaemonNotRunning" {
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     const dead_path = if (@import("builtin").os.tag == .windows) "C:\\zix_absent\\control.sock" else "/tmp/zix_absent_zixer/control.sock";
-    try std.testing.expectError(error.DaemonNotRunning, call(io, dead_path, "ping", &reply_buf));
+    try std.testing.expectError(error.ZixerDaemonNotRunning, call(io, dead_path, "ping", &reply_buf));
 }
 
 test "zix zixer: control client, over-long socket path reports ControlPathTooLong" {
@@ -90,7 +90,7 @@ test "zix zixer: control client, over-long socket path reports ControlPathTooLon
     long_path[0] = '/';
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
-    try std.testing.expectError(error.ControlPathTooLong, call(io, &long_path, "ping", &reply_buf));
+    try std.testing.expectError(error.ZixerControlPathTooLong, call(io, &long_path, "ping", &reply_buf));
 }
 
 test "zix zixer: control client, ping on a dead socket is false" {

@@ -32,7 +32,7 @@ A cell is left blank when it does not apply (a required handle has no tuning tra
 | tls | `.OFF` | TLS behavior: `.OFF`, `.PREFER`, `.REQUIRE` | a separate perf band (handshake plus per-record AEAD) | `.REQUIRE` over an untrusted network | | | `.PREFER` continues cleartext when refused, `.REQUIRE` fails |
 | dispatch_model | `.ASYNC` | transport that multiplexes socket I/O: `.ASYNC` (Executor), `.EPOLL`, `.URING` | picks the execution model, not a hot-path knob | leave `.ASYNC` for the pooled Executor, pick `.EPOLL` or `.URING` for the single-thread multiplexed transport | | | `.EPOLL` and `.URING` are cleartext only, so keep tls = `.OFF` for them |
 | max_pending_replies | `16` | replies one connection may owe (pipeline and `sendRows` batch bound), 0 = no bound | hot: batch depth per round trip | match to the batch you pipeline (see the sizing section) | shallower batches, more round trips | a stalled server grows the send buffer | 0 removes the shed, an unbounded producer can grow memory |
-| process_queue_len | `0` | pool only: parked-acquire bound, 0 = no parking | acquire behavior under a full pool | set to worker count plus a margin (see the sizing section) | acquire sheds instead of parking | more threads park (block) instead of shedding | 0 sheds `error.PoolExhausted` at once, beyond the bound sheds `error.PoolBusy` |
+| process_queue_len | `0` | pool only: parked-acquire bound, 0 = no parking | acquire behavior under a full pool | set to worker count plus a margin (see the sizing section) | acquire sheds instead of parking | more threads park (block) instead of shedding | 0 sheds `error.PostgrezPoolExhausted` at once, beyond the bound sheds `error.PostgrezPoolBusy` |
 | pool_size | `6` | pool only: connections per pool | throughput is roughly `pool_size / round_trip` | raise for more concurrent queries (see the sizing section) | queries queue on the pool | more server backends and memory | each connection is one server backend, stay under the server `max_connections` |
 | retry_max | `3` | pool only: connect attempts per acquire beyond the first | acquire latency on a flaky connect | raise for a flaky network | acquire gives up on connect sooner | acquire retries longer before failing | total attempts is `retry_max + 1` |
 | retry_delay_ms | `250` | pool only: delay between connect retries | acquire latency during retries | lower for faster retry, raise to back off | tighter retry loop | slower recovery, gentler on the server | the delay applies between attempts, not before the first |
@@ -66,7 +66,7 @@ syscalls  : about 2K   ->  about 2   (one send of all K, one Sync plus one recei
 wall time : K x round_trip  ->  round_trip + K x server_exec
 ```
 
-The round-trip cost is paid once for the whole batch instead of once per query. `max_pending_replies` is the depth bound: `sendRows` past the bound sheds `error.QueueFull` so a runaway producer cannot grow the send buffer without limit.
+The round-trip cost is paid once for the whole batch instead of once per query. `max_pending_replies` is the depth bound: `sendRows` past the bound sheds `error.PostgrezQueueFull` so a runaway producer cannot grow the send buffer without limit.
 
 - Set it to the batch depth you actually pipeline. The default 16 matches the `Executor` `batch_max`.
 - Too low serializes the batch into more round trips.
@@ -80,13 +80,13 @@ The round-trip cost is paid once for the whole batch instead of once per query. 
 ```mermaid
 flowchart LR
     acq[acquire on a full pool] --> q{waiters < process_queue_len?}
-    q -->|0| shed0[error.PoolExhausted]
+    q -->|0| shed0[error.PostgrezPoolExhausted]
     q -->|under bound| park[park FIFO, wait for a release]
-    q -->|at bound| shed1[error.PoolBusy]
+    q -->|at bound| shed1[error.PostgrezPoolBusy]
 ```
 
-- 0 means no parking: a full pool sheds `error.PoolExhausted` immediately. Choose this when you want backpressure to reach the caller at once.
-- `N` parks up to `N` acquires FIFO and hands each released connection directly to the oldest waiter. Beyond `N`, acquire sheds `error.PoolBusy`. Choose this when a brief stall should wait rather than fail.
+- 0 means no parking: a full pool sheds `error.PostgrezPoolExhausted` immediately. Choose this when you want backpressure to reach the caller at once.
+- `N` parks up to `N` acquires FIFO and hands each released connection directly to the oldest waiter. Beyond `N`, acquire sheds `error.PostgrezPoolBusy`. Choose this when a brief stall should wait rather than fail.
 - Rule of thumb: the worker count plus a small margin, so a transient stall parks and a real overload still sheds. The `Executor` sets it to `workers + 64` (the margin covers the `runInline` path).
 
 ### pool_size: how many connections

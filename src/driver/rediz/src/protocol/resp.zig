@@ -83,7 +83,7 @@ pub const Reply = union(enum) {
 /// out - *std.ArrayList(u8) (appended, caller batches and flushes)
 /// args - []const []const u8 (command name first, then its arguments)
 pub fn encodeCommand(allocator: std.mem.Allocator, out: *std.ArrayList(u8), args: []const []const u8) !void {
-    if (args.len == 0) return error.EmptyCommand;
+    if (args.len == 0) return error.RedizEmptyCommand;
 
     var header_buf: [32]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buf, "*{d}\r\n", .{args.len});
@@ -103,7 +103,7 @@ pub fn encodeCommand(allocator: std.mem.Allocator, out: *std.ArrayList(u8), args
 ///
 /// Note:
 /// - The source must provide `readLine(buf: []u8) ![]const u8` (one line,
-///   CRLF stripped, error.LineTooLong when buf overflows) and
+///   CRLF stripped, error.RedizLineTooLong when buf overflows) and
 ///   `readExact(buf: []u8) !void`.
 ///
 /// Param:
@@ -112,17 +112,17 @@ pub fn encodeCommand(allocator: std.mem.Allocator, out: *std.ArrayList(u8), args
 /// Return:
 /// - Reply on success (error replies decode as .err / .bulk_err, they are
 ///   data here, the connection maps them)
-/// - error.ProtocolViolation on an unknown marker or malformed frame
+/// - error.RedizProtocolViolation on an unknown marker or malformed frame
 pub fn decode(arena: std.mem.Allocator, source: anytype) anyerror!Reply {
     return decodeDepth(arena, source, 0);
 }
 
 fn decodeDepth(arena: std.mem.Allocator, source: anytype, depth: usize) anyerror!Reply {
-    if (depth >= MAX_DEPTH) return error.ProtocolViolation;
+    if (depth >= MAX_DEPTH) return error.RedizProtocolViolation;
 
     var line_buf: [MAX_LINE_LEN]u8 = undefined;
     const line = try source.readLine(&line_buf);
-    if (line.len == 0) return error.ProtocolViolation;
+    if (line.len == 0) return error.RedizProtocolViolation;
 
     const marker = line[0];
     const rest = line[1..];
@@ -132,18 +132,18 @@ fn decodeDepth(arena: std.mem.Allocator, source: anytype, depth: usize) anyerror
         '-' => return .{ .err = try arena.dupe(u8, rest) },
         ':' => return .{ .integer = try parseInteger(rest) },
         '#' => {
-            if (rest.len != 1) return error.ProtocolViolation;
+            if (rest.len != 1) return error.RedizProtocolViolation;
 
             return switch (rest[0]) {
                 't' => .{ .boolean = true },
                 'f' => .{ .boolean = false },
-                else => error.ProtocolViolation,
+                else => error.RedizProtocolViolation,
             };
         },
         ',' => return .{ .double = try parseDouble(rest) },
         '(' => return .{ .big_number = try arena.dupe(u8, rest) },
         '_' => {
-            if (rest.len != 0) return error.ProtocolViolation;
+            if (rest.len != 0) return error.RedizProtocolViolation;
 
             return .null;
         },
@@ -153,13 +153,13 @@ fn decodeDepth(arena: std.mem.Allocator, source: anytype, depth: usize) anyerror
             return .{ .bulk = body };
         },
         '!' => {
-            const body = try readBulkBody(arena, source, rest) orelse return error.ProtocolViolation;
+            const body = try readBulkBody(arena, source, rest) orelse return error.RedizProtocolViolation;
 
             return .{ .bulk_err = body };
         },
         '=' => {
-            const body = try readBulkBody(arena, source, rest) orelse return error.ProtocolViolation;
-            if (body.len < 4 or body[3] != ':') return error.ProtocolViolation;
+            const body = try readBulkBody(arena, source, rest) orelse return error.RedizProtocolViolation;
+            if (body.len < 4 or body[3] != ':') return error.RedizProtocolViolation;
 
             return .{ .verbatim = .{
                 .format = body[0..3].*,
@@ -168,7 +168,7 @@ fn decodeDepth(arena: std.mem.Allocator, source: anytype, depth: usize) anyerror
         },
         '*', '~', '>' => {
             const count = try parseAggregateLen(rest) orelse {
-                if (marker != '*') return error.ProtocolViolation;
+                if (marker != '*') return error.RedizProtocolViolation;
 
                 return .null;
             };
@@ -183,7 +183,7 @@ fn decodeDepth(arena: std.mem.Allocator, source: anytype, depth: usize) anyerror
             };
         },
         '%' => {
-            const count = try parseAggregateLen(rest) orelse return error.ProtocolViolation;
+            const count = try parseAggregateLen(rest) orelse return error.RedizProtocolViolation;
 
             const entries = try arena.alloc(MapEntry, count);
             for (entries) |*entry| {
@@ -193,7 +193,7 @@ fn decodeDepth(arena: std.mem.Allocator, source: anytype, depth: usize) anyerror
 
             return .{ .map = entries };
         },
-        else => return error.ProtocolViolation,
+        else => return error.RedizProtocolViolation,
     }
 }
 
@@ -204,28 +204,28 @@ fn decodeDepth(arena: std.mem.Allocator, source: anytype, depth: usize) anyerror
 /// - null on the RESP2 null bulk ($-1)
 fn readBulkBody(arena: std.mem.Allocator, source: anytype, len_text: []const u8) !?[]u8 {
     const len = try parseAggregateLen(len_text) orelse return null;
-    if (len > MAX_BULK_LEN) return error.ProtocolViolation;
+    if (len > MAX_BULK_LEN) return error.RedizProtocolViolation;
 
     const body = try arena.alloc(u8, len);
     try source.readExact(body);
 
     var crlf: [2]u8 = undefined;
     try source.readExact(&crlf);
-    if (crlf[0] != '\r' or crlf[1] != '\n') return error.ProtocolViolation;
+    if (crlf[0] != '\r' or crlf[1] != '\n') return error.RedizProtocolViolation;
 
     return body;
 }
 
 fn parseInteger(text: []const u8) !i64 {
-    return std.fmt.parseInt(i64, text, 10) catch error.ProtocolViolation;
+    return std.fmt.parseInt(i64, text, 10) catch error.RedizProtocolViolation;
 }
 
 /// Aggregate and bulk length field: a non-negative count, or -1 for null.
 fn parseAggregateLen(text: []const u8) !?usize {
     if (std.mem.eql(u8, text, "-1")) return null;
 
-    const value = std.fmt.parseInt(i64, text, 10) catch return error.ProtocolViolation;
-    if (value < 0) return error.ProtocolViolation;
+    const value = std.fmt.parseInt(i64, text, 10) catch return error.RedizProtocolViolation;
+    if (value < 0) return error.RedizProtocolViolation;
 
     return @intCast(value);
 }
@@ -235,7 +235,7 @@ fn parseDouble(text: []const u8) !f64 {
     if (std.mem.eql(u8, text, "-inf")) return -std.math.inf(f64);
     if (std.mem.eql(u8, text, "nan")) return std.math.nan(f64);
 
-    return std.fmt.parseFloat(f64, text) catch error.ProtocolViolation;
+    return std.fmt.parseFloat(f64, text) catch error.RedizProtocolViolation;
 }
 
 // --------------------------------------------------------- //
@@ -252,21 +252,21 @@ const FixedSource = struct {
         const start = self.pos;
         while (self.pos < self.bytes.len) : (self.pos += 1) {
             if (self.bytes[self.pos] == '\n') {
-                if (self.pos == start or self.bytes[self.pos - 1] != '\r') return error.ProtocolViolation;
+                if (self.pos == start or self.bytes[self.pos - 1] != '\r') return error.RedizProtocolViolation;
 
                 const line = self.bytes[start .. self.pos - 1];
-                if (line.len > buf.len) return error.LineTooLong;
+                if (line.len > buf.len) return error.RedizLineTooLong;
                 self.pos += 1;
 
                 return line;
             }
         }
 
-        return error.ConnectionClosed;
+        return error.RedizConnectionClosed;
     }
 
     fn readExact(self: *FixedSource, buf: []u8) !void {
-        if (self.pos + buf.len > self.bytes.len) return error.ConnectionClosed;
+        if (self.pos + buf.len > self.bytes.len) return error.RedizConnectionClosed;
 
         @memcpy(buf, self.bytes[self.pos..][0..buf.len]);
         self.pos += buf.len;
@@ -291,7 +291,7 @@ test "rediz protocol: encode command rejects empty" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
 
-    try testing.expectError(error.EmptyCommand, encodeCommand(testing.allocator, &out, &.{}));
+    try testing.expectError(error.RedizEmptyCommand, encodeCommand(testing.allocator, &out, &.{}));
 }
 
 test "rediz protocol: decode simple string, error and integer" {
@@ -394,12 +394,12 @@ test "rediz protocol: decode rejects malformed frames" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    try testing.expectError(error.ProtocolViolation, decodeFixed(allocator, "?\r\n"));
-    try testing.expectError(error.ProtocolViolation, decodeFixed(allocator, ":abc\r\n"));
-    try testing.expectError(error.ProtocolViolation, decodeFixed(allocator, "#x\r\n"));
-    try testing.expectError(error.ProtocolViolation, decodeFixed(allocator, "$5\r\nhelloXX"));
-    try testing.expectError(error.ProtocolViolation, decodeFixed(allocator, "*-2\r\n"));
-    try testing.expectError(error.ConnectionClosed, decodeFixed(allocator, "*2\r\n+only-one\r\n"));
+    try testing.expectError(error.RedizProtocolViolation, decodeFixed(allocator, "?\r\n"));
+    try testing.expectError(error.RedizProtocolViolation, decodeFixed(allocator, ":abc\r\n"));
+    try testing.expectError(error.RedizProtocolViolation, decodeFixed(allocator, "#x\r\n"));
+    try testing.expectError(error.RedizProtocolViolation, decodeFixed(allocator, "$5\r\nhelloXX"));
+    try testing.expectError(error.RedizProtocolViolation, decodeFixed(allocator, "*-2\r\n"));
+    try testing.expectError(error.RedizConnectionClosed, decodeFixed(allocator, "*2\r\n+only-one\r\n"));
 }
 
 test "rediz protocol: decode guards nesting depth" {
@@ -415,5 +415,5 @@ test "rediz protocol: decode guards nesting depth" {
     }
     try bytes.appendSlice(testing.allocator, ":1\r\n");
 
-    try testing.expectError(error.ProtocolViolation, decodeFixed(allocator, bytes.items));
+    try testing.expectError(error.RedizProtocolViolation, decodeFixed(allocator, bytes.items));
 }

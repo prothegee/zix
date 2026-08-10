@@ -10,21 +10,21 @@ pub const MAX_HEAD_BYTES: usize = 16 * 1024;
 pub const MAX_HEADERS: usize = 64;
 
 pub const Error = error{
-    HeadTooLarge,
+    ZixerHeadTooLarge,
     /// The peer went away between messages, before a single byte of the next
     /// head. Nothing was asked, so nothing is owed.
-    ConnectionClosed,
+    ZixerConnectionClosed,
     /// The peer went away part way through a head. A request was started and
     /// never finished, which is the one end the sender is owed a status for.
     PartialHead,
-    BadHead,
-    TooManyHeaders,
-    BadContentLength,
+    ZixerBadHead,
+    ZixerTooManyHeaders,
+    ZixerBadContentLength,
     /// Content-Length next to Transfer-Encoding: rejected outright, the
     /// classic rfc 9112 smuggling vector.
-    AmbiguousFraming,
+    ZixerAmbiguousFraming,
     /// A Transfer-Encoding zixer cannot re-frame (only chunked is supported).
-    UnsupportedTransferEncoding,
+    ZixerUnsupportedTransferEncoding,
 };
 
 pub const Header = struct {
@@ -79,9 +79,9 @@ pub const ResponseHead = struct {
 ///
 /// Return:
 /// - []const u8 the head bytes including the final CRLFCRLF
-/// - error.ConnectionClosed when the peer closes with no head started
+/// - error.ZixerConnectionClosed when the peer closes with no head started
 /// - error.PartialHead when the peer closes part way through one
-/// - error.HeadTooLarge when buf fills without a blank line
+/// - error.ZixerHeadTooLarge when buf fills without a blank line
 pub fn readHead(reader: *std.Io.Reader, buf: []u8) Error![]const u8 {
     var len: usize = 0;
     while (len < buf.len) {
@@ -92,25 +92,25 @@ pub fn readHead(reader: *std.Io.Reader, buf: []u8) Error![]const u8 {
         if (len >= 4 and std.mem.eql(u8, buf[len - 4 .. len], "\r\n\r\n")) return buf[0..len];
     }
 
-    return error.HeadTooLarge;
+    return error.ZixerHeadTooLarge;
 }
 
 /// Which end a stopped read was, told by how much of the head had arrived.
 fn endedAt(len: usize) Error {
-    return if (len == 0) error.ConnectionClosed else error.PartialHead;
+    return if (len == 0) error.ZixerConnectionClosed else error.PartialHead;
 }
 
 /// Parse one request head as read by readHead.
 pub fn parseRequest(head_bytes: []const u8) Error!RequestHead {
     var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
-    const request_line = lines.next() orelse return error.BadHead;
+    const request_line = lines.next() orelse return error.ZixerBadHead;
 
     var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method = parts.next() orelse return error.BadHead;
-    const target = parts.next() orelse return error.BadHead;
-    const version = parts.next() orelse return error.BadHead;
-    if (method.len == 0 or target.len == 0) return error.BadHead;
-    if (!std.mem.eql(u8, version, "HTTP/1.1") and !std.mem.eql(u8, version, "HTTP/1.0")) return error.BadHead;
+    const method = parts.next() orelse return error.ZixerBadHead;
+    const target = parts.next() orelse return error.ZixerBadHead;
+    const version = parts.next() orelse return error.ZixerBadHead;
+    if (method.len == 0 or target.len == 0) return error.ZixerBadHead;
+    if (!std.mem.eql(u8, version, "HTTP/1.1") and !std.mem.eql(u8, version, "HTTP/1.0")) return error.ZixerBadHead;
 
     var head = RequestHead{
         .method = method,
@@ -137,13 +137,13 @@ pub fn parseRequest(head_bytes: []const u8) Error!RequestHead {
 /// framing: a HEAD response has no body whatever its headers claim.
 pub fn parseResponse(head_bytes: []const u8, request_method: []const u8) Error!ResponseHead {
     var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
-    const status_line = lines.next() orelse return error.BadHead;
+    const status_line = lines.next() orelse return error.ZixerBadHead;
 
-    if (!std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.BadHead;
+    if (!std.mem.startsWith(u8, status_line, "HTTP/1.")) return error.ZixerBadHead;
     var parts = std.mem.splitScalar(u8, status_line, ' ');
     _ = parts.next();
-    const status_text = parts.next() orelse return error.BadHead;
-    const status = std.fmt.parseInt(u16, status_text, 10) catch return error.BadHead;
+    const status_text = parts.next() orelse return error.ZixerBadHead;
+    const status = std.fmt.parseInt(u16, status_text, 10) catch return error.ZixerBadHead;
     const reason = parts.rest();
 
     var head = ResponseHead{
@@ -180,12 +180,12 @@ fn parseHeaderLines(
 ) Error!void {
     while (lines.next()) |line| {
         if (line.len == 0) break;
-        if (header_count.* == MAX_HEADERS) return error.TooManyHeaders;
+        if (header_count.* == MAX_HEADERS) return error.ZixerTooManyHeaders;
 
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHead;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.ZixerBadHead;
         const name = line[0..colon];
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (name.len == 0) return error.BadHead;
+        if (name.len == 0) return error.ZixerBadHead;
 
         headers[header_count.*] = .{ .name = name, .value = value };
         header_count.* += 1;
@@ -193,13 +193,13 @@ fn parseHeaderLines(
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
             // A repeated Content-Length with a different value is the same
             // smuggling vector as CL next to TE.
-            const parsed = std.fmt.parseInt(u64, value, 10) catch return error.BadContentLength;
+            const parsed = std.fmt.parseInt(u64, value, 10) catch return error.ZixerBadContentLength;
             if (content_length.*) |seen| {
-                if (seen != parsed) return error.AmbiguousFraming;
+                if (seen != parsed) return error.ZixerAmbiguousFraming;
             }
             content_length.* = parsed;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (!std.ascii.eqlIgnoreCase(value, "chunked")) return error.UnsupportedTransferEncoding;
+            if (!std.ascii.eqlIgnoreCase(value, "chunked")) return error.ZixerUnsupportedTransferEncoding;
             chunked.* = true;
         } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
             connection_value.* = value;
@@ -210,7 +210,7 @@ fn parseHeaderLines(
 }
 
 fn resolveFraming(content_length: ?u64, chunked: bool, neither: Framing) Error!Framing {
-    if (chunked and content_length != null) return error.AmbiguousFraming;
+    if (chunked and content_length != null) return error.ZixerAmbiguousFraming;
     if (chunked) return .chunked;
     if (content_length) |len| return if (len == 0) .none else .{ .content_length = len };
 
@@ -255,19 +255,19 @@ test "zix zixer: http1 head, content-length and chunked each resolve framing" {
 
 test "zix zixer: http1 head, smuggling shapes are rejected" {
     try std.testing.expectError(
-        error.AmbiguousFraming,
+        error.ZixerAmbiguousFraming,
         parseRequest("POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n"),
     );
     try std.testing.expectError(
-        error.AmbiguousFraming,
+        error.ZixerAmbiguousFraming,
         parseRequest("POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n"),
     );
     try std.testing.expectError(
-        error.UnsupportedTransferEncoding,
+        error.ZixerUnsupportedTransferEncoding,
         parseRequest("POST /u HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"),
     );
     try std.testing.expectError(
-        error.BadContentLength,
+        error.ZixerBadContentLength,
         parseRequest("POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: nope\r\n\r\n"),
     );
 }
@@ -284,10 +284,10 @@ test "zix zixer: http1 head, connection close and http/1.0 default" {
 }
 
 test "zix zixer: http1 head, bad request lines are rejected" {
-    try std.testing.expectError(error.BadHead, parseRequest("GET /\r\n\r\n"));
-    try std.testing.expectError(error.BadHead, parseRequest("GET / HTTP/2.0\r\n\r\n"));
-    try std.testing.expectError(error.BadHead, parseRequest("\r\n\r\n"));
-    try std.testing.expectError(error.BadHead, parseRequest("GET / HTTP/1.1\r\nNoColonHere\r\n\r\n"));
+    try std.testing.expectError(error.ZixerBadHead, parseRequest("GET /\r\n\r\n"));
+    try std.testing.expectError(error.ZixerBadHead, parseRequest("GET / HTTP/2.0\r\n\r\n"));
+    try std.testing.expectError(error.ZixerBadHead, parseRequest("\r\n\r\n"));
+    try std.testing.expectError(error.ZixerBadHead, parseRequest("GET / HTTP/1.1\r\nNoColonHere\r\n\r\n"));
 }
 
 test "zix zixer: http1 head, response framing follows status and method" {
@@ -325,7 +325,7 @@ test "zix zixer: http1 head, readHead stops at the blank line and bounds the hea
 
     var tiny_buf: [8]u8 = undefined;
     var again = std.Io.Reader.fixed("GET / HTTP/1.1\r\n\r\n");
-    try std.testing.expectError(error.HeadTooLarge, readHead(&again, &tiny_buf));
+    try std.testing.expectError(error.ZixerHeadTooLarge, readHead(&again, &tiny_buf));
 
     var cut = std.Io.Reader.fixed("GET / HT");
     var cut_buf: [128]u8 = undefined;
@@ -337,7 +337,7 @@ test "zix zixer: http1 head, a started head and a silent connection end apart" {
     // when the client is finished with it.
     var silent = std.Io.Reader.fixed("");
     var silent_buf: [128]u8 = undefined;
-    try std.testing.expectError(error.ConnectionClosed, readHead(&silent, &silent_buf));
+    try std.testing.expectError(error.ZixerConnectionClosed, readHead(&silent, &silent_buf));
 
     // One byte is enough to be a request in progress.
     var started = std.Io.Reader.fixed("G");

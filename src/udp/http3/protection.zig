@@ -25,17 +25,17 @@ const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 /// The errors opening a packet can raise.
 pub const OpenError = error{
     /// The packet is shorter than the header, sample, and tag require.
-    Truncated,
+    ZixTruncated,
     /// Not a long-header Initial packet.
-    NotInitial,
+    ZixNotInitial,
     /// Not a long-header Handshake packet.
-    NotHandshake,
+    ZixNotHandshake,
     /// Not a short-header (1-RTT) packet.
-    NotShort,
+    ZixNotShort,
     /// The unprotected header did not fit the working buffer (an implausibly long token).
-    HeaderTooLong,
+    ZixHeaderTooLong,
     /// AEAD authentication failed: a forged, corrupted, or wrong-key packet.
-    Decrypt,
+    ZixDecrypt,
 };
 
 /// A decrypted packet: the recovered packet number and the plaintext frame payload (a slice into the
@@ -50,11 +50,11 @@ pub const Opened = struct {
 fn initialPnOffset(data: []const u8, hdr: packet.LongHeader) OpenError!usize {
     var pos = data.len - hdr.rest.len;
 
-    const token = varint.read(data[pos..]) catch return error.Truncated;
+    const token = varint.read(data[pos..]) catch return error.ZixTruncated;
     pos += token.len + @as(usize, @intCast(token.value));
-    if (pos > data.len) return error.Truncated;
+    if (pos > data.len) return error.ZixTruncated;
 
-    const length = varint.read(data[pos..]) catch return error.Truncated;
+    const length = varint.read(data[pos..]) catch return error.ZixTruncated;
     pos += length.len;
 
     return pos;
@@ -72,8 +72,8 @@ fn initialPnOffset(data: []const u8, hdr: packet.LongHeader) OpenError!usize {
 /// - Opened (recovered packet number plus the decrypted payload)
 /// - OpenError on a malformed or unauthenticated packet
 pub fn openInitial(data: []const u8, keys: crypto.AesKeys, out: []u8) OpenError!Opened {
-    const hdr = packet.parseLongHeader(data) catch return error.Truncated;
-    if (hdr.packet_type != 0) return error.NotInitial;
+    const hdr = packet.parseLongHeader(data) catch return error.ZixTruncated;
+    if (hdr.packet_type != 0) return error.ZixNotInitial;
 
     const pn_offset = try initialPnOffset(data, hdr);
 
@@ -85,7 +85,7 @@ pub fn openInitial(data: []const u8, keys: crypto.AesKeys, out: []u8) OpenError!
 fn handshakePnOffset(data: []const u8, hdr: packet.LongHeader) OpenError!usize {
     var pos = data.len - hdr.rest.len;
 
-    const length = varint.read(data[pos..]) catch return error.Truncated;
+    const length = varint.read(data[pos..]) catch return error.ZixTruncated;
     pos += length.len;
 
     return pos;
@@ -94,8 +94,8 @@ fn handshakePnOffset(data: []const u8, hdr: packet.LongHeader) OpenError!usize {
 /// Open a long-header Handshake packet (RFC 9001 5.3 / 5.4). `keys` are the Handshake keys for the
 /// sending direction (the client handshake keys when a server opens a client Handshake packet).
 pub fn openHandshake(data: []const u8, keys: crypto.AesKeys, out: []u8) OpenError!Opened {
-    const hdr = packet.parseLongHeader(data) catch return error.Truncated;
-    if (hdr.packet_type != 2) return error.NotHandshake;
+    const hdr = packet.parseLongHeader(data) catch return error.ZixTruncated;
+    if (hdr.packet_type != 2) return error.ZixNotHandshake;
 
     const pn_offset = try handshakePnOffset(data, hdr);
 
@@ -107,7 +107,7 @@ pub fn openHandshake(data: []const u8, keys: crypto.AesKeys, out: []u8) OpenErro
 fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset: usize) OpenError!Opened {
     // Header-protection sample: 16 bytes starting at pn_offset + 4 (RFC 9001 5.4.2).
     const sample_offset = pn_offset + 4;
-    if (data.len < sample_offset + 16) return error.Truncated;
+    if (data.len < sample_offset + 16) return error.ZixTruncated;
 
     var sample: [16]u8 = undefined;
     @memcpy(&sample, data[sample_offset .. sample_offset + 16]);
@@ -118,12 +118,12 @@ fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset
     const pn_len: usize = @as(usize, first & 0x03) + 1;
 
     const header_len = pn_offset + pn_len;
-    if (data.len < header_len + Aes128Gcm.tag_length) return error.Truncated;
+    if (data.len < header_len + Aes128Gcm.tag_length) return error.ZixTruncated;
 
     // Rebuild the unprotected header for the AEAD associated data: the unmasked first byte and the
     // unmasked packet-number bytes, the rest copied verbatim.
     var hdr_buf: [256]u8 = undefined;
-    if (header_len > hdr_buf.len) return error.HeaderTooLong;
+    if (header_len > hdr_buf.len) return error.ZixHeaderTooLong;
     @memcpy(hdr_buf[0..header_len], data[0..header_len]);
     hdr_buf[0] = first;
 
@@ -139,12 +139,12 @@ fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset
 
     const nonce = crypto.aeadNonce(keys.iv, full_pn);
     const ciphertext = data[header_len .. data.len - Aes128Gcm.tag_length];
-    if (ciphertext.len > out.len) return error.Truncated;
+    if (ciphertext.len > out.len) return error.ZixTruncated;
 
     var tag: [Aes128Gcm.tag_length]u8 = undefined;
     @memcpy(&tag, data[data.len - Aes128Gcm.tag_length ..]);
 
-    Aes128Gcm.decrypt(out[0..ciphertext.len], ciphertext, tag, hdr_buf[0..header_len], nonce, keys.key) catch return error.Decrypt;
+    Aes128Gcm.decrypt(out[0..ciphertext.len], ciphertext, tag, hdr_buf[0..header_len], nonce, keys.key) catch return error.ZixDecrypt;
 
     return .{ .packet_number = full_pn, .payload = out[0..ciphertext.len] };
 }
@@ -162,12 +162,12 @@ fn openLongHeaderAt(data: []const u8, keys: crypto.AesKeys, out: []u8, pn_offset
 /// which the AEAD nonce is built from the wrong number and every packet fails to decrypt, stalling the
 /// connection. `largest_pn` feeds packet.decodePacketNumber to recover the full value.
 pub fn openShort(data: []const u8, keys: crypto.AesKeys, dcid_len: usize, largest_pn: ?u64, out: []u8) OpenError!Opened {
-    if (data.len < 1 + dcid_len) return error.Truncated;
-    if (data[0] & 0x80 != 0) return error.NotShort;
+    if (data.len < 1 + dcid_len) return error.ZixTruncated;
+    if (data[0] & 0x80 != 0) return error.ZixNotShort;
 
     const pn_offset = 1 + dcid_len;
     const sample_offset = pn_offset + 4;
-    if (data.len < sample_offset + 16) return error.Truncated;
+    if (data.len < sample_offset + 16) return error.ZixTruncated;
 
     var sample: [16]u8 = undefined;
     @memcpy(&sample, data[sample_offset .. sample_offset + 16]);
@@ -178,10 +178,10 @@ pub fn openShort(data: []const u8, keys: crypto.AesKeys, dcid_len: usize, larges
     const pn_len: usize = @as(usize, first & 0x03) + 1;
 
     const header_len = pn_offset + pn_len;
-    if (data.len < header_len + Aes128Gcm.tag_length) return error.Truncated;
+    if (data.len < header_len + Aes128Gcm.tag_length) return error.ZixTruncated;
 
     var hdr_buf: [64]u8 = undefined;
-    if (header_len > hdr_buf.len) return error.HeaderTooLong;
+    if (header_len > hdr_buf.len) return error.ZixHeaderTooLong;
     @memcpy(hdr_buf[0..header_len], data[0..header_len]);
     hdr_buf[0] = first;
 
@@ -198,12 +198,12 @@ pub fn openShort(data: []const u8, keys: crypto.AesKeys, dcid_len: usize, larges
 
     const nonce = crypto.aeadNonce(keys.iv, full_pn);
     const ciphertext = data[header_len .. data.len - Aes128Gcm.tag_length];
-    if (ciphertext.len > out.len) return error.Truncated;
+    if (ciphertext.len > out.len) return error.ZixTruncated;
 
     var tag: [Aes128Gcm.tag_length]u8 = undefined;
     @memcpy(&tag, data[data.len - Aes128Gcm.tag_length ..]);
 
-    Aes128Gcm.decrypt(out[0..ciphertext.len], ciphertext, tag, hdr_buf[0..header_len], nonce, keys.key) catch return error.Decrypt;
+    Aes128Gcm.decrypt(out[0..ciphertext.len], ciphertext, tag, hdr_buf[0..header_len], nonce, keys.key) catch return error.ZixDecrypt;
 
     return .{ .packet_number = full_pn, .payload = out[0..ciphertext.len] };
 }
@@ -263,7 +263,7 @@ fn sealLongHeader(out: []u8, keys: crypto.AesKeys, first_base: u8, dcid: []const
     pos += pn_len;
 
     const header_len = pos;
-    if (header_len + payload.len + Aes128Gcm.tag_length > out.len) return error.Truncated;
+    if (header_len + payload.len + Aes128Gcm.tag_length > out.len) return error.ZixTruncated;
 
     // AEAD-seal the payload with the unprotected header as associated data (RFC 9001 5.3).
     const nonce = crypto.aeadNonce(keys.iv, packet_number);
@@ -275,7 +275,7 @@ fn sealLongHeader(out: []u8, keys: crypto.AesKeys, first_base: u8, dcid: []const
 
     // Header protection: sample 16 bytes at pn_offset + 4, mask, protect the first byte + pn bytes.
     const sample_offset = pn_offset + 4;
-    if (packet_len < sample_offset + 16) return error.Truncated;
+    if (packet_len < sample_offset + 16) return error.ZixTruncated;
 
     var sample: [16]u8 = undefined;
     @memcpy(&sample, out[sample_offset .. sample_offset + 16]);
@@ -310,7 +310,7 @@ pub fn sealShort(out: []u8, keys: crypto.AesKeys, dcid: []const u8, packet_numbe
     pos += pn_len;
 
     const header_len = pos;
-    if (header_len + payload.len + Aes128Gcm.tag_length > out.len) return error.Truncated;
+    if (header_len + payload.len + Aes128Gcm.tag_length > out.len) return error.ZixTruncated;
 
     const nonce = crypto.aeadNonce(keys.iv, packet_number);
     var tag: [Aes128Gcm.tag_length]u8 = undefined;
@@ -320,7 +320,7 @@ pub fn sealShort(out: []u8, keys: crypto.AesKeys, dcid: []const u8, packet_numbe
     const packet_len = header_len + payload.len + Aes128Gcm.tag_length;
 
     const sample_offset = pn_offset + 4;
-    if (packet_len < sample_offset + 16) return error.Truncated;
+    if (packet_len < sample_offset + 16) return error.ZixTruncated;
 
     var sample: [16]u8 = undefined;
     @memcpy(&sample, out[sample_offset .. sample_offset + 16]);
@@ -504,7 +504,7 @@ test "zix http3: openShort reconstructs a truncated packet number past 256 (the 
     // Without reconstruction (the old behavior, largest_pn = null) the same packet fails to decrypt:
     // proof this test guards the real regression, not a tautology.
     var recovered2: [256]u8 = undefined;
-    try std.testing.expectError(error.Decrypt, openShort(sealed, keys, dcid.len, null, &recovered2));
+    try std.testing.expectError(error.ZixDecrypt, openShort(sealed, keys, dcid.len, null, &recovered2));
 }
 
 test "zix http3: openInitial rejects a tampered packet" {
@@ -524,5 +524,5 @@ test "zix http3: openInitial rejects a tampered packet" {
     var out: [256]u8 = undefined;
 
     // Random ciphertext under the real keys does not authenticate.
-    try std.testing.expectError(error.Decrypt, openInitial(&tampered, client_keys, &out));
+    try std.testing.expectError(error.ZixDecrypt, openInitial(&tampered, client_keys, &out));
 }

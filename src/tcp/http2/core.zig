@@ -227,7 +227,7 @@ fn serveConnInner(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, io: s
         @memcpy(preface[3..], &rest);
         if (!std.mem.eql(u8, &preface, frame.PREFACE)) {
             frame.sendGoawayFD(fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
-            return error.BadPreface;
+            return error.ZixBadPreface;
         }
         try frame.sendSettingsFD(fd, &.{
             .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
@@ -266,20 +266,20 @@ fn serveH2cUpgrade(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, pref
     var filled: usize = 3;
     @memcpy(head_buf[0..3], prefix);
     while (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") == null) {
-        if (filled >= head_buf.len) return error.HeaderTooLarge;
-        const n = readOnceFD(fd, head_buf[filled..]) catch return error.Closed;
-        if (n == 0) return error.Closed;
+        if (filled >= head_buf.len) return error.ZixHeaderTooLarge;
+        const n = readOnceFD(fd, head_buf[filled..]) catch return error.ZixClosed;
+        if (n == 0) return error.ZixClosed;
         filled += n;
     }
     const hdr_end = std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n").? + 4;
 
     const upgrade = getHttp1Header(head_buf[0..hdr_end], "upgrade") orelse {
         frame.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
-        return error.BadRequest;
+        return error.ZixBadRequest;
     };
     if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade, " "), "h2c")) {
         frame.writeAllFD(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n") catch {};
-        return error.BadRequest;
+        return error.ZixBadRequest;
     }
 
     var method: []const u8 = "GET";
@@ -300,7 +300,7 @@ fn serveH2cUpgrade(handler: HandlerFn, fd: std.posix.fd_t, opts: ServeOpts, pref
     try frame.recvExact(fd, &preface);
     if (!std.mem.eql(u8, &preface, frame.PREFACE)) {
         frame.sendGoawayFD(fd, 0, frame.ERR_PROTOCOL_ERROR) catch {};
-        return error.BadPreface;
+        return error.ZixBadPreface;
     }
 
     var hpack_dec = hpack.HpackDecoder.init();
@@ -379,7 +379,7 @@ fn serveH2cLoop(
 
         if (fh.length > max_payload) {
             frame.sendGoawayFD(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
-            return error.FrameTooLarge;
+            return error.ZixFrameTooLarge;
         }
 
         const payload = payload_buf[0..fh.length];
@@ -414,7 +414,7 @@ fn serveH2cLoop(
                 if ((fh.flags & frame.FLAG_ACK) != 0) continue;
                 if (payload.len != 8) {
                     frame.sendGoawayFD(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 var p8: [8]u8 = undefined;
                 @memcpy(&p8, payload[0..8]);
@@ -425,7 +425,7 @@ fn serveH2cLoop(
                 const sid = fh.stream_id;
                 if (sid == 0) {
                     frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 if (sid <= last_stream_id and sid % 2 == 1) {
                     frame.sendRstStreamFD(fd, sid, frame.ERR_STREAM_CLOSED) catch {};
@@ -454,7 +454,7 @@ fn serveH2cLoop(
                 }
                 if (pad_len + offset > block.len) {
                     frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 block = block[offset .. block.len - pad_len];
 
@@ -476,7 +476,7 @@ fn serveH2cLoop(
                 const sid = fh.stream_id;
                 const slot = findSlot(sid, streams, stream_slots) orelse {
                     frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 };
                 const s = &streams[slot];
                 const count = hpack_dec.decode(payload, s.headers[s.header_count..], &s.header_scratch) catch {
@@ -496,7 +496,7 @@ fn serveH2cLoop(
                 const sid = fh.stream_id;
                 if (sid == 0) {
                     frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 const slot = findSlot(sid, streams, stream_slots) orelse {
                     frame.sendRstStreamFD(fd, sid, frame.ERR_STREAM_CLOSED) catch {};
@@ -512,7 +512,7 @@ fn serveH2cLoop(
                 }
                 if (pad_len > data.len) {
                     frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
-                    return error.ProtocolError;
+                    return error.ZixProtocolError;
                 }
                 data = data[0 .. data.len - pad_len];
 

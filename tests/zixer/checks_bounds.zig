@@ -51,7 +51,7 @@ fn requestInsideTheBudget(io: std.Io, port: u16) !void {
     var reply_buf: [REPLY_MAX]u8 = undefined;
     const reply = try wire.readUntilClose(stream.socket.handle, &reply_buf);
 
-    if (!std.mem.startsWith(u8, reply, "HTTP/1.1 200")) return error.UnexpectedStatus;
+    if (!std.mem.startsWith(u8, reply, "HTTP/1.1 200")) return error.ZixUnexpectedStatus;
     if (std.mem.indexOf(u8, reply, "upstream: proxies/bounds") == null) return error.NotFromUpstream;
 }
 

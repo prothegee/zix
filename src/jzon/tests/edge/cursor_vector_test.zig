@@ -57,29 +57,29 @@ test "jzon edge: the lane scan reads an escape split across a lane boundary" {
 
 test "jzon edge: the lane scan reports a token the document ends inside" {
     var unterminated: Cursor = .init("\"a body long enough to fill a whole lane but never closed");
-    try std.testing.expectError(error.Truncated, cursor_vector.stringSpan(&unterminated));
+    try std.testing.expectError(error.JzonTruncated, cursor_vector.stringSpan(&unterminated));
 
     var trailing_backslash: Cursor = .init("\"a body long enough to fill a whole lane ending on \\");
-    try std.testing.expectError(error.Truncated, cursor_vector.stringSpan(&trailing_backslash));
+    try std.testing.expectError(error.JzonTruncated, cursor_vector.stringSpan(&trailing_backslash));
 
     var empty: Cursor = .init("");
-    try std.testing.expectError(error.Truncated, cursor_vector.stringSpan(&empty));
+    try std.testing.expectError(error.JzonTruncated, cursor_vector.stringSpan(&empty));
 }
 
 test "jzon edge: the lane scan refuses a raw control byte inside a token" {
     var short: Cursor = .init("\"a\x01b\"");
-    try std.testing.expectError(error.Unexpected, cursor_vector.stringSpan(&short));
+    try std.testing.expectError(error.JzonUnexpected, cursor_vector.stringSpan(&short));
 
     // Past the first lane, so the byte is found by the lane scan rather than by
     // the tail that follows it.
     var long: Cursor = .init("\"a body long enough to fill a whole lane\x01 and then some\"");
-    try std.testing.expectError(error.Unexpected, cursor_vector.stringSpan(&long));
+    try std.testing.expectError(error.JzonUnexpected, cursor_vector.stringSpan(&long));
 }
 
 test "jzon edge: the lane scan refuses a token that does not open with a quote" {
     var cursor: Cursor = .init("not a string at all, though long enough for a lane");
 
-    try std.testing.expectError(error.Unexpected, cursor_vector.stringSpan(&cursor));
+    try std.testing.expectError(error.JzonUnexpected, cursor_vector.stringSpan(&cursor));
     try std.testing.expectEqual(@as(usize, 0), cursor.pos);
 }
 

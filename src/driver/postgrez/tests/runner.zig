@@ -37,7 +37,7 @@ fn waitForServer(io: std.Io, allocator: std.mem.Allocator) !void {
             .password = PASSWORD,
             .database = DATABASE,
         }) catch {
-            if (attempt >= READY_ATTEMPTS) return error.ServerNeverBecameReady;
+            if (attempt >= READY_ATTEMPTS) return error.PostgrezServerNeverBecameReady;
             std.Io.sleep(io, .fromMilliseconds(READY_DELAY_MS), .awake) catch {};
 
             continue;
@@ -136,7 +136,7 @@ pub fn main(process: std.process.Init) !void {
     if (paths.items.len == 0) {
         std.debug.print("usage: postgrez-runner <example binaries...> (use zig build test-runner)\n", .{});
 
-        return error.NoExamplesGiven;
+        return error.PostgrezNoExamplesGiven;
     }
 
     std.debug.print("waiting for the container on {s}:{d} ...\n", .{ IP, PORT });
@@ -161,7 +161,7 @@ pub fn main(process: std.process.Init) !void {
     if (failed > 0) {
         std.debug.print("\n{d}/{d} example(s) failed\n", .{ failed, paths.items.len });
 
-        return error.ExamplesFailed;
+        return error.PostgrezExamplesFailed;
     }
 
     std.debug.print("postgrez: all {d} examples passed\n", .{paths.items.len});

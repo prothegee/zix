@@ -31,7 +31,7 @@ pub const max_prime_len = max_modulus_len / 2;
 
 const Modulus = std.crypto.ff.Modulus(max_modulus_bits);
 
-pub const Error = error{ InvalidKey, MessageTooLong };
+pub const Error = error{ ZixInvalidKey, ZixMessageTooLong };
 
 /// DigestInfo DER prefix for SHA-256 (RFC 8017 9.2, the T value is this prefix then the 32 hash bytes).
 const sha256_digestinfo_prefix = [_]u8{
@@ -120,7 +120,7 @@ pub const PrivateKey = struct {
     ///
     /// Return:
     /// - PrivateKey (owns its modulus + exponent bytes)
-    /// - error.InvalidKey if the DER is malformed or a field exceeds max_modulus_len
+    /// - error.ZixInvalidKey if the DER is malformed or a field exceeds max_modulus_len
     pub fn fromDer(der: []const u8, is_pkcs8: bool) Error!PrivateKey {
         var inner = der;
         if (is_pkcs8) {
@@ -148,7 +148,7 @@ pub const PrivateKey = struct {
         _ = try r.readInteger(); // publicExponent e (not needed to sign)
         const d = try r.readInteger();
 
-        if (n.len > max_modulus_len or d.len > max_modulus_len) return error.InvalidKey;
+        if (n.len > max_modulus_len or d.len > max_modulus_len) return error.ZixInvalidKey;
 
         var key = PrivateKey{ .n_len = n.len, .d_len = d.len };
         @memcpy(key.n_buf[0..n.len], n);
@@ -194,7 +194,7 @@ pub const PrivateKey = struct {
     ///
     /// Return:
     /// - []const u8 (the signature, size() bytes, a sub-slice of out)
-    /// - error.MessageTooLong if the modulus is too small for the padding plus DigestInfo
+    /// - error.ZixMessageTooLong if the modulus is too small for the padding plus DigestInfo
     pub fn signPkcs1v15(self: *const PrivateKey, message: []const u8, out: []u8) Error![]const u8 {
         const k = self.size();
 
@@ -206,7 +206,7 @@ pub const PrivateKey = struct {
         try emsaPkcs1V15(digest, em);
 
         if (self.has_crt) {
-            const mod_n = Modulus.fromBytes(self.modulus(), .big) catch return error.InvalidKey;
+            const mod_n = Modulus.fromBytes(self.modulus(), .big) catch return error.ZixInvalidKey;
             return self.rsaspCrt(mod_n, em, out[0..k]);
         }
 
@@ -226,10 +226,10 @@ pub const PrivateKey = struct {
     ///
     /// Return:
     /// - []const u8 (the signature, size() bytes, a sub-slice of out)
-    /// - error.MessageTooLong if the modulus is too small for the salt and hash
+    /// - error.ZixMessageTooLong if the modulus is too small for the salt and hash
     pub fn signPss(self: *const PrivateKey, message: []const u8, salt: [pss_salt_len]u8, out: []u8) Error![]const u8 {
         const k = self.size();
-        const parsed_modulus = Modulus.fromBytes(self.modulus(), .big) catch return error.InvalidKey;
+        const parsed_modulus = Modulus.fromBytes(self.modulus(), .big) catch return error.ZixInvalidKey;
         const em_bits = parsed_modulus.bits() - 1;
 
         var em_buf: [max_modulus_len]u8 = undefined;
@@ -254,14 +254,14 @@ pub const PrivateKey = struct {
     ///
     /// Return:
     /// - []const u8 (the signature, sig)
-    /// - error.InvalidKey if a factor is malformed
+    /// - error.ZixInvalidKey if a factor is malformed
     fn rsaspCrt(self: *const PrivateKey, mod_n: Modulus, em: []const u8, sig: []u8) Error![]const u8 {
         const k = sig.len;
-        const mod_p = Modulus.fromBytes(self.primeP(), .big) catch return error.InvalidKey;
-        const mod_q = Modulus.fromBytes(self.primeQ(), .big) catch return error.InvalidKey;
+        const mod_p = Modulus.fromBytes(self.primeP(), .big) catch return error.ZixInvalidKey;
+        const mod_q = Modulus.fromBytes(self.primeQ(), .big) catch return error.ZixInvalidKey;
 
         // m reduced into each prime field, then m1 = m^dP mod p, m2 = m^dQ mod q.
-        const m_n = Modulus.Fe.fromBytes(mod_n, em, .big) catch return error.InvalidKey;
+        const m_n = Modulus.Fe.fromBytes(mod_n, em, .big) catch return error.ZixInvalidKey;
         const m_p = mod_p.reduce(m_n.v);
         const m_q = mod_q.reduce(m_n.v);
 
@@ -271,22 +271,22 @@ pub const PrivateKey = struct {
         // h = (s_p - s_q) * qInv mod p.
         const s_q_mod_p = mod_p.reduce(s_q.v);
         const diff = mod_p.sub(s_p, s_q_mod_p);
-        const qinv = Modulus.Fe.fromBytes(mod_p, self.coeffQinv(), .big) catch return error.InvalidKey;
+        const qinv = Modulus.Fe.fromBytes(mod_p, self.coeffQinv(), .big) catch return error.ZixInvalidKey;
         const h = mod_p.mul(diff, qinv);
 
         // s = s_q + q * h. Both q * h and s are below n, so the n-field arithmetic is exact.
         var h_buf: [max_modulus_len]u8 = undefined;
-        h.toBytes(h_buf[0..k], .big) catch return error.InvalidKey;
+        h.toBytes(h_buf[0..k], .big) catch return error.ZixInvalidKey;
         var sq_buf: [max_modulus_len]u8 = undefined;
-        s_q.toBytes(sq_buf[0..k], .big) catch return error.InvalidKey;
+        s_q.toBytes(sq_buf[0..k], .big) catch return error.ZixInvalidKey;
 
-        const h_n = Modulus.Fe.fromBytes(mod_n, h_buf[0..k], .big) catch return error.InvalidKey;
-        const s_q_n = Modulus.Fe.fromBytes(mod_n, sq_buf[0..k], .big) catch return error.InvalidKey;
-        const q_n = Modulus.Fe.fromBytes(mod_n, self.primeQ(), .big) catch return error.InvalidKey;
+        const h_n = Modulus.Fe.fromBytes(mod_n, h_buf[0..k], .big) catch return error.ZixInvalidKey;
+        const s_q_n = Modulus.Fe.fromBytes(mod_n, sq_buf[0..k], .big) catch return error.ZixInvalidKey;
+        const q_n = Modulus.Fe.fromBytes(mod_n, self.primeQ(), .big) catch return error.ZixInvalidKey;
 
         const qh = mod_n.mul(q_n, h_n);
         const s = mod_n.add(s_q_n, qh);
-        s.toBytes(sig, .big) catch return error.InvalidKey;
+        s.toBytes(sig, .big) catch return error.ZixInvalidKey;
 
         return sig;
     }
@@ -306,19 +306,19 @@ pub const PrivateKey = struct {
 ///
 /// Return:
 /// - Modulus.Fe (the half result s_p or s_q)
-/// - error.InvalidKey if serialization fails
+/// - error.ZixInvalidKey if serialization fails
 fn crtHalf(mod: Modulus, prime_be: []const u8, base_fe: Modulus.Fe, exp_be: []const u8) Error!Modulus.Fe {
     const plen = prime_be.len;
 
     var base_buf: [max_prime_len]u8 = undefined;
-    base_fe.toBytes(base_buf[0..plen], .big) catch return error.InvalidKey;
+    base_fe.toBytes(base_buf[0..plen], .big) catch return error.ZixInvalidKey;
 
     var out_buf: [max_prime_len]u8 = undefined;
     if (montModExp(prime_be, base_buf[0..plen], exp_be, out_buf[0..plen])) {
-        return Modulus.Fe.fromBytes(mod, out_buf[0..plen], .big) catch error.InvalidKey;
+        return Modulus.Fe.fromBytes(mod, out_buf[0..plen], .big) catch error.ZixInvalidKey;
     }
 
-    return mod.powWithEncodedExponent(base_fe, exp_be, .big) catch error.InvalidKey;
+    return mod.powWithEncodedExponent(base_fe, exp_be, .big) catch error.ZixInvalidKey;
 }
 
 /// Dispatch the modexp to a Montgomery instance sized to the prime width (the primes of
@@ -341,7 +341,7 @@ fn montModExp(prime_be: []const u8, base_be: []const u8, exp_be: []const u8, out
 /// || 0x00 || T, where PS is at least eight 0xff octets and T is the DigestInfo prefix then the hash.
 fn emsaPkcs1V15(digest: [hash_len]u8, em: []u8) Error!void {
     const t_len = sha256_digestinfo_prefix.len + hash_len;
-    if (em.len < t_len + 11) return error.MessageTooLong;
+    if (em.len < t_len + 11) return error.ZixMessageTooLong;
 
     @memset(em, 0xff);
     em[0] = 0x00;
@@ -359,7 +359,7 @@ fn emsaPssEncode(message: []const u8, salt: [pss_salt_len]u8, em_bits: usize, em
     Sha256.hash(message, &m_hash, .{});
 
     const em_len = em.len;
-    if (em_len < hash_len + pss_salt_len + 2) return error.MessageTooLong;
+    if (em_len < hash_len + pss_salt_len + 2) return error.ZixMessageTooLong;
 
     var h_input: [8 + hash_len + pss_salt_len]u8 = undefined;
     @memset(h_input[0..8], 0x00);
@@ -408,17 +408,17 @@ fn mgf1(seed: []const u8, out: []u8) void {
 
 /// RSASP1 signature primitive (RFC 8017 5.2.1): s = m ^ d mod n, then I2OSP to k bytes.
 fn rsasp1(n_bytes: []const u8, d_bytes: []const u8, em: []const u8, sig: []u8) Error![]const u8 {
-    const modulus = Modulus.fromBytes(n_bytes, .big) catch return error.InvalidKey;
+    const modulus = Modulus.fromBytes(n_bytes, .big) catch return error.ZixInvalidKey;
 
     return rsasp1WithModulus(modulus, d_bytes, em, sig);
 }
 
 /// RSASP1 against an already-parsed modulus, so the PSS path does not parse n twice.
 fn rsasp1WithModulus(modulus: Modulus, d_bytes: []const u8, em: []const u8, sig: []u8) Error![]const u8 {
-    const m_fe = Modulus.Fe.fromBytes(modulus, em, .big) catch return error.InvalidKey;
+    const m_fe = Modulus.Fe.fromBytes(modulus, em, .big) catch return error.ZixInvalidKey;
 
-    const s_fe = modulus.powWithEncodedExponent(m_fe, d_bytes, .big) catch return error.InvalidKey;
-    s_fe.toBytes(sig, .big) catch return error.InvalidKey;
+    const s_fe = modulus.powWithEncodedExponent(m_fe, d_bytes, .big) catch return error.ZixInvalidKey;
+    s_fe.toBytes(sig, .big) catch return error.ZixInvalidKey;
 
     return sig;
 }
@@ -430,7 +430,7 @@ const DerReader = struct {
     pos: usize = 0,
 
     fn byte(self: *DerReader) Error!u8 {
-        if (self.pos >= self.buf.len) return error.InvalidKey;
+        if (self.pos >= self.buf.len) return error.ZixInvalidKey;
 
         const b = self.buf[self.pos];
         self.pos += 1;
@@ -439,7 +439,7 @@ const DerReader = struct {
     }
 
     fn expectTag(self: *DerReader, tag: u8) Error!void {
-        if (try self.byte() != tag) return error.InvalidKey;
+        if (try self.byte() != tag) return error.ZixInvalidKey;
     }
 
     fn readLen(self: *DerReader) Error!usize {
@@ -447,7 +447,7 @@ const DerReader = struct {
         if (first < 0x80) return first;
 
         const count = first & 0x7f;
-        if (count == 0 or count > 2) return error.InvalidKey;
+        if (count == 0 or count > 2) return error.ZixInvalidKey;
 
         var len: usize = 0;
         var i: usize = 0;
@@ -457,12 +457,12 @@ const DerReader = struct {
     }
 
     fn skip(self: *DerReader, n: usize) Error!void {
-        if (self.pos + n > self.buf.len) return error.InvalidKey;
+        if (self.pos + n > self.buf.len) return error.ZixInvalidKey;
         self.pos += n;
     }
 
     fn read(self: *DerReader, n: usize) Error![]const u8 {
-        if (self.pos + n > self.buf.len) return error.InvalidKey;
+        if (self.pos + n > self.buf.len) return error.ZixInvalidKey;
 
         const s = self.buf[self.pos .. self.pos + n];
         self.pos += n;

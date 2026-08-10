@@ -47,9 +47,9 @@ pub const UNSPECIFIED_PORT: u16 = 9;
 /// `write` carries that one on its own.
 pub const Error = error{
     /// Fewer fields than an `m=` line needs.
-    Malformed,
+    ZixMalformed,
     /// A port outside what the field holds.
-    BadPort,
+    ZixBadPort,
 };
 
 /// One `m=` line, borrowed from the description it came from.
@@ -105,17 +105,17 @@ pub const Media = struct {
 ///
 /// Return:
 /// - Media borrowing `value`
-/// - error.Malformed if the media, port, transport, or format list is missing
-/// - error.BadPort if a port is not a number that fits
+/// - error.ZixMalformed if the media, port, transport, or format list is missing
+/// - error.ZixBadPort if a port is not a number that fits
 pub fn read(value: []const u8) Error!Media {
     var fields = std.mem.tokenizeScalar(u8, value, ' ');
 
-    const media = fields.next() orelse return error.Malformed;
-    const port_field = fields.next() orelse return error.Malformed;
-    const proto = fields.next() orelse return error.Malformed;
+    const media = fields.next() orelse return error.ZixMalformed;
+    const port_field = fields.next() orelse return error.ZixMalformed;
+    const proto = fields.next() orelse return error.ZixMalformed;
     const formats = fields.rest();
 
-    if (formats.len == 0) return error.Malformed;
+    if (formats.len == 0) return error.ZixMalformed;
 
     const slash = std.mem.indexOfScalar(u8, port_field, '/') orelse
         return .{
@@ -159,14 +159,14 @@ pub fn valueLen(media: []const u8, proto: []const u8, formats: []const u8) usize
 ///
 /// Return:
 /// - []const u8, the value alone, with no line type and no terminator
-/// - error.NoSpace
-pub fn write(out: []u8, media: []const u8, port: u16, proto: []const u8, formats: []const u8) error{NoSpace}![]const u8 {
+/// - error.ZixNoSpace
+pub fn write(out: []u8, media: []const u8, port: u16, proto: []const u8, formats: []const u8) error{ZixNoSpace}![]const u8 {
     var digits: [MAX_PORT_DIGITS]u8 = undefined;
     const port_text = writePort(&digits, port);
 
     const total = media.len + 1 + port_text.len + 1 + proto.len + 1 + formats.len;
 
-    if (out.len < total) return error.NoSpace;
+    if (out.len < total) return error.ZixNoSpace;
 
     var at: usize = 0;
     at += copy(out[at..], media);
@@ -188,9 +188,9 @@ pub const MAX_PORT_DIGITS: usize = 5;
 
 /// Read a port field.
 fn readPort(text: []const u8) Error!u16 {
-    if (text.len == 0) return error.BadPort;
+    if (text.len == 0) return error.ZixBadPort;
 
-    return std.fmt.parseInt(u16, text, 10) catch error.BadPort;
+    return std.fmt.parseInt(u16, text, 10) catch error.ZixBadPort;
 }
 
 /// Write a port in base ten.
@@ -248,22 +248,22 @@ test "zix sdp: media read, the port count form is split off" {
 }
 
 test "zix sdp: media read, a missing field is refused" {
-    try std.testing.expectError(error.Malformed, read("application 9 UDP/DTLS/SCTP"));
-    try std.testing.expectError(error.Malformed, read("application 9"));
-    try std.testing.expectError(error.Malformed, read("application"));
-    try std.testing.expectError(error.Malformed, read(""));
+    try std.testing.expectError(error.ZixMalformed, read("application 9 UDP/DTLS/SCTP"));
+    try std.testing.expectError(error.ZixMalformed, read("application 9"));
+    try std.testing.expectError(error.ZixMalformed, read("application"));
+    try std.testing.expectError(error.ZixMalformed, read(""));
 }
 
 test "zix sdp: media read, a port that is not a number is refused" {
-    try std.testing.expectError(error.BadPort, read("application x UDP/DTLS/SCTP webrtc-datachannel"));
+    try std.testing.expectError(error.ZixBadPort, read("application x UDP/DTLS/SCTP webrtc-datachannel"));
 }
 
 test "zix sdp: media read, a port past what the field holds is refused" {
-    try std.testing.expectError(error.BadPort, read("application 65536 UDP/DTLS/SCTP webrtc-datachannel"));
+    try std.testing.expectError(error.ZixBadPort, read("application 65536 UDP/DTLS/SCTP webrtc-datachannel"));
 }
 
 test "zix sdp: media read, an empty port count is refused" {
-    try std.testing.expectError(error.BadPort, read("video 49170/ RTP/AVP 31"));
+    try std.testing.expectError(error.ZixBadPort, read("video 49170/ RTP/AVP 31"));
 }
 
 test "zix sdp: media isDataChannel, the RFC 8841 shape is accepted" {
@@ -341,7 +341,7 @@ test "zix sdp: media write, a short buffer errors" {
     var buf: [16]u8 = undefined;
 
     try std.testing.expectError(
-        error.NoSpace,
+        error.ZixNoSpace,
         write(&buf, DATA_CHANNEL_MEDIA, 9091, DATA_CHANNEL_PROTO, DATA_CHANNEL_FORMAT),
     );
 }

@@ -39,7 +39,7 @@ pub const FIELD_LEN: usize = 4;
 pub const MIN_PACKET_LEN: usize = FIELD_OFFSET + FIELD_LEN;
 
 /// A slice too short to hold a common header, so it has no checksum field.
-pub const Error = error{ShortPacket};
+pub const Error = error{ZixShortPacket};
 
 /// CRC32c of the packet with its checksum field counted as zero.
 ///
@@ -52,9 +52,9 @@ pub const Error = error{ShortPacket};
 ///
 /// Return:
 /// - u32 checksum in host order, ready for `write`
-/// - error.ShortPacket if the slice cannot hold a common header
+/// - error.ZixShortPacket if the slice cannot hold a common header
 pub fn compute(packet: []const u8) Error!u32 {
-    if (packet.len < MIN_PACKET_LEN) return error.ShortPacket;
+    if (packet.len < MIN_PACKET_LEN) return error.ZixShortPacket;
 
     const zeros: [FIELD_LEN]u8 = @splat(0);
 
@@ -73,9 +73,9 @@ pub fn compute(packet: []const u8) Error!u32 {
 ///
 /// Return:
 /// - u32 in host order
-/// - error.ShortPacket if the slice cannot hold a common header
+/// - error.ZixShortPacket if the slice cannot hold a common header
 pub fn read(packet: []const u8) Error!u32 {
-    if (packet.len < MIN_PACKET_LEN) return error.ShortPacket;
+    if (packet.len < MIN_PACKET_LEN) return error.ZixShortPacket;
 
     return std.mem.readInt(u32, packet[FIELD_OFFSET..][0..FIELD_LEN], .little);
 }
@@ -90,7 +90,7 @@ pub fn read(packet: []const u8) Error!u32 {
 ///
 /// Return:
 /// - void
-/// - error.ShortPacket if the slice cannot hold a common header
+/// - error.ZixShortPacket if the slice cannot hold a common header
 pub fn insert(packet: []u8) Error!void {
     const value = try compute(packet);
 
@@ -209,8 +209,8 @@ test "zix sctp: checksum verify, an unstamped packet fails" {
 }
 
 test "zix sctp: checksum read, a slice shorter than the common header errors" {
-    try std.testing.expectError(error.ShortPacket, read(sample_init[0..11]));
-    try std.testing.expectError(error.ShortPacket, compute(sample_init[0..11]));
+    try std.testing.expectError(error.ZixShortPacket, read(sample_init[0..11]));
+    try std.testing.expectError(error.ZixShortPacket, compute(sample_init[0..11]));
     try std.testing.expect(!verify(sample_init[0..11]));
 }
 

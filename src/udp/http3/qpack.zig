@@ -19,8 +19,8 @@ pub const IntResult = struct { value: u64, len: usize };
 
 /// Decode an N-bit prefixed integer (RFC 7541 5.1, reused by QPACK 4.1.1). The low `prefix_bits` of
 /// the first byte hold the value or, if all ones, a continuation follows.
-pub fn decodePrefixedInt(data: []const u8, prefix_bits: u4) error{Truncated}!IntResult {
-    if (data.len == 0) return error.Truncated;
+pub fn decodePrefixedInt(data: []const u8, prefix_bits: u4) error{ZixTruncated}!IntResult {
+    if (data.len == 0) return error.ZixTruncated;
 
     const max: u64 = (@as(u64, 1) << prefix_bits) - 1;
     const first: u64 = data[0] & @as(u8, @intCast(max));
@@ -30,7 +30,7 @@ pub fn decodePrefixedInt(data: []const u8, prefix_bits: u4) error{Truncated}!Int
     var len: usize = 1;
     var shift: u6 = 0;
     while (true) {
-        if (len >= data.len) return error.Truncated;
+        if (len >= data.len) return error.ZixTruncated;
 
         const byte = data[len];
         len += 1;
@@ -130,14 +130,14 @@ pub const StreamRegistry = struct {
     encoder_open: bool = false,
     decoder_open: bool = false,
 
-    pub fn register(self: *StreamRegistry, stream_type: u64) error{StreamCreationError}!void {
+    pub fn register(self: *StreamRegistry, stream_type: u64) error{ZixStreamCreationError}!void {
         switch (stream_type) {
             encoder_stream_type => {
-                if (self.encoder_open) return error.StreamCreationError;
+                if (self.encoder_open) return error.ZixStreamCreationError;
                 self.encoder_open = true;
             },
             decoder_stream_type => {
-                if (self.decoder_open) return error.StreamCreationError;
+                if (self.decoder_open) return error.ZixStreamCreationError;
                 self.decoder_open = true;
             },
             else => {},
@@ -152,9 +152,9 @@ pub const IndexedFieldLine = struct { static: bool, index: u64, len: usize };
 
 /// Decode an Indexed Field Line (RFC 9204 4.5.2): leading '1', then the 'T' table bit, then a 6-bit
 /// prefix index.
-pub fn decodeIndexedFieldLine(data: []const u8) error{ Truncated, NotIndexed }!IndexedFieldLine {
-    if (data.len == 0) return error.Truncated;
-    if (data[0] & 0x80 == 0) return error.NotIndexed;
+pub fn decodeIndexedFieldLine(data: []const u8) error{ ZixTruncated, ZixNotIndexed }!IndexedFieldLine {
+    if (data.len == 0) return error.ZixTruncated;
+    if (data[0] & 0x80 == 0) return error.ZixNotIndexed;
 
     const is_static = data[0] & 0x40 != 0;
     const int = try decodePrefixedInt(data, 6);
@@ -173,20 +173,20 @@ pub const LiteralNameRef = struct { static: bool, name_index: u64, value: []cons
 
 /// Decode a Literal Field Line with Name Reference (RFC 9204 4.5.4): leading '01', the 'N' and 'T'
 /// bits, a 4-bit prefix name index, then an 8-bit prefix string literal value.
-pub fn decodeLiteralNameRef(data: []const u8) error{ Truncated, NotLiteralNameRef }!LiteralNameRef {
-    if (data.len == 0) return error.Truncated;
-    if (data[0] & 0xc0 != 0x40) return error.NotLiteralNameRef;
+pub fn decodeLiteralNameRef(data: []const u8) error{ ZixTruncated, ZixNotLiteralNameRef }!LiteralNameRef {
+    if (data.len == 0) return error.ZixTruncated;
+    if (data[0] & 0xc0 != 0x40) return error.ZixNotLiteralNameRef;
 
     const is_static = data[0] & 0x10 != 0;
     const name = try decodePrefixedInt(data, 4);
     var pos = name.len;
 
-    if (pos >= data.len) return error.Truncated;
+    if (pos >= data.len) return error.ZixTruncated;
 
     const huffman = data[pos] & 0x80 != 0;
     const length = try decodePrefixedInt(data[pos..], 7);
     pos += length.len;
-    if (data.len < pos + length.value) return error.Truncated;
+    if (data.len < pos + length.value) return error.ZixTruncated;
 
     return .{ .static = is_static, .name_index = name.value, .value = data[pos .. pos + length.value], .huffman = huffman, .len = pos + @as(usize, @intCast(length.value)) };
 }
@@ -246,8 +246,8 @@ test "zix http3: RFC 9204 Appendix A static table and 4.2 streams" {
     try registry.register(encoder_stream_type);
     try registry.register(decoder_stream_type);
     try std.testing.expect(registry.encoder_open and registry.decoder_open);
-    try std.testing.expectError(error.StreamCreationError, registry.register(encoder_stream_type));
-    try std.testing.expectError(error.StreamCreationError, registry.register(decoder_stream_type));
+    try std.testing.expectError(error.ZixStreamCreationError, registry.register(encoder_stream_type));
+    try std.testing.expectError(error.ZixStreamCreationError, registry.register(decoder_stream_type));
 }
 
 test "zix http3: RFC 9204 4.5 static-table field line representations" {

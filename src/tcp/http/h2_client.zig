@@ -81,10 +81,10 @@ pub const Parts = struct {
 ///
 /// Return:
 /// - Parts (owned by config.allocator)
-/// - error.TlsNoTrustAnchor (tls_verify is on but tls_ca_path is null)
-/// - error.AlpnNotH2 (server did not select h2)
-/// - error.UnsupportedH2 (response headers spanned CONTINUATION frames)
-/// - error.BodyTooLarge / error.NoStatus / error.StreamReset / error.Goaway
+/// - error.ZixTlsNoTrustAnchor (tls_verify is on but tls_ca_path is null)
+/// - error.ZixAlpnNotH2 (server did not select h2)
+/// - error.ZixUnsupportedH2 (response headers spanned CONTINUATION frames)
+/// - error.ZixBodyTooLarge / error.ZixNoStatus / error.ZixStreamReset / error.ZixGoaway
 pub fn fetch(
     config: HttpClientConfig,
     method: Method.Code,
@@ -129,17 +129,17 @@ fn handshake(config: HttpClientConfig, fd: posix.fd_t, host: []const u8) !Tls.Cl
     // A peer that accepts and then never speaks parks this read with no end, so the flight is
     // bounded by the same budget the HTTP_1 path uses for its first response byte.
     for (0..3) |_| flen += readRecordInto(fd, flight_buf[flen..], config.response_timeout_ms) catch |err| switch (err) {
-        error.ReadTimeout => return error.ResponseTimeout,
+        error.ZixReadTimeout => return error.ZixResponseTimeout,
         else => return err,
     };
 
     var fin_buf: [FINISHED_BUF]u8 = undefined;
     const finished = try Tls.Client.finish(&state, flight_buf[0..flen], &fin_buf);
-    if (finished.alpn != Tls.Alpn.H2) return error.AlpnNotH2;
+    if (finished.alpn != Tls.Alpn.H2) return error.ZixAlpnNotH2;
 
     // trust the server cert: chain to the configured anchor (RFC 5280) + match the host (RFC 6125).
     if (config.tls_verify) {
-        const anchor_path = config.tls_ca_path orelse return error.TlsNoTrustAnchor;
+        const anchor_path = config.tls_ca_path orelse return error.ZixTlsNoTrustAnchor;
 
         var pem_buf: [CA_PEM_BUF]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&pem_buf);
@@ -257,7 +257,7 @@ fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.Client
 
         var dec: [record.max_record_wire]u8 = undefined;
         const plain = try conn.readAppData(rec_buf[0..rec_len], &dec);
-        if (acc_len + plain.len > acc.len) return error.BodyTooLarge;
+        if (acc_len + plain.len > acc.len) return error.ZixBodyTooLarge;
         @memcpy(acc[acc_len..][0..plain.len], plain);
         acc_len += plain.len;
 
@@ -282,7 +282,7 @@ fn readResponse(gpa: std.mem.Allocator, fd: posix.fd_t, conn: *Tls.Client.Client
         }
     }
 
-    if (!have_status) return error.NoStatus;
+    if (!have_status) return error.ZixNoStatus;
 
     try head.appendSlice(gpa, "\r\n");
 
@@ -309,7 +309,7 @@ fn handleFrame(
 ) !void {
     switch (frame.frame_type) {
         Http2.FRAME_TYPE_HEADERS => {
-            if (frame.flags & Http2.FLAG_END_HEADERS == 0) return error.UnsupportedH2;
+            if (frame.flags & Http2.FLAG_END_HEADERS == 0) return error.ZixUnsupportedH2;
 
             const block = try headerBlock(frame, payload);
             var hdrs: [Http2.MAX_HEADERS]Http2.Header = undefined;
@@ -335,7 +335,7 @@ fn handleFrame(
         },
         Http2.FRAME_TYPE_DATA => {
             const data = try dataPayload(frame, payload);
-            if (body.items.len + data.len > max_body) return error.BodyTooLarge;
+            if (body.items.len + data.len > max_body) return error.ZixBodyTooLarge;
             try body.appendSlice(gpa, data);
 
             if (frame.flags & Http2.FLAG_END_STREAM != 0) stream_done.* = true;
@@ -347,10 +347,10 @@ fn handleFrame(
             if (frame.flags & Http2.FLAG_ACK == 0) try sendControlFD(fd, conn, Http2.FRAME_TYPE_PING, Http2.FLAG_ACK, 0, payload);
         },
         Http2.FRAME_TYPE_RST_STREAM => {
-            if (frame.stream_id == 1) return error.StreamReset;
+            if (frame.stream_id == 1) return error.ZixStreamReset;
         },
         Http2.FRAME_TYPE_GOAWAY => {
-            if (!have_status.*) return error.Goaway;
+            if (!have_status.*) return error.ZixGoaway;
             stream_done.* = true;
         },
         else => {}, // WINDOW_UPDATE, PRIORITY, PUSH_PROMISE, etc.: nothing to do for a single GET/POST.
@@ -362,14 +362,14 @@ fn headerBlock(frame: Http2.FrameHeader, payload: []const u8) ![]const u8 {
     var start: usize = 0;
     var end: usize = payload.len;
     if (frame.flags & Http2.FLAG_PADDED != 0) {
-        if (payload.len < 1) return error.UnsupportedH2;
+        if (payload.len < 1) return error.ZixUnsupportedH2;
         const pad_len = payload[0];
         start = 1;
-        if (@as(usize, pad_len) > end - start) return error.UnsupportedH2;
+        if (@as(usize, pad_len) > end - start) return error.ZixUnsupportedH2;
         end -= pad_len;
     }
     if (frame.flags & Http2.FLAG_PRIORITY != 0) {
-        if (end - start < 5) return error.UnsupportedH2;
+        if (end - start < 5) return error.ZixUnsupportedH2;
         start += 5; // stream dependency (4) + weight (1)
     }
 
@@ -379,10 +379,10 @@ fn headerBlock(frame: Http2.FrameHeader, payload: []const u8) ![]const u8 {
 /// The application data inside a DATA frame, stripping the PADDED prefix when present.
 fn dataPayload(frame: Http2.FrameHeader, payload: []const u8) ![]const u8 {
     if (frame.flags & Http2.FLAG_PADDED == 0) return payload;
-    if (payload.len < 1) return error.UnsupportedH2;
+    if (payload.len < 1) return error.ZixUnsupportedH2;
 
     const pad_len = payload[0];
-    if (@as(usize, pad_len) > payload.len - 1) return error.UnsupportedH2;
+    if (@as(usize, pad_len) > payload.len - 1) return error.ZixUnsupportedH2;
 
     return payload[1 .. payload.len - pad_len];
 }
@@ -508,10 +508,10 @@ fn readAll(fd: posix.fd_t, buf: []u8, idle_ms: u32) !void {
     while (read < buf.len) {
         // Inside the loop, not above it: a peer that sends one byte and then stops would clear a
         // single gate at the top and park on the next read with nothing left to bound it.
-        if (!socket_poll.readableWithin(fd, idle_ms)) return error.ReadTimeout;
+        if (!socket_poll.readableWithin(fd, idle_ms)) return error.ZixReadTimeout;
 
         const n = fd_io.readOnce(fd, buf[read..]) catch return error.ReadFailed;
-        if (n == 0) return error.ConnectionClosed;
+        if (n == 0) return error.ZixConnectionClosed;
 
         read += n;
     }
@@ -613,5 +613,5 @@ test "zix http: h2 client, a peer that accepts and never speaks yields ResponseT
         .response_timeout_ms = 150,
     }, .GET, host, 9404, "/", &.{}, null);
 
-    try std.testing.expectError(error.ResponseTimeout, outcome);
+    try std.testing.expectError(error.ZixResponseTimeout, outcome);
 }

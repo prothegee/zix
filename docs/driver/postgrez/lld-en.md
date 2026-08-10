@@ -27,7 +27,7 @@ sequenceDiagram
     else cleartext
         C->>S: PasswordMessage
     else md5
-        Note over C: unsupported, connect fails with error.UnsupportedAuth
+        Note over C: unsupported, connect fails with error.PostgrezUnsupportedAuth
     end
     S-->>C: AuthenticationOk, ParameterStatus, BackendKeyData, ReadyForQuery
 ```
@@ -61,7 +61,7 @@ Result columns decode by their described format: binary when the driver has a bi
 | `Statement.sendRows` + `awaitRows` | many Bind and Execute behind one Sync | 1 per batch |
 | `Pipeline.add` + `sync` | many statements behind one Sync | 1 per batch |
 
-On an error the extended path drains to the next ReadyForQuery so the connection stays usable. A server error captures its SQLSTATE and message into `lastServerError` and surfaces as `error.ServerError`.
+On an error the extended path drains to the next ReadyForQuery so the connection stays usable. A server error captures its SQLSTATE and message into `lastServerError` and surfaces as `error.PostgrezServerError`.
 
 ## Prepared statements
 
@@ -86,10 +86,10 @@ sequenceDiagram
 
 Rules the connection enforces through `batch_pending`, `batch_flushed`, and `batch_aborted`:
 
-- `max_pending_replies` bounds the queue, `sendRows` past the bound sheds `error.QueueFull`.
+- `max_pending_replies` bounds the queue, `sendRows` past the bound sheds `error.PostgrezQueueFull`.
 - The first `awaitRows` appends Sync and flushes, so one send and one receive burst cover the whole batch.
 - Results arrive in send order: call `awaitRows` on the statement that queued that execution, and drive each `Result` to the end (or `deinit`) before the next `awaitRows`.
-- After a failed statement the server discards the rest until Sync, so the remaining `awaitRows` return `error.BatchAborted`.
+- After a failed statement the server discards the rest until Sync, so the remaining `awaitRows` return `error.PostgrezBatchAborted`.
 - A prepare clears the connection send buffer, so all prepares must precede the first `sendRows` of a batch.
 
 ## Executor internals
@@ -126,7 +126,7 @@ flowchart TB
     empty -->|yes| conn[connect with retry, outside the lock]
     empty -->|no| park{process_queue_len allows parking?}
     park -->|yes| wait[enqueue waiter, futex wait]
-    park -->|no| shed[error.PoolExhausted or PoolBusy]
+    park -->|no| shed[error.PostgrezPoolExhausted or PoolBusy]
     rel[release] --> waiter{waiter parked?}
     waiter -->|yes| grant[hand the connection to the oldest waiter]
     waiter -->|no| back[mark the slot idle]
@@ -136,19 +136,19 @@ flowchart TB
 - Parking sleeps on a futex word per waiter. On Linux this is the raw futex syscall (the fast path stays untouched), on other targets the wait and wake go through the `std.Io` backend with the same semantics.
 - `release` hands a healthy connection directly to the oldest parked waiter (the slot stays held through the handoff), or marks it idle.
 - `discard` frees a broken slot, granting it to a waiter (who reconnects) or leaving it for the next acquire.
-- Beyond the waiter bound `acquire` sheds `error.PoolBusy`, with parking off it sheds `error.PoolExhausted`.
+- Beyond the waiter bound `acquire` sheds `error.PostgrezPoolBusy`, with parking off it sheds `error.PostgrezPoolExhausted`.
 
 ## Error taxonomy
 
 | Error | Meaning | Recovery |
 | :- | :- | :- |
-| `error.ServerError` | the server reported an error, captured in `lastServerError` | the connection stays usable |
-| transport errors (`error.ConnectionClosed` and similar) | the socket failed | discard the connection |
-| `error.QueueFull` | a batch or pipeline hit `max_pending_replies` | await the queued results first |
-| `error.BatchAborted` | an earlier statement of the batch failed | drain the rest, retry the batch |
-| `error.PoolExhausted` | the pool is full and parking is off | retry later or raise `process_queue_len` |
-| `error.PoolBusy` | the waiter queue is full | retry later or raise `process_queue_len` |
-| `error.ParamCountMismatch` | args and the statement disagree | fix the argument count |
+| `error.PostgrezServerError` | the server reported an error, captured in `lastServerError` | the connection stays usable |
+| transport errors (`error.PostgrezConnectionClosed` and similar) | the socket failed | discard the connection |
+| `error.PostgrezQueueFull` | a batch or pipeline hit `max_pending_replies` | await the queued results first |
+| `error.PostgrezBatchAborted` | an earlier statement of the batch failed | drain the rest, retry the batch |
+| `error.PostgrezPoolExhausted` | the pool is full and parking is off | retry later or raise `process_queue_len` |
+| `error.PostgrezPoolBusy` | the waiter queue is full | retry later or raise `process_queue_len` |
+| `error.PostgrezParamCountMismatch` | args and the statement disagree | fix the argument count |
 
 ## Config reference
 

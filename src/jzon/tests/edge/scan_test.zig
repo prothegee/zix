@@ -23,7 +23,7 @@ test "jzon edge: both widths leave an empty document alone" {
         scan.skipSpace(&cursor, shape);
 
         try std.testing.expect(cursor.atEnd());
-        try std.testing.expectError(error.Truncated, scan.stringSpan(&cursor, shape));
+        try std.testing.expectError(error.JzonTruncated, scan.stringSpan(&cursor, shape));
     }
 }
 
@@ -62,7 +62,7 @@ test "jzon edge: both widths refuse a token opening on the last byte" {
     inline for (SHAPES) |shape| {
         var cursor: Cursor = .init("\"");
 
-        try std.testing.expectError(error.Truncated, scan.stringSpan(&cursor, shape));
+        try std.testing.expectError(error.JzonTruncated, scan.stringSpan(&cursor, shape));
     }
 }
 
@@ -77,7 +77,7 @@ test "jzon edge: both widths report an escape the document ends on" {
         inline for (SHAPES) |shape| {
             var cursor: Cursor = .init(document);
 
-            try std.testing.expectError(error.Truncated, scan.stringSpan(&cursor, shape));
+            try std.testing.expectError(error.JzonTruncated, scan.stringSpan(&cursor, shape));
         }
     }
 }

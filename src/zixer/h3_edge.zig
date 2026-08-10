@@ -158,7 +158,7 @@ pub const EdgeState = struct {
     ///
     /// Return:
     /// - *EdgeState with the receive thread running
-    /// - error.TlsRequired when the cfg carries no certificate
+    /// - error.ZixerTlsRequired when the cfg carries no certificate
     /// - the zix.Tls.Context.init errors (missing file, bad PEM, unsupported key)
     pub fn create(
         allocator: std.mem.Allocator,
@@ -168,7 +168,7 @@ pub const EdgeState = struct {
         port: u16,
         options: bind_options.BindOptions,
     ) !*EdgeState {
-        if (!cfg.tls or cfg.tls_cert == null or cfg.tls_key == null) return error.TlsRequired;
+        if (!cfg.tls or cfg.tls_cert == null or cfg.tls_key == null) return error.ZixerTlsRequired;
 
         const state = try allocator.create(EdgeState);
         errdefer allocator.destroy(state);
@@ -616,7 +616,7 @@ fn serveRequest(incoming: RequestTask) void {
     const body = task.bytes[body_start..][0..body_len];
 
     var request = h3_translate.assemble(section.slice(), body_len == 0) catch |err| {
-        answerLocal(task, if (err == error.UnsupportedConnect) 501 else 400, null);
+        answerLocal(task, if (err == error.ZixerUnsupportedConnect) 501 else 400, null);
         return;
     };
 
@@ -878,7 +878,7 @@ fn servePool(task: RequestTask, request: *const h3_translate.Request, fields: []
             // A silent upstream is not a dead one: the request was already
             // delivered, so it is neither replayed elsewhere nor is the
             // slot taken out of rotation.
-            if (err == error.UpstreamTimeout) {
+            if (err == error.ZixerUpstreamTimeout) {
                 answerLocal(task, 504, "http_response_timeout");
                 return;
             }
@@ -903,21 +903,21 @@ fn readUpstreamHead(task: RequestTask, up_r: *std.Io.Reader, method: []const u8,
 
     var interim: usize = 0;
     while (interim <= MAX_INTERIM) : (interim += 1) {
-        if (!gate.ready(up_r)) return error.UpstreamTimeout;
+        if (!gate.ready(up_r)) return error.ZixerUpstreamTimeout;
 
-        const bytes = http1_head.readHead(up_r, &head_buf) catch return error.UpstreamDead;
-        const response = http1_head.parseResponse(bytes, method) catch return error.UpstreamDead;
+        const bytes = http1_head.readHead(up_r, &head_buf) catch return error.ZixerUpstreamDead;
+        const response = http1_head.parseResponse(bytes, method) catch return error.ZixerUpstreamDead;
 
-        if (response.status == 101) return error.UpstreamDead;
+        if (response.status == 101) return error.ZixerUpstreamDead;
         if (response.status / 100 != 1) return response;
 
         var block_buf: [4096]u8 = undefined;
         var ip_buf: [proxy_headers.CLIENT_IP_MAX]u8 = undefined;
-        const block = h3_translate.encodeResponseBlock(&block_buf, &response, null, clientBlock(task, &ip_buf)) catch return error.UpstreamDead;
-        if (!writeHeaders(task, block)) return error.ClientDead;
+        const block = h3_translate.encodeResponseBlock(&block_buf, &response, null, clientBlock(task, &ip_buf)) catch return error.ZixerUpstreamDead;
+        if (!writeHeaders(task, block)) return error.ZixerClientDead;
     }
 
-    return error.UpstreamDead;
+    return error.ZixerUpstreamDead;
 }
 
 /// Relay one upstream response onto the client stream: head as a field
@@ -965,7 +965,7 @@ fn relayResponse(task: RequestTask, response: *const http1_head.ResponseHead, co
     finishStream(task);
 }
 
-const RelayError = error{ UpstreamDead, ClientDead, BadBody };
+const RelayError = error{ ZixerUpstreamDead, ZixerClientDead, ZixerBadBody };
 
 /// Relay a body of known length.
 fn relayExact(task: RequestTask, up_r: *std.Io.Reader, len: u64, gate: upstream_deadline.Gate) RelayError!void {
@@ -975,13 +975,13 @@ fn relayExact(task: RequestTask, up_r: *std.Io.Reader, len: u64, gate: upstream_
     while (left > 0) {
         // The head is already on the wire, so a stall here can only end the
         // stream. The client sees it cut rather than a body that never ends.
-        if (!gate.ready(up_r)) return error.UpstreamDead;
+        if (!gate.ready(up_r)) return error.ZixerUpstreamDead;
 
         const want: usize = @intCast(@min(left, buf.len));
-        const read = up_r.readSliceShort(buf[0..want]) catch return error.UpstreamDead;
-        if (read == 0) return error.UpstreamDead;
+        const read = up_r.readSliceShort(buf[0..want]) catch return error.ZixerUpstreamDead;
+        if (read == 0) return error.ZixerUpstreamDead;
 
-        if (!writeBody(task, buf[0..read])) return error.ClientDead;
+        if (!writeBody(task, buf[0..read])) return error.ZixerClientDead;
         left -= read;
     }
 }
@@ -991,9 +991,9 @@ fn relayChunked(task: RequestTask, up_r: *std.Io.Reader) RelayError!void {
     var line_buf: [128]u8 = undefined;
 
     while (true) {
-        const line = readLine(up_r, &line_buf) catch return error.UpstreamDead;
+        const line = readLine(up_r, &line_buf) catch return error.ZixerUpstreamDead;
         const size_text = std.mem.sliceTo(line, ';');
-        const size = std.fmt.parseInt(u64, std.mem.trim(u8, size_text, " \t"), 16) catch return error.BadBody;
+        const size = std.fmt.parseInt(u64, std.mem.trim(u8, size_text, " \t"), 16) catch return error.ZixerBadBody;
 
         if (size == 0) {
             try relayTrailers(task, up_r);
@@ -1004,15 +1004,15 @@ fn relayChunked(task: RequestTask, up_r: *std.Io.Reader) RelayError!void {
         var buf: [RELAY_CHUNK]u8 = undefined;
         while (left > 0) {
             const want: usize = @intCast(@min(left, buf.len));
-            const read = up_r.readSliceShort(buf[0..want]) catch return error.UpstreamDead;
-            if (read == 0) return error.UpstreamDead;
+            const read = up_r.readSliceShort(buf[0..want]) catch return error.ZixerUpstreamDead;
+            if (read == 0) return error.ZixerUpstreamDead;
 
-            if (!writeBody(task, buf[0..read])) return error.ClientDead;
+            if (!writeBody(task, buf[0..read])) return error.ZixerClientDead;
             left -= read;
         }
 
-        const terminator = readLine(up_r, &line_buf) catch return error.UpstreamDead;
-        if (terminator.len != 0) return error.BadBody;
+        const terminator = readLine(up_r, &line_buf) catch return error.ZixerUpstreamDead;
+        if (terminator.len != 0) return error.ZixerBadBody;
     }
 }
 
@@ -1023,7 +1023,7 @@ fn relayTrailers(task: RequestTask, up_r: *std.Io.Reader) RelayError!void {
     var line_buf: [1024]u8 = undefined;
 
     while (true) {
-        const line = readLine(up_r, &line_buf) catch return error.UpstreamDead;
+        const line = readLine(up_r, &line_buf) catch return error.ZixerUpstreamDead;
         if (line.len == 0) break;
         if (count >= trailers.len) continue;
 
@@ -1038,8 +1038,8 @@ fn relayTrailers(task: RequestTask, up_r: *std.Io.Reader) RelayError!void {
     if (count == 0) return;
 
     var block_buf: [4096]u8 = undefined;
-    const block = h3_translate.encodeTrailerBlock(&block_buf, trailers[0..count]) catch return error.BadBody;
-    if (!writeHeaders(task, block)) return error.ClientDead;
+    const block = h3_translate.encodeTrailerBlock(&block_buf, trailers[0..count]) catch return error.ZixerBadBody;
+    if (!writeHeaders(task, block)) return error.ZixerClientDead;
 }
 
 /// Relay a body framed only by the upstream closing.
@@ -1050,7 +1050,7 @@ fn relayUntilClose(task: RequestTask, up_r: *std.Io.Reader) RelayError!void {
         const read = up_r.readSliceShort(&buf) catch return;
         if (read == 0) return;
 
-        if (!writeBody(task, buf[0..read])) return error.ClientDead;
+        if (!writeBody(task, buf[0..read])) return error.ZixerClientDead;
     }
 }
 
@@ -1069,7 +1069,7 @@ fn readLine(src: *std.Io.Reader, buf: []u8) ![]const u8 {
         len += 1;
     }
 
-    return error.HeadTooLarge;
+    return error.ZixerHeadTooLarge;
 }
 
 // --------------------------------------------------------- //
@@ -1523,7 +1523,7 @@ const H3Client = struct {
                 const server_hello = firstCryptoData(opened.payload) orelse continue;
 
                 transcript.update(server_hello);
-                const server_public = serverKeyShare(server_hello) orelse return error.NoServerKeyShare;
+                const server_public = serverKeyShare(server_hello) orelse return error.ZixerNoServerKeyShare;
                 const shared = try X25519.scalarmult(ephemeral, server_public);
                 hs_keys = keyschedule.handshakeKeys(shared, transcript.current());
 
@@ -1544,7 +1544,7 @@ const H3Client = struct {
             }
         }
 
-        if (!have_app) return error.HandshakeIncomplete;
+        if (!have_app) return error.ZixerHandshakeIncomplete;
     }
 
     /// Send one request: a QPACK field section as HEADERS, then the body as
@@ -1630,7 +1630,7 @@ const H3Client = struct {
             try client.acknowledge();
         }
 
-        return error.NoResponse;
+        return error.ZixerNoResponse;
     }
 
     /// Walk a decrypted payload, copying every tracked stream's bytes into place.
@@ -1758,7 +1758,7 @@ fn decodeResponse(bytes: []const u8, body_out: []u8, scratch: []u8) !ClientRespo
             section = try h3_qpack.decodeSection(frame.payload, scratch);
         }
         if (frame.kind == h3_frames.DATA) {
-            if (body_len + frame.payload.len > body_out.len) return error.BodyTooLarge;
+            if (body_len + frame.payload.len > body_out.len) return error.ZixerBodyTooLarge;
 
             @memcpy(body_out[body_len..][0..frame.payload.len], frame.payload);
             body_len += frame.payload.len;
@@ -1767,7 +1767,7 @@ fn decodeResponse(bytes: []const u8, body_out: []u8, scratch: []u8) !ClientRespo
         pos += frame.consumed;
     }
 
-    return .{ .section = section orelse return error.NoHeaders, .body_len = body_len };
+    return .{ .section = section orelse return error.ZixerNoHeaders, .body_len = body_len };
 }
 
 /// A one-shot h1 upstream the edge proxies to.
@@ -1960,7 +1960,7 @@ fn waitBackend(io: std.Io, fake: *FakeBackend) !void {
     if (fake.bind_failed.load(.acquire)) {
         std.log.err("zix zixer: h3 edge, the fake backend could not take port {d} in {d} tries", .{ fake.port, BIND_TRIES });
 
-        return error.FakeBindFailed;
+        return error.ZixerFakeBindFailed;
     }
 
     try testing.expect(fake.ready.load(.acquire));
@@ -2035,7 +2035,7 @@ test "zix zixer: h3 edge, a cleartext cfg refuses to serve" {
     const socket = try bindSite(io, 18904);
     defer socket.close(io);
 
-    try testing.expectError(error.TlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 18904, .{}));
+    try testing.expectError(error.ZixerTlsRequired, EdgeState.create(testing.allocator, io, socket, &cfg, 18904, .{}));
 }
 
 test "zix zixer: h3 edge, a request crosses quic to the http1 upstream and back" {

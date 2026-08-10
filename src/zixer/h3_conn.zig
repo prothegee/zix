@@ -656,7 +656,7 @@ pub const Conn = struct {
 
     /// Append response bytes for one client stream.
     pub fn respond(conn: *Conn, stream_id: u64, bytes: []const u8) !void {
-        const send = conn.streams.sendFor(stream_id) orelse return error.NoStreamSlot;
+        const send = conn.streams.sendFor(stream_id) orelse return error.ZixerNoStreamSlot;
         if (send.stream_limit == 0) send.stream_limit = conn.client_max_stream_data;
 
         try send.append(conn.allocator, bytes);

@@ -39,17 +39,17 @@ pub const MAX_SUPPORTED_EXTENSIONS: usize = 8;
 /// Everything that makes an initiation chunk unusable.
 pub const Error = error{
     /// Fewer bytes than the fixed fields need, or a parameter running past the end.
-    Truncated,
+    ZixTruncated,
     /// A parameter length below the parameter header size.
-    BadLength,
+    ZixBadLength,
     /// The initiate tag is zero, which RFC 9260 3.3.2 forbids.
-    ZeroInitiateTag,
+    ZixZeroInitiateTag,
     /// The advertised receive window is below 1500.
-    SmallWindow,
+    ZixSmallWindow,
     /// Either stream count is zero, which RFC 9260 3.3.2 forbids.
-    ZeroStreams,
+    ZixZeroStreams,
     /// The output buffer cannot hold what was asked for.
-    NoSpace,
+    ZixNoSpace,
 };
 
 /// The fixed fields, which are the same in INIT and INIT ACK.
@@ -145,10 +145,10 @@ pub const Initiation = struct {
 ///
 /// Return:
 /// - Initiation borrowing `value`
-/// - error.Truncated, error.BadLength, error.ZeroInitiateTag, error.SmallWindow,
-///   error.ZeroStreams
+/// - error.ZixTruncated, error.ZixBadLength, error.ZixZeroInitiateTag, error.ZixSmallWindow,
+///   error.ZixZeroStreams
 pub fn read(value: []const u8) Error!Initiation {
-    if (value.len < FIXED_LEN) return error.Truncated;
+    if (value.len < FIXED_LEN) return error.ZixTruncated;
 
     const fixed: Fixed = .{
         .initiate_tag = std.mem.readInt(u32, value[0..4], .big),
@@ -158,9 +158,9 @@ pub fn read(value: []const u8) Error!Initiation {
         .initial_tsn = std.mem.readInt(u32, value[12..16], .big),
     };
 
-    if (fixed.initiate_tag == 0) return error.ZeroInitiateTag;
-    if (fixed.advertised_rwnd < MIN_ADVERTISED_RWND) return error.SmallWindow;
-    if (fixed.outbound_streams == 0 or fixed.inbound_streams == 0) return error.ZeroStreams;
+    if (fixed.initiate_tag == 0) return error.ZixZeroInitiateTag;
+    if (fixed.advertised_rwnd < MIN_ADVERTISED_RWND) return error.ZixSmallWindow;
+    if (fixed.outbound_streams == 0 or fixed.inbound_streams == 0) return error.ZixZeroStreams;
 
     const region = value[FIXED_LEN..];
     try parameter.validate(region);
@@ -206,14 +206,14 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - Builder
-    /// - error.NoSpace if the buffer cannot hold the fixed fields
-    /// - error.ZeroInitiateTag, error.SmallWindow, error.ZeroStreams if the caller's own fields
+    /// - error.ZixNoSpace if the buffer cannot hold the fixed fields
+    /// - error.ZixZeroInitiateTag, error.ZixSmallWindow, error.ZixZeroStreams if the caller's own fields
     ///   break the rules a receiver would reject them for
     pub fn begin(buf: []u8, fixed: Fixed) Error!Builder {
-        if (buf.len < FIXED_LEN) return error.NoSpace;
-        if (fixed.initiate_tag == 0) return error.ZeroInitiateTag;
-        if (fixed.advertised_rwnd < MIN_ADVERTISED_RWND) return error.SmallWindow;
-        if (fixed.outbound_streams == 0 or fixed.inbound_streams == 0) return error.ZeroStreams;
+        if (buf.len < FIXED_LEN) return error.ZixNoSpace;
+        if (fixed.initiate_tag == 0) return error.ZixZeroInitiateTag;
+        if (fixed.advertised_rwnd < MIN_ADVERTISED_RWND) return error.ZixSmallWindow;
+        if (fixed.outbound_streams == 0 or fixed.inbound_streams == 0) return error.ZixZeroStreams;
 
         std.mem.writeInt(u32, buf[0..4], fixed.initiate_tag, .big);
         std.mem.writeInt(u32, buf[4..8], fixed.advertised_rwnd, .big);
@@ -232,7 +232,7 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace, error.BadLength
+    /// - error.ZixNoSpace, error.ZixBadLength
     pub fn addParameter(self: *Builder, kind: parameter.Type, value: []const u8) Error!void {
         const written = try parameter.write(self.buf[self.len..], kind, value);
 
@@ -246,7 +246,7 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn addStateCookie(self: *Builder, cookie: []const u8) Error!void {
         return self.addParameter(.STATE_COOKIE, cookie);
     }
@@ -255,7 +255,7 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn addForwardTsnSupported(self: *Builder) Error!void {
         return self.addParameter(.FORWARD_TSN_SUPPORTED, &.{});
     }
@@ -271,11 +271,11 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace if the list is longer than MAX_SUPPORTED_EXTENSIONS or does not fit
+    /// - error.ZixNoSpace if the list is longer than MAX_SUPPORTED_EXTENSIONS or does not fit
     pub fn addSupportedExtensions(self: *Builder, kinds: []const chunk.Type) Error!void {
         var list: [MAX_SUPPORTED_EXTENSIONS]u8 = undefined;
 
-        if (kinds.len > list.len) return error.NoSpace;
+        if (kinds.len > list.len) return error.ZixNoSpace;
 
         for (kinds, 0..) |kind, index| list[index] = @intFromEnum(kind);
 
@@ -294,12 +294,12 @@ pub const Builder = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NoSpace, error.BadLength
+    /// - error.ZixNoSpace, error.ZixBadLength
     pub fn addUnrecognized(self: *Builder, unknown: parameter.Parameter) Error!void {
         const start = self.len;
         const inner_len = parameter.HEADER_LEN + unknown.value.len;
 
-        if (self.buf.len - start < parameter.HEADER_LEN) return error.NoSpace;
+        if (self.buf.len - start < parameter.HEADER_LEN) return error.ZixNoSpace;
 
         const inner = try parameter.write(
             self.buf[start + parameter.HEADER_LEN ..],
@@ -434,7 +434,7 @@ test "zix sctp: init read, an unknown parameter from the stop range hides what f
 test "zix sctp: init read, a body shorter than the fixed fields errors" {
     const short: [15]u8 = @splat(0);
 
-    try std.testing.expectError(error.Truncated, read(&short));
+    try std.testing.expectError(error.ZixTruncated, read(&short));
 }
 
 test "zix sctp: init read, a zero initiate tag errors" {
@@ -443,7 +443,7 @@ test "zix sctp: init read, a zero initiate tag errors" {
     const body = buf[0..builder.len];
     std.mem.writeInt(u32, body[0..4], 0, .big);
 
-    try std.testing.expectError(error.ZeroInitiateTag, read(body));
+    try std.testing.expectError(error.ZixZeroInitiateTag, read(body));
 }
 
 test "zix sctp: init read, a receive window under 1500 errors" {
@@ -452,7 +452,7 @@ test "zix sctp: init read, a receive window under 1500 errors" {
     const body = buf[0..builder.len];
     std.mem.writeInt(u32, body[4..8], 1499, .big);
 
-    try std.testing.expectError(error.SmallWindow, read(body));
+    try std.testing.expectError(error.ZixSmallWindow, read(body));
 }
 
 test "zix sctp: init read, a window of exactly 1500 is accepted" {
@@ -472,11 +472,11 @@ test "zix sctp: init read, a zero stream count errors on either side" {
     const body = buf[0..builder.len];
 
     std.mem.writeInt(u16, body[8..10], 0, .big);
-    try std.testing.expectError(error.ZeroStreams, read(body));
+    try std.testing.expectError(error.ZixZeroStreams, read(body));
 
     std.mem.writeInt(u16, body[8..10], 128, .big);
     std.mem.writeInt(u16, body[10..12], 0, .big);
-    try std.testing.expectError(error.ZeroStreams, read(body));
+    try std.testing.expectError(error.ZixZeroStreams, read(body));
 }
 
 test "zix sctp: init build, the same rules are checked before writing" {
@@ -484,28 +484,28 @@ test "zix sctp: init build, the same rules are checked before writing" {
     var fixed = sample_fixed;
 
     fixed.initiate_tag = 0;
-    try std.testing.expectError(error.ZeroInitiateTag, Builder.begin(&buf, fixed));
+    try std.testing.expectError(error.ZixZeroInitiateTag, Builder.begin(&buf, fixed));
 
     fixed = sample_fixed;
     fixed.advertised_rwnd = 1000;
-    try std.testing.expectError(error.SmallWindow, Builder.begin(&buf, fixed));
+    try std.testing.expectError(error.ZixSmallWindow, Builder.begin(&buf, fixed));
 
     fixed = sample_fixed;
     fixed.outbound_streams = 0;
-    try std.testing.expectError(error.ZeroStreams, Builder.begin(&buf, fixed));
+    try std.testing.expectError(error.ZixZeroStreams, Builder.begin(&buf, fixed));
 }
 
 test "zix sctp: init build, a buffer too small for the fixed fields errors" {
     var buf: [15]u8 = undefined;
 
-    try std.testing.expectError(error.NoSpace, Builder.begin(&buf, sample_fixed));
+    try std.testing.expectError(error.ZixNoSpace, Builder.begin(&buf, sample_fixed));
 }
 
 test "zix sctp: init build, a parameter that does not fit errors and leaves the body usable" {
     var buf: [24]u8 = undefined;
     var builder = try Builder.begin(&buf, sample_fixed);
 
-    try std.testing.expectError(error.NoSpace, builder.addStateCookie("this cookie is far too long"));
+    try std.testing.expectError(error.ZixNoSpace, builder.addStateCookie("this cookie is far too long"));
 
     const parsed = try read(builder.chunkValue());
     try std.testing.expectEqual(sample_fixed.initiate_tag, parsed.fixed.initiate_tag);
@@ -519,5 +519,5 @@ test "zix sctp: init read, a parameter running past the body errors" {
     const body = buf[0..builder.len];
     std.mem.writeInt(u16, body[FIXED_LEN + 2 ..][0..2], 40, .big);
 
-    try std.testing.expectError(error.Truncated, read(body));
+    try std.testing.expectError(error.ZixTruncated, read(body));
 }

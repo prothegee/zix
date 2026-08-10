@@ -89,7 +89,7 @@ pub const UpstreamConn = struct {
 /// What a connect to one upstream can end as.
 pub const ConnectError = error{
     /// host is not a literal ip address, so there was nothing to reach.
-    BadUpstreamAddress,
+    ZixerBadUpstreamAddress,
 } || socket_connect.Error;
 
 /// Connect to one upstream, giving up after budget_ms. Only literal ip
@@ -113,11 +113,11 @@ pub const ConnectError = error{
 ///
 /// Return:
 /// - UpstreamConn with reused = false
-/// - error.BadUpstreamAddress when host is not a literal ip
-/// - error.ConnectTimeout when the budget ran out with no answer
-/// - error.ConnectFailed when the upstream refused or was unreachable
+/// - error.ZixerBadUpstreamAddress when host is not a literal ip
+/// - error.ZixConnectTimeout when the budget ran out with no answer
+/// - error.ZixConnectFailed when the upstream refused or was unreachable
 pub fn connect(io: std.Io, host: []const u8, port: u16, slot_index: u32, budget_ms: u32) ConnectError!UpstreamConn {
-    const addr = std.Io.net.IpAddress.parse(host, port) catch return error.BadUpstreamAddress;
+    const addr = std.Io.net.IpAddress.parse(host, port) catch return error.ZixerBadUpstreamAddress;
 
     const stream = try socket_connect.withinBudget(io, &addr, budget_ms);
     tcp_nodelay.apply(stream);
@@ -364,7 +364,7 @@ test "zix zixer: upstream conn, non-literal host is refused before any socket" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    try std.testing.expectError(error.BadUpstreamAddress, connect(io, "backend.local", 3000, 0, 0));
+    try std.testing.expectError(error.ZixerBadUpstreamAddress, connect(io, "backend.local", 3000, 0, 0));
 }
 
 test "zix zixer: upstream conn, a refused port is a failure and not an elapsed budget" {
@@ -379,7 +379,7 @@ test "zix zixer: upstream conn, a refused port is a failure and not an elapsed b
 
     // A generous budget, so an answer of ConnectFailed can only have come from
     // the refusal itself.
-    try std.testing.expectError(error.ConnectFailed, connect(io, "127.0.0.1", 18948, 0, 10_000));
+    try std.testing.expectError(error.ZixConnectFailed, connect(io, "127.0.0.1", 18948, 0, 10_000));
 }
 
 test "zix zixer: upstream conn, connect hands back a socket with nagle off" {

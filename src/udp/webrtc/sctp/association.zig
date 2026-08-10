@@ -118,15 +118,15 @@ pub const Outcome = struct {
 pub const Error = error{
     OutOfMemory,
     /// The output buffer is too small for the reply that had to go out.
-    NoSpace,
+    ZixNoSpace,
     /// The peer did something the protocol does not allow.
-    ProtocolViolation,
+    ZixProtocolViolation,
     /// A message grew past the reassembly limit.
-    MessageTooLarge,
+    ZixMessageTooLarge,
     /// A DATA chunk must carry at least one byte.
-    NoUserData,
+    ZixNoUserData,
     /// Sending is not possible in the current state.
-    NotEstablished,
+    ZixNotEstablished,
 };
 
 /// One SCTP association over one DTLS connection.
@@ -228,13 +228,13 @@ pub const Association = struct {
     ///
     /// Return:
     /// - []const u8, the packet to send
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn connect(self: *Association, out: []u8) Error![]const u8 {
         var body: [MAX_REPLY_BYTES]u8 = undefined;
-        var builder = initiation.Builder.begin(&body, self.localFixed()) catch return error.NoSpace;
+        var builder = initiation.Builder.begin(&body, self.localFixed()) catch return error.ZixNoSpace;
 
-        builder.addForwardTsnSupported() catch return error.NoSpace;
-        builder.addSupportedExtensions(&.{ .RE_CONFIG, .FORWARD_TSN }) catch return error.NoSpace;
+        builder.addForwardTsnSupported() catch return error.ZixNoSpace;
+        builder.addSupportedExtensions(&.{ .RE_CONFIG, .FORWARD_TSN }) catch return error.ZixNoSpace;
 
         // A packet carrying an INIT has a zero verification tag: the peer's tag is not known yet.
         const reply = try self.buildPacket(out, 0, .INIT, 0, builder.chunkValue());
@@ -255,7 +255,7 @@ pub const Association = struct {
     ///
     /// Return:
     /// - Outcome
-    /// - error.ProtocolViolation, error.MessageTooLarge, error.NoSpace, error.OutOfMemory
+    /// - error.ZixProtocolViolation, error.ZixMessageTooLarge, error.ZixNoSpace, error.OutOfMemory
     pub fn handle(self: *Association, datagram: []const u8, now_ms: u64, out: []u8) Error!Outcome {
         const incoming = packet.parse(datagram) catch return .{};
 
@@ -327,7 +327,7 @@ pub const Association = struct {
     ///
     /// Return:
     /// - ?reassembly.Message
-    /// - error.ProtocolViolation, error.MessageTooLarge, error.OutOfMemory
+    /// - error.ZixProtocolViolation, error.ZixMessageTooLarge, error.OutOfMemory
     pub fn nextMessage(self: *Association) Error!?reassembly.Message {
         return self.reassembler.next();
     }
@@ -342,10 +342,10 @@ pub const Association = struct {
     ///
     /// Return:
     /// - void
-    /// - error.NotEstablished if the association is not up
-    /// - error.NoUserData if the payload is empty
-    /// - error.ProtocolViolation if the stream is outside what was negotiated
-    /// - error.NoSpace, error.OutOfMemory
+    /// - error.ZixNotEstablished if the association is not up
+    /// - error.ZixNoUserData if the payload is empty
+    /// - error.ZixProtocolViolation if the stream is outside what was negotiated
+    /// - error.ZixNoSpace, error.OutOfMemory
     pub fn sendMessage(
         self: *Association,
         stream_identifier: u16,
@@ -353,9 +353,9 @@ pub const Association = struct {
         options: SendOptions,
         now_ms: u64,
     ) Error!void {
-        if (self.state != .ESTABLISHED) return error.NotEstablished;
-        if (payload.len == 0) return error.NoUserData;
-        if (stream_identifier >= self.outbound_streams) return error.ProtocolViolation;
+        if (self.state != .ESTABLISHED) return error.ZixNotEstablished;
+        if (payload.len == 0) return error.ZixNoUserData;
+        if (stream_identifier >= self.outbound_streams) return error.ZixProtocolViolation;
 
         const sequence = self.next_sequence[stream_identifier];
         const piece = self.maxPayloadBytes();
@@ -374,9 +374,9 @@ pub const Association = struct {
                 .payload = payload[at..end],
                 .reliability = options.reliability,
             }, now_ms) catch |err| switch (err) {
-                error.NoSpace => return error.NoSpace,
+                error.ZixNoSpace => return error.ZixNoSpace,
                 error.OutOfMemory => return error.OutOfMemory,
-                error.NoUserData => return error.NoUserData,
+                error.ZixNoUserData => return error.ZixNoUserData,
             };
 
             at = end;
@@ -399,14 +399,14 @@ pub const Association = struct {
     ///
     /// Return:
     /// - ?[]const u8, a packet to send
-    /// - error.NoSpace if the buffer cannot hold a common header
+    /// - error.ZixNoSpace if the buffer cannot hold a common header
     pub fn flush(self: *Association, now_ms: u64, out: []u8) Error!?[]const u8 {
         var writer = packet.Writer.init(
             out[0..@min(out.len, self.config.path_max_bytes)],
             self.config.local_port,
             self.config.remote_port,
             self.peer_tag,
-        ) catch return error.NoSpace;
+        ) catch return error.ZixNoSpace;
 
         while (self.send.nextToSend()) |item| {
             const cost = item.wireBytes();
@@ -425,7 +425,7 @@ pub const Association = struct {
 
         if (writer.isEmpty()) return null;
 
-        return writer.finish() catch return error.NoSpace;
+        return writer.finish() catch return error.ZixNoSpace;
     }
 
     /// The retransmission timer expired.
@@ -448,13 +448,13 @@ pub const Association = struct {
     ///
     /// Return:
     /// - []const u8, the SHUTDOWN packet to send
-    /// - error.NotEstablished if the association was never up
-    /// - error.NoSpace
+    /// - error.ZixNotEstablished if the association was never up
+    /// - error.ZixNoSpace
     pub fn shutdown(self: *Association, out: []u8) Error![]const u8 {
-        if (self.state != .ESTABLISHED) return error.NotEstablished;
+        if (self.state != .ESTABLISHED) return error.ZixNotEstablished;
 
         var body: [teardown.SHUTDOWN_VALUE_LEN]u8 = undefined;
-        const value = teardown.writeShutdown(&body, self.receive.cumulative_tsn) catch return error.NoSpace;
+        const value = teardown.writeShutdown(&body, self.receive.cumulative_tsn) catch return error.ZixNoSpace;
 
         const reply = try self.buildPacket(out, self.peer_tag, .SHUTDOWN, 0, value);
         self.state = .SHUTDOWN_SENT;
@@ -470,10 +470,10 @@ pub const Association = struct {
     ///
     /// Return:
     /// - []const u8, the ABORT packet to send
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn abort(self: *Association, out: []u8, reason: []const u8) Error![]const u8 {
         var body: [MAX_REPLY_BYTES]u8 = undefined;
-        const causes = error_cause.writeUserInitiatedAbort(&body, reason) catch return error.NoSpace;
+        const causes = error_cause.writeUserInitiatedAbort(&body, reason) catch return error.ZixNoSpace;
 
         const reply = try self.buildPacket(out, self.peer_tag, .ABORT, teardown.teardownFlags(false), causes);
         self.state = .CLOSED;
@@ -492,7 +492,7 @@ pub const Association = struct {
     ///
     /// Return:
     /// - ?[]const u8, the packet to send
-    /// - error.NoSpace
+    /// - error.ZixNoSpace
     pub fn buildForwardTsn(self: *Association, out: []u8) Error!?[]const u8 {
         if (!self.peer_forward_tsn) return null;
 
@@ -502,7 +502,7 @@ pub const Association = struct {
         const listed = self.send.forwardTsnStreams(point, &entries);
 
         var body: [MAX_REPLY_BYTES]u8 = undefined;
-        const value = forward_tsn.write(&body, point, listed) catch return error.NoSpace;
+        const value = forward_tsn.write(&body, point, listed) catch return error.ZixNoSpace;
 
         const reply = try self.buildPacket(out, self.peer_tag, .FORWARD_TSN, 0, value);
         self.send.markForwarded(point);
@@ -522,12 +522,12 @@ pub const Association = struct {
     ///
     /// Return:
     /// - []const u8, the packet to send
-    /// - error.NotEstablished if the association is not up
-    /// - error.ProtocolViolation if the peer never announced the extension
-    /// - error.NoSpace
+    /// - error.ZixNotEstablished if the association is not up
+    /// - error.ZixProtocolViolation if the peer never announced the extension
+    /// - error.ZixNoSpace
     pub fn sendReconfig(self: *Association, value: []const u8, out: []u8) Error![]const u8 {
-        if (self.state != .ESTABLISHED) return error.NotEstablished;
-        if (!self.peer_reconfig) return error.ProtocolViolation;
+        if (self.state != .ESTABLISHED) return error.ZixNotEstablished;
+        if (!self.peer_reconfig) return error.ZixProtocolViolation;
 
         return self.buildPacket(out, self.peer_tag, .RE_CONFIG, 0, value);
     }
@@ -594,10 +594,10 @@ pub const Association = struct {
         const request = initiation.read(item.value) catch return .{};
 
         var body: [MAX_REPLY_BYTES]u8 = undefined;
-        var builder = initiation.Builder.begin(&body, self.localFixed()) catch return error.NoSpace;
+        var builder = initiation.Builder.begin(&body, self.localFixed()) catch return error.ZixNoSpace;
 
-        builder.addForwardTsnSupported() catch return error.NoSpace;
-        builder.addSupportedExtensions(&.{ .RE_CONFIG, .FORWARD_TSN }) catch return error.NoSpace;
+        builder.addForwardTsnSupported() catch return error.ZixNoSpace;
+        builder.addSupportedExtensions(&.{ .RE_CONFIG, .FORWARD_TSN }) catch return error.ZixNoSpace;
 
         var blob: [cookie.COOKIE_LEN]u8 = undefined;
         const signed = self.signer.sign(.{
@@ -608,9 +608,9 @@ pub const Association = struct {
             .peer_forward_tsn = request.supportsForwardTsn(),
             .peer_reconfig = request.supportsReconfig(),
             .issued_ms = now_ms,
-        }, &blob) catch return error.NoSpace;
+        }, &blob) catch return error.ZixNoSpace;
 
-        builder.addStateCookie(signed) catch return error.NoSpace;
+        builder.addStateCookie(signed) catch return error.ZixNoSpace;
 
         // The answer carries the peer's tag even though nothing is remembered about it.
         return .{ .reply = try self.buildPacket(out, request.fixed.initiate_tag, .INIT_ACK, 0, builder.chunkValue()) };
@@ -653,7 +653,7 @@ pub const Association = struct {
                 const causes = error_cause.writeStaleCookie(&body, @intCast(@min(
                     staleness_ms *| 1_000,
                     std.math.maxInt(u32),
-                ))) catch return error.NoSpace;
+                ))) catch return error.ZixNoSpace;
 
                 return .{ .reply = try self.buildPacket(out, self.peer_tag, .ERROR, 0, causes) };
             },
@@ -675,7 +675,7 @@ pub const Association = struct {
         self.reassembler.accept(arriving) catch |err| switch (err) {
             // Refused for space, so the TSN must not stay acknowledged or the peer will never
             // send it again.
-            error.NoSpace => return,
+            error.ZixNoSpace => return,
             else => return err,
         };
 
@@ -710,7 +710,7 @@ pub const Association = struct {
         const info = heartbeat.readInfo(item.value) catch return .{};
 
         var body: [MAX_REPLY_BYTES]u8 = undefined;
-        const value = heartbeat.writeInfo(&body, info) catch return error.NoSpace;
+        const value = heartbeat.writeInfo(&body, info) catch return error.ZixNoSpace;
 
         return .{ .reply = try self.buildPacket(out, self.peer_tag, .HEARTBEAT_ACK, 0, value) };
     }
@@ -811,17 +811,17 @@ pub const Association = struct {
         value: []const u8,
     ) Error![]const u8 {
         var writer = packet.Writer.init(out, self.config.local_port, self.config.remote_port, verification_tag) catch
-            return error.NoSpace;
+            return error.ZixNoSpace;
 
-        writer.addChunk(kind, flags, value) catch return error.NoSpace;
+        writer.addChunk(kind, flags, value) catch return error.ZixNoSpace;
 
-        return writer.finish() catch return error.NoSpace;
+        return writer.finish() catch return error.ZixNoSpace;
     }
 
     /// Build the acknowledgement for what has arrived.
     fn buildSack(self: *Association, out: []u8) Error![]const u8 {
         var body: [receive_queue.MAX_SACK_VALUE_LEN]u8 = undefined;
-        const value = self.receive.writeSack(&body, self.config.advertised_rwnd) catch return error.NoSpace;
+        const value = self.receive.writeSack(&body, self.config.advertised_rwnd) catch return error.ZixNoSpace;
 
         return self.buildPacket(out, self.peer_tag, .SACK, 0, value);
     }
@@ -1118,7 +1118,7 @@ test "zix sctp: association data, sending before the handshake is refused" {
     defer pair.client.deinit();
     defer pair.server.deinit();
 
-    try std.testing.expectError(error.NotEstablished, pair.client.sendMessage(0, "early", .{}, 1_000));
+    try std.testing.expectError(error.ZixNotEstablished, pair.client.sendMessage(0, "early", .{}, 1_000));
 }
 
 test "zix sctp: association data, a stream outside what was negotiated is refused" {
@@ -1129,7 +1129,7 @@ test "zix sctp: association data, a stream outside what was negotiated is refuse
     try handshake(&pair.client, &pair.server, 1_000);
 
     try std.testing.expectError(
-        error.ProtocolViolation,
+        error.ZixProtocolViolation,
         pair.client.sendMessage(pair.client.outbound_streams, "nowhere", .{}, 1_000),
     );
 }
@@ -1141,7 +1141,7 @@ test "zix sctp: association data, an empty message is refused" {
 
     try handshake(&pair.client, &pair.server, 1_000);
 
-    try std.testing.expectError(error.NoUserData, pair.client.sendMessage(0, "", .{}, 1_000));
+    try std.testing.expectError(error.ZixNoUserData, pair.client.sendMessage(0, "", .{}, 1_000));
 }
 
 test "zix sctp: association tags, a packet with the wrong verification tag is dropped" {
@@ -1224,7 +1224,7 @@ test "zix sctp: association shutdown, closing before the handshake is refused" {
 
     var out: [MAX_REPLY_BYTES]u8 = undefined;
 
-    try std.testing.expectError(error.NotEstablished, pair.client.shutdown(&out));
+    try std.testing.expectError(error.ZixNotEstablished, pair.client.shutdown(&out));
 }
 
 test "zix sctp: association abort, the peer sees it and never answers it" {
@@ -1320,7 +1320,7 @@ test "zix sctp: association sendReconfig, an association that is not up refuses"
 
     var wire: [MAX_REPLY_BYTES]u8 = undefined;
 
-    try std.testing.expectError(error.NotEstablished, pair.client.sendReconfig(&.{ 0, 0, 0, 4 }, &wire));
+    try std.testing.expectError(error.ZixNotEstablished, pair.client.sendReconfig(&.{ 0, 0, 0, 4 }, &wire));
 }
 
 test "zix sctp: association sendReconfig, a peer that never announced the extension refuses" {
@@ -1334,7 +1334,7 @@ test "zix sctp: association sendReconfig, a peer that never announced the extens
 
     var wire: [MAX_REPLY_BYTES]u8 = undefined;
 
-    try std.testing.expectError(error.ProtocolViolation, pair.client.sendReconfig(&.{ 0, 0, 0, 4 }, &wire));
+    try std.testing.expectError(error.ZixProtocolViolation, pair.client.sendReconfig(&.{ 0, 0, 0, 4 }, &wire));
 }
 
 test "zix sctp: association handle, a RE-CONFIG chunk is handed up rather than answered" {

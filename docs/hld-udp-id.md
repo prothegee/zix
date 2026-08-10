@@ -61,14 +61,14 @@ flowchart TD
     F --> G["socket.send(io, dest, bytes)"]
     D --> H["receiveFeedback()"]
     H --> P{"recv_timeout_ms > 0 and poll times out?"}
-    P -->|yes| Q["error.RecvTimeout"]
+    P -->|yes| Q["error.ZixRecvTimeout"]
     P -->|no| I["socket.receive(io, buf)"]
     I --> J{"len == 1?"}
     J -->|0x06| K[".ack"]
     J -->|other| L[".nack"]
     J -->|no| M{"len == @sizeOf(Packet)?"}
     M -->|yes| N["fromEndian(packet)\n.packet(Packet)"]
-    M -->|no| O["error.UnexpectedPacketSize"]
+    M -->|no| O["error.ZixUnexpectedPacketSize"]
 ```
 
 ---
@@ -220,7 +220,7 @@ Satu `init(config, args)` menerima process args. Flag `allow_args` menentukan ap
 | `false` (default) | Args diabaikan. Port diambil dari struct konfigurasi. Berikan `.{}` untuk `args`. | tidak ada |
 | `true` | Flag yang dikenali menimpa konfigurasi. Flag yang hilang atau tidak dikenali mempertahankan nilai konfigurasi. | `--ip` / `--port` (server), `--bind-ip` / `--bind-port` / `--server-port` (client) |
 
-Guard port tidak bergantung pada `allow_args`: `init()` gagal dengan `error.PortNotConfigured` saat port hasil bernilai nol. Validasi dilakukan saat `init()`, bukan saat `run()`.
+Guard port tidak bergantung pada `allow_args`: `init()` gagal dengan `error.ZixPortNotConfigured` saat port hasil bernilai nol. Validasi dilakukan saat `init()`, bukan saat `run()`.
 
 ---
 
@@ -315,7 +315,7 @@ Gunakan `std.heap.smp_allocator` (atau general-purpose allocator apapun) agar `f
 
 ## Catatan RFC
 
-- **RFC 768 (UDP)**: Port 0 adalah reserved. `init()` menolaknya dengan `error.PortNotConfigured`. Payload maksimum adalah 65.507 byte, diberlakukan saat comptime melalui `@compileError`.
+- **RFC 768 (UDP)**: Port 0 adalah reserved. `init()` menolaknya dengan `error.ZixPortNotConfigured`. Payload maksimum adalah 65.507 byte, diberlakukan saat comptime melalui `@compileError`.
 - **RFC 791 / konvensi jaringan**: `Endianness.BIG` bersesuaian dengan network byte order (big-endian).
 - Deteksi disconnect berbasis timeout tidak memiliki RFC (perilaku tingkat aplikasi karena UDP tidak memiliki koneksi).
 - Nilai byte ACK (0x06) dan NACK (0x15) adalah kode kontrol ASCII, tidak didefinisikan oleh RFC UDP manapun.
@@ -354,7 +354,7 @@ Berdampingan dengan typed `Server(Packet)`, `zix.Udp.Raw(handler)` melayani data
 
 - Handler: `fn(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *Sink) void`. Ia menerima byte apa adanya (hingga `max_recv_buf`), peer, dan `Sink`. `sink.reply(bytes)` membalas pengirim tanpa konversi address, `sink.replyTo(peer, bytes)` membalas peer eksplisit.
 - I/O batched (Linux): menerima dalam batch `recvmmsg` (`recv_batch`), mengirim dalam batch `sendmmsg` (`send_batch`). Balasan digabung jadi satu `sendmmsg` per batch yang diterima. Non-Linux jatuh ke satu loop receive `std.Io.net`.
-- Dispatch (`dispatch_model`, enum yang sama dengan engine TCP, dipartisi sesuai ADR-043 ke `src/udp/dispatch/`): `.ASYNC` menjalankan satu worker. `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per CPU (per-core shared-nothing) dan khusus Linux, ditolak di luar Linux dengan `error.DispatchModelUnsupported`. `.EPOLL` adalah epoll readiness loop, `.URING` io_uring completion loop nyata (fallback ke epoll saat io_uring tidak tersedia).
+- Dispatch (`dispatch_model`, enum yang sama dengan engine TCP, dipartisi sesuai ADR-043 ke `src/udp/dispatch/`): `.ASYNC` menjalankan satu worker. `.EPOLL` / `.URING` menjalankan satu worker SO_REUSEPORT per CPU (per-core shared-nothing) dan khusus Linux, ditolak di luar Linux dengan `error.ZixDispatchModelUnsupported`. `.EPOLL` adalah epoll readiness loop, `.URING` io_uring completion loop nyata (fallback ke epoll saat io_uring tidak tersedia).
 
 ```zig
 fn handler(dg: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.Udp.Sink) void {

@@ -26,12 +26,12 @@ const GS2_NO_BINDING_UNSUPPORTED = "y,,";
 const GS2_END_POINT = "p=tls-server-end-point,,";
 
 pub const Error = error{
-    BadClientFirst,
-    BadClientFinal,
-    NonceMismatch,
-    ChannelBindingMismatch,
-    ProofMismatch,
-    InputTooLong,
+    PostgrezBadClientFirst,
+    PostgrezBadClientFinal,
+    PostgrezNonceMismatch,
+    PostgrezChannelBindingMismatch,
+    PostgrezProofMismatch,
+    PostgrezInputTooLong,
 };
 
 pub const Mechanism = enum {
@@ -86,23 +86,23 @@ pub const Server = struct {
     ///
     /// Return:
     /// - the server-first message, valid until the next call
-    /// - error.BadClientFirst on a malformed or unbound greeting
+    /// - error.PostgrezBadClientFirst on a malformed or unbound greeting
     pub fn handleClientFirst(self: *Self, client_first: []const u8) Error![]const u8 {
         const bare = try self.stripGs2Header(client_first);
-        if (bare.len > self.client_first_bare_buf.len) return error.InputTooLong;
+        if (bare.len > self.client_first_bare_buf.len) return error.PostgrezInputTooLong;
 
         @memcpy(self.client_first_bare_buf[0..bare.len], bare);
         self.client_first_bare_len = bare.len;
 
-        const client_nonce = findAttribute(bare, 'r') orelse return error.BadClientFirst;
-        if (client_nonce.len == 0) return error.BadClientFirst;
-        if (client_nonce.len + self.options.server_nonce.len > self.combined_nonce_buf.len) return error.InputTooLong;
+        const client_nonce = findAttribute(bare, 'r') orelse return error.PostgrezBadClientFirst;
+        if (client_nonce.len == 0) return error.PostgrezBadClientFirst;
+        if (client_nonce.len + self.options.server_nonce.len > self.combined_nonce_buf.len) return error.PostgrezInputTooLong;
 
         @memcpy(self.combined_nonce_buf[0..client_nonce.len], client_nonce);
         @memcpy(self.combined_nonce_buf[client_nonce.len..][0..self.options.server_nonce.len], self.options.server_nonce);
         self.combined_nonce_len = client_nonce.len + self.options.server_nonce.len;
 
-        if (self.options.salt.len > MAX_SALT) return error.InputTooLong;
+        if (self.options.salt.len > MAX_SALT) return error.PostgrezInputTooLong;
         var salt_b64: [std.base64.standard.Encoder.calcSize(MAX_SALT)]u8 = undefined;
         const salt_encoded = std.base64.standard.Encoder.encode(&salt_b64, self.options.salt);
 
@@ -111,7 +111,7 @@ pub const Server = struct {
             self.combinedNonce(),
             salt_encoded,
             self.options.iterations,
-        }) catch return error.InputTooLong;
+        }) catch return error.PostgrezInputTooLong;
         self.server_first_len = writer.buffered().len;
 
         std.crypto.pwhash.pbkdf2(
@@ -120,7 +120,7 @@ pub const Server = struct {
             self.options.salt,
             self.options.iterations,
             HmacSha256,
-        ) catch return error.BadClientFirst;
+        ) catch return error.PostgrezBadClientFirst;
 
         return self.serverFirst();
     }
@@ -129,17 +129,17 @@ pub const Server = struct {
     ///
     /// Return:
     /// - the server-final message `v=<signature>`, valid until the next call
-    /// - error.ProofMismatch when the client did not know the password
-    /// - error.ChannelBindingMismatch when a PLUS binding did not match
+    /// - error.PostgrezProofMismatch when the client did not know the password
+    /// - error.PostgrezChannelBindingMismatch when a PLUS binding did not match
     pub fn handleClientFinal(self: *Self, client_final: []const u8, out: []u8) Error![]const u8 {
-        if (client_final.len > MAX_CLIENT_FINAL) return error.InputTooLong;
+        if (client_final.len > MAX_CLIENT_FINAL) return error.PostgrezInputTooLong;
 
-        const proof_marker = std.mem.lastIndexOf(u8, client_final, ",p=") orelse return error.BadClientFinal;
+        const proof_marker = std.mem.lastIndexOf(u8, client_final, ",p=") orelse return error.PostgrezBadClientFinal;
         const without_proof = client_final[0..proof_marker];
         const proof_b64 = client_final[proof_marker + 3 ..];
 
-        const nonce = findAttribute(without_proof, 'r') orelse return error.BadClientFinal;
-        if (!std.mem.eql(u8, nonce, self.combinedNonce())) return error.NonceMismatch;
+        const nonce = findAttribute(without_proof, 'r') orelse return error.PostgrezBadClientFinal;
+        if (!std.mem.eql(u8, nonce, self.combinedNonce())) return error.PostgrezNonceMismatch;
 
         try self.checkChannelBinding(without_proof);
 
@@ -149,7 +149,7 @@ pub const Server = struct {
             self.clientFirstBare(),
             self.serverFirst(),
             without_proof,
-        }) catch return error.InputTooLong;
+        }) catch return error.PostgrezInputTooLong;
         const auth_message = auth_writer.buffered();
 
         var client_key: [32]u8 = undefined;
@@ -162,9 +162,9 @@ pub const Server = struct {
         HmacSha256.create(&client_signature, auth_message, &stored_key);
 
         var proof: [32]u8 = undefined;
-        const proof_len = std.base64.standard.Decoder.calcSizeForSlice(proof_b64) catch return error.BadClientFinal;
-        if (proof_len != proof.len) return error.BadClientFinal;
-        std.base64.standard.Decoder.decode(&proof, proof_b64) catch return error.BadClientFinal;
+        const proof_len = std.base64.standard.Decoder.calcSizeForSlice(proof_b64) catch return error.PostgrezBadClientFinal;
+        if (proof_len != proof.len) return error.PostgrezBadClientFinal;
+        std.base64.standard.Decoder.decode(&proof, proof_b64) catch return error.PostgrezBadClientFinal;
 
         // ClientKey = ClientProof XOR ClientSignature, and hashing it must
         // land back on the stored key
@@ -175,7 +175,7 @@ pub const Server = struct {
 
         var recovered_stored: [32]u8 = undefined;
         Sha256.hash(&recovered_key, &recovered_stored, .{});
-        if (!std.mem.eql(u8, &recovered_stored, &stored_key)) return error.ProofMismatch;
+        if (!std.mem.eql(u8, &recovered_stored, &stored_key)) return error.PostgrezProofMismatch;
 
         var server_key: [32]u8 = undefined;
         HmacSha256.create(&server_key, "Server Key", &self.salted_password);
@@ -187,7 +187,7 @@ pub const Server = struct {
         const signature_encoded = std.base64.standard.Encoder.encode(&signature_b64, &server_signature);
 
         var writer = std.Io.Writer.fixed(out);
-        writer.print("v={s}", .{signature_encoded}) catch return error.InputTooLong;
+        writer.print("v={s}", .{signature_encoded}) catch return error.PostgrezInputTooLong;
 
         return writer.buffered();
     }
@@ -216,7 +216,7 @@ pub const Server = struct {
     /// Remove the gs2 header, leaving client-first-bare.
     fn stripGs2Header(self: *const Self, client_first: []const u8) Error![]const u8 {
         if (self.options.mechanism == .SCRAM_SHA_256_PLUS) {
-            if (!std.mem.startsWith(u8, client_first, GS2_END_POINT)) return error.BadClientFirst;
+            if (!std.mem.startsWith(u8, client_first, GS2_END_POINT)) return error.PostgrezBadClientFirst;
 
             return client_first[GS2_END_POINT.len..];
         }
@@ -228,31 +228,31 @@ pub const Server = struct {
             return client_first[GS2_NO_BINDING_UNSUPPORTED.len..];
         }
 
-        return error.BadClientFirst;
+        return error.PostgrezBadClientFirst;
     }
 
     /// The c= attribute must decode to the gs2 header plus, for PLUS, the
     /// binding data the server expects.
     fn checkChannelBinding(self: *const Self, without_proof: []const u8) Error!void {
-        const encoded = findAttribute(without_proof, 'c') orelse return error.BadClientFinal;
+        const encoded = findAttribute(without_proof, 'c') orelse return error.PostgrezBadClientFinal;
 
         var decoded_buf: [GS2_END_POINT.len + 64]u8 = undefined;
-        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return error.BadClientFinal;
-        if (decoded_len > decoded_buf.len) return error.BadClientFinal;
-        std.base64.standard.Decoder.decode(decoded_buf[0..decoded_len], encoded) catch return error.BadClientFinal;
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return error.PostgrezBadClientFinal;
+        if (decoded_len > decoded_buf.len) return error.PostgrezBadClientFinal;
+        std.base64.standard.Decoder.decode(decoded_buf[0..decoded_len], encoded) catch return error.PostgrezBadClientFinal;
 
         const decoded = decoded_buf[0..decoded_len];
         const header = self.gs2Header();
-        if (!std.mem.startsWith(u8, decoded, header)) return error.ChannelBindingMismatch;
+        if (!std.mem.startsWith(u8, decoded, header)) return error.PostgrezChannelBindingMismatch;
 
         const binding = decoded[header.len..];
         if (self.options.mechanism == .SCRAM_SHA_256) {
-            if (binding.len != 0) return error.ChannelBindingMismatch;
+            if (binding.len != 0) return error.PostgrezChannelBindingMismatch;
 
             return;
         }
 
-        if (!std.mem.eql(u8, binding, self.options.expected_cbind)) return error.ChannelBindingMismatch;
+        if (!std.mem.eql(u8, binding, self.options.expected_cbind)) return error.PostgrezChannelBindingMismatch;
     }
 };
 
@@ -323,7 +323,7 @@ test "postgrez inproc: scram rejects a client that knows the wrong password" {
     const client_final = try client.handleServerFirst(server_first);
 
     var server_final_buf: [256]u8 = undefined;
-    try testing.expectError(error.ProofMismatch, server.handleClientFinal(client_final, &server_final_buf));
+    try testing.expectError(error.PostgrezProofMismatch, server.handleClientFinal(client_final, &server_final_buf));
 }
 
 test "postgrez inproc: scram rejects a binding the client got wrong" {
@@ -344,7 +344,7 @@ test "postgrez inproc: scram rejects a binding the client got wrong" {
     const client_final = try client.handleServerFirst(server_first);
 
     var server_final_buf: [256]u8 = undefined;
-    try testing.expectError(error.ChannelBindingMismatch, server.handleClientFinal(client_final, &server_final_buf));
+    try testing.expectError(error.PostgrezChannelBindingMismatch, server.handleClientFinal(client_final, &server_final_buf));
 }
 
 test "postgrez inproc: scram server first extends the client nonce" {
@@ -373,7 +373,7 @@ test "postgrez inproc: scram server first reports its salt and iteration count" 
 test "postgrez inproc: scram rejects a greeting with no gs2 header" {
     var server = Server.init(.{ .password = TEST_PASSWORD });
 
-    try testing.expectError(error.BadClientFirst, server.handleClientFirst("n=,r=" ++ CLIENT_NONCE));
+    try testing.expectError(error.PostgrezBadClientFirst, server.handleClientFirst("n=,r=" ++ CLIENT_NONCE));
 }
 
 test "postgrez inproc: scram plain accepts the y gs2 header" {
@@ -391,7 +391,7 @@ test "postgrez inproc: scram rejects a final message whose nonce drifted" {
 
     var out: [256]u8 = undefined;
     try testing.expectError(
-        error.NonceMismatch,
+        error.PostgrezNonceMismatch,
         server.handleClientFinal("c=biws,r=somethingelse,p=AAAA", &out),
     );
 }

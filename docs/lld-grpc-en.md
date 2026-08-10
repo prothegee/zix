@@ -210,7 +210,7 @@ The blocks are produced by running the real `HpackEncoder` at comptime, so they 
 
 ### Dispatch (run)
 
-`server.zig` holds the public `GrpcServer` type and a thin `run()` switch on `dispatch_model`. The per-model implementations live in `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` keeps the accept-thread + `io.async` structure and calls `serveGrpcConn`. `.EPOLL` calls `epoll.runEpoll`. `.URING` calls `uring.runUring` (the io_uring completion-based shape of `.EPOLL`). When `cfg.tls != null`, `run()` instead branches to `tls_mux.runTlsMux` (multiplexed) or `tls_serve.runTls` (blocking per-connection). Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.DispatchModelUnsupported` (ADR-065).
+`server.zig` holds the public `GrpcServer` type and a thin `run()` switch on `dispatch_model`. The per-model implementations live in `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` keeps the accept-thread + `io.async` structure and calls `serveGrpcConn`. `.EPOLL` calls `epoll.runEpoll`. `.URING` calls `uring.runUring` (the io_uring completion-based shape of `.EPOLL`). When `cfg.tls != null`, `run()` instead branches to `tls_mux.runTlsMux` (multiplexed) or `tls_serve.runTls` (blocking per-connection). Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
 
 The `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, and `runEpoll` symbols below all live in `dispatch/epoll.zig`.
 

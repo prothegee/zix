@@ -89,7 +89,7 @@ pub const Http1ServerConfig = struct {
     send_date_header: bool = true,
     /// Root directory for static file serving. Empty (default) disables it. A request matching no
     /// route is served as a file before the 404 fallback (every dispatch model and https), ".." is
-    /// rejected, Range (RFC 7233) yields 206. Validated at run(): missing dir = error.PublicDirNotFound.
+    /// rejected, Range (RFC 7233) yields 206. Validated at run(): missing dir = error.ZixPublicDirNotFound.
     public_dir: []const u8 = "",
     /// Upload subdirectory relative to public_dir. Declarative companion to public_dir: an upload
     /// handler saves received files here by convention. The engine does not auto-wire uploads,

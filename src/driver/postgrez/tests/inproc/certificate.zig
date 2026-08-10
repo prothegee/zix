@@ -46,7 +46,7 @@ const TAG_VERSION: u8 = 0xa0;
 pub const Error = error{
     /// The certificate did not fit in MAX_DER, or an intermediate did not fit
     /// in its own buffer.
-    BufferTooSmall,
+    PostgrezBufferTooSmall,
 };
 
 /// A fixed-capacity DER sink. Elements are built innermost first, then wrapped.
@@ -55,7 +55,7 @@ const Der = struct {
     len: usize = 0,
 
     fn append(self: *Der, source: []const u8) Error!void {
-        if (self.len + source.len > self.bytes.len) return error.BufferTooSmall;
+        if (self.len + source.len > self.bytes.len) return error.PostgrezBufferTooSmall;
 
         @memcpy(self.bytes[self.len..][0..source.len], source);
         self.len += source.len;
@@ -77,7 +77,7 @@ const Der = struct {
         } else if (content.len <= 0xffff) {
             try self.append(&[_]u8{ 0x82, @intCast(content.len >> 8), @truncate(content.len) });
         } else {
-            return error.BufferTooSmall;
+            return error.PostgrezBufferTooSmall;
         }
 
         try self.append(content);
@@ -94,7 +94,7 @@ const Der = struct {
         } else if (length <= 0xff) {
             try self.append(&[_]u8{ 0x81, @intCast(length) });
         } else {
-            return error.BufferTooSmall;
+            return error.PostgrezBufferTooSmall;
         }
 
         try self.appendByte(0x00);
@@ -122,7 +122,7 @@ pub const SelfSigned = struct {
     ///
     /// Return:
     /// - SelfSigned, copy it by value, it owns no heap memory
-    /// - error.BufferTooSmall when common_name pushes the encoding past MAX_DER
+    /// - error.PostgrezBufferTooSmall when common_name pushes the encoding past MAX_DER
     pub fn generate(io: std.Io, common_name: []const u8) !Self {
         const key_pair = EcdsaP256.KeyPair.generate(io);
 

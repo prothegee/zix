@@ -78,8 +78,8 @@ graph LR
 | :- | :- | :- |
 | `io` | wajib | backend `std.Io` yang disediakan pemanggil |
 | `ip` | wajib | alamat bind |
-| `port` | wajib | port listen, 0 -> `error.PortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.EPOLL`, atau `.URING` (dua terakhir hanya Linux, native, ditolak di luar Linux dengan error.DispatchModelUnsupported) |
+| `port` | wajib | port listen, 0 -> `error.ZixPortNotConfigured` |
+| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.EPOLL`, atau `.URING` (dua terakhir hanya Linux, native, ditolak di luar Linux dengan error.ZixDispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | backlog `listen()` |
 | `workers` | 0 | 0 -> cpu_count worker multiplex untuk EPOLL dan URING. Diabaikan oleh ASYNC |
 | `max_streams` | 128 | maksimum stream HTTP/2 konkuren per koneksi (SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan) |
@@ -320,7 +320,7 @@ Saat handler memanggil `res.finish(status, msg)` tanpa mengirim data apa pun, se
 | `.EPOLL` | per worker | event loop multiplex (hanya Linux) | throughput tertinggi, lihat di bawah |
 | `.URING` | per worker | loop io_uring multiplex (hanya Linux) | bentuk sama dengan `.EPOLL`, berbasis completion |
 
-`.EPOLL` spesifik Linux. Di luar Linux, `run()` mengembalikan `error.DispatchModelUnsupported` setelah mencatat model mana yang ditolak, jadi pakai `.ASYNC` di sana. `.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring (`runUring`, ADR-037 Phase 4): berbasis completion bukan readiness, worker `workers` (0 = cpu_count), hanya Linux, dan ditolak di luar Linux dengan cara yang sama. Saat io_uring sendiri tidak tersedia di host Linux, `.URING` melipat ke loop `.EPOLL` dengan notice yang dicatat.
+`.EPOLL` spesifik Linux. Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported` setelah mencatat model mana yang ditolak, jadi pakai `.ASYNC` di sana. `.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring (`runUring`, ADR-037 Phase 4): berbasis completion bukan readiness, worker `workers` (0 = cpu_count), hanya Linux, dan ditolak di luar Linux dengan cara yang sama. Saat io_uring sendiri tidak tersedia di host Linux, `.URING` melipat ke loop `.EPOLL` dengan notice yang dicatat.
 
 ### `.EPOLL` bersifat multiplex dan shared-nothing
 

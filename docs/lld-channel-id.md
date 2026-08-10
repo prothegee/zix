@@ -50,9 +50,9 @@ Aritmetika ring:
 ```
 lock mutex
 while count == buf.len:
-    if closed: unlock + return error.Closed
+    if closed: unlock + return error.ZixClosed
     not_full.waitUncancelable(io, &mutex)
-if closed: unlock + return error.Closed
+if closed: unlock + return error.ZixClosed
 buf[(head + count) % buf.len] = value
 count += 1
 unlock
@@ -64,7 +64,7 @@ not_empty.signal(io)
 ```
 lock mutex
 while count == 0:
-    if closed: unlock + return error.Closed
+    if closed: unlock + return error.ZixClosed
     not_empty.waitUncancelable(io, &mutex)
 value = buf[head]
 head = (head + 1) % buf.len

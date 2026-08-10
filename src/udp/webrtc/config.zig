@@ -47,7 +47,7 @@ pub const WebrtcServerConfig = struct {
     // UDP substrate knobs (ADR-049), restated flat.
 
     /// Concurrency model. ASYNC runs a single worker on every platform, EPOLL and URING run one
-    /// SO_REUSEPORT worker per core and are rejected off Linux with error.DispatchModelUnsupported.
+    /// SO_REUSEPORT worker per core and are rejected off Linux with error.ZixDispatchModelUnsupported.
     /// Required: the caller must set it explicitly (no default).
     dispatch_model: DispatchModel,
     /// Worker count for the per-core models. 0 means one per usable CPU. Ignored by ASYNC.

@@ -77,12 +77,12 @@ pub fn parseBind(ip: []const u8, port: u16) !posix.sockaddr.in6 {
 pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
     // Raw dual-stack sockets are POSIX-only here: Windows callers use the
     // std.Io fallback path instead.
-    if (comptime builtin.os.tag == .windows) return error.SocketFailed;
+    if (comptime builtin.os.tag == .windows) return error.ZixSocketFailed;
 
     const srv = linux.socket(linux.AF.INET6, linux.SOCK.DGRAM, linux.IPPROTO.UDP);
     switch (posix.errno(srv)) {
         .SUCCESS => {},
-        else => return error.SocketFailed,
+        else => return error.ZixSocketFailed,
     }
 
     const fd: posix.socket_t = @intCast(srv);
@@ -97,14 +97,14 @@ pub fn open(ip: []const u8, port: u16, reuse: bool) !posix.socket_t {
     if (reuse) {
         const one = std.mem.toBytes(@as(c_int, 1));
         posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, &one) catch {};
-        posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEPORT, &one) catch return error.ReusePortFailed;
+        posix.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEPORT, &one) catch return error.ZixReusePortFailed;
     }
 
     var addr = try parseBind(ip, port);
     const brv = linux.bind(fd, @ptrCast(&addr), sockaddr_in6_len);
     switch (posix.errno(brv)) {
         .SUCCESS => {},
-        else => return error.BindFailed,
+        else => return error.ZixBindFailed,
     }
 
     return fd;
@@ -209,7 +209,7 @@ pub const RecvBatch = struct {
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             .INTR => return 0,
-            else => return error.RecvFailed,
+            else => return error.ZixRecvFailed,
         }
 
         return rc;
@@ -224,7 +224,7 @@ pub const RecvBatch = struct {
         switch (posix.errno(rc)) {
             .SUCCESS => {},
             .INTR, .AGAIN => return 0,
-            else => return error.RecvFailed,
+            else => return error.ZixRecvFailed,
         }
 
         return rc;
@@ -393,7 +393,7 @@ pub const SendBatch = struct {
         // else: that syscall number belongs to something different there, and its result would be
         // read back through the wrong errno convention (a failure reading as success). A caller off
         // Linux is expected to set `portable` above, and gets a reported failure when it did not.
-        if (comptime builtin.os.tag != .linux) return error.SendFailed;
+        if (comptime builtin.os.tag != .linux) return error.ZixSendFailed;
 
         if (self.gso) {
             try self.flushGso(fd);
@@ -407,7 +407,7 @@ pub const SendBatch = struct {
             switch (posix.errno(rc)) {
                 .SUCCESS => {},
                 .INTR => continue,
-                else => return error.SendFailed,
+                else => return error.ZixSendFailed,
             }
             if (rc == 0) break;
             sent += rc;
@@ -600,7 +600,7 @@ fn gsoGroupLen(iovs: []const posix.iovec, names: []const posix.sockaddr.in6, i: 
 /// kernel to split it into seg_size-byte wire datagrams (the last may be shorter). seg_size 0 sends
 /// the buffer as a single datagram.
 fn sendSeg(fd: posix.socket_t, base: [*]const u8, total: usize, seg_size: u16, dest: *const posix.sockaddr.in6) !void {
-    if (comptime builtin.os.tag == .windows) return error.SendFailed;
+    if (comptime builtin.os.tag == .windows) return error.ZixSendFailed;
 
     var iov = posix.iovec_const{ .base = base, .len = total };
     var control: GsoControl align(@alignOf(usize)) = undefined;
@@ -626,7 +626,7 @@ fn sendSeg(fd: posix.socket_t, base: [*]const u8, total: usize, seg_size: u16, d
         switch (posix.errno(rc)) {
             .SUCCESS => return,
             .INTR => continue,
-            else => return error.SendFailed,
+            else => return error.ZixSendFailed,
         }
     }
 }

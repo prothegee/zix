@@ -45,7 +45,7 @@ pub fn UdpClient(comptime Packet: type) type {
         /// args - process args, or `.{}` when not reading CLI
         ///
         /// Return:
-        /// - error.PortNotConfigured if bind_port or server_port is zero
+        /// - error.ZixPortNotConfigured if bind_port or server_port is zero
         pub fn init(config: UdpClientConfig, io: std.Io, args: anytype) !Self {
             var cfg = config;
             // The parse only compiles when args is a real std.process.Args. Passing `.{}` (no CLI)
@@ -54,7 +54,7 @@ pub fn UdpClient(comptime Packet: type) type {
                 if (cfg.allow_args) cfg = Config.applyClientArgs(cfg, args);
             }
 
-            if (cfg.bind_port == 0 or cfg.server_port == 0) return error.PortNotConfigured;
+            if (cfg.bind_port == 0 or cfg.server_port == 0) return error.ZixPortNotConfigured;
 
             const bind_addr = try std.Io.net.IpAddress.parse(cfg.bind_ip, cfg.bind_port);
             const socket = try bind_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
@@ -78,8 +78,8 @@ pub fn UdpClient(comptime Packet: type) type {
         /// Blocking receive. Decodes the packet from wire endianness on receipt.
         ///
         /// Return:
-        /// - error.RecvTimeout if recv_timeout_ms is set and no datagram arrives in time
-        /// - error.UnexpectedPacketSize if the datagram size matches neither ACK/NACK nor Packet
+        /// - error.ZixRecvTimeout if recv_timeout_ms is set and no datagram arrives in time
+        /// - error.ZixUnexpectedPacketSize if the datagram size matches neither ACK/NACK nor Packet
         ///
         /// Note:
         /// - for a concurrent send/receive loop, see examples/udp_client.zig
@@ -87,7 +87,7 @@ pub fn UdpClient(comptime Packet: type) type {
             if (self.config.recv_timeout_ms > 0) {
                 // std.Io.Threaded panics on EAGAIN, so gate with poll instead of SO_RCVTIMEO.
                 if (!try socket_poll.waitReady(self.socket.handle, socket_poll.READABLE, self.config.recv_timeout_ms)) {
-                    return error.RecvTimeout;
+                    return error.ZixRecvTimeout;
                 }
             }
 
@@ -100,7 +100,7 @@ pub fn UdpClient(comptime Packet: type) type {
                 const wire_pkt: Packet = std.mem.bytesToValue(Packet, &buf);
                 return .{ .packet = pkt.fromEndian(Packet, wire_pkt, self.config.endianness) };
             }
-            return error.UnexpectedPacketSize;
+            return error.ZixUnexpectedPacketSize;
         }
     };
 }
@@ -112,7 +112,7 @@ test "zix udp: UdpClient init rejects a zero port" {
     defer threaded.deinit();
 
     const Client = UdpClient(extern struct { value: u32 });
-    try std.testing.expectError(error.PortNotConfigured, Client.init(.{ .ip = "127.0.0.1", .server_port = 0, .bind_port = 0 }, threaded.io(), .{}));
+    try std.testing.expectError(error.ZixPortNotConfigured, Client.init(.{ .ip = "127.0.0.1", .server_port = 0, .bind_port = 0 }, threaded.io(), .{}));
 }
 
 test "zix udp: UdpClient receiveFeedback reports RecvTimeout when the server stays silent" {
@@ -131,5 +131,5 @@ test "zix udp: UdpClient receiveFeedback reports RecvTimeout when the server sta
     }, threaded.io(), .{});
     defer client.deinit();
 
-    try std.testing.expectError(error.RecvTimeout, client.receiveFeedback());
+    try std.testing.expectError(error.ZixRecvTimeout, client.receiveFeedback());
 }

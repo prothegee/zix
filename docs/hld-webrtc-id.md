@@ -114,12 +114,12 @@ Primitif tingkat rendah, terbuka supaya peer atau harness test bisa membangun si
 
 | Error | Sebab |
 | :- | :- |
-| `error.PortNotConfigured` | `config.port` bernilai 0 |
-| `error.IceCredentialsRequired` | ufrag atau password lokal kosong |
-| `error.IceCredentialsInvalid` | salah satunya di luar yang diizinkan RFC 8445 bagian 5.3 |
-| `error.TlsRequired` | `config.tls` null, sementara WebRTC tidak punya mode cleartext |
-| `error.UnsupportedCertificateKey` | kunci pada context itu bukan ECDSA P-256 |
-| `error.DispatchModelUnsupported` | `.EPOLL` atau `.URING` di luar Linux |
+| `error.ZixPortNotConfigured` | `config.port` bernilai 0 |
+| `error.ZixIceCredentialsRequired` | ufrag atau password lokal kosong |
+| `error.ZixIceCredentialsInvalid` | salah satunya di luar yang diizinkan RFC 8445 bagian 5.3 |
+| `error.ZixTlsRequired` | `config.tls` null, sementara WebRTC tidak punya mode cleartext |
+| `error.ZixUnsupportedCertificateKey` | kunci pada context itu bukan ECDSA P-256 |
+| `error.ZixDispatchModelUnsupported` | `.EPOLL` atau `.URING` di luar Linux |
 
 ### Method Context
 

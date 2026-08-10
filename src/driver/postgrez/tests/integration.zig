@@ -58,7 +58,7 @@ test "postgrez integration: 00 server becomes ready (driver-polled)" {
     var attempt: u32 = 0;
     while (true) : (attempt += 1) {
         const conn = postgrez.Conn.connect(arena.allocator(), io, SCRAM_CONFIG) catch {
-            if (attempt >= 240) return error.ServerNeverBecameReady;
+            if (attempt >= 240) return error.PostgrezServerNeverBecameReady;
             ioSleepMs(io, 500);
 
             continue;
@@ -129,7 +129,7 @@ test "postgrez integration: 04 wrong password surfaces INVALID_PASSWORD" {
     var bad_config = SCRAM_CONFIG;
     bad_config.password = "wrong";
 
-    try testing.expectError(error.ServerError, postgrez.Conn.connect(arena.allocator(), threaded.io(), bad_config));
+    try testing.expectError(error.PostgrezServerError, postgrez.Conn.connect(arena.allocator(), threaded.io(), bad_config));
 }
 
 const Profile = struct {
@@ -257,7 +257,7 @@ test "postgrez integration: 08 unique violation maps to the SQLSTATE enum" {
     const conn = try postgrez.Conn.connect(arena.allocator(), threaded.io(), SCRAM_CONFIG);
     defer conn.deinit();
 
-    try testing.expectError(error.ServerError, conn.exec(
+    try testing.expectError(error.PostgrezServerError, conn.exec(
         "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
         .{ "Alice2", "alice@example.com", @as(i16, 31) },
     ));
@@ -447,7 +447,7 @@ test "postgrez integration: 14 pool heals a killed connection via retry" {
     ioSleepMs(io, 200);
 
     // the victim now fails, discard frees the slot, acquire reconnects
-    try testing.expectError(error.ConnectionClosed, again.exec("SELECT 1", .{}));
+    try testing.expectError(error.PostgrezConnectionClosed, again.exec("SELECT 1", .{}));
     pool.discard(again);
 
     const healed = try pool.acquire();
@@ -604,7 +604,7 @@ const ExecutorProbe = struct {
     fn waitDone(target: u32) !void {
         var spins: usize = 0;
         while (done.load(.monotonic) < target) : (spins += 1) {
-            if (spins > 50_000_000) return error.ExecutorNeverFinished;
+            if (spins > 50_000_000) return error.PostgrezExecutorNeverFinished;
             std.atomic.spinLoopHint();
         }
     }
@@ -641,7 +641,7 @@ test "postgrez integration: 18 executor pipelines a batch of prepared reads in o
     var seen_batches: u64 = 0;
     var spins: usize = 0;
     while (seen_jobs < count or seen_batches < 1) : (spins += 1) {
-        if (spins > 50_000_000) return error.StatsNeverSettled;
+        if (spins > 50_000_000) return error.PostgrezStatsNeverSettled;
 
         const stats = executor.snapshot();
         seen_jobs += stats.jobs;

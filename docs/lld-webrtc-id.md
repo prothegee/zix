@@ -215,7 +215,7 @@ Jebakan yang perlu diingat:
 - `a=sctp-port` yang hilang adalah error (RFC 8841 bagian 5.1). `a=max-message-size` yang hilang berdefault 64 KB, dan nilai 0 berarti ukuran bebas.
 - `MAX_SESSION_ID` membatasi session id pada baris origin di 62 bit, karena RFC 8829 bagian 5.2.1 menuntut yang muat di integer 64 bit **bertanda**. `u64` rentang penuh membuat Firefox menolak seluruh answer sekitar separuh waktu.
 - **`media_answer.zig` menulis `a=candidate` plus `end-of-candidates` di setiap section yang dibawa.** Browser membaca candidate remote dari section bertanda BUNDLE, yang berupa media section ketika media ditawarkan. Tanpa itu peer punya credential dan tidak punya alamat, lalu ICE gagal tanpa satu datagram pun terkirim.
-- `offer.zig` mewajibkan adanya data channel section dan menjawab `error.NoDataChannel` bila tidak ada, jadi halaman browser harus memanggil `createDataChannel` bersama media-nya.
+- `offer.zig` mewajibkan adanya data channel section dan menjawab `error.ZixNoDataChannel` bila tidak ada, jadi halaman browser harus memanggil `createDataChannel` bersama media-nya.
 
 Kebijakan: media ditolak secara default. Format yang ditawarkan **diulang, bukan dipilih**, karena engine ini tidak punya codec sehingga tidak punya pendapat. `rtx` (RFC 4588) dibuang, karena butuh riwayat paket yang tidak ada. Feedback dijawab hanya bila ia ditawarkan **dan** diimplementasikan, yaitu `nack` dan `nack pli` saja. `a=rtcp-mux` diwajibkan, karena socket-nya satu.
 

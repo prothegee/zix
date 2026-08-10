@@ -16,7 +16,7 @@ Sudah diimplementasikan. Lihat ADR-024 untuk alasan desain.
 - Framing berbasis delimiter SOH: tanpa length prefix, deteksi batas pesan berbasis delimiter.
 - Lapisan sesi sudah terintegrasi: Logon / Logout / Heartbeat / TestRequest ditangani secara otomatis, semua pesan lainnya di-echo.
 - Tidak ada heap allocation di `serveConn`: stack buffer digunakan di seluruh implementasi.
-- Dispatch ASYNC, EPOLL, dan URING. Wajib tanpa default: ASYNC cocok untuk sesi FIX berumur panjang dan satu-satunya model portabel. EPOLL dan URING menjalankan worker per-core shared-nothing di Linux, dan `run()` menolak keduanya di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
+- Dispatch ASYNC, EPOLL, dan URING. Wajib tanpa default: ASYNC cocok untuk sesi FIX berumur panjang dan satu-satunya model portabel. EPOLL dan URING menjalankan worker per-core shared-nothing di Linux, dan `run()` menolak keduanya di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
 - `io: std.Io` di dalam konfigurasi (tidak diteruskan ke `run()`).
 
 ---
@@ -85,7 +85,7 @@ pub const Fix = @import("tcp/fix/Fix.zig");
 | `ip` | wajib | Alamat bind |
 | `port` | wajib | Port bind. Harus bukan nol |
 | `comp_id` | wajib | SenderCompID server (tag 49) |
-| `dispatch_model` | `.ASYNC` | ASYNC, EPOLL, atau URING (EPOLL dan URING Linux-only: epoll native / io_uring, ditolak di luar Linux dengan error.DispatchModelUnsupported) |
+| `dispatch_model` | `.ASYNC` | ASYNC, EPOLL, atau URING (EPOLL dan URING Linux-only: epoll native / io_uring, ditolak di luar Linux dengan error.ZixDispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | TCP listen backlog |
 | `workers` | 0 (cpu_count) | Jumlah accept thread. Diabaikan oleh ASYNC |
 | `worker_stack_size_bytes` | 512 KiB | Stack worker thread untuk handler EPOLL / URING. Demand-paged, biaya kecil sampai kedalamannya terpakai |

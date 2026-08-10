@@ -19,9 +19,9 @@ const message = @import("message.zig");
 pub const MAX_MESSAGE_LEN = 1024 * 1024;
 
 pub const Error = error{
-    ConnectionClosed,
-    MalformedMessage,
-    MessageTooLarge,
+    PostgrezConnectionClosed,
+    PostgrezMalformedMessage,
+    PostgrezMessageTooLarge,
     OutOfMemory,
 };
 
@@ -112,22 +112,22 @@ pub const Message = union(enum) {
 /// arena - std.mem.Allocator (owns every slice in the result)
 pub fn readStartup(source: anytype, arena: std.mem.Allocator) Error!Startup {
     var length_bytes: [4]u8 = undefined;
-    source.readExact(&length_bytes) catch return error.ConnectionClosed;
+    source.readExact(&length_bytes) catch return error.PostgrezConnectionClosed;
 
     const total = std.mem.readInt(i32, &length_bytes, .big);
-    if (total < 8 or total > MAX_MESSAGE_LEN) return error.MessageTooLarge;
+    if (total < 8 or total > MAX_MESSAGE_LEN) return error.PostgrezMessageTooLarge;
 
     const payload = try arena.alloc(u8, @as(usize, @intCast(total)) - 4);
-    source.readExact(payload) catch return error.ConnectionClosed;
+    source.readExact(payload) catch return error.PostgrezConnectionClosed;
 
     var reader = message.Reader{ .buf = payload };
-    const code = reader.int32() catch return error.MalformedMessage;
+    const code = reader.int32() catch return error.PostgrezMalformedMessage;
 
     // an SSL request is exactly the code and nothing else
     if (code == 80877103) return .ssl_request;
 
     if (code == 80877102) {
-        const pid = reader.int32() catch return error.MalformedMessage;
+        const pid = reader.int32() catch return error.PostgrezMalformedMessage;
 
         return .{ .cancel_request = .{ .pid = pid, .key = reader.rest() } };
     }
@@ -137,10 +137,10 @@ pub fn readStartup(source: anytype, arena: std.mem.Allocator) Error!Startup {
     var database: []const u8 = "";
 
     while (reader.remaining() > 1) {
-        const name = reader.cstring() catch return error.MalformedMessage;
+        const name = reader.cstring() catch return error.PostgrezMalformedMessage;
         if (name.len == 0) break;
 
-        const value = reader.cstring() catch return error.MalformedMessage;
+        const value = reader.cstring() catch return error.PostgrezMalformedMessage;
         try parameters.append(arena, .{ .name = name, .value = value });
 
         if (std.mem.eql(u8, name, "user")) user = value;
@@ -158,14 +158,14 @@ pub fn readStartup(source: anytype, arena: std.mem.Allocator) Error!Startup {
 /// Read one tagged message.
 pub fn readMessage(source: anytype, arena: std.mem.Allocator) Error!Message {
     var header: [5]u8 = undefined;
-    source.readExact(&header) catch return error.ConnectionClosed;
+    source.readExact(&header) catch return error.PostgrezConnectionClosed;
 
     const tag = header[0];
     const total = std.mem.readInt(i32, header[1..5], .big);
-    if (total < 4 or total > MAX_MESSAGE_LEN) return error.MessageTooLarge;
+    if (total < 4 or total > MAX_MESSAGE_LEN) return error.PostgrezMessageTooLarge;
 
     const payload = try arena.alloc(u8, @as(usize, @intCast(total)) - 4);
-    source.readExact(payload) catch return error.ConnectionClosed;
+    source.readExact(payload) catch return error.PostgrezConnectionClosed;
 
     return decode(tag, payload, arena);
 }
@@ -177,7 +177,7 @@ pub fn decode(tag: u8, payload: []const u8, arena: std.mem.Allocator) Error!Mess
 
     return switch (tag) {
         'p' => .{ .password = payload },
-        'Q' => .{ .query = reader.cstring() catch return error.MalformedMessage },
+        'Q' => .{ .query = reader.cstring() catch return error.PostgrezMalformedMessage },
         'P' => .{ .parse = try decodeParse(&reader, arena) },
         'B' => .{ .bind = try decodeBind(&reader, arena) },
         'D' => .{ .describe = try decodeTarget(&reader) },
@@ -188,41 +188,41 @@ pub fn decode(tag: u8, payload: []const u8, arena: std.mem.Allocator) Error!Mess
         'X' => .terminate,
         'd' => .{ .copy_data = payload },
         'c' => .copy_done,
-        'f' => .{ .copy_fail = reader.cstring() catch return error.MalformedMessage },
+        'f' => .{ .copy_fail = reader.cstring() catch return error.PostgrezMalformedMessage },
         else => .{ .unknown = tag },
     };
 }
 
 fn decodeParse(reader: *message.Reader, arena: std.mem.Allocator) Error!Parse {
-    const statement_name = reader.cstring() catch return error.MalformedMessage;
-    const sql = reader.cstring() catch return error.MalformedMessage;
-    const count = reader.int16() catch return error.MalformedMessage;
-    if (count < 0) return error.MalformedMessage;
+    const statement_name = reader.cstring() catch return error.PostgrezMalformedMessage;
+    const sql = reader.cstring() catch return error.PostgrezMalformedMessage;
+    const count = reader.int16() catch return error.PostgrezMalformedMessage;
+    if (count < 0) return error.PostgrezMalformedMessage;
 
     const oids = try arena.alloc(u32, @intCast(count));
     for (oids) |*entry| {
-        entry.* = @bitCast(reader.int32() catch return error.MalformedMessage);
+        entry.* = @bitCast(reader.int32() catch return error.PostgrezMalformedMessage);
     }
 
     return .{ .statement_name = statement_name, .sql = sql, .param_oids = oids };
 }
 
 fn decodeBind(reader: *message.Reader, arena: std.mem.Allocator) Error!Bind {
-    const portal_name = reader.cstring() catch return error.MalformedMessage;
-    const statement_name = reader.cstring() catch return error.MalformedMessage;
+    const portal_name = reader.cstring() catch return error.PostgrezMalformedMessage;
+    const statement_name = reader.cstring() catch return error.PostgrezMalformedMessage;
 
     // Parameter formats. The protocol allows none (all text), exactly one
     // (that format for every parameter), or one each.
-    const format_count = reader.int16() catch return error.MalformedMessage;
-    if (format_count < 0) return error.MalformedMessage;
+    const format_count = reader.int16() catch return error.PostgrezMalformedMessage;
+    if (format_count < 0) return error.PostgrezMalformedMessage;
 
     const formats = try arena.alloc(bool, @intCast(format_count));
     for (formats) |*binary| {
-        binary.* = (reader.int16() catch return error.MalformedMessage) == 1;
+        binary.* = (reader.int16() catch return error.PostgrezMalformedMessage) == 1;
     }
 
-    const param_count = reader.int16() catch return error.MalformedMessage;
-    if (param_count < 0) return error.MalformedMessage;
+    const param_count = reader.int16() catch return error.PostgrezMalformedMessage;
+    if (param_count < 0) return error.PostgrezMalformedMessage;
 
     const parameters = try arena.alloc(BoundParameter, @intCast(param_count));
     for (parameters, 0..) |*parameter, index| {
@@ -233,9 +233,9 @@ fn decodeBind(reader: *message.Reader, arena: std.mem.Allocator) Error!Bind {
         else if (index < formats.len)
             formats[index]
         else
-            return error.MalformedMessage;
+            return error.PostgrezMalformedMessage;
 
-        const length = reader.int32() catch return error.MalformedMessage;
+        const length = reader.int32() catch return error.PostgrezMalformedMessage;
         if (length < 0) {
             parameter.* = .{ .value = null, .binary = binary };
 
@@ -243,19 +243,19 @@ fn decodeBind(reader: *message.Reader, arena: std.mem.Allocator) Error!Bind {
         }
 
         parameter.* = .{
-            .value = reader.bytes(@intCast(length)) catch return error.MalformedMessage,
+            .value = reader.bytes(@intCast(length)) catch return error.PostgrezMalformedMessage,
             .binary = binary,
         };
     }
 
-    const result_format_count = reader.int16() catch return error.MalformedMessage;
-    if (result_format_count < 0) return error.MalformedMessage;
+    const result_format_count = reader.int16() catch return error.PostgrezMalformedMessage;
+    if (result_format_count < 0) return error.PostgrezMalformedMessage;
 
     // any binary result format asks the whole row set to come back binary,
     // which is what the driver's binary-first mapper relies on
     var binary_results = false;
     for (0..@intCast(result_format_count)) |_| {
-        const format = reader.int16() catch return error.MalformedMessage;
+        const format = reader.int16() catch return error.PostgrezMalformedMessage;
         if (format == 1) binary_results = true;
     }
 
@@ -268,16 +268,16 @@ fn decodeBind(reader: *message.Reader, arena: std.mem.Allocator) Error!Bind {
 }
 
 fn decodeTarget(reader: *message.Reader) Error!Target {
-    const kind = reader.byte() catch return error.MalformedMessage;
-    const name = reader.cstring() catch return error.MalformedMessage;
+    const kind = reader.byte() catch return error.PostgrezMalformedMessage;
+    const name = reader.cstring() catch return error.PostgrezMalformedMessage;
 
     return .{ .kind = kind, .name = name };
 }
 
 fn decodeExecute(reader: *message.Reader) Error!Execute {
-    const portal_name = reader.cstring() catch return error.MalformedMessage;
-    const max_rows = reader.int32() catch return error.MalformedMessage;
-    if (max_rows < 0) return error.MalformedMessage;
+    const portal_name = reader.cstring() catch return error.PostgrezMalformedMessage;
+    const max_rows = reader.int32() catch return error.PostgrezMalformedMessage;
+    if (max_rows < 0) return error.PostgrezMalformedMessage;
 
     return .{ .portal_name = portal_name, .max_rows = @intCast(max_rows) };
 }
@@ -296,7 +296,7 @@ const FixedSource = struct {
     pos: usize = 0,
 
     fn readExact(self: *FixedSource, buf: []u8) !void {
-        if (self.pos + buf.len > self.bytes.len) return error.ConnectionClosed;
+        if (self.pos + buf.len > self.bytes.len) return error.PostgrezConnectionClosed;
 
         @memcpy(buf, self.bytes[self.pos..][0..buf.len]);
         self.pos += buf.len;
@@ -496,7 +496,7 @@ test "postgrez inproc: frontend reports a closed peer mid-message" {
     // a header that promises more payload than the stream holds
     var source = FixedSource{ .bytes = &[_]u8{ 'Q', 0, 0, 0, 20 } };
 
-    try testing.expectError(error.ConnectionClosed, readMessage(&source, arena.allocator()));
+    try testing.expectError(error.PostgrezConnectionClosed, readMessage(&source, arena.allocator()));
 }
 
 test "postgrez inproc: frontend rejects an implausible message length" {
@@ -505,5 +505,5 @@ test "postgrez inproc: frontend rejects an implausible message length" {
 
     var source = FixedSource{ .bytes = &[_]u8{ 'Q', 0x7f, 0xff, 0xff, 0xff } };
 
-    try testing.expectError(error.MessageTooLarge, readMessage(&source, arena.allocator()));
+    try testing.expectError(error.PostgrezMessageTooLarge, readMessage(&source, arena.allocator()));
 }

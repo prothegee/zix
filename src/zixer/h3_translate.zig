@@ -20,11 +20,11 @@ const NAME_LOWER_MAX: usize = 128;
 pub const Error = error{
     /// The request breaks an rfc 9114 4.1.2 or 4.2 rule: the stream answers a
     /// message error, never the pool.
-    Malformed,
+    ZixerMalformed,
     /// CONNECT over h3. The edge tunnels nothing on h3 yet.
-    UnsupportedConnect,
+    ZixerUnsupportedConnect,
     /// The head or block buffer ran out.
-    BufferFull,
+    ZixerBufferFull,
     WriteFailed,
 };
 
@@ -55,28 +55,28 @@ pub fn assemble(fields: []const h3_qpack.Field, end_stream: bool) Error!Request 
     var seen_regular = false;
 
     for (fields) |field| {
-        if (field.name.len == 0) return error.Malformed;
+        if (field.name.len == 0) return error.ZixerMalformed;
 
         if (field.name[0] == ':') {
-            if (seen_regular) return error.Malformed;
+            if (seen_regular) return error.ZixerMalformed;
 
             if (std.mem.eql(u8, field.name, ":method")) {
-                if (method != null) return error.Malformed;
+                if (method != null) return error.ZixerMalformed;
                 method = field.value;
             } else if (std.mem.eql(u8, field.name, ":path")) {
-                if (target != null) return error.Malformed;
+                if (target != null) return error.ZixerMalformed;
                 target = field.value;
             } else if (std.mem.eql(u8, field.name, ":scheme")) {
-                if (scheme != null) return error.Malformed;
+                if (scheme != null) return error.ZixerMalformed;
                 scheme = field.value;
             } else if (std.mem.eql(u8, field.name, ":authority")) {
-                if (authority != null) return error.Malformed;
+                if (authority != null) return error.ZixerMalformed;
                 authority = field.value;
             } else if (std.mem.eql(u8, field.name, ":protocol")) {
-                if (protocol != null) return error.Malformed;
+                if (protocol != null) return error.ZixerMalformed;
                 protocol = field.value;
             } else {
-                return error.Malformed;
+                return error.ZixerMalformed;
             }
             continue;
         }
@@ -85,11 +85,11 @@ pub fn assemble(fields: []const h3_qpack.Field, end_stream: bool) Error!Request 
         try validateRegularName(field.name);
 
         if (std.mem.eql(u8, field.name, "te")) {
-            if (!std.ascii.eqlIgnoreCase(field.value, "trailers")) return error.Malformed;
+            if (!std.ascii.eqlIgnoreCase(field.value, "trailers")) return error.ZixerMalformed;
         } else if (std.mem.eql(u8, field.name, "content-length")) {
-            const parsed = std.fmt.parseInt(u64, field.value, 10) catch return error.Malformed;
+            const parsed = std.fmt.parseInt(u64, field.value, 10) catch return error.ZixerMalformed;
             if (content_length) |seen| {
-                if (seen != parsed) return error.Malformed;
+                if (seen != parsed) return error.ZixerMalformed;
             }
             content_length = parsed;
         } else if (std.mem.eql(u8, field.name, "host")) {
@@ -99,23 +99,23 @@ pub fn assemble(fields: []const h3_qpack.Field, end_stream: bool) Error!Request 
         }
     }
 
-    const method_value = method orelse return error.Malformed;
-    if (method_value.len == 0) return error.Malformed;
+    const method_value = method orelse return error.ZixerMalformed;
+    if (method_value.len == 0) return error.ZixerMalformed;
 
     // The edge terminates h3 and re-originates h1, and an h1 hop cannot carry
     // a tunnel opened over h3 (rfc 9114 4.4, rfc 9220 for extended CONNECT).
-    if (std.mem.eql(u8, method_value, "CONNECT")) return error.UnsupportedConnect;
-    if (protocol != null) return error.UnsupportedConnect;
+    if (std.mem.eql(u8, method_value, "CONNECT")) return error.ZixerUnsupportedConnect;
+    if (protocol != null) return error.ZixerUnsupportedConnect;
 
-    if (scheme == null) return error.Malformed;
-    const target_value = target orelse return error.Malformed;
-    if (target_value.len == 0) return error.Malformed;
+    if (scheme == null) return error.ZixerMalformed;
+    const target_value = target orelse return error.ZixerMalformed;
+    if (target_value.len == 0) return error.ZixerMalformed;
 
     const final_authority = authority orelse host_value;
-    if (final_authority.len == 0) return error.Malformed;
+    if (final_authority.len == 0) return error.ZixerMalformed;
 
     // A body promised by content-length cannot ride a stream that already ended.
-    if (end_stream and (content_length orelse 0) != 0) return error.Malformed;
+    if (end_stream and (content_length orelse 0) != 0) return error.ZixerMalformed;
 
     return .{
         .method = method_value,
@@ -132,12 +132,12 @@ pub fn assemble(fields: []const h3_qpack.Field, end_stream: bool) Error!Request 
 /// header makes the whole message malformed.
 fn validateRegularName(name: []const u8) Error!void {
     for (name) |char| {
-        if (char >= 'A' and char <= 'Z') return error.Malformed;
+        if (char >= 'A' and char <= 'Z') return error.ZixerMalformed;
     }
 
     const forbidden = [_][]const u8{ "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade" };
     for (forbidden) |bad| {
-        if (std.mem.eql(u8, name, bad)) return error.Malformed;
+        if (std.mem.eql(u8, name, bad)) return error.ZixerMalformed;
     }
 }
 
@@ -146,22 +146,22 @@ fn validateRegularName(name: []const u8) Error!void {
 pub fn buildUpstreamHead(buf: []u8, request: *const Request, fields: []const h3_qpack.Field, client_addr: std.Io.net.IpAddress, scheme: request_scheme.Scheme, extra: cfg_headers.Block) Error![]const u8 {
     var fixed = std.Io.Writer.fixed(buf);
 
-    fixed.print("{s} {s} HTTP/1.1\r\n", .{ request.method, request.target }) catch return error.BufferFull;
-    fixed.print("Host: {s}\r\n", .{request.authority}) catch return error.BufferFull;
-    writeFilteredFields(&fixed, fields, extra) catch return error.BufferFull;
-    fixed.print("Via: {s}\r\n", .{VIA_H3}) catch return error.BufferFull;
-    proxy_headers.writeForwarded(&fixed, client_addr, request.authority, scheme) catch return error.BufferFull;
+    fixed.print("{s} {s} HTTP/1.1\r\n", .{ request.method, request.target }) catch return error.ZixerBufferFull;
+    fixed.print("Host: {s}\r\n", .{request.authority}) catch return error.ZixerBufferFull;
+    writeFilteredFields(&fixed, fields, extra) catch return error.ZixerBufferFull;
+    fixed.print("Via: {s}\r\n", .{VIA_H3}) catch return error.ZixerBufferFull;
+    proxy_headers.writeForwarded(&fixed, client_addr, request.authority, scheme) catch return error.ZixerBufferFull;
 
     if (request.has_body) {
         if (request.content_length) |len| {
-            fixed.print("Content-Length: {d}\r\n", .{len}) catch return error.BufferFull;
+            fixed.print("Content-Length: {d}\r\n", .{len}) catch return error.ZixerBufferFull;
         } else {
-            fixed.writeAll("Transfer-Encoding: chunked\r\n") catch return error.BufferFull;
+            fixed.writeAll("Transfer-Encoding: chunked\r\n") catch return error.ZixerBufferFull;
         }
     }
 
-    extra.write(&fixed) catch return error.BufferFull;
-    fixed.writeAll("\r\n") catch return error.BufferFull;
+    extra.write(&fixed) catch return error.ZixerBufferFull;
+    fixed.writeAll("\r\n") catch return error.ZixerBufferFull;
 
     return fixed.buffered();
 }
@@ -233,7 +233,7 @@ pub fn encodeLocalBlock(block_buf: []u8, status: u16, proxy_error: ?[]const u8, 
 
     if (proxy_error) |token| {
         var value_buf: [96]u8 = undefined;
-        const value = std.fmt.bufPrint(&value_buf, "zixer; error=\"{s}\"", .{token}) catch return error.BufferFull;
+        const value = std.fmt.bufPrint(&value_buf, "zixer; error=\"{s}\"", .{token}) catch return error.ZixerBufferFull;
         try encoder.field("proxy-status", value);
     }
 
@@ -291,7 +291,7 @@ fn writeExtraFields(encoder: *h3_qpack.Encoder, extra: cfg_headers.Block) Error!
 
     var value_buf: [cfg_headers.MAX_VALUE_BYTES]u8 = undefined;
     for (extra.lines()) |line| {
-        const value = line.renderValue(&value_buf, extra.values) catch return error.BufferFull;
+        const value = line.renderValue(&value_buf, extra.values) catch return error.ZixerBufferFull;
 
         try writeLowerField(encoder, line.name, value);
     }
@@ -340,7 +340,7 @@ test "zix zixer: h3 translate, missing and duplicate pseudo headers are malforme
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":authority", .value = "a.test" },
     };
-    try testing.expectError(error.Malformed, assemble(&no_path, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&no_path, true));
 
     const twice = [_]h3_qpack.Field{
         .{ .name = ":method", .value = "GET" },
@@ -349,14 +349,14 @@ test "zix zixer: h3 translate, missing and duplicate pseudo headers are malforme
         .{ .name = ":authority", .value = "a.test" },
         .{ .name = ":path", .value = "/" },
     };
-    try testing.expectError(error.Malformed, assemble(&twice, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&twice, true));
 
     const after_regular = [_]h3_qpack.Field{
         .{ .name = ":method", .value = "GET" },
         .{ .name = "accept", .value = "*/*" },
         .{ .name = ":path", .value = "/" },
     };
-    try testing.expectError(error.Malformed, assemble(&after_regular, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&after_regular, true));
 
     const unknown_pseudo = [_]h3_qpack.Field{
         .{ .name = ":method", .value = "GET" },
@@ -365,7 +365,7 @@ test "zix zixer: h3 translate, missing and duplicate pseudo headers are malforme
         .{ .name = ":path", .value = "/" },
         .{ .name = ":made-up", .value = "x" },
     };
-    try testing.expectError(error.Malformed, assemble(&unknown_pseudo, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&unknown_pseudo, true));
 }
 
 test "zix zixer: h3 translate, connection specific fields are malformed" {
@@ -378,14 +378,14 @@ test "zix zixer: h3 translate, connection specific fields are malformed" {
 
     inline for (.{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" }) |name| {
         const fields = base ++ [_]h3_qpack.Field{.{ .name = name, .value = "x" }};
-        try testing.expectError(error.Malformed, assemble(&fields, true));
+        try testing.expectError(error.ZixerMalformed, assemble(&fields, true));
     }
 
     const upper = base ++ [_]h3_qpack.Field{.{ .name = "Accept", .value = "*/*" }};
-    try testing.expectError(error.Malformed, assemble(&upper, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&upper, true));
 
     const bad_te = base ++ [_]h3_qpack.Field{.{ .name = "te", .value = "gzip" }};
-    try testing.expectError(error.Malformed, assemble(&bad_te, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&bad_te, true));
 
     const good_te = base ++ [_]h3_qpack.Field{.{ .name = "te", .value = "trailers" }};
     _ = try assemble(&good_te, true);
@@ -400,7 +400,7 @@ test "zix zixer: h3 translate, connect is refused on the h3 edge" {
         .{ .name = ":protocol", .value = "websocket" },
     };
 
-    try testing.expectError(error.UnsupportedConnect, assemble(&connect, true));
+    try testing.expectError(error.ZixerUnsupportedConnect, assemble(&connect, true));
 }
 
 test "zix zixer: h3 translate, a body without content length frames as chunked" {
@@ -431,7 +431,7 @@ test "zix zixer: h3 translate, a body without content length frames as chunked" 
     try testing.expect(std.mem.indexOf(u8, sized_head, "Content-Length: 7\r\n") != null);
 
     // A promised body on an already ended stream is malformed.
-    try testing.expectError(error.Malformed, assemble(&sized, true));
+    try testing.expectError(error.ZixerMalformed, assemble(&sized, true));
 }
 
 test "zix zixer: h3 translate, the upstream head carries via, forwarded, and coalesced cookies" {

@@ -72,7 +72,7 @@ pub const ForwardState = struct {
     ///
     /// Return:
     /// - *ForwardState with the up pump running
-    /// - error.BadUpstreamAddress when an upstream host is not a literal ip
+    /// - error.ZixerBadUpstreamAddress when an upstream host is not a literal ip
     pub fn create(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -86,7 +86,7 @@ pub const ForwardState = struct {
         const upstreams = try allocator.alloc(std.Io.net.IpAddress, cfg.upstreams.len);
         errdefer allocator.free(upstreams);
         for (cfg.upstreams, 0..) |upstream, index| {
-            upstreams[index] = std.Io.net.IpAddress.parse(upstream.host, upstream.port) catch return error.BadUpstreamAddress;
+            upstreams[index] = std.Io.net.IpAddress.parse(upstream.host, upstream.port) catch return error.ZixerBadUpstreamAddress;
         }
 
         const wake_ip = try allocator.dupe(u8, cfg.ip);
@@ -426,7 +426,7 @@ fn sendAndReceive(io: std.Io, socket: std.Io.net.Socket, edge: *const std.Io.net
     try socket.send(io, edge, payload);
 
     const ready = try socket_poll.waitReady(socket.handle, socket_poll.READABLE, REPLY_WAIT_MS);
-    if (!ready) return error.NoReply;
+    if (!ready) return error.ZixerNoReply;
 
     const message = try socket.receive(io, out);
 
@@ -606,7 +606,7 @@ test "zix zixer: udp forward, a bad upstream literal refuses to start" {
 
     const upstreams = [_]site_cfg.Upstream{.{ .host = "not-an-ip", .port = 9 }};
 
-    try testing.expectError(error.BadUpstreamAddress, startForward(io, 18839, &upstreams));
+    try testing.expectError(error.ZixerBadUpstreamAddress, startForward(io, 18839, &upstreams));
 }
 
 // --------------------------------------------------------- //

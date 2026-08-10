@@ -45,14 +45,14 @@ const CERTIFICATE_VERIFY_CONTEXT = "TLS 1.3, server CertificateVerify";
 const MAX_CLIENT_HELLO = 2048;
 
 pub const Error = error{
-    ConnectionClosed,
-    NotClientHello,
-    NoClientKeyShare,
-    UnsupportedCipherSuite,
-    UnexpectedRecord,
-    ClientFinishedMismatch,
-    RecordTooLarge,
-    HandshakeAlert,
+    PostgrezConnectionClosed,
+    PostgrezNotClientHello,
+    PostgrezNoClientKeyShare,
+    PostgrezUnsupportedCipherSuite,
+    PostgrezUnexpectedRecord,
+    PostgrezClientFinishedMismatch,
+    PostgrezRecordTooLarge,
+    PostgrezHandshakeAlert,
 };
 
 /// Post-handshake keys and the per-direction sequence numbers. The server
@@ -95,7 +95,7 @@ pub const Session = struct {
             );
             self.write_seq += 1;
 
-            writer.writeAll(protected) catch return error.ConnectionClosed;
+            writer.writeAll(protected) catch return error.PostgrezConnectionClosed;
             pos += chunk_len;
         }
     }
@@ -116,7 +116,7 @@ pub const Session = struct {
     fn fillPlain(self: *Self, reader: *std.Io.Reader) !void {
         while (true) {
             const rec = try readWireRecord(reader, &self.record_buf);
-            if (rec[0] == ALERT_RECORD) return error.ConnectionClosed;
+            if (rec[0] == ALERT_RECORD) return error.PostgrezConnectionClosed;
 
             var opened_buf: [record.MAX_PLAINTEXT + 256]u8 = undefined;
             const opened = record.deprotect(
@@ -125,7 +125,7 @@ pub const Session = struct {
                 self.client_app_key,
                 self.client_app_iv,
                 self.read_seq,
-            ) catch return error.ConnectionClosed;
+            ) catch return error.PostgrezConnectionClosed;
             self.read_seq += 1;
 
             switch (opened.inner_type) {
@@ -138,7 +138,7 @@ pub const Session = struct {
                 },
                 // a post-handshake message from the client, nothing to do
                 .HANDSHAKE => continue,
-                else => return error.ConnectionClosed,
+                else => return error.PostgrezConnectionClosed,
             }
         }
     }
@@ -154,8 +154,8 @@ pub const Session = struct {
 ///
 /// Return:
 /// - Session ready for application data
-/// - error.ClientFinishedMismatch when the client proved a different transcript
-/// - error.UnsupportedCipherSuite when the client offered nothing usable
+/// - error.PostgrezClientFinishedMismatch when the client proved a different transcript
+/// - error.PostgrezUnsupportedCipherSuite when the client offered nothing usable
 pub fn handshake(
     io: std.Io,
     reader: *std.Io.Reader,
@@ -164,7 +164,7 @@ pub fn handshake(
 ) !Session {
     var hello_buf: [MAX_CLIENT_HELLO]u8 = undefined;
     const hello_record = try readWireRecord(reader, &hello_buf);
-    if (hello_record[0] != HANDSHAKE_RECORD) return error.UnexpectedRecord;
+    if (hello_record[0] != HANDSHAKE_RECORD) return error.PostgrezUnexpectedRecord;
 
     const client_hello_msg = hello_record[5..];
     const client_hello = try parseClientHello(client_hello_msg);
@@ -240,9 +240,9 @@ pub fn handshake(
         0,
     );
 
-    writer.writeAll(hello_wire) catch return error.ConnectionClosed;
-    writer.writeAll(flight_wire) catch return error.ConnectionClosed;
-    writer.flush() catch return error.ConnectionClosed;
+    writer.writeAll(hello_wire) catch return error.PostgrezConnectionClosed;
+    writer.writeAll(flight_wire) catch return error.PostgrezConnectionClosed;
+    writer.flush() catch return error.PostgrezConnectionClosed;
 
     // application keys come from the transcript through the server Finished
     const t_full = transcript.current();
@@ -296,15 +296,15 @@ fn finishedVerifyData(key: Secret, transcript_hash: Secret) Secret {
 
 /// One TLS record off the wire: the 5-byte header, then the framed length.
 fn readWireRecord(reader: *std.Io.Reader, buf: []u8) Error![]const u8 {
-    if (buf.len < 5) return error.RecordTooLarge;
+    if (buf.len < 5) return error.PostgrezRecordTooLarge;
 
-    reader.readSliceAll(buf[0..5]) catch return error.ConnectionClosed;
+    reader.readSliceAll(buf[0..5]) catch return error.PostgrezConnectionClosed;
 
     const body_len = std.mem.readInt(u16, buf[3..5], .big);
-    if (body_len > record.MAX_CIPHERTEXT) return error.RecordTooLarge;
-    if (5 + @as(usize, body_len) > buf.len) return error.RecordTooLarge;
+    if (body_len > record.MAX_CIPHERTEXT) return error.PostgrezRecordTooLarge;
+    if (5 + @as(usize, body_len) > buf.len) return error.PostgrezRecordTooLarge;
 
-    reader.readSliceAll(buf[5 .. 5 + body_len]) catch return error.ConnectionClosed;
+    reader.readSliceAll(buf[5 .. 5 + body_len]) catch return error.PostgrezConnectionClosed;
 
     return buf[0 .. 5 + body_len];
 }
@@ -327,37 +327,37 @@ const ClientHelloParsed = struct {
 fn parseClientHello(msg: []const u8) Error!ClientHelloParsed {
     var reader = wire.Reader{ .buf = msg };
 
-    if ((reader.readU8() catch return error.NotClientHello) != 1) return error.NotClientHello;
-    _ = reader.readU24() catch return error.NotClientHello;
-    _ = reader.readU16() catch return error.NotClientHello; // legacy_version
-    _ = reader.readBytes(32) catch return error.NotClientHello; // client_random
+    if ((reader.readU8() catch return error.PostgrezNotClientHello) != 1) return error.PostgrezNotClientHello;
+    _ = reader.readU24() catch return error.PostgrezNotClientHello;
+    _ = reader.readU16() catch return error.PostgrezNotClientHello; // legacy_version
+    _ = reader.readBytes(32) catch return error.PostgrezNotClientHello; // client_random
 
-    const session_id_len = reader.readU8() catch return error.NotClientHello;
-    const session_id = reader.readBytes(session_id_len) catch return error.NotClientHello;
+    const session_id_len = reader.readU8() catch return error.PostgrezNotClientHello;
+    const session_id = reader.readBytes(session_id_len) catch return error.PostgrezNotClientHello;
 
-    const suites_len = reader.readU16() catch return error.NotClientHello;
-    const suites = reader.readBytes(suites_len) catch return error.NotClientHello;
-    if (!offersCipherSuite(suites, CIPHER_SUITE_AES_128_GCM_SHA256)) return error.UnsupportedCipherSuite;
+    const suites_len = reader.readU16() catch return error.PostgrezNotClientHello;
+    const suites = reader.readBytes(suites_len) catch return error.PostgrezNotClientHello;
+    if (!offersCipherSuite(suites, CIPHER_SUITE_AES_128_GCM_SHA256)) return error.PostgrezUnsupportedCipherSuite;
 
-    const compression_len = reader.readU8() catch return error.NotClientHello;
-    _ = reader.readBytes(compression_len) catch return error.NotClientHello;
+    const compression_len = reader.readU8() catch return error.PostgrezNotClientHello;
+    _ = reader.readBytes(compression_len) catch return error.PostgrezNotClientHello;
 
-    const ext_len = reader.readU16() catch return error.NoClientKeyShare;
-    const exts = reader.readBytes(ext_len) catch return error.NoClientKeyShare;
+    const ext_len = reader.readU16() catch return error.PostgrezNoClientKeyShare;
+    const exts = reader.readBytes(ext_len) catch return error.PostgrezNoClientKeyShare;
 
     var ext_reader = wire.Reader{ .buf = exts };
     while (ext_reader.remaining() >= 4) {
-        const ext_type = ext_reader.readU16() catch return error.NoClientKeyShare;
-        const ext_data_len = ext_reader.readU16() catch return error.NoClientKeyShare;
-        const ext_data = ext_reader.readBytes(ext_data_len) catch return error.NoClientKeyShare;
+        const ext_type = ext_reader.readU16() catch return error.PostgrezNoClientKeyShare;
+        const ext_data_len = ext_reader.readU16() catch return error.PostgrezNoClientKeyShare;
+        const ext_data = ext_reader.readBytes(ext_data_len) catch return error.PostgrezNoClientKeyShare;
         if (ext_type != 0x0033) continue;
 
         var share_reader = wire.Reader{ .buf = ext_data };
-        _ = share_reader.readU16() catch return error.NoClientKeyShare; // client_shares length
+        _ = share_reader.readU16() catch return error.PostgrezNoClientKeyShare; // client_shares length
         while (share_reader.remaining() >= 4) {
-            const group = share_reader.readU16() catch return error.NoClientKeyShare;
-            const key_len = share_reader.readU16() catch return error.NoClientKeyShare;
-            const key_bytes = share_reader.readBytes(key_len) catch return error.NoClientKeyShare;
+            const group = share_reader.readU16() catch return error.PostgrezNoClientKeyShare;
+            const key_len = share_reader.readU16() catch return error.PostgrezNoClientKeyShare;
+            const key_bytes = share_reader.readBytes(key_len) catch return error.PostgrezNoClientKeyShare;
             if (group != NAMED_GROUP_X25519 or key_len != 32) continue;
 
             var out: ClientHelloParsed = .{ .client_public = undefined, .session_id = session_id };
@@ -367,7 +367,7 @@ fn parseClientHello(msg: []const u8) Error!ClientHelloParsed {
         }
     }
 
-    return error.NoClientKeyShare;
+    return error.PostgrezNoClientKeyShare;
 }
 
 fn offersCipherSuite(suites: []const u8, wanted: u16) bool {
@@ -491,26 +491,26 @@ fn readClientFinished(
         const rec = try readWireRecord(reader, &record_buf);
         switch (rec[0]) {
             20 => continue, // ChangeCipherSpec
-            ALERT_RECORD => return error.HandshakeAlert,
+            ALERT_RECORD => return error.PostgrezHandshakeAlert,
             APPLICATION_DATA_RECORD => {},
-            else => return error.UnexpectedRecord,
+            else => return error.PostgrezUnexpectedRecord,
         }
 
         var opened_buf: [record.MAX_PLAINTEXT + 256]u8 = undefined;
         const opened = record.deprotect(&opened_buf, rec, client_hs.key, client_hs.iv, 0) catch {
-            return error.ClientFinishedMismatch;
+            return error.PostgrezClientFinishedMismatch;
         };
-        if (opened.inner_type != .HANDSHAKE) return error.UnexpectedRecord;
+        if (opened.inner_type != .HANDSHAKE) return error.PostgrezUnexpectedRecord;
 
         var flight_reader = wire.Reader{ .buf = opened.data };
-        const msg_type = flight_reader.readU8() catch return error.ClientFinishedMismatch;
-        const msg_len = flight_reader.readU24() catch return error.ClientFinishedMismatch;
-        const body = flight_reader.readBytes(msg_len) catch return error.ClientFinishedMismatch;
-        if (msg_type != 20) return error.UnexpectedRecord;
+        const msg_type = flight_reader.readU8() catch return error.PostgrezClientFinishedMismatch;
+        const msg_len = flight_reader.readU24() catch return error.PostgrezClientFinishedMismatch;
+        const body = flight_reader.readBytes(msg_len) catch return error.PostgrezClientFinishedMismatch;
+        if (msg_type != 20) return error.PostgrezUnexpectedRecord;
 
         const expected = finishedVerifyData(client_finished_key, transcript_hash);
         if (body.len != expected.len or !std.mem.eql(u8, body, &expected)) {
-            return error.ClientFinishedMismatch;
+            return error.PostgrezClientFinishedMismatch;
         }
 
         return;
@@ -573,7 +573,7 @@ test "postgrez inproc: tls rejects a hello that offers no usable cipher suite" {
     writer.patchU16(exts);
     writer.patchU24(header);
 
-    try testing.expectError(error.UnsupportedCipherSuite, parseClientHello(writer.slice()));
+    try testing.expectError(error.PostgrezUnsupportedCipherSuite, parseClientHello(writer.slice()));
 }
 
 test "postgrez inproc: tls rejects a hello with no x25519 key share" {
@@ -592,7 +592,7 @@ test "postgrez inproc: tls rejects a hello with no x25519 key share" {
     writer.patchU16(exts);
     writer.patchU24(header);
 
-    try testing.expectError(error.NoClientKeyShare, parseClientHello(writer.slice()));
+    try testing.expectError(error.PostgrezNoClientKeyShare, parseClientHello(writer.slice()));
 }
 
 test "postgrez inproc: tls certificate verify content follows the rfc layout" {

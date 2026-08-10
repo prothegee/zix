@@ -18,15 +18,15 @@ test "zix edge: Http1 a lowercase method token is refused, not folded" {
     // engines now read one method table, so the same token gets the same
     // answer whichever engine serves it.
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http1.parseHead("query /search HTTP/1.1\r\nHost: x\r\n\r\n"),
     );
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http1.parseHead("QuErY /search HTTP/1.1\r\nHost: x\r\n\r\n"),
     );
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http1.parseHead("get /search HTTP/1.1\r\nHost: x\r\n\r\n"),
     );
 }
@@ -35,11 +35,11 @@ test "zix edge: Http1 and Http answer a lowercase method the same way" {
     // The two engines used to disagree here: one folded the token, the other
     // matched exactly. This pins them together so the split cannot come back.
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http1.parseHead("query /search HTTP/1.1\r\nHost: x\r\n\r\n"),
     );
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http.Request.fromRaw("query /search HTTP/1.1\r\nHost: x\r\n\r\n", std.testing.allocator),
     );
 }
@@ -48,7 +48,7 @@ test "zix edge: Http1 a method token past the known maximum is refused, not trun
     // The token is peer-controlled. It must be bounded before the lowercase copy,
     // not copied and then measured.
     try std.testing.expectError(
-        error.UnknownMethod,
+        error.ZixUnknownMethod,
         zix.Http1.parseHead("PROPPATCH /search HTTP/1.1\r\nHost: x\r\n\r\n"),
     );
     try std.testing.expect(zix.Http1.Method.codeFromString("PROPPATCH") == null);
@@ -58,17 +58,17 @@ test "zix edge: Http1 an unimplemented method answers 501, a broken line answers
     // Before RFC 10008 support, QUERY itself landed in the unknown bucket and the
     // engine answered as though it were a GET. Now the two failures stay apart all
     // the way to the status line.
-    try std.testing.expectError(error.UnknownMethod, zix.Http1.parseHead("BREW /pot HTTP/1.1\r\n\r\n"));
-    try std.testing.expectError(error.InvalidRequest, zix.Http1.parseHead("GET\r\n\r\n"));
+    try std.testing.expectError(error.ZixUnknownMethod, zix.Http1.parseHead("BREW /pot HTTP/1.1\r\n\r\n"));
+    try std.testing.expectError(error.ZixInvalidRequest, zix.Http1.parseHead("GET\r\n\r\n"));
 
     try std.testing.expect(std.mem.startsWith(
         u8,
-        zix.Http1.parseErrorResponse(error.UnknownMethod),
+        zix.Http1.parseErrorResponse(error.ZixUnknownMethod),
         "HTTP/1.1 501 Not Implemented\r\n",
     ));
     try std.testing.expect(std.mem.startsWith(
         u8,
-        zix.Http1.parseErrorResponse(error.InvalidRequest),
+        zix.Http1.parseErrorResponse(error.ZixInvalidRequest),
         "HTTP/1.1 400 Bad Request\r\n",
     ));
 }
@@ -76,8 +76,8 @@ test "zix edge: Http1 an unimplemented method answers 501, a broken line answers
 test "zix edge: Http1 a malformed request line is not reported as an unknown method" {
     // A line that never tokenized says nothing about the method, so it must not
     // draw a 501.
-    try std.testing.expectError(error.InvalidRequest, zix.Http1.parseHead("GET /x\r\n\r\n"));
-    try std.testing.expectError(error.InvalidRequest, zix.Http1.parseHead("GET /x HTTP/9.9\r\n\r\n"));
+    try std.testing.expectError(error.ZixInvalidRequest, zix.Http1.parseHead("GET /x\r\n\r\n"));
+    try std.testing.expectError(error.ZixInvalidRequest, zix.Http1.parseHead("GET /x HTTP/9.9\r\n\r\n"));
 }
 
 test "zix edge: Http1 a QUERY with an empty method-adjacent target still parses" {

@@ -244,7 +244,7 @@ Parsing Range sendiri tidak lokal: ia datang dari `src/utils/http_range.zig`, di
 
 ## dispatch/ dan tls_mux.zig
 
-`server.zig` memuat tipe publik `Http2Server` dan `run()` switch tipis: `.ASYNC` mempertahankan struktur accept-thread (`common.ConnTask` plus `common.dispatchConn`) dan memanggil `core.serveConn`, `.EPOLL` memanggil `epoll.runEpoll`, `.URING` memanggil `uring.runUring`, dan `config.tls != null` mengarahkan `.EPOLL` / `.URING` ke `tls_mux.runTlsMux`, selain itu semua ke `tls_serve.runTls`. Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.DispatchModelUnsupported` (ADR-065).
+`server.zig` memuat tipe publik `Http2Server` dan `run()` switch tipis: `.ASYNC` mempertahankan struktur accept-thread (`common.ConnTask` plus `common.dispatchConn`) dan memanggil `core.serveConn`, `.EPOLL` memanggil `epoll.runEpoll`, `.URING` memanggil `uring.runUring`, dan `config.tls != null` mengarahkan `.EPOLL` / `.URING` ke `tls_mux.runTlsMux`, selain itu semua ke `tls_serve.runTls`. Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### dispatch/epoll.zig
 

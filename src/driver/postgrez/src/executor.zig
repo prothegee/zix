@@ -102,7 +102,7 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
                 if (table.statements[slot]) |*ready| return ready;
 
                 table.statements[slot] = table.conn.?.prepare(sql) catch |err| {
-                    if (err != error.ServerError) self.broken = true;
+                    if (err != error.PostgrezServerError) self.broken = true;
 
                     return null;
                 };
@@ -185,10 +185,10 @@ pub fn Executor(comptime Job: type, comptime statement_count: usize) type {
         ///
         /// Return:
         /// - *Executor, deinit stops the workers and frees everything
-        /// - error.BatchTooWide when batch_max exceeds the histogram width
+        /// - error.PostgrezBatchTooWide when batch_max exceeds the histogram width
         /// - allocation or Pool.init errors
         pub fn init(allocator: std.mem.Allocator, io: std.Io, config: lib.Config, options: Options) !*Self {
-            if (options.batch_max == 0 or options.batch_max > FILL_BUCKETS) return error.BatchTooWide;
+            if (options.batch_max == 0 or options.batch_max > FILL_BUCKETS) return error.PostgrezBatchTooWide;
 
             const cpus = std.Thread.getCpuCount() catch 16;
             const workers = if (options.workers != 0) options.workers else sizeWorkers(cpus, options.max_conn_hint);
@@ -654,7 +654,7 @@ test "postgrez: executor runs a submitted job with a null batch when no server" 
     // needs the very core the spin is burning)
     var attempts: usize = 0;
     while (Probe.ran.load(.monotonic) == 0) : (attempts += 1) {
-        if (attempts > 2_000) return error.WorkerNeverRan;
+        if (attempts > 2_000) return error.PostgrezWorkerNeverRan;
 
         threaded.io().sleep(.fromMilliseconds(1), .awake) catch {};
     }
@@ -667,7 +667,7 @@ test "postgrez: executor runs a submitted job with a null batch when no server" 
     // counters to land before snapshotting, or the snapshot races them
     attempts = 0;
     while (executor.stat_batches.load(.monotonic) == 0 or executor.stat_jobs.load(.monotonic) == 0) : (attempts += 1) {
-        if (attempts > 2_000) return error.StatsNeverRecorded;
+        if (attempts > 2_000) return error.PostgrezStatsNeverRecorded;
 
         threaded.io().sleep(.fromMilliseconds(1), .awake) catch {};
     }
@@ -681,7 +681,7 @@ test "postgrez: executor rejects a batch_max wider than the histogram" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
 
-    try testing.expectError(error.BatchTooWide, Executor(ProbeJob, 1).init(testing.allocator, threaded.io(), .{
+    try testing.expectError(error.PostgrezBatchTooWide, Executor(ProbeJob, 1).init(testing.allocator, threaded.io(), .{
         .user = "tester",
     }, .{
         .run_batch = Probe.runBatch,

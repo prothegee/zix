@@ -160,21 +160,21 @@ test "jzon edge: float refuses the words std.fmt would read as numbers" {
     // std.fmt.parseFloat takes all four of these. None of them is JSON, and a
     // read cursor bounds a token without checking its grammar, so the refusal has
     // to happen on this side.
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "inf"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "-inf"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "nan"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "0x1p3"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "inf"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "-inf"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "nan"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "0x1p3"));
 }
 
 test "jzon edge: float refuses a number missing a part the grammar needs" {
-    try std.testing.expectError(error.BadNumber, float.parse(f64, ""));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "-"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "."));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, ".5"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "1."));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "1e"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "1e-"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "--1"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, ""));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "-"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "."));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, ".5"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "1."));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "1e"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "1e-"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "--1"));
 }
 
 test "jzon edge: float refuses a leading zero that is not the whole integer part" {
@@ -182,16 +182,16 @@ test "jzon edge: float refuses a leading zero that is not the whole integer part
     try std.testing.expectEqual(@as(f64, 0.5), try float.parse(f64, "0.5"));
     try std.testing.expectEqual(@as(f64, -0.5), try float.parse(f64, "-0.5"));
 
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "01"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "-01"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "007"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "01"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "-01"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "007"));
 }
 
 test "jzon edge: float refuses anything trailing the number" {
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "1 "));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "1,"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "1.5x"));
-    try std.testing.expectError(error.BadNumber, float.parse(f64, "+1"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "1 "));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "1,"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "1.5x"));
+    try std.testing.expectError(error.JzonBadNumber, float.parse(f64, "+1"));
 }
 
 test "jzon edge: float reads a value past a width as an infinity, the way std.json does" {

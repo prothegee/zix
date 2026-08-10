@@ -63,7 +63,7 @@ pub fn corsHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Ht
 // With .large (64), this would require > 64 calls to trigger.
 // Here we use a small local cap to demonstrate the error path clearly.
 //
-// In practice, addHeader() returns error.TooManyHeaders when the cap is
+// In practice, addHeader() returns error.ZixTooManyHeaders when the cap is
 // reached. Handlers should propagate or handle it, returning the error
 // here surfaces it as a 500 to the client.
 pub fn overflowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) !void {
@@ -82,7 +82,7 @@ pub fn overflowHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zi
         try res.addHeader(name, val);
     }
 
-    // 65th call: returns error.TooManyHeaders
+    // 65th call: returns error.ZixTooManyHeaders
     res.addHeader("X-One-Too-Many", "overflow") catch |err| {
         res.setStatus(.INTERNAL_SERVER_ERROR);
         const msg = try std.fmt.allocPrint(ctx.allocator, "{{\"error\":\"{s}\",\"note\":\"cap is 64\"}}", .{@errorName(err)});

@@ -99,7 +99,7 @@ const EXPECTED_LINES: usize = 2;
 ///
 /// Return:
 /// - Nanoseconds the quickest round took
-/// - error.WrongShape when the parse did not read the whole document
+/// - error.JzonWrongShape when the parse did not read the whole document
 fn timeStrategy(
     io: std.Io,
     arena: *std.heap.ArenaAllocator,
@@ -112,7 +112,7 @@ fn timeStrategy(
         defer _ = arena.reset(.retain_capacity);
 
         const order = try jzon.deserialize(Order, arena.allocator(), src, .{ .strategy = strategy });
-        if (order.lines.len != EXPECTED_LINES) return error.WrongShape;
+        if (order.lines.len != EXPECTED_LINES) return error.JzonWrongShape;
     }
 
     var best: u64 = std.math.maxInt(u64);

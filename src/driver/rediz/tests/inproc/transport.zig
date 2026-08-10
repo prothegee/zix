@@ -65,13 +65,13 @@ pub const Transport = struct {
         // takeDelimiterInclusive, not the exclusive form: the exclusive form
         // leaves the delimiter behind and the next read sees an empty line.
         const raw = self.reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
-            error.EndOfStream, error.ReadFailed => return error.ConnectionClosed,
-            error.StreamTooLong => return error.ProtocolViolation,
+            error.EndOfStream, error.ReadFailed => return error.RedizConnectionClosed,
+            error.StreamTooLong => return error.RedizProtocolViolation,
         };
-        if (raw.len < 2 or raw[raw.len - 2] != '\r') return error.ProtocolViolation;
+        if (raw.len < 2 or raw[raw.len - 2] != '\r') return error.RedizProtocolViolation;
 
         const body = raw[0 .. raw.len - 2];
-        if (body.len > buf.len) return error.ProtocolViolation;
+        if (body.len > buf.len) return error.RedizProtocolViolation;
         @memcpy(buf[0..body.len], body);
 
         return buf[0..body.len];
@@ -82,15 +82,15 @@ pub const Transport = struct {
 
         while (true) {
             var byte: [1]u8 = undefined;
-            self.tls.?.readAll(&self.reader.interface, &byte) catch return error.ConnectionClosed;
+            self.tls.?.readAll(&self.reader.interface, &byte) catch return error.RedizConnectionClosed;
 
             if (byte[0] == '\n') {
-                if (len == 0 or buf[len - 1] != '\r') return error.ProtocolViolation;
+                if (len == 0 or buf[len - 1] != '\r') return error.RedizProtocolViolation;
 
                 return buf[0 .. len - 1];
             }
 
-            if (len >= buf.len) return error.ProtocolViolation;
+            if (len >= buf.len) return error.RedizProtocolViolation;
             buf[len] = byte[0];
             len += 1;
         }
@@ -99,12 +99,12 @@ pub const Transport = struct {
     /// Fill buf completely.
     pub fn readExact(self: *Self, buf: []u8) wire.ReadError!void {
         if (self.tls) |*session| {
-            session.readAll(&self.reader.interface, buf) catch return error.ConnectionClosed;
+            session.readAll(&self.reader.interface, buf) catch return error.RedizConnectionClosed;
 
             return;
         }
 
-        self.reader.interface.readSliceAll(buf) catch return error.ConnectionClosed;
+        self.reader.interface.readSliceAll(buf) catch return error.RedizConnectionClosed;
     }
 
     /// Write one reply and put it on the wire.
@@ -238,7 +238,7 @@ test "rediz inproc: transport rejects a line with no carriage return" {
     transport.openPlain(pair.threaded.io(), pair.server_side);
 
     var buf: [64]u8 = undefined;
-    try testing.expectError(error.ProtocolViolation, transport.readLine(&buf));
+    try testing.expectError(error.RedizProtocolViolation, transport.readLine(&buf));
 }
 
 test "rediz inproc: transport reports a closed peer" {
@@ -253,7 +253,7 @@ test "rediz inproc: transport reports a closed peer" {
     try pair.client_side.shutdown(pair.threaded.io(), .both);
 
     var buf: [64]u8 = undefined;
-    try testing.expectError(error.ConnectionClosed, transport.readLine(&buf));
+    try testing.expectError(error.RedizConnectionClosed, transport.readLine(&buf));
 }
 
 test "rediz inproc: transport send puts the whole reply on the wire" {
