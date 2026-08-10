@@ -47,6 +47,7 @@ pub fn serveOpts(cfg: Http2ServerConfig) core.ServeOpts {
         .max_frame_size = cfg.max_frame_size,
         .max_header_scratch = cfg.max_header_scratch,
         .max_body = cfg.max_body,
+        .logger = cfg.logger,
         .conn_read_buf_min = cfg.max_recv_buf,
         .tls_write_buf_initial = cfg.tls_write_buf_initial_bytes,
         .response_cache = cfg.response_cache,
@@ -222,6 +223,7 @@ pub fn dispatchConn(task: ConnTask) void {
     // no worker, so the cache is built once per io pool thread and reused by every connection
     // that lands on it. Reclaimed together when the accept loop ends.
     installThreadCache(task.opts);
+    core.setAccessLogger(task.opts.logger);
 
     core.serveConn(task.handler, task.fd, task.opts, task.io);
 }
