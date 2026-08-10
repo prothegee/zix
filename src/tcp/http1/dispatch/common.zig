@@ -58,6 +58,8 @@ pub const ConnArgs = struct {
     max_request_body: usize = 0,
     public_dir: []const u8 = "",
     max_response_headers: usize = 16,
+    /// Where served requests are recorded, from config.logger. Null logs nothing.
+    logger: ?*Logger = null,
     compress: bool = false,
     compression_min_size: usize = 256,
     compression_max_out: usize = 256 * 1024,
@@ -81,6 +83,7 @@ pub fn connEntry(args: ConnArgs) void {
     core.setDateHeader(args.send_date_header);
     core.setStatic(args.public_dir, args.io);
     core.setMaxResponseHeaders(args.max_response_headers);
+    core.setAccessLogger(args.logger);
     core.setCompression(args.compress, args.compression_min_size, args.compression_max_out);
 
     if (args.response_cache) {
@@ -705,11 +708,6 @@ fn readLoggedLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
 }
 
 test "zix http1: logSystem files a failure at the level the caller passed" {
-    if (comptime @import("builtin").target.os.tag == .windows) {
-        std.log.info("logger file output is not ported to Windows, test skipped", .{});
-        return;
-    }
-
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
@@ -741,11 +739,6 @@ test "zix http1: logSystem files a failure at the level the caller passed" {
 }
 
 test "zix http1: logSystem lifecycle line files as INFO, not as the old fixed level" {
-    if (comptime @import("builtin").target.os.tag == .windows) {
-        std.log.info("logger file output is not ported to Windows, test skipped", .{});
-        return;
-    }
-
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
@@ -777,11 +770,6 @@ test "zix http1: logSystem lifecycle line files as INFO, not as the old fixed le
 }
 
 test "zix http1: logSystem below the logger min level writes nothing" {
-    if (comptime @import("builtin").target.os.tag == .windows) {
-        std.log.info("logger file output is not ported to Windows, test skipped", .{});
-        return;
-    }
-
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
