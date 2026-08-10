@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-/// Largest "dir/filename" path save() can assemble on the stack. Longer paths return error.PathTooLong.
+/// Largest "dir/filename" path save() can assemble on the stack. Longer paths return error.ZixPathTooLong.
 const MAX_PATH_LEN: usize = 512;
 /// Scratch buffer size backing the file writer in save().
 const WRITE_BUF_SIZE: usize = 8192;
@@ -46,11 +46,23 @@ pub fn extension(file_path: []const u8) []const u8 {
 /// max_bytes - usize (largest file accepted, inclusive)
 ///
 /// Return:
-/// - ![]u8 (caller-owned file content)
-/// - error.StreamTooLong if the file is larger than max_bytes
-/// - error.FileNotFound if the path does not resolve
+/// - []u8 (caller-owned file content)
+/// - error.ZixFileNotFound (the path does not resolve)
+/// - error.ZixFilePathIsDirectory (the path names a directory)
+/// - error.ZixFileTooLarge (the file is larger than max_bytes)
+/// - error.ZixFileUnreadable (the path resolves and the read still failed, most often permissions)
+/// - error.OutOfMemory
 pub fn load(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, max_bytes: usize) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(max_bytes +| 1));
+    // A caller that only learns "NotFound" cannot tell a typo from a permission problem, and the
+    // name is all it gets: an error value has nowhere to put the path. Four causes, four names,
+    // and the caller names the path it passed in.
+    return std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(max_bytes +| 1)) catch |err| switch (err) {
+        error.FileNotFound => error.ZixFileNotFound,
+        error.IsDir => error.ZixFilePathIsDirectory,
+        error.StreamTooLong => error.ZixFileTooLarge,
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ZixFileUnreadable,
+    };
 }
 
 /// Save file data to a directory, creating it if it does not exist
@@ -68,7 +80,7 @@ pub fn save(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename:
     std.Io.Dir.cwd().createDirPath(io, dir) catch {};
 
     var path_buf: [MAX_PATH_LEN]u8 = undefined;
-    if (dir.len + 1 + filename.len > path_buf.len) return error.PathTooLong;
+    if (dir.len + 1 + filename.len > path_buf.len) return error.ZixPathTooLong;
     @memcpy(path_buf[0..dir.len], dir);
     path_buf[dir.len] = '/';
     @memcpy(path_buf[dir.len + 1 ..][0..filename.len], filename);
@@ -128,7 +140,7 @@ test "zix utils: file load, over max_bytes fails instead of allocating" {
 
     // A ceiling below the file size must fail. Exactly the file size must succeed, which is
     // the whole point of the inclusive adjustment inside load().
-    try std.testing.expectError(error.StreamTooLong, load(io, allocator, saved_path, content.len - 1));
+    try std.testing.expectError(error.ZixFileTooLarge, load(io, allocator, saved_path, content.len - 1));
 
     const exact = try load(io, allocator, saved_path, content.len);
     defer allocator.free(exact);
@@ -136,12 +148,26 @@ test "zix utils: file load, over max_bytes fails instead of allocating" {
     try std.testing.expectEqualStrings(content, exact);
 }
 
-test "zix utils: file load, missing path returns FileNotFound" {
+test "zix utils: file load, a missing path is named as missing" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
 
     try std.testing.expectError(
-        error.FileNotFound,
+        error.ZixFileNotFound,
         load(threaded.io(), std.testing.allocator, "tmp/zix_file_load_test/definitely_absent.html", 4096),
+    );
+}
+
+test "zix utils: file load, a directory is named as a directory, not as missing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+    std.Io.Dir.cwd().createDirPath(io, "tmp/zix_file_load_test/a_directory") catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, "tmp/zix_file_load_test/a_directory") catch {};
+
+    try std.testing.expectError(
+        error.ZixFilePathIsDirectory,
+        load(io, std.testing.allocator, "tmp/zix_file_load_test/a_directory", 4096),
     );
 }

@@ -70,11 +70,11 @@ pub const WsClientConfig = struct {
     /// TCP connect timeout in milliseconds. 0 = no timeout.
     connect_timeout_ms: u32 = 0,
     /// Time allowed to receive the upgrade response after the handshake request is sent, in
-    /// milliseconds. 0 = no timeout. Yields error.ResponseTimeout when a server accepts and then
+    /// milliseconds. 0 = no timeout. Yields error.ZixResponseTimeout when a server accepts and then
     /// never answers.
     response_timeout_ms: u32 = 0,
     /// Idle bound between frames, in milliseconds. The budget restarts on every frame.
-    /// 0 = no timeout. Yields error.ReadTimeout when the peer goes quiet.
+    /// 0 = no timeout. Yields error.ZixReadTimeout when the peer goes quiet.
     ///
     /// Note:
     /// - Defaults to no bound on purpose. A live socket is expected to sit idle between frames, so
@@ -164,7 +164,7 @@ pub const WsConn = struct {
     ///
     /// Return:
     /// - ?Frame
-    /// - error.ConnectionClosed (EOF mid-frame)
+    /// - error.ZixConnectionClosed (EOF mid-frame)
     pub fn recv(self: Self, payload_buf: []u8) !?Frame {
         var header: [2]u8 = undefined;
         if (!try recvExact(self.fd, &header, self.read_timeout_ms)) return null;
@@ -176,22 +176,22 @@ pub const WsConn = struct {
 
         if (payload_len == ws_len_16bit_marker) {
             var ext: [2]u8 = undefined;
-            if (!try recvExact(self.fd, &ext, self.read_timeout_ms)) return error.ConnectionClosed;
+            if (!try recvExact(self.fd, &ext, self.read_timeout_ms)) return error.ZixConnectionClosed;
             payload_len = (@as(u64, ext[0]) << 8) | ext[1];
         } else if (payload_len == ws_len_64bit_marker) {
             var ext: [ws_len_64bit_field_size]u8 = undefined;
-            if (!try recvExact(self.fd, &ext, self.read_timeout_ms)) return error.ConnectionClosed;
+            if (!try recvExact(self.fd, &ext, self.read_timeout_ms)) return error.ZixConnectionClosed;
             payload_len = 0;
             for (0..ws_len_64bit_field_size) |i| payload_len = (payload_len << 8) | ext[i];
         }
 
         var mask: [ws_mask_len]u8 = .{ 0, 0, 0, 0 };
         if (masked) {
-            if (!try recvExact(self.fd, &mask, self.read_timeout_ms)) return error.ConnectionClosed;
+            if (!try recvExact(self.fd, &mask, self.read_timeout_ms)) return error.ZixConnectionClosed;
         }
 
         const capped_len: usize = @intCast(@min(payload_len, payload_buf.len));
-        if (!try recvExact(self.fd, payload_buf[0..capped_len], self.read_timeout_ms)) return error.ConnectionClosed;
+        if (!try recvExact(self.fd, payload_buf[0..capped_len], self.read_timeout_ms)) return error.ZixConnectionClosed;
 
         if (masked) {
             for (0..capped_len) |i| payload_buf[i] ^= mask[i % ws_mask_len];
@@ -244,9 +244,11 @@ pub const WsClient = struct {
     ///
     /// Return:
     /// - WsConn
-    /// - error.InvalidUrl (malformed URL or missing host)
-    /// - error.TlsNotSupported (wss:// scheme)
-    /// - error.HandshakeFailed (server did not send 101 or accept key mismatch)
+    /// - error.ZixUrlSchemeUnsupported (the scheme is not ws)
+    /// - error.ZixUrlHostMissing (the URL carries no host)
+    /// - error.ZixUrlPortInvalid (the port is not a number in range)
+    /// - error.ZixTlsNotSupported (wss:// scheme)
+    /// - error.ZixHandshakeFailed (server did not send 101 or accept key mismatch)
     pub fn connect(self: Self, url: []const u8) !WsConn {
         const parsed = try parseWsUrl(url);
 
@@ -272,19 +274,19 @@ pub const WsClient = struct {
                 "Sec-WebSocket-Version: 13\r\n" ++
                 "\r\n",
             .{ parsed.path, parsed.host, parsed.port, ws_key },
-        ) catch return error.HandshakeFailed;
+        ) catch return error.ZixHandshakeFailed;
 
-        writeAllFD(fd, req) catch return error.HandshakeFailed;
+        writeAllFD(fd, req) catch return error.ZixHandshakeFailed;
 
         var resp_buf: [HANDSHAKE_RESP_BUF]u8 = undefined;
         var resp_len: usize = 0;
         var header_end: usize = 0;
 
         while (resp_len < resp_buf.len) {
-            if (!socket_poll.readableWithin(fd, self.config.response_timeout_ms)) return error.ResponseTimeout;
+            if (!socket_poll.readableWithin(fd, self.config.response_timeout_ms)) return error.ZixResponseTimeout;
 
-            const n = readOnceFD(fd, resp_buf[resp_len..]) catch return error.HandshakeFailed;
-            if (n == 0) return error.HandshakeFailed;
+            const n = readOnceFD(fd, resp_buf[resp_len..]) catch return error.ZixHandshakeFailed;
+            if (n == 0) return error.ZixHandshakeFailed;
             resp_len += n;
             if (std.mem.indexOf(u8, resp_buf[0..resp_len], "\r\n\r\n")) |pos| {
                 header_end = pos + 4;
@@ -292,15 +294,15 @@ pub const WsClient = struct {
             }
         }
 
-        if (header_end == 0) return error.HandshakeFailed;
-        if (!std.mem.startsWith(u8, resp_buf[0..header_end], "HTTP/1.1 101")) return error.HandshakeFailed;
+        if (header_end == 0) return error.ZixHandshakeFailed;
+        if (!std.mem.startsWith(u8, resp_buf[0..header_end], "HTTP/1.1 101")) return error.ZixHandshakeFailed;
 
         var accept_out: [64]u8 = undefined;
-        const expected_accept = acceptKey(ws_key, &accept_out) catch return error.HandshakeFailed;
-        const server_accept = findHeader(resp_buf[0..header_end], "sec-websocket-accept") orelse return error.HandshakeFailed;
+        const expected_accept = acceptKey(ws_key, &accept_out) catch return error.ZixHandshakeFailed;
+        const server_accept = findHeader(resp_buf[0..header_end], "sec-websocket-accept") orelse return error.ZixHandshakeFailed;
 
         if (!std.mem.eql(u8, std.mem.trim(u8, server_accept, " \t"), expected_accept)) {
-            return error.HandshakeFailed;
+            return error.ZixHandshakeFailed;
         }
 
         return WsConn{ .fd = fd, .read_timeout_ms = self.config.read_timeout_ms };
@@ -321,7 +323,7 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
     // RFC 6455 1.3: this GUID is mandated by the spec, do not change it.
     const rfc6455_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     var hash_input: [WS_ACCEPT_HASH_INPUT_SIZE]u8 = undefined;
-    if (key.len + rfc6455_guid.len > hash_input.len) return error.KeyTooLong;
+    if (key.len + rfc6455_guid.len > hash_input.len) return error.ZixKeyTooLong;
 
     @memcpy(hash_input[0..key.len], key);
     @memcpy(hash_input[key.len..][0..rfc6455_guid.len], rfc6455_guid);
@@ -339,24 +341,24 @@ pub fn acceptKey(key: []const u8, out: *[64]u8) ![]const u8 {
 const WsUrlParsed = struct { host: []const u8, port: u16, path: []const u8 };
 
 fn parseWsUrl(url: []const u8) !WsUrlParsed {
-    if (std.mem.startsWith(u8, url, "wss://")) return error.TlsNotSupported;
-    if (!std.mem.startsWith(u8, url, "ws://")) return error.InvalidUrl;
+    if (std.mem.startsWith(u8, url, "wss://")) return error.ZixTlsNotSupported;
+    if (!std.mem.startsWith(u8, url, "ws://")) return error.ZixUrlSchemeUnsupported;
 
     const authority_start: usize = "ws://".len;
     const path_start = std.mem.indexOfScalarPos(u8, url, authority_start, '/') orelse url.len;
     const authority = url[authority_start..path_start];
     const path_str: []const u8 = if (path_start < url.len) url[path_start..] else "/";
 
-    if (authority.len == 0) return error.InvalidUrl;
+    if (authority.len == 0) return error.ZixUrlHostMissing;
 
     const colon_pos = std.mem.lastIndexOfScalar(u8, authority, ':');
     const host: []const u8 = if (colon_pos) |cp| authority[0..cp] else authority;
     const port: u16 = if (colon_pos) |cp|
-        (std.fmt.parseInt(u16, authority[cp + 1 ..], 10) catch return error.InvalidUrl)
+        (std.fmt.parseInt(u16, authority[cp + 1 ..], 10) catch return error.ZixUrlPortInvalid)
     else
         80;
 
-    if (host.len == 0) return error.InvalidUrl;
+    if (host.len == 0) return error.ZixUrlHostMissing;
 
     return WsUrlParsed{ .host = host, .port = port, .path = path_str };
 }
@@ -400,10 +402,10 @@ fn recvExact(fd: std.posix.fd_t, buf: []u8, idle_ms: u32) !bool {
     if (buf.len == 0) return true;
     var received: usize = 0;
     while (received < buf.len) {
-        if (!socket_poll.readableWithin(fd, idle_ms)) return error.ReadTimeout;
+        if (!socket_poll.readableWithin(fd, idle_ms)) return error.ZixReadTimeout;
 
-        const n = readOnceFD(fd, buf[received..]) catch return error.ConnectionClosed;
-        if (n == 0) return if (received == 0) false else error.ConnectionClosed;
+        const n = readOnceFD(fd, buf[received..]) catch return error.ZixConnectionClosed;
+        if (n == 0) return if (received == 0) false else error.ZixConnectionClosed;
         received += n;
     }
     return true;
@@ -449,11 +451,11 @@ test "zix http ws client: parseWsUrl default port 80" {
 }
 
 test "zix http ws client: parseWsUrl wss returns TlsNotSupported" {
-    try std.testing.expectError(error.TlsNotSupported, parseWsUrl("wss://example.com/ws"));
+    try std.testing.expectError(error.ZixTlsNotSupported, parseWsUrl("wss://example.com/ws"));
 }
 
-test "zix http ws client: parseWsUrl non-ws scheme returns InvalidUrl" {
-    try std.testing.expectError(error.InvalidUrl, parseWsUrl("http://example.com/"));
+test "zix http ws client: parseWsUrl names an unsupported scheme as one" {
+    try std.testing.expectError(error.ZixUrlSchemeUnsupported, parseWsUrl("http://example.com/"));
 }
 
 test "zix http ws client: a server that never answers yields ResponseTimeout" {
@@ -472,7 +474,7 @@ test "zix http ws client: a server that never answers yields ResponseTimeout" {
         .response_timeout_ms = 150,
     });
 
-    try std.testing.expectError(error.ResponseTimeout, client.connect("ws://127.0.0.1:9081/ws"));
+    try std.testing.expectError(error.ZixResponseTimeout, client.connect("ws://127.0.0.1:9081/ws"));
 }
 
 test "zix http ws client: a peer that sends no frame yields ReadTimeout" {
@@ -548,5 +550,5 @@ test "zix http ws client: a peer that sends no frame yields ReadTimeout" {
     const outcome = conn.recv(&buf);
     release.store(true, .release);
 
-    try std.testing.expectError(error.ReadTimeout, outcome);
+    try std.testing.expectError(error.ZixReadTimeout, outcome);
 }

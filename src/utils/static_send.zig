@@ -14,7 +14,20 @@ const builtin = @import("builtin");
 
 // --------------------------------------------------------- //
 
-pub const SendError = error{BrokenPipe};
+/// How a static send can end.
+///
+/// Note:
+/// - BrokenPipe and the file errors are separate on purpose. A peer that hung up mid-download is
+///   ordinary and needs no operator, while a file the server cannot read is a broken deployment.
+///   They used to share one name, so the two were indistinguishable to the caller.
+pub const SendError = error{
+    /// The peer went away, which is the client's business and not a server fault.
+    BrokenPipe,
+    /// The open file could not be read, most often a disk or permission problem.
+    ZixStaticFileUnreadable,
+    /// The file ended inside the range that was promised, so it changed under the open handle.
+    ZixStaticFileTruncated,
+};
 
 /// An engine's canonical socket write. The copy path goes through it rather than
 /// writing the fd directly, so a copied body is coalesced and encrypted exactly
@@ -50,9 +63,10 @@ fn sendFileLinux(sock: std.posix.fd_t, file_fd: std.posix.fd_t, offset: u64, len
         const rc = std.os.linux.sendfile(sock, file_fd, &cursor, remaining);
 
         switch (std.posix.errno(rc)) {
-            .SUCCESS => if (rc == 0) return error.BrokenPipe,
+            .SUCCESS => if (rc == 0) return error.ZixStaticFileTruncated,
             .INTR => {},
             .AGAIN => try waitWritable(sock),
+            .IO, .NOMEM => return error.ZixStaticFileUnreadable,
             else => return error.BrokenPipe,
         }
     }
@@ -72,8 +86,8 @@ fn copyBody(
 
     while (sent < len) {
         const want: usize = @intCast(@min(len - sent, buf.len));
-        const read = file.readPositionalAll(io, buf[0..want], offset + sent) catch return error.BrokenPipe;
-        if (read == 0) return error.BrokenPipe;
+        const read = file.readPositionalAll(io, buf[0..want], offset + sent) catch return error.ZixStaticFileUnreadable;
+        if (read == 0) return error.ZixStaticFileTruncated;
 
         try write(sock, buf[0..read]);
         sent += read;
@@ -103,7 +117,9 @@ fn copyBody(
 ///
 /// Return:
 /// - void when the whole range was accepted
-/// - error.BrokenPipe when the peer went away or the file could not be read
+/// - error.BrokenPipe when the peer went away
+/// - error.ZixStaticFileUnreadable when the open file could not be read
+/// - error.ZixStaticFileTruncated when the file ended inside the promised range
 pub fn sendBody(
     sock: std.posix.fd_t,
     io: std.Io,
@@ -300,4 +316,36 @@ test "zix static_send: a closed peer makes the zero-copy path report BrokenPipe"
     _ = std.os.linux.close(pair[1]);
 
     try testing.expectError(error.BrokenPipe, sendBody(pair[0], testing.io, file, 0, 4, true, testFail));
+}
+
+test "zix static_send: a file that ends inside the range is named, not reported as a dead peer" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(tmp.dir, "short.txt", "abc");
+
+    var root_buf: [64]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    var dir = try std.Io.Dir.cwd().openDir(testing.io, root, .{});
+    defer dir.close(testing.io);
+
+    const file = try dir.openFile(testing.io, "short.txt", .{});
+    defer file.close(testing.io);
+
+    // The range promises more than the file holds, which is a file that changed under the handle,
+    // not a client that hung up.
+    test_sink_len = 0;
+    try testing.expectError(error.ZixStaticFileTruncated, sendBody(TEST_FD, testing.io, file, 0, 64, false, testCollect));
+}
+
+/// Write one fixture file into a temp dir for the test above.
+fn writeFixture(dir: std.Io.Dir, name: []const u8, body: []const u8) void {
+    const file = dir.createFile(testing.io, name, .{}) catch return;
+    defer file.close(testing.io);
+
+    var write_buf: [128]u8 = undefined;
+    var writer = file.writer(testing.io, &write_buf);
+    writer.interface.writeAll(body) catch return;
+    writer.interface.flush() catch return;
 }

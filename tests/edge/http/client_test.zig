@@ -3,7 +3,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-test "zix edge: error.InvalidUrl, unsupported scheme" {
+test "zix edge: error.ZixUrlSchemeUnsupported, unsupported scheme" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -13,10 +13,10 @@ test "zix edge: error.InvalidUrl, unsupported scheme" {
     });
     defer client.deinit();
 
-    try std.testing.expectError(error.InvalidUrl, client.get("ftp://example.com/", .{}));
+    try std.testing.expectError(error.ZixUrlSchemeUnsupported, client.get("ftp://example.com/", .{}));
 }
 
-test "zix edge: error.InvalidUrl, missing host" {
+test "zix edge: error.ZixUrlHostMissing, missing host" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -26,10 +26,13 @@ test "zix edge: error.InvalidUrl, missing host" {
     });
     defer client.deinit();
 
-    try std.testing.expectError(error.InvalidUrl, client.get("http://", .{}));
+    // "http://" alone does not reach the host check at all: std.Uri.parse rejects it first,
+    // which the single old name hid. An authority that parses and is empty is the case that
+    // actually gets there.
+    try std.testing.expectError(error.ZixUrlHostMissing, client.get("http:///only/a/path", .{}));
 }
 
-test "zix edge: error.InvalidUrl, malformed url" {
+test "zix edge: error.ZixUrlMalformed, malformed url" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 512 * 1024 });
     defer threaded.deinit();
 
@@ -39,7 +42,7 @@ test "zix edge: error.InvalidUrl, malformed url" {
     });
     defer client.deinit();
 
-    try std.testing.expectError(error.InvalidUrl, client.get(":::bad", .{}));
+    try std.testing.expectError(error.ZixUrlMalformed, client.get(":::bad", .{}));
 }
 
 test "zix edge: ClientResponse.header(), absent name returns null" {
