@@ -313,7 +313,7 @@ Write hook (`frame.write_hook`) adalah mekanisme bersama: mux menulis plaintext 
 
 `config.logger` hanya menerima baris lifecycle server (notice listening, fallback io_uring, fallback non-Linux) via `logger.system()`. Saat null, baris lifecycle dicetak ke stderr hanya pada Debug build dan diam pada release build.
 
-Access logging per-stream adalah tanggung jawab handler: handler memiliki frame I/O-nya sendiri dan mengembalikan `void`, sehingga engine tidak dapat mengamati status response atau jumlah byte. Panggil `logger.access()` di dalam handler di titik status akhir dan ukurannya diketahui.
+Access logging per-stream adalah tanggung jawab engine, bukan handler. Saat `config.logger` diisi, engine menulis satu record `[http2:access]` setelah setiap stream yang dilayani, mengambil status dan jumlah byte dari `Response`. Handler yang membingkai byte-nya sendiri lewat `frame.sendResponseFD` tetap tercatat, tetapi jumlah byte-nya terbaca 0, sehingga handler seperti itu boleh memanggil `logger.access()` sendiri di titik ukuran sebenarnya diketahui.
 
 ---
 
