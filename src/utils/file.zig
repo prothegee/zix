@@ -1,11 +1,15 @@
 //! zix file utils
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Largest "dir/filename" path save() can assemble on the stack. Longer paths return error.ZixPathTooLong.
 const MAX_PATH_LEN: usize = 512;
 /// Scratch buffer size backing the file writer in save().
 const WRITE_BUF_SIZE: usize = 8192;
+/// Targets where a directory can be opened and read, handing back its raw entries instead of
+/// failing the read. Every other target refuses, so the cause is already in the failure.
+const READ_SUCCEEDS_ON_DIRECTORY: bool = builtin.os.tag == .netbsd;
 
 // --------------------------------------------------------- //
 
@@ -38,6 +42,8 @@ pub fn extension(file_path: []const u8) []const u8 {
 ///   make the parameter mean what its name says.
 /// - The path is resolved against the process working directory, so a relative path only
 ///   resolves when the process is launched from the expected directory.
+/// - A directory named as the path is rejected on every target. NetBSD allows a directory to be
+///   read, so the kind is asked for there before the read rather than inferred from it.
 ///
 /// Param:
 /// io - std.Io
@@ -53,6 +59,17 @@ pub fn extension(file_path: []const u8) []const u8 {
 /// - error.ZixFileUnreadable (the path resolves and the read still failed, most often permissions)
 /// - error.OutOfMemory
 pub fn load(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, max_bytes: usize) ![]u8 {
+    // NetBSD hands back directory entries rather than refusing the read, so without this the
+    // caller there receives binary dirent bytes as if they were file content.
+    if (comptime READ_SUCCEEDS_ON_DIRECTORY) {
+        const info = std.Io.Dir.cwd().statFile(io, file_path, .{}) catch |err| return switch (err) {
+            error.FileNotFound => error.ZixFileNotFound,
+            else => error.ZixFileUnreadable,
+        };
+
+        if (info.kind == .directory) return error.ZixFilePathIsDirectory;
+    }
+
     // A caller that only learns "NotFound" cannot tell a typo from a permission problem, and the
     // name is all it gets: an error value has nowhere to put the path. Four causes, four names,
     // and the caller names the path it passed in.
