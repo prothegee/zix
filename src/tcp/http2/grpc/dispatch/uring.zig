@@ -23,6 +23,7 @@ const tls_mux = @import("../tls_mux.zig");
 const tls_conn = @import("../../../../multiplexers/tls_conn.zig");
 const Tls = @import("../../../../tls/Tls.zig");
 const reuseport = @import("../../../../multiplexers/reuseport.zig");
+const listen_report = @import("../../../../multiplexers/listen_report.zig");
 const IoUring = std.os.linux.IoUring;
 
 /// SQ entries per worker ring.
@@ -95,6 +96,8 @@ const UringMuxCtx = struct {
     tls_port: u16 = 0,
     /// CBPF steering wiring (config.reuseport_cbpf). Null = steering off.
     steering: ?reuseport.Steering = null,
+    /// Where this worker says whether its listeners came up, shared with the whole group.
+    report: *listen_report.Report,
 };
 
 /// Build a concrete io_uring mux worker entry with the Router type baked in at
@@ -545,15 +548,28 @@ fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
             var bind_turn = reuseport.BindTurn.begin(ctx.steering, ctx.worker_id);
             defer bind_turn.release();
 
-            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch return;
+            // Every exit between here and the ring loop has to reach the group, or the workers
+            // that did bind wait on one that is already gone.
+            var slot = ctx.report.slot(ctx.io, error.ZixGrpcWorkerSetupFailed);
+            defer slot.close();
+
+            const addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.port) catch |err| {
+                slot.fail(err);
+
+                return;
+            };
             var srv = addr.listen(ctx.io, .{
                 .reuse_address = true,
                 .kernel_backlog = ctx.kernel_backlog,
-            }) catch return;
+            }) catch |err| {
+                slot.fail(err);
+
+                return;
+            };
             defer srv.deinit(ctx.io);
             const listener_fd = srv.socket.handle;
 
-            if (ctx.steering) |steer| reuseport.attachCpuSteering(listener_fd, steer.group_size);
+            if (ctx.steering) |steer| _ = reuseport.attachCpuSteering(listener_fd, steer.group_size);
 
             // Dual-listener TLS side: a second listener on tls_port whose connections terminate
             // TLS in this same ring loop (no separate epoll fleet).
@@ -561,18 +577,31 @@ fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
             var tls_srv: std.Io.net.Server = undefined;
             var tls_listener_fd: std.posix.fd_t = -1;
             if (tls_active) {
-                const tls_addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.tls_port) catch return;
+                const tls_addr = std.Io.net.IpAddress.resolve(ctx.io, ctx.ip, ctx.tls_port) catch |err| {
+                    slot.fail(err);
+
+                    return;
+                };
                 tls_srv = tls_addr.listen(ctx.io, .{
                     .reuse_address = true,
                     .kernel_backlog = ctx.kernel_backlog,
-                }) catch return;
+                }) catch |err| {
+                    slot.fail(err);
+
+                    return;
+                };
                 tls_listener_fd = tls_srv.socket.handle;
-                if (ctx.steering) |steer| reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
+                if (ctx.steering) |steer| _ = reuseport.attachCpuSteering(tls_listener_fd, steer.group_size);
             }
             defer if (tls_active) tls_srv.deinit(ctx.io);
 
             // Both groups joined: release the bind turn to the next worker.
             bind_turn.release();
+
+            // Serve only once every worker is up, so a group where one bind failed serves on none
+            // of them and the caller gets one honest failure.
+            slot.ok();
+            if (ctx.report.awaitGroup(ctx.io) != null) return;
 
             const slots = slab.mapZeroedSlots(?*UringGrpcConn, MAX_FD) catch return;
 
@@ -630,7 +659,7 @@ pub fn runUring(comptime RouterType: type, cfg: GrpcServerConfig) !void {
     // setup, return, and the server would vanish right after binding (a confusing
     // ServerStartTimeout downstream). Fall back to the EPOLL shared-nothing loop.
     var probe = initUringRing() catch |err| {
-        logSystem(cfg, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
+        logSystem(cfg, .WARN, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL.", .{@errorName(err)});
 
         return epoll_model.runEpoll(RouterType, cfg);
     };
@@ -642,10 +671,6 @@ pub fn runUring(comptime RouterType: type, cfg: GrpcServerConfig) !void {
     const worker_count = if (cfg.workers == 0) cpu else cfg.workers;
     const opts = common.serveOptsWithCache(cfg);
 
-    logSystem(cfg, "listening on {s}:{d} (io_uring-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
-    if (cfg.tls != null and cfg.tls_port != 0)
-        logSystem(cfg, "dual listener: grpc TLS on {s}:{d} (same workers, on-ring)", .{ cfg.ip, cfg.tls_port });
-
     const workers = try std.heap.smp_allocator.alloc(std.Thread, worker_count);
     defer std.heap.smp_allocator.free(workers);
 
@@ -653,9 +678,13 @@ pub fn runUring(comptime RouterType: type, cfg: GrpcServerConfig) !void {
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (cfg.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = worker_count } else null;
 
+    // What every worker says about its own listeners, so a bind that fails inside a worker
+    // thread reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(worker_count);
+
     const worker_fn = uringMuxWorkerFn(RouterType);
     for (workers, 0..) |*thread, idx|
-        thread.* = try std.Thread.spawn(
+        thread.* = std.Thread.spawn(
             .{ .stack_size = cfg.worker_stack_size_bytes },
             worker_fn,
             .{UringMuxCtx{
@@ -669,8 +698,30 @@ pub fn runUring(comptime RouterType: type, cfg: GrpcServerConfig) !void {
                 .tls_ctx = cfg.tls,
                 .tls_port = cfg.tls_port,
                 .steering = steering,
+                .report = &report,
             }},
-        );
+        ) catch |err| {
+            logSystem(cfg, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ idx, worker_count, @errorName(err) });
+            report.abandon(io, worker_count - idx, err);
+
+            for (workers[0..idx]) |spawned| spawned.join();
+
+            return error.ZixGrpcListenFailed;
+        };
+
+    if (report.awaitGroup(io)) |err| {
+        logSystem(cfg, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ cfg.ip, cfg.port, report.failures(), worker_count, @errorName(err) });
+
+        for (workers) |thread| thread.join();
+
+        return error.ZixGrpcListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is
+    // nothing to announce: the old line claimed a listener that may never have come up.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (io_uring-mux/{d})", .{ cfg.ip, cfg.port, worker_count });
+    if (cfg.tls != null and cfg.tls_port != 0)
+        logSystem(cfg, .INFO, "dual listener: grpc TLS on {s}:{d} (same workers, on-ring)", .{ cfg.ip, cfg.tls_port });
 
     for (workers) |thread| thread.join();
 }
