@@ -15,6 +15,7 @@ const datagram = @import("../../datagram.zig");
 const recovery = @import("../recovery.zig");
 const common = @import("common.zig");
 const reuseport = @import("../../../multiplexers/reuseport.zig");
+const listen_report = @import("../../../multiplexers/listen_report.zig");
 
 /// Max datagrams drained from the socket per epoll wake before returning to epoll_wait (the cap on one
 /// drain-to-EAGAIN pass). A worker owns one UDP socket, so the only reason to leave a non-empty drain is
@@ -28,32 +29,42 @@ const max_drain_per_wake: usize = 4096;
 /// epoll_wait block keeps an idle worker off the CPU, so utilization tracks real load with no spin.
 /// Shared-nothing: its own socket, epoll fd, CID table, and batches, so the hot path takes no lock. Pub
 /// so the io_uring worker can fall back to it when io_uring is unavailable.
-pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize, steering: ?reuseport.Steering) void {
+pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConfig, worker_id: usize, steering: ?reuseport.Steering, report: *listen_report.Report) void {
     common.pinToCpu(worker_id);
 
     // Skew report at worker exit: requests this worker served (common.tl_requests_served).
-    defer common.logSystem(config, "epoll worker {d}: {d} requests served", .{ worker_id, common.tl_requests_served });
+    defer common.logSystem(config, .INFO, "epoll worker {d}: {d} requests served", .{ worker_id, common.tl_requests_served });
 
     // Bind under the order gate: REUSEPORT group index i = worker i,
     // so the cpu-mod-N steering lands on the worker pinned to that slot.
     var bind_turn = reuseport.BindTurn.begin(steering, worker_id);
     defer bind_turn.release();
 
+    // Every exit between here and the receive loop has to reach the group, or the workers that
+    // did bind wait on one that is already gone.
+    var slot = report.slot(config.io, error.ZixHttp3WorkerSetupFailed);
+    defer slot.close();
+
     const fd = datagram.open(config.ip, config.port, true) catch |err| {
-        common.logSystem(config, "bind error: {}", .{err});
+        slot.fail(err);
+
         return;
     };
     defer datagram.close(fd);
 
-    if (steering) |steer| reuseport.attachCpuSteering(fd, steer.group_size);
+    if (steering) |steer| _ = reuseport.attachCpuSteering(fd, steer.group_size);
     bind_turn.release();
+
+    // Serve only once every worker is up, so a group where one bind failed serves on none of them.
+    slot.ok();
+    if (report.awaitGroup(config.io) != null) return;
 
     common.setBusyPoll(fd, config.busy_poll_us);
     datagram.setSocketBuffers(fd, config.socket_rcvbuf, config.socket_sndbuf);
 
     const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
     if (std.posix.errno(epfd_rc) != .SUCCESS) {
-        common.logSystem(config, "epoll_create1 failed", .{});
+        common.logSystem(config, .ERROR, "epoll_create1 failed", .{});
         return;
     }
     const epfd: i32 = @intCast(epfd_rc);
@@ -61,7 +72,7 @@ pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConf
 
     var watch = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = fd } };
     if (std.posix.errno(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &watch)) != .SUCCESS) {
-        common.logSystem(config, "epoll_ctl ADD failed", .{});
+        common.logSystem(config, .ERROR, "epoll_ctl ADD failed", .{});
         return;
     }
 
@@ -135,12 +146,11 @@ pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConf
 /// the socket to EAGAIN per wake. The .URING sibling (uring.zig) runs the io_uring completion loop instead.
 pub fn runEpoll(comptime handler: core.HandlerFn, config: Http3ServerConfig) !void {
     if (!datagram.is_linux) {
-        common.logSystem(config, "HTTP/3 requires the Linux datagram path", .{});
+        common.logSystem(config, .ERROR, "HTTP/3 requires the Linux datagram path", .{});
         return;
     }
 
     const want = common.effectiveWorkers(config);
-    common.logSystem(config, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + epoll)", .{ config.ip, config.port, want });
 
     common.installDiagnosticDump();
 
@@ -151,11 +161,32 @@ pub fn runEpoll(comptime handler: core.HandlerFn, config: Http3ServerConfig) !vo
     var bind_gate = reuseport.BindOrderGate{};
     const steering: ?reuseport.Steering = if (config.reuseport_cbpf) .{ .gate = &bind_gate, .group_size = want } else null;
 
+    // What every worker says about its own socket, so a bind that fails inside a worker thread
+    // reaches this frame instead of ending that thread and nothing else.
+    var report = listen_report.Report.init(want);
+
     var spawned: usize = 0;
     for (0..want) |i| {
-        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i, steering }) catch break;
+        threads[i] = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, workerLoopEpoll, .{ handler, config, i, steering, &report }) catch |err| {
+            common.logSystem(config, .ERROR, "could not spawn worker {d} of {d} ({s})", .{ i, want, @errorName(err) });
+            report.abandon(config.io, want - i, err);
+
+            break;
+        };
         spawned += 1;
     }
+
+    if (report.awaitGroup(config.io)) |err| {
+        common.logSystem(config, .ERROR, "not listening on {s}:{d}: {d} of {d} workers could not bind ({s})", .{ config.ip, config.port, report.failures(), want, @errorName(err) });
+
+        for (threads[0..spawned]) |thread| thread.join();
+
+        return error.ZixHttp3ListenFailed;
+    }
+
+    // Announced here rather than above the spawn, because until the group reports there is nothing
+    // to announce: the old line claimed a socket that may never have been bound.
+    common.logSystem(config, .INFO, "listening on {s}:{d} ({d} workers, SO_REUSEPORT + epoll)", .{ config.ip, config.port, want });
 
     for (threads[0..spawned]) |thread| thread.join();
 }
