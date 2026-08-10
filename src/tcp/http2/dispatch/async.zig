@@ -18,8 +18,6 @@ pub fn runAsync(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     // the accept loop ends rather than living until process exit.
     defer _ = async_cache.reclaim();
 
-    logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
-
     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
     var listener = try addr.listen(io, .{
         .reuse_address = true, // SO_REUSEADDR + SO_REUSEPORT on POSIX, applied to all models
@@ -27,10 +25,14 @@ pub fn runAsync(handler: core.HandlerFn, cfg: Http2ServerConfig) !void {
     });
     defer listener.deinit(io);
 
+    // Announced below the bind, not above it: the old line claimed an address the listener
+    // may never have taken.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
+
     while (true) {
         const stream = listener.accept(io) catch |err| {
             if (err != error.ConnectionAborted) {
-                logSystem(cfg, "accept error: {}", .{err});
+                logSystem(cfg, .ERROR, "accept error: {}", .{err});
                 break;
             }
             continue;
