@@ -16,8 +16,6 @@ const applyConnTimeout = common.applyConnTimeout;
 pub fn runAsync(cfg: TcpServerConfig, handler: HandlerFn) !void {
     const io = cfg.io;
 
-    logSystem(cfg, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
-
     const addr = try std.Io.net.IpAddress.resolve(io, cfg.ip, cfg.port);
     var net_server = try addr.listen(io, .{
         .mode = .stream,
@@ -26,6 +24,10 @@ pub fn runAsync(cfg: TcpServerConfig, handler: HandlerFn) !void {
         .kernel_backlog = cfg.kernel_backlog,
     });
     defer net_server.deinit(io);
+
+    // Announced below the bind, not above it: the old line claimed an address the listener
+    // may never have taken.
+    logSystem(cfg, .INFO, "listening on {s}:{d} (async)", .{ cfg.ip, cfg.port });
 
     while (true) {
         const stream = net_server.accept(io) catch |err| {

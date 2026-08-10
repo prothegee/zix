@@ -38,9 +38,9 @@ fn serveDispatch(cfg: TcpServerConfig, handler: HandlerFn) !void {
 
     // Reject an unrunnable model before binding, so a rejected config leaves nothing behind (ADR-065).
     if (!dispatch_support.isSupported(cfg.dispatch_model)) {
-        common.logSystem(cfg, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
+        common.logSystem(cfg, .ERROR, "{s} dispatch is Linux-only, use .ASYNC on this platform.", .{dispatch_support.rejectedName(cfg.dispatch_model)});
 
-        return error.DispatchModelUnsupported;
+        return error.ZixDispatchModelUnsupported;
     }
 
     return switch (cfg.dispatch_model) {
@@ -53,7 +53,7 @@ fn serveDispatch(cfg: TcpServerConfig, handler: HandlerFn) !void {
         .EPOLL, .URING => if (comptime builtin.target.os.tag == .linux)
             epoll_model.runEpoll(cfg, handler)
         else
-            error.DispatchModelUnsupported,
+            error.ZixDispatchModelUnsupported,
     };
 }
 
@@ -68,7 +68,7 @@ fn TcpServerImpl(comptime handler: HandlerFn) type {
         const Self = @This();
 
         pub fn init(config: TcpServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
+            if (config.port == 0) return error.ZixPortNotConfigured;
 
             return .{ .config = config };
         }
@@ -95,7 +95,7 @@ fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type {
         const Self = @This();
 
         pub fn init(config: TcpServerConfig) !Self {
-            if (config.port == 0) return error.PortNotConfigured;
+            if (config.port == 0) return error.ZixPortNotConfigured;
 
             return .{ .config = config };
         }
@@ -110,7 +110,7 @@ fn TcpFramedServerImpl(comptime frame_fn: FrameFn) type {
                     // this host, otherwise serve the framed adapter over EPOLL so
                     // the server does not vanish right after binding.
                     if (uring_model.uringUnavailableReason()) |reason| {
-                        common.logSystem(self.config, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL (framed adapter).", .{reason});
+                        common.logSystem(self.config, .WARN, "io_uring unavailable ({s}): not suited to this environment (commonly RLIMIT_MEMLOCK, the ulimit -l cap, too low for the ring size). Falling back to EPOLL (framed adapter).", .{reason});
                     } else {
                         return uring_model.runFramedUring(self.config, io, frame_fn);
                     }
@@ -171,7 +171,7 @@ pub const Server = struct {
     ///
     /// Return:
     /// - !TcpServerImpl(handler)
-    /// - error.PortNotConfigured if config.port is 0
+    /// - error.ZixPortNotConfigured if config.port is 0
     pub fn init(comptime handler: HandlerFn, config: TcpServerConfig) !TcpServerImpl(handler) {
         return TcpServerImpl(handler).init(config);
     }
@@ -190,7 +190,7 @@ pub const Server = struct {
     ///
     /// Return:
     /// - !TcpFramedServerImpl(frame_fn)
-    /// - error.PortNotConfigured if config.port is 0
+    /// - error.ZixPortNotConfigured if config.port is 0
     pub fn initFramed(comptime frame_fn: FrameFn, config: TcpServerConfig) !TcpFramedServerImpl(frame_fn) {
         return TcpFramedServerImpl(frame_fn).init(config);
     }
@@ -242,7 +242,7 @@ test "zix tcp: TcpServer init, port zero returns PortNotConfigured" {
     defer threaded.deinit();
 
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         Server.init(echoHandler, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
@@ -331,7 +331,7 @@ test "zix tcp: Tcp.Server.initFramed, port zero returns PortNotConfigured" {
     defer threaded.deinit();
 
     try std.testing.expectError(
-        error.PortNotConfigured,
+        error.ZixPortNotConfigured,
         Server.initFramed(testTcpFrame, .{ .io = threaded.io(), .ip = "127.0.0.1", .port = 0, .dispatch_model = .ASYNC }),
     );
 }
