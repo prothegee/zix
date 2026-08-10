@@ -77,7 +77,8 @@ Anything the grammar cannot read is a fault, never a silent skip:
 | :- | :- | :- | :- | :- |
 | workers | `1` | accept loops each site runs, `0` means every available thread | http1, http2, and grpc sites that serve upstreams or a `public_dir` | above the thread count this process may use it faults and stays at the default |
 | dispatch | `async` | dispatch model: `async`, `epoll`, `uring` | reported only, see below | `epoll` and `uring` fault off Linux, any other word faults everywhere |
-| logs_dir | `<root>/logs` | where log output will be written | the directory must exist, nothing writes into it yet | a missing directory faults and `status` exits 1 |
+| logs_dir | `<root>/logs` | where the daemon writes its log files, one `zixer-000000.log` per day directory | every line the daemon and its sites emit | a missing directory faults and `status` exits 1, and the daemon then keeps console output only |
+| log_level | `info` | lowest severity written, to the log file and the console alike: `debug`, `info`, `warn`, `error` | every line the daemon and its sites emit | any other word faults and stays at the default |
 | sites_dir | `<root>/sites` | where site `.cfg` files are read from | every `list`, `status`, `start`, and `restart` | a missing directory faults, and no site is found |
 | kernel_backlog | `1024` | default listen queue length for tcp site listeners | http1, http2, and grpc sites without their own value, plus the acme companion listener | `0` faults, the kernel still caps the value at `net.core.somaxconn` |
 | max_recv_buf | `8192` | bytes one per-connection stream buffer gets, see below | http1, http2, grpc, and TLS sites, as the default a site file may override | outside `1024` to `262144` it faults and stays at the default |
@@ -642,6 +643,7 @@ status: ok
 workers: 1
 dispatch: async
 logs_dir: /srv/zixer/logs
+log_level: info
 sites_dir: /srv/zixer/sites
 max_recv_buf: 8192
 kernel_backlog: 1024

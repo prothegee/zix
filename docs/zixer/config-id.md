@@ -77,7 +77,8 @@ Apa pun yang tidak terbaca grammar menjadi fault, tidak pernah dilewati diam-dia
 | :- | :- | :- | :- | :- |
 | workers | `1` | jumlah accept loop yang dijalankan tiap site, `0` berarti semua thread yang tersedia | site http1, http2, dan grpc yang melayani upstream atau `public_dir` | di atas jumlah thread yang boleh dipakai proses ini ia fault dan tetap di default |
 | dispatch | `async` | dispatch model: `async`, `epoll`, `uring` | hanya dilaporkan, lihat di bawah | `epoll` dan `uring` fault di luar Linux, kata lain fault di mana pun |
-| logs_dir | `<root>/logs` | tempat output log akan ditulis | direktorinya harus ada, belum ada yang menulis ke sana | direktori yang hilang menjadi fault dan `status` keluar dengan kode 1 |
+| logs_dir | `<root>/logs` | tempat daemon menulis file log-nya, satu `zixer-000000.log` per direktori tanggal | setiap baris yang dikeluarkan daemon dan site-nya | direktori yang hilang menjadi fault dan `status` keluar dengan kode 1, lalu daemon hanya menyisakan output console |
+| log_level | `info` | severity terendah yang ditulis, ke file log dan ke console sekaligus: `debug`, `info`, `warn`, `error` | setiap baris yang dikeluarkan daemon dan site-nya | kata lain menjadi fault dan tetap memakai default |
 | sites_dir | `<root>/sites` | tempat file `.cfg` site dibaca | tiap `list`, `status`, `start`, dan `restart` | direktori yang hilang menjadi fault, dan tidak ada site yang ditemukan |
 | kernel_backlog | `1024` | panjang listen queue default untuk listener site tcp | site http1, http2, dan grpc yang tidak punya nilai sendiri, plus listener companion acme | `0` fault, kernel tetap membatasi nilainya di `net.core.somaxconn` |
 | max_recv_buf | `8192` | jumlah byte untuk satu stream buffer per koneksi, lihat di bawah | site http1, http2, grpc, dan TLS, sebagai default yang boleh ditimpa file site | di luar `1024` sampai `262144` ia fault dan tetap di default |
@@ -656,6 +657,7 @@ status: ok
 workers: 1
 dispatch: async
 logs_dir: /srv/zixer/logs
+log_level: info
 sites_dir: /srv/zixer/sites
 max_recv_buf: 8192
 kernel_backlog: 1024

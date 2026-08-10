@@ -454,7 +454,7 @@ Daemon berjalan di foreground dengan `zixer daemon`, dan itulah yang diinginkan 
 ZIXER_DIR=/srv/zixer zixer daemon
 ```
 
-Belum ada output log. `logs_dir` harus ada karena `status` memeriksanya, dan tidak ada yang menulis ke sana.
+Daemon menulis ke dua tempat sekaligus: `logs_dir/<tanggal>/zixer-000000.log`, dan console tempat ia dijalankan. `log_level` menentukan ambang untuk keduanya, default-nya `info`. `logs_dir` harus sudah ada, yang diurus `zixer init` dan diperiksa `zixer status`, dan daemon yang tidak bisa menulis ke sana tetap menyisakan output console.
 
 <br>
 
