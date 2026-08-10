@@ -5,6 +5,7 @@ const std = @import("std");
 const control = @import("control.zig");
 const control_client = @import("control_client.zig");
 const daemon = @import("daemon.zig");
+const daemon_log = @import("daemon_log.zig");
 const root_dir = @import("root_dir.zig");
 
 const USAGE =
@@ -34,11 +35,11 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, arena: std.mem.Allocator, o
     }
 
     var control_daemon = daemon.Daemon.init(allocator, io, arena, root) catch |err| switch (err) {
-        error.NotInitialized => {
+        error.ZixerNotInitialized => {
             try out.print("zixer is not initialized (no main.cfg in {s})\nrun: zixer init\n", .{root.path});
             return 1;
         },
-        error.MainCfgInvalid => {
+        error.ZixerMainCfgInvalid => {
             try out.writeAll("main.cfg has errors, run: zixer status\n");
             return 1;
         },
@@ -55,11 +56,17 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, arena: std.mem.Allocator, o
         return 1;
     }
 
-    try out.print("daemon: listening on {s}\n", .{control_daemon.socket_path});
+    // From here on the daemon's own logger is the only writer, and out is left
+    // alone. The two cannot share a destination: out writes to stdout at a
+    // position it tracks itself, and a positional write does not move the file
+    // offset the logger's console sink appends at, so `zixer daemon > file 2>&1`
+    // would have the two overwrite each other from byte zero.
     try out.flush();
 
+    daemon_log.logSystem(&control_daemon.logger, .INFO, "daemon: listening on {s}", .{control_daemon.socket_path});
+
     control_daemon.run() catch |err| {
-        try out.print("daemon failed ({s})\n", .{@errorName(err)});
+        daemon_log.logSystem(&control_daemon.logger, .ERROR, "daemon failed ({s})", .{@errorName(err)});
         return 1;
     };
 
@@ -72,11 +79,11 @@ fn runStop(io: std.Io, arena: std.mem.Allocator, out: *std.Io.Writer, root: root
 
     var reply_buf: [control.MAX_LINE]u8 = undefined;
     const reply = control_client.call(io, socket_path, "shutdown", &reply_buf) catch |err| switch (err) {
-        error.DaemonNotRunning => {
+        error.ZixerDaemonNotRunning => {
             try out.writeAll("daemon is not running\n");
             return 1;
         },
-        error.UdsNotSupported => {
+        error.ZixerUdsNotSupported => {
             try out.writeAll("unix sockets are not supported on this platform\n");
             return 1;
         },

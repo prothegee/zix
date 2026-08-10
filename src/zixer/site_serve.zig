@@ -85,6 +85,9 @@ pub const ServeState = struct {
     request_headers: cfg_headers.Table,
     acme_webroot: ?[]const u8,
     acme_relay: ?site_cfg.Upstream,
+    /// The daemon's logger, borrowed. Null is a site built outside a daemon,
+    /// and those lines reach std.log instead, see daemon_log.logSystem.
+    logger: ?*zix.Logger,
     stop: std.atomic.Value(bool) = .init(false),
     wake_ip: []const u8,
     port: u16,
@@ -217,6 +220,7 @@ pub const ServeState = struct {
             .request_headers = request_headers,
             .acme_webroot = acme_webroot,
             .acme_relay = acme_relay,
+            .logger = options.logger,
             .wake_ip = wake_ip,
             .port = port,
         };
@@ -352,7 +356,7 @@ fn freeIdles(allocator: std.mem.Allocator, io: std.Io, idles: []upstream_conn.Id
 
 /// Bind one more listener on an address the site already owns.
 fn listenShared(io: std.Io, ip: []const u8, port: u16, kernel_backlog: u31) !std.Io.net.Server {
-    const addr = std.Io.net.IpAddress.parse(ip, port) catch return error.SiteCfgIncomplete;
+    const addr = std.Io.net.IpAddress.parse(ip, port) catch return error.ZixerSiteCfgIncomplete;
 
     return addr.listen(io, .{ .reuse_address = true, .kernel_backlog = kernel_backlog });
 }
@@ -383,6 +387,7 @@ fn buildProxy(state: *ServeState, index: usize) http1_proxy.Proxy {
         .client_scheme = request_scheme.Scheme.ofSite(state.tls_ctx != null),
         .upstream_timeout_ms = state.upstream_timeout_ms,
         .upstream_connect_timeout_ms = state.upstream_connect_timeout_ms,
+        .logger = state.logger,
         .allocator = state.allocator,
         .stream_buf_bytes = state.stream_buf_bytes,
         .process_gate = &state.process_gate,
@@ -554,7 +559,7 @@ test "zix zixer: site serve, tls site create refuses a missing cert file" {
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18895);
     var server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
 
-    try std.testing.expectError(error.TlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 18895, .{ .kernel_backlog = 8 }));
+    try std.testing.expectError(error.ZixTlsCertFileNotFound, ServeState.create(std.testing.allocator, io, server, &cfg, 18895, .{ .kernel_backlog = 8 }));
     server.deinit(io);
 }
 
@@ -1302,4 +1307,75 @@ test "zix zixer: site serve, the header tables reach every worker and outlive th
 
     state.shutdown();
     try std.testing.expect(!port_probe.isTaken(io, addr));
+}
+
+test "zix zixer: site serve, the daemon logger reaches every worker's proxy" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve logger handoff test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Writes nowhere, so the handoff is what is under test rather than the output.
+    var logger = zix.Logger{ .config = .{}, .allocator = std.testing.allocator };
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18996,
+        .public_dir = "/var/www/static-test",
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18996);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18996, .{
+        .workers = 2,
+        .kernel_backlog = 8,
+        .logger = &logger,
+    });
+
+    try std.testing.expectEqual(@as(?*zix.Logger, &logger), state.logger);
+    for (state.workers) |*worker| try std.testing.expectEqual(@as(?*zix.Logger, &logger), worker.proxy.logger);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
+}
+
+test "zix zixer: site serve, a site bound with no daemon logger carries none" {
+    if (comptime @import("builtin").os.tag != .linux) {
+        std.log.info("zix zixer: site serve logger absence test needs linux", .{});
+
+        return;
+    }
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg = site_cfg.SiteCfg{
+        .engine = .HTTP1,
+        .ip = "127.0.0.1",
+        .port = 18994,
+        .public_dir = "/var/www/static-test",
+    };
+
+    const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 18994);
+    const server = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+
+    const state = try ServeState.create(std.testing.allocator, io, server, &cfg, 18994, .{ .kernel_backlog = 8 });
+
+    try std.testing.expectEqual(@as(?*zix.Logger, null), state.logger);
+    try std.testing.expectEqual(@as(?*zix.Logger, null), state.workers[0].proxy.logger);
+
+    state.shutdown();
+
+    var rebound = try addr.listen(io, .{ .kernel_backlog = 8, .reuse_address = true });
+    rebound.deinit(io);
 }

@@ -12,6 +12,7 @@ const MAIN_CFG_TEMPLATE =
     \\workers: 0                      # accept loops per tcp site, 0 = all available threads
     \\dispatch: async                 # async | epoll | uring
     \\logs_dir: {s}/logs
+    \\log_level: info                 # debug | info | warn | error, the log file and the console
     \\sites_dir: {s}/sites
     \\
     \\# per-listener defaults, site files may override

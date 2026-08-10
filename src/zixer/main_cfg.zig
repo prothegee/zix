@@ -6,6 +6,7 @@ const zix = @import("zix");
 
 const cfg_scanner = @import("cfg_scanner.zig");
 const conn_buffer = @import("conn_buffer.zig");
+const daemon_log = @import("daemon_log.zig");
 const deadline_table = @import("deadline_table.zig");
 const fault = @import("fault.zig");
 const process_gate = @import("process_gate.zig");
@@ -20,6 +21,10 @@ pub const MainCfg = struct {
     workers: usize = 1,
     dispatch: Dispatch = .ASYNC,
     logs_dir: []const u8 = "",
+    /// Lowest severity the daemon writes, to the log file and to the console
+    /// alike. info keeps the lifecycle lines, warn and error narrow it to
+    /// what needs acting on, debug opens the per-request detail.
+    log_level: daemon_log.Level = .INFO,
     sites_dir: []const u8 = "",
     kernel_backlog: u31 = 1024,
     max_recv_buf: usize = conn_buffer.DEFAULT_BYTES,
@@ -59,6 +64,7 @@ const Key = enum {
     workers,
     dispatch,
     logs_dir,
+    log_level,
     sites_dir,
     kernel_backlog,
     max_recv_buf,
@@ -158,6 +164,14 @@ pub fn parse(
                 cfg.dispatch = model;
             },
             .logs_dir => cfg.logs_dir = entry.value,
+            .log_level => {
+                const level = daemon_log.parseLevel(entry.value) orelse {
+                    try faults.add(entry.key, "unknown value '{s}', use debug, info, warn, or error", .{entry.value});
+                    continue;
+                };
+
+                cfg.log_level = level;
+            },
             .sites_dir => cfg.sites_dir = entry.value,
             .kernel_backlog => {
                 const value = try fault.evalNumber(faults, entry) orelse continue;
@@ -816,4 +830,48 @@ test "zix zixer: main cfg, upstream connect and idle values above their ceilings
     try std.testing.expectEqual(@as(usize, 2), faults.slice().len);
     try std.testing.expectEqual(upstream_conn.DEFAULT_CONNECT_TIMEOUT_MS, cfg.upstream_connect_timeout_ms);
     try std.testing.expectEqual(upstream_conn.DEFAULT_IDLE_TTL_MS, cfg.upstream_idle_ttl_ms);
+}
+
+test "zix zixer: main cfg, log_level defaults to info" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+    try std.testing.expectEqual(daemon_log.Level.INFO, cfg.log_level);
+}
+
+test "zix zixer: main cfg, every log_level spelling parses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const cases = [_]struct { line: []const u8, want: daemon_log.Level }{
+        .{ .line = "log_level: debug\n", .want = .DEBUG },
+        .{ .line = "log_level: info\n", .want = .INFO },
+        .{ .line = "log_level: warn\n", .want = .WARN },
+        .{ .line = "log_level: error\n", .want = .ERROR },
+    };
+
+    for (cases) |case| {
+        var faults = fault.FaultList.init(arena.allocator());
+        const cfg = try parse(arena.allocator(), case.line, "/srv/zixer", 8, &faults);
+
+        try std.testing.expectEqual(@as(usize, 0), faults.slice().len);
+        try std.testing.expectEqual(case.want, cfg.log_level);
+    }
+}
+
+test "zix zixer: main cfg, an unknown log_level faults and keeps the default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var faults = fault.FaultList.init(arena.allocator());
+    const cfg = try parse(arena.allocator(), "log_level: loud\n", "/srv/zixer", 8, &faults);
+
+    try std.testing.expectEqual(@as(usize, 1), faults.slice().len);
+    try std.testing.expectEqualStrings("log_level", faults.slice()[0].key);
+    try std.testing.expectEqualStrings("unknown value 'loud', use debug, info, warn, or error", faults.slice()[0].hint);
+    try std.testing.expectEqual(daemon_log.Level.INFO, cfg.log_level);
 }

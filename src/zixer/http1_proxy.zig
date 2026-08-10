@@ -9,6 +9,7 @@ const cfg_scanner = @import("cfg_scanner.zig");
 const client_admit = @import("client_admit.zig");
 const client_lease = @import("client_lease.zig");
 const conn_buffer = @import("conn_buffer.zig");
+const daemon_log = @import("daemon_log.zig");
 const deadline_table = @import("deadline_table.zig");
 const fault = @import("fault.zig");
 const http1_head = @import("http1_head.zig");
@@ -114,6 +115,10 @@ pub const Proxy = struct {
     /// Headers this site adds to every request it sends an upstream, compiled
     /// from its [request_headers] section. Empty when the site configured none.
     request_headers: cfg_headers.Table = .{},
+    /// The daemon's logger, borrowed. Every edge error the site answers is
+    /// written here too, so an operator sees what a client saw. Null is a
+    /// Proxy built outside a daemon, and those lines reach std.log instead.
+    logger: ?*zix.Logger = null,
 };
 
 /// The site's answer headers with one request's token values filled in.
@@ -164,7 +169,7 @@ pub fn serveConn(proxy: *const Proxy, client_stream: std.Io.net.Stream) void {
     defer lease.release();
 
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, legsFor(proxy)) catch {
-        writeRefusal(io, client_stream);
+        writeRefusal(proxy.logger, io, client_stream);
         return;
     };
     defer buffers.deinit(proxy.allocator);
@@ -193,11 +198,11 @@ fn legsFor(proxy: *const Proxy) conn_buffer.Legs {
 /// - The site's own headers are left off here on purpose. This answer exists
 ///   because the box could not spare the buffers for a request, so it stays
 ///   the one reply that costs nothing beyond its own line.
-fn writeRefusal(io: std.Io, client_stream: std.Io.net.Stream) void {
+fn writeRefusal(logger: ?*zix.Logger, io: std.Io, client_stream: std.Io.net.Stream) void {
     var refusal_buf: [256]u8 = undefined;
     var refusal_writer = client_stream.writer(io, &refusal_buf);
 
-    writeEdgeError(&refusal_writer.interface, 503, "edge out of buffers", "connection_limit_reached", .{});
+    writeEdgeError(logger, &refusal_writer.interface, 503, "edge out of buffers", "connection_limit_reached", .{});
     refusal_writer.interface.flush() catch {};
 }
 
@@ -223,7 +228,7 @@ fn writeRefusal(io: std.Io, client_stream: std.Io.net.Stream) void {
 ///   passes a lease over nothing.
 pub fn serveLoop(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *std.Io.Writer, client_addr: std.Io.net.IpAddress, client_stream: ?std.Io.net.Stream, zero_copy_fd: ?std.posix.fd_t, lease: *client_lease.Lease) void {
     const buffers = conn_buffer.Set.init(proxy.allocator, proxy.stream_buf_bytes, .{ .client = false, .upstream = proxy.pool != null }) catch {
-        writeEdgeError(client_w, 503, "edge out of buffers", "connection_limit_reached", clientBlock(proxy, "", ""));
+        writeEdgeError(proxy.logger, client_w, 503, "edge out of buffers", "connection_limit_reached", clientBlock(proxy, "", ""));
         client_w.flush() catch {};
         return;
     };
@@ -248,13 +253,13 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
 
         var head_buf: [http1_head.MAX_HEAD_BYTES]u8 = undefined;
         const head_bytes = http1_head.readHead(client_r, &head_buf) catch |err| {
-            answerUnreadableHead(client_w, err, clientBlock(proxy, client_ip, ""));
+            answerUnreadableHead(proxy.logger, client_w, err, clientBlock(proxy, client_ip, ""));
 
             return;
         };
 
         const request = http1_head.parseRequest(head_bytes) catch {
-            writeEdgeError(client_w, 400, "bad request", "http_request_error", clientBlock(proxy, client_ip, ""));
+            writeEdgeError(proxy.logger, client_w, 400, "bad request", "http_request_error", clientBlock(proxy, client_ip, ""));
             return;
         };
 
@@ -304,7 +309,7 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
         // site's own [request_headers] block at its ceiling.
         var build_buf: [http1_head.MAX_HEAD_BYTES + 512 + cfg_headers.MAX_BLOCK_BYTES]u8 = undefined;
         const upstream_head = buildUpstreamHead(&build_buf, &request, client_addr, upgrade, proxy.client_scheme, to_upstream) catch {
-            writeEdgeError(client_w, 400, "bad request", "http_request_error", to_client);
+            writeEdgeError(proxy.logger, client_w, 400, "bad request", "http_request_error", to_client);
             return;
         };
 
@@ -343,13 +348,13 @@ fn serveLoopBuffered(proxy: *const Proxy, client_r: *std.Io.Reader, client_w: *s
 ///
 /// Return:
 /// - void, and nothing at all is written for the silent close
-fn answerUnreadableHead(client_w: *std.Io.Writer, err: http1_head.Error, extra: cfg_headers.Block) void {
+fn answerUnreadableHead(logger: ?*zix.Logger, client_w: *std.Io.Writer, err: http1_head.Error, extra: cfg_headers.Block) void {
     switch (err) {
         error.PartialHead => {
             writeLocalStatus(client_w, 408, "request timeout", "", true, extra);
             client_w.flush() catch {};
         },
-        error.HeadTooLarge => writeEdgeError(client_w, 431, "head too large", "http_request_error", extra),
+        error.ZixerHeadTooLarge => writeEdgeError(logger, client_w, 431, "head too large", "http_request_error", extra),
         else => {},
     }
 }
@@ -397,7 +402,7 @@ fn acmeAnswer(proxy: *const Proxy, request: *const http1_head.RequestHead, clien
     if (acme.relay) |upstream| {
         if (acme_challenge.relay(proxy.io, upstream, request.method, request.target, request.host, client_w)) return .CLOSE;
 
-        writeEdgeError(client_w, 502, "acme relay unreachable", "connection_refused", extra);
+        writeEdgeError(proxy.logger, client_w, 502, "acme relay unreachable", "connection_refused", extra);
         return .CLOSE;
     }
 
@@ -651,7 +656,7 @@ fn exchange(
     // answered (static, acme, the https redirect) never reaches it.
     const admission = process_wait.admit(proxy.process_gate, io);
     if (admission != .ADMITTED) {
-        writeEdgeError(client_w, 504, admission.reason(), process_wait.PROXY_ERROR, extra);
+        writeEdgeError(proxy.logger, client_w, 504, admission.reason(), process_wait.PROXY_ERROR, extra);
 
         return .CLOSE;
     }
@@ -673,7 +678,7 @@ fn exchange(
             // pool the honest answer is the failure it saw, not 503.
             if (failed_here) break;
 
-            writeEdgeError(client_w, 503, "no upstream available", "destination_unavailable", extra);
+            writeEdgeError(proxy.logger, client_w, 503, "no upstream available", "destination_unavailable", extra);
             return .CLOSE;
         };
 
@@ -703,12 +708,12 @@ fn exchange(
             .none => {},
             .content_length => |len| pumpExact(client_r, &up_writer.interface, len, null) catch {
                 conn.stream.close(io);
-                writeEdgeError(client_w, 502, "upstream send failed", "connection_terminated", extra);
+                writeEdgeError(proxy.logger, client_w, 502, "upstream send failed", "connection_terminated", extra);
                 return .CLOSE;
             },
             .chunked => pumpChunked(client_r, &up_writer.interface, false) catch {
                 conn.stream.close(io);
-                writeEdgeError(client_w, 502, "upstream send failed", "connection_terminated", extra);
+                writeEdgeError(proxy.logger, client_w, 502, "upstream send failed", "connection_terminated", extra);
                 return .CLOSE;
             },
             .until_close => unreachable,
@@ -720,7 +725,7 @@ fn exchange(
                 failed_here = true;
                 continue;
             }
-            writeEdgeError(client_w, 502, "upstream send failed", "connection_terminated", extra);
+            writeEdgeError(proxy.logger, client_w, 502, "upstream send failed", "connection_terminated", extra);
             return .CLOSE;
         };
 
@@ -731,8 +736,8 @@ fn exchange(
             // A silent upstream is not a dead one: the request was already
             // delivered, so replaying it could run the work twice, and the
             // slot stays up because a slow backend is still a serving one.
-            if (err == error.UpstreamTimeout) {
-                writeEdgeError(client_w, 504, "upstream timeout", "http_response_timeout", extra);
+            if (err == error.ZixerUpstreamTimeout) {
+                writeEdgeError(proxy.logger, client_w, 504, "upstream timeout", "http_response_timeout", extra);
                 return .CLOSE;
             }
 
@@ -743,7 +748,7 @@ fn exchange(
                 failed_here = true;
                 continue;
             }
-            writeEdgeError(client_w, 502, "upstream closed early", "connection_terminated", extra);
+            writeEdgeError(proxy.logger, client_w, 502, "upstream closed early", "connection_terminated", extra);
             return .CLOSE;
         };
 
@@ -813,7 +818,7 @@ fn exchange(
     }
 
     const answer = upstream_status.afterAttempts(connect_timed_out);
-    writeEdgeError(client_w, answer.status, answer.reason, answer.proxy_error, extra);
+    writeEdgeError(proxy.logger, client_w, answer.status, answer.reason, answer.proxy_error, extra);
 
     return .CLOSE;
 }
@@ -822,9 +827,9 @@ fn exchange(
 const HeadError = error{
     /// The upstream closed, broke framing, or answered something this
     /// exchange never asked for.
-    UpstreamDead,
+    ZixerUpstreamDead,
     /// The upstream stayed silent past the site's budget.
-    UpstreamTimeout,
+    ZixerUpstreamTimeout,
 };
 
 /// Read the upstream response head, relaying interim 1xx responses to the
@@ -845,19 +850,19 @@ fn readResponseHead(
 ) HeadError!http1_head.ResponseHead {
     var interim: usize = 0;
     while (interim <= MAX_INTERIM) : (interim += 1) {
-        if (!gate.ready(up_r)) return error.UpstreamTimeout;
+        if (!gate.ready(up_r)) return error.ZixerUpstreamTimeout;
 
-        const bytes = http1_head.readHead(up_r, head_buf) catch return error.UpstreamDead;
-        const response = http1_head.parseResponse(bytes, method) catch return error.UpstreamDead;
+        const bytes = http1_head.readHead(up_r, head_buf) catch return error.ZixerUpstreamDead;
+        const response = http1_head.parseResponse(bytes, method) catch return error.ZixerUpstreamDead;
 
-        if (response.status == 101) return if (upgrade) response else error.UpstreamDead;
+        if (response.status == 101) return if (upgrade) response else error.ZixerUpstreamDead;
         if (response.status / 100 != 1) return response;
 
-        client_w.writeAll(bytes) catch return error.UpstreamDead;
-        client_w.flush() catch return error.UpstreamDead;
+        client_w.writeAll(bytes) catch return error.ZixerUpstreamDead;
+        client_w.flush() catch return error.ZixerUpstreamDead;
     }
 
-    return error.UpstreamDead;
+    return error.ZixerUpstreamDead;
 }
 
 /// Rebuild the client head for the upstream leg: filtered headers plus Via,
@@ -966,7 +971,23 @@ fn expectsContinue(request: *const http1_head.RequestHead) bool {
 }
 
 /// Local error reply with the rfc 9209 Proxy-Status parameter, then close.
-fn writeEdgeError(client_w: *std.Io.Writer, status: u16, reason: []const u8, proxy_error: []const u8, extra: cfg_headers.Block) void {
+///
+/// Note:
+/// - The same answer goes to the operator's log, because a client seeing a 502 and an operator
+///   seeing nothing is the gap this funnel closes. The status picks the level: a 5xx is the site
+///   or its upstream failing and files at WARN, a 4xx is the client's own request and files at
+///   DEBUG, so a bad client cannot flood the log.
+///
+/// Param:
+/// logger - ?*zix.Logger (the daemon's, null outside a daemon)
+fn writeEdgeError(logger: ?*zix.Logger, client_w: *std.Io.Writer, status: u16, reason: []const u8, proxy_error: []const u8, extra: cfg_headers.Block) void {
+    daemon_log.logSystem(
+        logger,
+        if (status >= 500) .WARN else .DEBUG,
+        "answered {d} {s} (proxy-status error=\"{s}\")",
+        .{ status, reason, proxy_error },
+    );
+
     client_w.print(
         "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nProxy-Status: zixer; error=\"{s}\"\r\nConnection: close\r\n",
         .{ status, reason, reason.len + 1, proxy_error },
@@ -994,11 +1015,11 @@ fn pumpExact(src: *std.Io.Reader, dst: *std.Io.Writer, len: u64, gate: ?upstream
     var remaining = len;
     while (remaining > 0) {
         if (gate) |bound| {
-            if (!bound.ready(src)) return error.UpstreamTimeout;
+            if (!bound.ready(src)) return error.ZixerUpstreamTimeout;
         }
 
         const want: usize = @intCast(@min(remaining, PUMP_LIMIT));
-        const got = src.stream(dst, .limited(want)) catch return error.ConnectionClosed;
+        const got = src.stream(dst, .limited(want)) catch return error.ZixerConnectionClosed;
 
         // Zero moved is not the end: the reader may have filled its own
         // buffer this pass instead of writing, and the next pass drains
@@ -1026,7 +1047,7 @@ fn pumpChunked(src: *std.Io.Reader, dst: *std.Io.Writer, flush_each: bool) !void
 
         const semicolon = std.mem.indexOfScalar(u8, size_line, ';');
         const size_text = std.mem.trim(u8, if (semicolon) |pos| size_line[0..pos] else size_line, " \t");
-        const size = std.fmt.parseInt(u64, size_text, 16) catch return error.BadChunk;
+        const size = std.fmt.parseInt(u64, size_text, 16) catch return error.ZixerBadChunk;
 
         try dst.print("{x}\r\n", .{size});
 
@@ -1042,7 +1063,7 @@ fn pumpChunked(src: *std.Io.Reader, dst: *std.Io.Writer, flush_each: bool) !void
         try pumpExact(src, dst, size, null);
 
         const after = try readLine(src, &line_buf);
-        if (after.len != 0) return error.BadChunk;
+        if (after.len != 0) return error.ZixerBadChunk;
         try dst.writeAll("\r\n");
         if (flush_each) try dst.flush();
     }
@@ -1067,14 +1088,14 @@ fn pumpUntilClose(src: *std.Io.Reader, dst: *std.Io.Writer) void {
 fn readLine(src: *std.Io.Reader, buf: []u8) ![]const u8 {
     var len: usize = 0;
     while (len < buf.len) {
-        const got = src.readSliceShort(buf[len .. len + 1]) catch return error.ConnectionClosed;
-        if (got == 0) return error.ConnectionClosed;
+        const got = src.readSliceShort(buf[len .. len + 1]) catch return error.ZixerConnectionClosed;
+        if (got == 0) return error.ZixerConnectionClosed;
 
         len += 1;
         if (len >= 2 and buf[len - 2] == '\r' and buf[len - 1] == '\n') return buf[0 .. len - 2];
     }
 
-    return error.BadChunk;
+    return error.ZixerBadChunk;
 }
 
 // --------------------------------------------------------- //
@@ -1179,7 +1200,7 @@ test "zix zixer: http1 proxy, an edge error and a local status carry them too" {
     // every answer belongs on it.
     var error_buf: [512]u8 = undefined;
     var error_out = std.Io.Writer.fixed(&error_buf);
-    writeEdgeError(&error_out, 504, "upstream timeout", "http_response_timeout", extra);
+    writeEdgeError(&quiet_logger, &error_out, 504, "upstream timeout", "http_response_timeout", extra);
     const error_head = error_out.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, error_head, "x-frame-options: DENY\r\n") != null);
@@ -1200,6 +1221,7 @@ test "zix zixer: http1 proxy, a block builder fills the tokens from the proxy an
     defer arena.deinit();
 
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = std.testing.io,
         .client_scheme = .HTTPS,
         .response_headers = try testTable(arena.allocator(), .RESPONSE, &.{
@@ -1292,7 +1314,7 @@ test "zix zixer: http1 proxy, pumpExact moves exactly the length" {
 
     var short = std.Io.Reader.fixed("abc");
     var short_out = std.Io.Writer.fixed(&out_buf);
-    try std.testing.expectError(error.ConnectionClosed, pumpExact(&short, &short_out, 5, null));
+    try std.testing.expectError(error.ZixerConnectionClosed, pumpExact(&short, &short_out, 5, null));
 }
 
 test "zix zixer: http1 proxy, pumpChunked re-emits chunks and the trailer" {
@@ -1305,14 +1327,14 @@ test "zix zixer: http1 proxy, pumpChunked re-emits chunks and the trailer" {
 
     var bad = std.Io.Reader.fixed("nope\r\n");
     var bad_out = std.Io.Writer.fixed(&out_buf);
-    try std.testing.expectError(error.BadChunk, pumpChunked(&bad, &bad_out, false));
+    try std.testing.expectError(error.ZixerBadChunk, pumpChunked(&bad, &bad_out, false));
 }
 
 test "zix zixer: http1 proxy, edge error carries proxy-status" {
     var out_buf: [512]u8 = undefined;
     var out = std.Io.Writer.fixed(&out_buf);
 
-    writeEdgeError(&out, 502, "all upstreams failed", "connection_refused", .{});
+    writeEdgeError(&quiet_logger, &out, 502, "all upstreams failed", "connection_refused", .{});
     const reply = out.buffered();
 
     try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 502 all upstreams failed\r\n"));
@@ -1444,7 +1466,7 @@ test "zix zixer: http1 proxy, round trip relays body and rewrites both heads" {
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1499,7 +1521,7 @@ test "zix zixer: http1 proxy, edge keep-alive reuses one upstream conn" {
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1561,7 +1583,7 @@ test "zix zixer: http1 proxy, dead upstream fails over inside one request" {
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 2);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1604,7 +1626,7 @@ test "zix zixer: http1 proxy, an upstream that never answers its handshake gets 
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .upstream_connect_timeout_ms = 300 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .upstream_connect_timeout_ms = 300 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1661,7 +1683,7 @@ test "zix zixer: http1 proxy, every upstream down answers 502 with proxy-status"
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1713,6 +1735,11 @@ test "zix zixer: http1 proxy, every upstream down answers 502 with proxy-status"
 
 const testing = std.testing;
 
+/// A logger that writes nowhere: console off and no save_path, so nothing is opened and nothing is
+/// printed. Every test proxy carries it, which keeps the edge errors a test drives on purpose out
+/// of the runner's output while still exercising the logger branch the daemon takes.
+var quiet_logger = zix.Logger{ .config = .{}, .allocator = std.testing.allocator };
+
 fn writeFixture(dir: std.Io.Dir, name: []const u8, data: []const u8) void {
     dir.writeFile(testing.io, .{ .sub_path = name, .data = data }) catch @panic("fixture write failed");
 }
@@ -1729,7 +1756,7 @@ test "zix zixer: http1 proxy, static hit serves the file and keeps alive" {
 
     var root_buf: [64]u8 = undefined;
     const root = fixtureRoot(&root_buf, &tmp);
-    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
 
     const request = try http1_head.parseRequest("GET /app.js HTTP/1.1\r\nHost: t\r\n\r\n");
     var out_buf: [1024]u8 = undefined;
@@ -1754,7 +1781,7 @@ test "zix zixer: http1 proxy, static head request sends no body" {
 
     var root_buf: [64]u8 = undefined;
     const root = fixtureRoot(&root_buf, &tmp);
-    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
 
     const request = try http1_head.parseRequest("HEAD /page.html HTTP/1.1\r\nHost: t\r\n\r\n");
     var out_buf: [1024]u8 = undefined;
@@ -1776,7 +1803,7 @@ test "zix zixer: http1 proxy, static miss falls back to the spa page" {
 
     var root_buf: [64]u8 = undefined;
     const root = fixtureRoot(&root_buf, &tmp);
-    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = "index.html" } };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = "index.html" } };
 
     // A deep link misses on disk and serves the fallback page instead.
     const request = try http1_head.parseRequest("GET /users/42 HTTP/1.1\r\nHost: t\r\n\r\n");
@@ -1798,7 +1825,7 @@ test "zix zixer: http1 proxy, static-only site answers 404 and 405 locally" {
 
     var root_buf: [64]u8 = undefined;
     const root = fixtureRoot(&root_buf, &tmp);
-    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
 
     const miss = try http1_head.parseRequest("GET /absent.txt HTTP/1.1\r\nHost: t\r\n\r\n");
     var miss_buf: [512]u8 = undefined;
@@ -1834,6 +1861,7 @@ test "zix zixer: http1 proxy, mixed site miss continues to the pool" {
     var idle = try upstream_conn.IdleCache.init(testing.allocator, 1);
     defer idle.deinit(testing.allocator, testing.io);
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .pool = &pool,
         .idle = &idle,
@@ -1869,7 +1897,7 @@ test "zix zixer: http1 proxy, static request carrying a body closes the edge" {
 
     var root_buf: [64]u8 = undefined;
     const root = fixtureRoot(&root_buf, &tmp);
-    const proxy = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
 
     const request = try http1_head.parseRequest("GET /app.js HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\n\r\n");
     var out_buf: [512]u8 = undefined;
@@ -1909,6 +1937,7 @@ test "zix zixer: http1 proxy, mixed site serves static beside the pool end to en
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = io,
         .pool = &pool,
         .idle = &idle,
@@ -1966,6 +1995,7 @@ test "zix zixer: http1 proxy, a served static request carries the site's headers
     const root = fixtureRoot(&root_buf, &tmp);
 
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
         .client_scheme = .HTTPS,
@@ -1999,6 +2029,7 @@ test "zix zixer: http1 proxy, a request past the site's ceiling is refused witho
     defer arena.deinit();
 
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .static = .{ .public_dir = "/nonexistent", .public_prefix = null, .spa_fallback = null },
         .response_headers = try testTable(arena.allocator(), .RESPONSE, &.{
@@ -2036,6 +2067,7 @@ test "zix zixer: http1 proxy, acme webroot answers ahead of the static plane" {
     const webroot = std.fmt.bufPrint(&acme_buf, "{s}/acme", .{root}) catch unreachable;
 
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .static = .{ .public_dir = www, .public_prefix = null, .spa_fallback = null },
         .acme = .{ .webroot = webroot },
@@ -2065,6 +2097,7 @@ test "zix zixer: http1 proxy, acme relay unreachable answers 502 proxy-status" {
     const io = threaded.io();
 
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = io,
         .acme = .{ .relay = .{ .host = "127.0.0.1", .port = 18892 } },
     };
@@ -2091,7 +2124,7 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
     var der_buf: [4096]u8 = undefined;
     const cert_der = try zix.Tls.pemToDer(&der_buf, cert_pem);
 
-    const proxy = Proxy{ .io = io, .tls_cert_der = cert_der };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .tls_cert_der = cert_der };
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40002 } };
 
     var foreign = std.Io.Reader.fixed("GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
@@ -2115,7 +2148,7 @@ test "zix zixer: http1 proxy, tls certificate gate answers 421 on a foreign host
 }
 
 test "zix zixer: http1 proxy, https redirect carries the site port" {
-    const proxy = Proxy{ .io = testing.io, .redirect_https = 8443 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .redirect_https = 8443 };
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 40003 } };
 
     var src = std.Io.Reader.fixed("GET /app/page HTTP/1.1\r\nHost: site.test:80\r\n\r\n");
@@ -2146,7 +2179,7 @@ test "zix zixer: http1 proxy, https redirect carries the site port" {
 // --------------------------------------------------------- //
 
 test "zix zixer: http1 proxy, a redirect keeps the method when the method matters" {
-    const proxy = Proxy{ .io = testing.io, .redirect_https = 8443 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .redirect_https = 8443 };
 
     // A GET may be repeated as a GET, so the long-standing status stands.
     const read_request = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: site.test\r\n\r\n");
@@ -2166,7 +2199,7 @@ test "zix zixer: http1 proxy, a redirect keeps the method when the method matter
 }
 
 test "zix zixer: http1 proxy, a named redirect host leaves the client no say" {
-    const named = Proxy{ .io = testing.io, .redirect_https = 443, .redirect_host = "example.com" };
+    const named = Proxy{ .logger = &quiet_logger, .io = testing.io, .redirect_https = 443, .redirect_host = "example.com" };
 
     // Whatever the client claimed to be talking to, the reply names the site.
     const spoofed = try http1_head.parseRequest("GET /x HTTP/1.1\r\nHost: evil.test\r\n\r\n");
@@ -2184,7 +2217,7 @@ test "zix zixer: http1 proxy, a named redirect host leaves the client no say" {
 }
 
 test "zix zixer: http1 proxy, a host that would reshape the location is refused" {
-    const proxy = Proxy{ .io = testing.io, .redirect_https = 443 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .redirect_https = 443 };
 
     // A slash in the Host would put a client-written path inside zixer's own
     // Location line.
@@ -2384,7 +2417,7 @@ test "zix zixer: http1 proxy, ws upgrade tunnels end to end and pins one upstrea
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 2);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2458,7 +2491,7 @@ test "zix zixer: http1 proxy, ws upgrade refused relays the plain response" {
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2557,7 +2590,7 @@ test "zix zixer: http1 proxy, sse stream relays each event as it arrives" {
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2650,7 +2683,7 @@ test "zix zixer: http1 proxy, a silent upstream answers 504 with proxy-status" {
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .upstream_timeout_ms = 200 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .upstream_timeout_ms = 200 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2703,7 +2736,7 @@ test "zix zixer: http1 proxy, a short budget does not disturb a healthy exchange
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .upstream_timeout_ms = 200 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .upstream_timeout_ms = 200 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2751,7 +2784,7 @@ test "zix zixer: http1 proxy, a body larger than the buffers relays whole" {
 
     // The smallest buffer a site may configure, against a body many times
     // its length: the pump has to loop, and nothing may be dropped.
-    const proxy = Proxy{ .io = io, .allocator = std.testing.allocator, .stream_buf_bytes = conn_buffer.MIN_BYTES, .pool = &pool, .idle = &idle };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .allocator = std.testing.allocator, .stream_buf_bytes = conn_buffer.MIN_BYTES, .pool = &pool, .idle = &idle };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2778,7 +2811,7 @@ test "zix zixer: http1 proxy, a body larger than the buffers relays whole" {
 
     // The upstream echoes the body it received, so a short read anywhere
     // in the chain shows up as a short echo here.
-    const echo_at = std.mem.indexOf(u8, reply, "echo:") orelse return error.NoEchoInReply;
+    const echo_at = std.mem.indexOf(u8, reply, "echo:") orelse return error.ZixerNoEchoInReply;
     try std.testing.expectEqual(body_len + 5, reply.len - echo_at);
 }
 
@@ -2786,8 +2819,8 @@ test "zix zixer: http1 proxy, a static site allocates no upstream legs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const static_proxy = Proxy{ .io = testing.io, .allocator = arena.allocator(), .static = .{ .public_dir = "/x", .public_prefix = null, .spa_fallback = null } };
-    const proxied_proxy = Proxy{ .io = testing.io, .allocator = arena.allocator(), .pool = @ptrFromInt(@alignOf(upstream_pool.Pool)) };
+    const static_proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .allocator = arena.allocator(), .static = .{ .public_dir = "/x", .public_prefix = null, .spa_fallback = null } };
+    const proxied_proxy = Proxy{ .logger = &quiet_logger, .io = testing.io, .allocator = arena.allocator(), .pool = @ptrFromInt(@alignOf(upstream_pool.Pool)) };
 
     try std.testing.expectEqual(@as(usize, 2), legsFor(&static_proxy).count());
     try std.testing.expectEqual(@as(usize, 4), legsFor(&proxied_proxy).count());
@@ -2818,7 +2851,7 @@ test "zix zixer: http1 proxy, a saturated site refuses with 504 before it picks"
     // Another request already holds the site's only slot.
     try std.testing.expectEqual(process_gate.Admission.ADMITTED, gate.enter());
 
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2866,7 +2899,7 @@ test "zix zixer: http1 proxy, a queued request that waits its budget out answers
     defer gate.deinit(std.testing.allocator);
     try std.testing.expectEqual(process_gate.Admission.ADMITTED, gate.enter());
 
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2918,7 +2951,7 @@ test "zix zixer: http1 proxy, an admitted request gives its slot back" {
     var gate = try process_gate.Gate.init(std.testing.allocator, .{ .limit = 1, .queue_len = 2 });
     defer gate.deinit(std.testing.allocator);
 
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .process_gate = &gate };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -2958,7 +2991,7 @@ test "zix zixer: http1 proxy, a cached answer is byte identical to an uncached o
     const root = fixtureRoot(&root_buf, &tmp);
     const request = try http1_head.parseRequest("GET /app.js HTTP/1.1\r\nHost: t\r\n\r\n");
 
-    const uncached = Proxy{ .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
+    const uncached = Proxy{ .logger = &quiet_logger, .io = testing.io, .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null } };
     var plain_buf: [1024]u8 = undefined;
     var plain_out = std.Io.Writer.fixed(&plain_buf);
     try testing.expectEqual(EdgeResult.KEEP, staticAnswer(&uncached, &request, &plain_out, null, .{}).?);
@@ -2967,6 +3000,7 @@ test "zix zixer: http1 proxy, a cached answer is byte identical to an uncached o
     defer static_cached.shutdown(testing.io);
 
     const cached = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
         .public_dir_cache_ttl_ms = 60_000,
@@ -2994,6 +3028,7 @@ test "zix zixer: http1 proxy, a cached entry answers after the file leaves disk"
     defer static_cached.shutdown(testing.io);
 
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
         .public_dir_cache_ttl_ms = 60_000,
@@ -3031,6 +3066,7 @@ test "zix zixer: http1 proxy, a window of zero keeps every request uncached" {
     // The table exists because another site asked for it, but this site set 0
     // and must still re-open every time.
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
         .public_dir_cache_ttl_ms = 0,
@@ -3064,6 +3100,7 @@ test "zix zixer: http1 proxy, a cached hit negotiates the precompressed sibling"
     defer static_cached.shutdown(testing.io);
 
     const proxy = Proxy{
+        .logger = &quiet_logger,
         .io = testing.io,
         .static = .{ .public_dir = root, .public_prefix = null, .spa_fallback = null },
         .public_dir_cache_ttl_ms = 60_000,
@@ -3149,7 +3186,7 @@ test "zix zixer: http1 proxy, a site at its connection limit refuses the next on
     var table = try deadline_table.Table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
 
-    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
 
     var held_fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &held_fds));
@@ -3210,7 +3247,7 @@ test "zix zixer: http1 proxy, a client past its budget is cut and the edge lets 
     var table = try deadline_table.Table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
 
-    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 1 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .client_table = &table, .client_timeout_ms = 1 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -3306,7 +3343,7 @@ test "zix zixer: http1 proxy, an event stream keeps its connection past the budg
 
     // One millisecond of budget: anything still under it a moment later is
     // held, not merely lucky.
-    const proxy = Proxy{ .io = io, .pool = &pool, .idle = &idle, .client_table = &table, .client_timeout_ms = 1 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .client_table = &table, .client_timeout_ms = 1 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -3366,7 +3403,7 @@ test "zix zixer: http1 proxy, a kept-alive connection arms a fresh budget per re
     var table = try deadline_table.Table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
 
-    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .client_table = &table, .client_timeout_ms = 60_000 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -3422,18 +3459,18 @@ test "zix zixer: http1 proxy, each way a head read ends has its own answer" {
     var reply_buf: [512]u8 = undefined;
 
     var timed_out = std.Io.Writer.fixed(&reply_buf);
-    answerUnreadableHead(&timed_out, error.PartialHead, .{});
+    answerUnreadableHead(null, &timed_out, error.PartialHead, .{});
     try testing.expect(std.mem.startsWith(u8, timed_out.buffered(), "HTTP/1.1 408 request timeout\r\n"));
     try testing.expect(std.mem.indexOf(u8, timed_out.buffered(), "Connection: close\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, timed_out.buffered(), "\r\n\r\nrequest timeout\n"));
 
     var oversized = std.Io.Writer.fixed(&reply_buf);
-    answerUnreadableHead(&oversized, error.HeadTooLarge, .{});
+    answerUnreadableHead(null, &oversized, error.ZixerHeadTooLarge, .{});
     try testing.expect(std.mem.startsWith(u8, oversized.buffered(), "HTTP/1.1 431 head too large\r\n"));
 
     // The one end that gets no reply at all.
     var silent = std.Io.Writer.fixed(&reply_buf);
-    answerUnreadableHead(&silent, error.ConnectionClosed, .{});
+    answerUnreadableHead(null, &silent, error.ZixerConnectionClosed, .{});
     try testing.expectEqual(@as(usize, 0), silent.buffered().len);
 }
 
@@ -3447,7 +3484,7 @@ test "zix zixer: http1 proxy, a request that stops half way is answered 408" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const proxy = Proxy{ .io = io };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io };
 
     var fds: [2]std.posix.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -3488,7 +3525,7 @@ test "zix zixer: http1 proxy, a half-sent request cut by the bound still gets it
     var table = try deadline_table.Table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
 
-    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 1 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .client_table = &table, .client_timeout_ms = 1 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -3537,7 +3574,7 @@ test "zix zixer: http1 proxy, a kept-alive connection cut while idle is closed w
     var table = try deadline_table.Table.init(std.testing.allocator, 1);
     defer table.deinit(std.testing.allocator);
 
-    const proxy = Proxy{ .io = io, .client_table = &table, .client_timeout_ms = 1 };
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .client_table = &table, .client_timeout_ms = 1 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
