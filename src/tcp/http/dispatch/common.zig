@@ -9,6 +9,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const win_io = @import("../../../utils/windows_io.zig");
+const peer_addr = @import("../../../utils/peer_addr.zig");
 const Config = @import("../config.zig").HttpServerConfig;
 const Request = @import("../request.zig").Request;
 const Response = @import("../response.zig").Response;
@@ -658,15 +659,20 @@ pub fn processRequest(
     if (res.streaming) return .close;
 
     if (cfg.logger) |lg| {
-        const forwarded_for = req.header("x-forwarded-for") orelse "";
-        const real_ip = req.header("x-real-ip") orelse "";
-        const client_ip = if (forwarded_for.len > 0) blk: {
-            const comma = std.mem.indexOf(u8, forwarded_for, ",") orelse forwarded_for.len;
-            break :blk std.mem.trim(u8, forwarded_for[0..comma], " ");
-        } else real_ip;
+        // Resolution order is proxy header, then proxy header, then the socket itself. The socket
+        // read only happens for a direct request, which is the case that used to log "-", and it
+        // only happens at all when a logger is attached.
+        var peer_buf: [peer_addr.MAX_LEN]u8 = undefined;
+        const client_ip = peer_addr.clientIp(
+            req.header("x-forwarded-for") orelse "",
+            req.header("x-real-ip") orelse "",
+            fd,
+            &peer_buf,
+        );
         const user_agent = req.header("user-agent") orelse "";
         const origin = req.header("origin") orelse "";
         lg.access(
+            "http",
             method.stringFromEnum(req.method()),
             req.path(),
             @intFromEnum(res.status),
