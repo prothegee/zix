@@ -179,7 +179,7 @@ Codec frame, pengirim control-frame, dan konstanta (`FRAME_TYPE_*`, `FLAG_*`, `E
 
 `writeAllFD` memeriksa `write_hook` threadlocal: saat diset (jalur seal TLS, atau sink coalescing) ia menyerahkan plaintext ke hook, selain itu ia memanggil `writeAllRawFD`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. `writeAllRawFD` juga jalur flush milik hook itu sendiri, jadi flush coalescing tidak masuk ulang ke hook.
 
-`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` masing-masing mengenkode satu control frame. `sendResponseFD` -> `sendResponseEncodedFD` adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body besar yang mungkin melebihi window peer memakai `mux.sendResponseStreamFD` sebagai gantinya.
+`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` masing-masing mengenkode satu control frame. `sendResponseFD` -> `sendResponseEncodedFD` adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body di atau di bawah `SEND_STAGE_BODY_MAX` (4 KiB) keluar sebagai satu staged write, yang lebih besar sebagai satu vectored write per chunk DATA (blok HEADERS menumpang chunk pertama, write hook menerima tiap pasangan sebagai dua append). Body besar yang mungkin melebihi window peer memakai `mux.sendResponseStreamFD` sebagai gantinya.
 
 ---
 

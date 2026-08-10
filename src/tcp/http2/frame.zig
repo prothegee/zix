@@ -24,6 +24,16 @@ pub const DEFAULT_WINDOW_SIZE: u32 = 65535;
 /// HPACK encode scratch for one response HEADERS block.
 pub const HPACK_ENCODE_SCRATCH: usize = 512;
 
+/// Body-size cutoff for staging a whole response into one buffer and one write. At or below this
+/// the body is copied next to its frame headers (one syscall, one hook append). Above it the body
+/// leaves zero-copy as the payload half of a vectored write. Loopback-measured crossover: the
+/// staged copy wins below 4 KiB, the vectored send wins past it.
+pub const SEND_STAGE_BODY_MAX: usize = 4096;
+
+/// Send stage: HEADERS frame header + HPACK block + DATA frame header + a body up to
+/// SEND_STAGE_BODY_MAX.
+const SEND_STAGE_SIZE: usize = FRAME_HEADER_LEN + HPACK_ENCODE_SCRATCH + FRAME_HEADER_LEN + SEND_STAGE_BODY_MAX;
+
 pub const FRAME_TYPE_DATA: u8 = 0x00;
 pub const FRAME_TYPE_HEADERS: u8 = 0x01;
 pub const FRAME_TYPE_PRIORITY: u8 = 0x02;
@@ -162,6 +172,60 @@ pub fn writeAllRawFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!voi
     }
 }
 
+/// Hook-bypassing vectored write-all of a header + payload pair: one syscall carries both on the
+/// cleartext posix path. Polls on EAGAIN like writeAllRawFD. Windows writes the pair sequentially.
+fn writevAllRawFD(fd: std.posix.fd_t, head: []const u8, payload: []const u8) error{BrokenPipe}!void {
+    if (comptime builtin.os.tag == .windows) {
+        try win_io.writeAll(fd, head);
+        return win_io.writeAll(fd, payload);
+    }
+
+    var iovs = [2]std.posix.iovec_const{
+        .{ .base = head.ptr, .len = head.len },
+        .{ .base = payload.ptr, .len = payload.len },
+    };
+    var iov_idx: usize = 0;
+
+    while (iov_idx < iovs.len) {
+        const rc = std.posix.system.writev(fd, iovs[iov_idx..].ptr, @intCast(iovs.len - iov_idx));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                var accepted: usize = @intCast(rc);
+                if (accepted == 0) return error.BrokenPipe;
+
+                while (iov_idx < iovs.len and accepted >= iovs[iov_idx].len) {
+                    accepted -= iovs[iov_idx].len;
+                    iov_idx += 1;
+                }
+                if (iov_idx < iovs.len and accepted > 0) {
+                    iovs[iov_idx].base += accepted;
+                    iovs[iov_idx].len -= accepted;
+                }
+            },
+            .INTR => continue,
+            // Non-blocking EPOLL socket with a full send buffer: poll until
+            // writable then retry. Blocking sockets never hit this branch.
+            .AGAIN => {
+                var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.OUT, .revents = 0 }};
+                _ = std.posix.poll(&pfd, -1) catch return error.BrokenPipe;
+            },
+            else => return error.BrokenPipe,
+        }
+    }
+}
+
+/// Write a frame header + payload pair. A hook receives the two slices as two appends (its sink
+/// coalesces them itself), the cleartext path sends both in one vectored syscall.
+fn writePairFD(fd: std.posix.fd_t, head: []const u8, payload: []const u8) error{BrokenPipe}!void {
+    if (write_hook) |hook| {
+        hook(write_hook_ctx.?, head);
+        hook(write_hook_ctx.?, payload);
+        return;
+    }
+
+    return writevAllRawFD(fd, head, payload);
+}
+
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
 fn readOnceFD(fd: std.posix.fd_t, buf: []u8) !usize {
     if (comptime builtin.os.tag == .windows) return win_io.readOnce(fd, buf);
@@ -288,6 +352,8 @@ pub fn sendResponseFD(
 /// content_encoding omits the header. The body is framed in <= DEFAULT_MAX_FRAME_SIZE DATA chunks.
 /// This is the immediate, unmetered send (no flow control). For large bodies that may exceed the
 /// peer's window use the multiplexed `mux.sendResponseStreamFD`, which paces by WINDOW_UPDATE.
+/// A body at or under SEND_STAGE_BODY_MAX leaves as one staged write, a larger one as one vectored
+/// write per DATA chunk (the HEADERS block rides the first chunk).
 pub fn sendResponseEncodedFD(
     fd: std.posix.fd_t,
     stream_id: u31,
@@ -297,41 +363,64 @@ pub fn sendResponseEncodedFD(
     body: []const u8,
 ) !void {
     const hpack = @import("hpack.zig");
-    var hdr_buf: [HPACK_ENCODE_SCRATCH]u8 = undefined;
+    var stage_buf: [SEND_STAGE_SIZE]u8 = undefined;
 
     // The [:status, content-type, content-encoding] prefix is served from a per-triple cache, only
     // content-length (which varies) is encoded per call. A bodyless response omits content-length.
     const content_length: ?u64 = if (body.len > 0) body.len else null;
-    const hblock = hdr_buf[0..hpack.respHeaderBlock(&hdr_buf, status, content_type, content_encoding, content_length)];
+    const hblock_len = hpack.respHeaderBlock(stage_buf[FRAME_HEADER_LEN..][0..HPACK_ENCODE_SCRATCH], status, content_type, content_encoding, content_length);
     const end_stream_flag: u8 = if (body.len == 0) FLAG_END_STREAM | FLAG_END_HEADERS else FLAG_END_HEADERS;
-
-    try writeFrameHeaderFD(fd, .{
-        .length = @intCast(hblock.len),
+    encodeFrameHeader(stage_buf[0..FRAME_HEADER_LEN], .{
+        .length = @intCast(hblock_len),
         .frame_type = FRAME_TYPE_HEADERS,
         .flags = end_stream_flag,
         .stream_id = stream_id,
     });
-    try writeAllFD(fd, hblock);
+    var staged: usize = FRAME_HEADER_LEN + hblock_len;
 
-    if (body.len > 0) {
-        // Frame the body in <= DEFAULT_MAX_FRAME_SIZE chunks: a single DATA frame larger than the
-        // peer's max frame size (16384 by default) is a FRAME_SIZE_ERROR. The last chunk carries
-        // END_STREAM.
-        var off: usize = 0;
-        while (off < body.len) {
-            const chunk = @min(body.len - off, DEFAULT_MAX_FRAME_SIZE);
-            const last = off + chunk == body.len;
+    if (body.len == 0) return writeAllFD(fd, stage_buf[0..staged]);
 
-            try writeFrameHeaderFD(fd, .{
-                .length = @intCast(chunk),
-                .frame_type = FRAME_TYPE_DATA,
-                .flags = if (last) FLAG_END_STREAM else 0,
-                .stream_id = stream_id,
-            });
-            try writeAllFD(fd, body[off..][0..chunk]);
+    if (body.len <= SEND_STAGE_BODY_MAX) {
+        encodeFrameHeader(stage_buf[staged..][0..FRAME_HEADER_LEN], .{
+            .length = @intCast(body.len),
+            .frame_type = FRAME_TYPE_DATA,
+            .flags = FLAG_END_STREAM,
+            .stream_id = stream_id,
+        });
+        staged += FRAME_HEADER_LEN;
+        @memcpy(stage_buf[staged..][0..body.len], body);
+        staged += body.len;
 
-            off += chunk;
+        return writeAllFD(fd, stage_buf[0..staged]);
+    }
+
+    // Frame the body in <= DEFAULT_MAX_FRAME_SIZE chunks: a single DATA frame larger than the
+    // peer's max frame size (16384 by default) is a FRAME_SIZE_ERROR. The last chunk carries
+    // END_STREAM.
+    var off: usize = 0;
+    var first_chunk = true;
+    while (off < body.len) {
+        const chunk = @min(body.len - off, DEFAULT_MAX_FRAME_SIZE);
+        const last = off + chunk == body.len;
+        const data_header = FrameHeader{
+            .length = @intCast(chunk),
+            .frame_type = FRAME_TYPE_DATA,
+            .flags = if (last) FLAG_END_STREAM else 0,
+            .stream_id = stream_id,
+        };
+
+        if (first_chunk) {
+            // the HEADERS block and the first DATA header share the head half of one vectored write
+            encodeFrameHeader(stage_buf[staged..][0..FRAME_HEADER_LEN], data_header);
+            try writePairFD(fd, stage_buf[0 .. staged + FRAME_HEADER_LEN], body[off..][0..chunk]);
+            first_chunk = false;
+        } else {
+            var chunk_header: [FRAME_HEADER_LEN]u8 = undefined;
+            encodeFrameHeader(&chunk_header, data_header);
+            try writePairFD(fd, &chunk_header, body[off..][0..chunk]);
         }
+
+        off += chunk;
     }
 }
 
@@ -409,6 +498,140 @@ test "zix http2: sendResponseFD chunks a body past the max frame size, END_STREA
     }
 
     try std.testing.expectEqual(@as(usize, 40000), data_bytes);
+    try std.testing.expect((last_data_flags & FLAG_END_STREAM) != 0);
+}
+
+// Capture write-hook appends so a test can assert how many writes one send produced and what the
+// first append carried. Used by the send-staging tests below.
+const StageProbe = struct {
+    count: usize = 0,
+    first_len: usize = 0,
+    total: usize = 0,
+    buf: [1024]u8 = undefined,
+};
+
+fn stageProbeWrite(ctx: *anyopaque, bytes: []const u8) void {
+    const probe: *StageProbe = @ptrCast(@alignCast(ctx));
+    if (probe.count == 0) {
+        const keep = @min(bytes.len, probe.buf.len);
+        @memcpy(probe.buf[0..keep], bytes[0..keep]);
+        probe.first_len = bytes.len;
+    }
+
+    probe.count += 1;
+    probe.total += bytes.len;
+}
+
+/// Hook tests never reach the socket, so the descriptor only has to exist as a value.
+const STAGE_TEST_FD: std.posix.fd_t = if (builtin.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
+test "zix http2: sendResponseEncodedFD stages a small response into one write" {
+    var probe = StageProbe{};
+    write_hook = stageProbeWrite;
+    write_hook_ctx = &probe;
+    defer {
+        write_hook = null;
+        write_hook_ctx = null;
+    }
+
+    try sendResponseEncodedFD(STAGE_TEST_FD, 1, 200, "text/plain", "", "pong");
+
+    try std.testing.expectEqual(@as(usize, 1), probe.count);
+
+    const headers_fh = parseFrameHeader(probe.buf[0..FRAME_HEADER_LEN]);
+    try std.testing.expectEqual(@as(u8, FRAME_TYPE_HEADERS), headers_fh.frame_type);
+
+    const data_off = FRAME_HEADER_LEN + @as(usize, headers_fh.length);
+    const data_fh = parseFrameHeader(probe.buf[data_off..][0..FRAME_HEADER_LEN]);
+    try std.testing.expectEqual(@as(u8, FRAME_TYPE_DATA), data_fh.frame_type);
+    try std.testing.expect((data_fh.flags & FLAG_END_STREAM) != 0);
+    try std.testing.expectEqualStrings("pong", probe.buf[data_off + FRAME_HEADER_LEN ..][0..4]);
+    try std.testing.expectEqual(data_off + FRAME_HEADER_LEN + 4, probe.total);
+}
+
+test "zix http2: sendResponseEncodedFD bodyless response is one write, END_STREAM on HEADERS" {
+    var probe = StageProbe{};
+    write_hook = stageProbeWrite;
+    write_hook_ctx = &probe;
+    defer {
+        write_hook = null;
+        write_hook_ctx = null;
+    }
+
+    try sendResponseEncodedFD(STAGE_TEST_FD, 5, 204, "text/plain", "", "");
+
+    try std.testing.expectEqual(@as(usize, 1), probe.count);
+
+    const headers_fh = parseFrameHeader(probe.buf[0..FRAME_HEADER_LEN]);
+    try std.testing.expectEqual(@as(u8, FRAME_TYPE_HEADERS), headers_fh.frame_type);
+    try std.testing.expect((headers_fh.flags & FLAG_END_STREAM) != 0);
+    try std.testing.expect((headers_fh.flags & FLAG_END_HEADERS) != 0);
+    try std.testing.expectEqual(FRAME_HEADER_LEN + @as(usize, headers_fh.length), probe.total);
+}
+
+test "zix http2: sendResponseEncodedFD stage cap boundary, at the cap one write, past it a pair" {
+    var probe = StageProbe{};
+    write_hook = stageProbeWrite;
+    write_hook_ctx = &probe;
+    defer {
+        write_hook = null;
+        write_hook_ctx = null;
+    }
+
+    const at_cap: [SEND_STAGE_BODY_MAX]u8 = @splat('x');
+    try sendResponseEncodedFD(STAGE_TEST_FD, 1, 200, "text/plain", "", &at_cap);
+    try std.testing.expectEqual(@as(usize, 1), probe.count);
+
+    probe = .{};
+    const past_cap: [SEND_STAGE_BODY_MAX + 1]u8 = @splat('x');
+    try sendResponseEncodedFD(STAGE_TEST_FD, 1, 200, "text/plain", "", &past_cap);
+    try std.testing.expectEqual(@as(usize, 2), probe.count);
+
+    // the head half carries the HEADERS frame plus the DATA header, the body leaves untouched
+    const headers_fh = parseFrameHeader(probe.buf[0..FRAME_HEADER_LEN]);
+    try std.testing.expectEqual(FRAME_HEADER_LEN + @as(usize, headers_fh.length) + FRAME_HEADER_LEN, probe.first_len);
+    try std.testing.expectEqual(probe.first_len + past_cap.len, probe.total);
+}
+
+test "zix http2: sendResponseEncodedFD vectored path delivers a single-frame body on a socket" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+    const fds = pair.fds;
+
+    // The drain runs concurrently so a small socket buffer never deadlocks the send (same shape
+    // as the chunking test above).
+    var buf: [16 * 1024]u8 = undefined;
+    var drain: std.Io.Future(usize) = io.async(drainUntilEof, .{ fds[0], &buf });
+
+    var body: [8000]u8 = @splat('b');
+    try sendResponseEncodedFD(fds[1], 1, 200, "text/plain", "", &body);
+    fd_io.close(fds[1]);
+
+    const total = drain.await(io);
+
+    var off: usize = 0;
+    var data_frames: usize = 0;
+    var data_bytes: usize = 0;
+    var last_data_flags: u8 = 0;
+    while (off + FRAME_HEADER_LEN <= total) {
+        const fh = parseFrameHeader(buf[off..][0..FRAME_HEADER_LEN]);
+        off += FRAME_HEADER_LEN;
+
+        if (fh.frame_type == FRAME_TYPE_DATA) {
+            data_frames += 1;
+            data_bytes += fh.length;
+            last_data_flags = fh.flags;
+        }
+
+        off += fh.length;
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), data_frames);
+    try std.testing.expectEqual(@as(usize, 8000), data_bytes);
     try std.testing.expect((last_data_flags & FLAG_END_STREAM) != 0);
 }
 
