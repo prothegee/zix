@@ -1,12 +1,19 @@
-//! Integration tests: a TLS response larger than one TLS record.
+//! Integration tests: a TLS response larger than one TLS record, and larger than the engine's
+//! response staging buffer.
 //!
 //! A TLS 1.3 record carries at most 2^14 bytes of plaintext (RFC 8446 5.1), so anything longer has
 //! to leave as several records. These drive a real TLS server with a real handshake and assert that
 //! a body spanning one, two, three, and four records arrives whole and unchanged, and that the
 //! server is still answering afterwards.
 //!
-//! The sizes are chosen around the record boundary rather than at round numbers, because that is
-//! where a split goes wrong: one byte over the ceiling is the first case that needs two records.
+//! The sizes are chosen around two boundaries rather than at round numbers, because that is where a
+//! split goes wrong. The first is one record (2^14): one byte over is the first case that needs two
+//! records. The second is the per-connection response staging (64 KiB, head included): one byte over
+//! is the first case whose bytes have to leave while the response is still being rendered, which is
+//! the case that used to close the connection with nothing on it.
+//!
+//! All three dispatch models are driven, because the staging buffer is declared once per serve path
+//! and .ASYNC does not share a file with .EPOLL / .URING.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,6 +27,11 @@ const URING_TLS_PORT: u16 = 9251;
 
 const is_linux = builtin.target.os.tag == .linux;
 
+/// Port the .ASYNC (thread-per-connection) TLS path answers on. That path is its own file, so it
+/// needs its own listener on Linux where SPLIT_MODEL is .EPOLL. Off Linux SPLIT_MODEL is already
+/// .ASYNC, so the same listener covers it and a second server would only repeat the first.
+const ASYNC_TLS_PORT: u16 = if (is_linux) 9252 else TLS_PORT;
+
 /// Dispatch model behind TLS_PORT, the port the record-splitting tests use.
 ///
 /// Note:
@@ -31,9 +43,17 @@ const SPLIT_MODEL: zix.Http1.DispatchModel = if (is_linux) .EPOLL else .ASYNC;
 const CERT: []const u8 = "examples/certs/ecdsa_p256_cert.pem";
 const KEY: []const u8 = "examples/certs/ecdsa_p256_key.pem";
 
-/// Largest body a test asks for. Kept under the engine's TLS response staging, which bounds the
-/// whole response (headers included), not just the body.
-const BODY_MAX: usize = 60 * 1024;
+/// Largest body a test asks for. Well past the engine's TLS response staging, which the response no
+/// longer has to fit: past it the rendered bytes spill through the connection's stream sink as they
+/// are produced. Sized to the band real static assets land in, where the drop used to happen.
+const BODY_MAX: usize = 200 * 1024;
+
+/// The engine's per-connection TLS response staging (tls_mux.RESPONSE_BUF_SIZE, and the same value
+/// in tls_serve). A response, head included, larger than this is the case under test: it can no
+/// longer be handed to the peer in one piece. Restated here because it is engine-internal, so it
+/// has to be kept in step with those two: a stale value only makes these sizes stop being boundary
+/// cases, which no assertion would notice.
+const RESPONSE_STAGING: usize = 64 * 1024;
 
 /// Body bytes the handler serves, filled once with a non-repeating pattern so a truncated or
 /// misordered record cannot pass as correct.
@@ -107,7 +127,8 @@ fn startServersOnce() !void {
     split_thread.detach();
 
     // No URING server off Linux: run() would reject the model and the thread would exit, leaving
-    // a port nothing listens on. The one test that drives it skips there instead.
+    // a port nothing listens on. The one test that drives it skips there instead. The second
+    // .ASYNC server is Linux-only for the opposite reason: off Linux the one above already is one.
     if (comptime !is_linux) return;
 
     const uring_thread = try std.Thread.spawn(.{}, serveTls, .{ io, tls, logger, ServeArgs{
@@ -115,6 +136,12 @@ fn startServersOnce() !void {
         .dispatch_model = .URING,
     } });
     uring_thread.detach();
+
+    const async_thread = try std.Thread.spawn(.{}, serveTls, .{ io, tls, logger, ServeArgs{
+        .port = ASYNC_TLS_PORT,
+        .dispatch_model = .ASYNC,
+    } });
+    async_thread.detach();
 }
 
 // --------------------------------------------------------- //
@@ -342,4 +369,91 @@ test "zix integration: TLS on the URING model splits a large response the same w
 
     try std.testing.expect(try expectBody(&session, gpa, (1 << 14) + 1) >= 2);
     try std.testing.expect(try expectBody(&session, gpa, 45000) >= 3);
+}
+
+// --------------------------------------------------------- //
+
+/// Sizes either side of the response staging boundary. The first three fit and always did, the rest
+/// are the cases that used to close the connection with no status line and no alert on it. 200 KiB
+/// is the largest of the static fixtures that could not be served over TLS.
+const past_staging = [_]usize{ RESPONSE_STAGING - 4096, RESPONSE_STAGING - 200, RESPONSE_STAGING - 137, RESPONSE_STAGING - 136, RESPONSE_STAGING, RESPONSE_STAGING + 1, 100 * 1024, 200 * 1024 };
+
+/// Drive every size either side of the staging boundary over one session, then a small request, so
+/// a large response is proved both correct and non-fatal to the connection that carried it.
+fn expectPastStaging(io: std.Io, gpa: std.mem.Allocator, port: u16) !void {
+    var session: Session = undefined;
+    try handshake(io, gpa, port, &session);
+    defer {
+        session.stream.close(io);
+        gpa.free(session.read_buf);
+        gpa.free(session.write_buf);
+    }
+
+    for (past_staging) |want| _ = try expectBody(&session, gpa, want);
+
+    // The response after the largest one is the real assertion for keep-alive: a spilled response
+    // must leave the session's record sequence exactly where a buffered one would.
+    _ = try expectBody(&session, gpa, 16);
+}
+
+test "zix integration: TLS serves a response larger than the connection response staging" {
+    try startServersOnce();
+
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try expectPastStaging(io, gpa, TLS_PORT);
+}
+
+test "zix integration: TLS on the ASYNC model serves a response past the response staging" {
+    try startServersOnce();
+
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try expectPastStaging(io, gpa, ASYNC_TLS_PORT);
+}
+
+test "zix integration: TLS on the URING model serves a response past the response staging" {
+    // URING dispatch is Linux-only.
+    if (comptime !is_linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    try startServersOnce();
+
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try expectPastStaging(io, gpa, URING_TLS_PORT);
+}
+
+test "zix integration: TLS interleaves small and oversized responses on one connection" {
+    try startServersOnce();
+
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var session: Session = undefined;
+    try handshake(io, gpa, TLS_PORT, &session);
+    defer {
+        session.stream.close(io);
+        gpa.free(session.read_buf);
+        gpa.free(session.write_buf);
+    }
+
+    // A spilled response and a buffered one alternate down the same session. Anything that leaked
+    // between the two paths (a stale staging offset, a skipped flush, a record out of sequence)
+    // shows up here and not in a run of same-sized requests.
+    const mixed = [_]usize{ 8, 150 * 1024, 32, 100 * 1024, 4096, RESPONSE_STAGING + 1, 64 };
+    for (mixed) |want| _ = try expectBody(&session, gpa, want);
 }
