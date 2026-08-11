@@ -52,7 +52,9 @@ const TLS_SEALED_OUT_SIZE: usize = record.sealedLen(RESPONSE_BUF_SIZE);
 /// Per-connection request accumulator: the effective max request size over TLS (matches tls_serve).
 const REQUEST_BUF_SIZE: usize = 17 * 1024;
 
-/// Handler response staging: the effective max response size over TLS (matches tls_serve).
+/// Handler response staging (matches tls_serve). Not a ceiling: a response larger than this spills
+/// through the connection's stream sink as it is rendered, so this bounds how much of a response is
+/// held at once, not how large one may be.
 pub const RESPONSE_BUF_SIZE: usize = 64 * 1024;
 
 /// One TLS connection: the shared byte transport (session + outbound backpressure buffer) plus the
@@ -110,6 +112,7 @@ fn streamWrite(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
 const BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const PAYLOAD_TOO_LARGE = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const HEAD_TOO_LARGE = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const INTERNAL_ERROR = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// What a peer gets when it hangs up part way through a request.
 ///
@@ -301,15 +304,24 @@ fn serveBuffered(conn: *TlsConn, payload_buf: []u8, out_buf: []u8) bool {
             };
         }
 
-        const result = tls_serve.runHandlerToBuffer(conn.handler, &head, body, &response_buf, core.tl_static_io orelse undefined) catch {
-            _ = core.takeWebSocket(); // failed upgrade or oversized response: drop any handoff
+        // The stream sink doubles as the response spill, so a response larger than response_buf
+        // leaves as records while it renders instead of failing at the buffer.
+        stream_sink.wrote = false;
+        const result = tls_serve.runHandlerToBuffer(conn.handler, &head, body, &response_buf, core.tl_static_io orelse undefined, &stream_sink) catch {
+            _ = core.takeWebSocket(); // a failed upgrade leaves a handoff nothing will run
+
+            // Nothing of this response reached the wire, so it can still carry a status. A bare
+            // close here is what made an unsendable response look like a dropped connection from
+            // the client side. The 421 path above answers the same way.
+            if (!stream_sink.wrote) _ = sendPlain(conn, INTERNAL_ERROR);
             conn.transport.wclose = true;
+
             return true;
         };
 
         // A streamed response (beginStream / serveTls) already left through the stream sink.
         if (stream_sink.failed) return false;
-        if (!result.streamed and !sendPlain(conn, result.bytes)) return false;
+        if (!result.streamed and result.bytes.len > 0 and !sendPlain(conn, result.bytes)) return false;
 
         // consume this request, sliding any pipelined bytes to the front.
         conn.feed.consume(&conn.rbuf, serve.request_len);
