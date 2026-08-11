@@ -3,7 +3,7 @@
   "language": "Zig",
   "type": "engine",
   "engine": "zix.Http3 ASYNC Dispatch Model",
-  "description": "HTTP/3 on the zix.Http3 engine, pure-Zig QUIC on std.crypto (RFC 9000/9001/9002/9114), .ASYNC dispatch: a single worker on UDP 8443, NewReno with PTO retransmit, rolling MAX_STREAMS/MAX_DATA credit. TLS 1.3 inside the handshake, ALPN h3. baseline sums the query per request. Static comes from the engine's public_dir, whose cache window is mandatory on this engine: an HTTP/3 response body outlives the handler, so it cannot come from handler memory.",
+  "description": "HTTP/3 on the zix.Http3 engine, pure-Zig QUIC on std.crypto (RFC 9000/9001/9002/9114), .ASYNC dispatch: a single worker on UDP 8443, NewReno with PTO retransmit, rolling MAX_STREAMS/MAX_DATA credit. TLS 1.3 inside the handshake, ALPN h3. baseline sums the query plus the POST body per request, refusing a body the engine only received part of. Static comes from the engine's public_dir, whose cache window is mandatory on this engine: an HTTP/3 response body outlives the handler, so it cannot come from handler memory.",
   "repo": "https://codeberg.org/prothegee/zix",
   "enabled": true,
   "tests": [
