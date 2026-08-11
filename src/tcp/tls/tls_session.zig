@@ -115,9 +115,29 @@ pub const Session = struct {
         return self.alpn_h2;
     }
 
+    /// Ciphertext bytes this session can take in one feed.
+    ///
+    /// Note:
+    /// - The reassembly buffer holds one record, and feed refuses (and closes on) an input larger
+    ///   than the room left. A caller that reads into a buffer wider than one record has to size its
+    ///   read by this, or a busy socket hands over two records at once and the connection dies with
+    ///   no explanation. That is what capped TLS uploads at one bufferful.
+    /// - 0 means a record larger than the buffer is being reassembled, which cannot complete.
+    ///
+    /// Return:
+    /// - usize (bytes feed will accept right now)
+    pub fn readRoom(self: *const Session) usize {
+        return self.rbuf.len - self.rlen;
+    }
+
     /// Feed received ciphertext. Drains every complete record now buffered, advancing the handshake or
     /// decrypting application data. `to_send_buf` collects bytes to write (handshake flight, alerts),
     /// `plain_buf` collects decrypted application plaintext. The returned slices point into those.
+    ///
+    /// Note:
+    /// - Never hand this more than readRoom() bytes. Past that the connection is terminated, because
+    ///   the reassembly buffer cannot hold the input and dropping part of it would desynchronize the
+    ///   record stream.
     pub fn feed(self: *Session, input: []const u8, to_send_buf: []u8, plain_buf: []u8) FeedResult {
         if (self.phase == .closed) return .{ .outcome = .close };
 
