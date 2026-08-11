@@ -68,6 +68,9 @@ pub const demux = @import("demux.zig");
 pub const stream = @import("stream.zig");
 /// Frame-level request decode helpers: STREAM frame parsing over a decrypted payload.
 pub const request = @import("request.zig");
+/// Request-stream reassembly: the buffers a worker holds a request in while its client is still
+/// sending it, since a request with a body rarely arrives in one packet.
+pub const reassembly = @import("reassembly.zig");
 /// Frame builders for the send path: ACK, MAX_DATA, MAX_STREAMS, STREAM.
 pub const response = @import("response.zig");
 /// TLS 1.3 key schedule the QUIC handshake reuses (transcript hash, HKDF derive).
