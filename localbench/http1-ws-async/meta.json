@@ -1,0 +1,17 @@
+{
+  "display_name": "zix-localbench-http1-ws-async",
+  "language": "Zig",
+  "type": "engine",
+  "engine": "zix.Http1 WebSocket ASYNC Dispatch Model",
+  "description": "WebSocket echo on the zix.Http1 engine, .ASYNC dispatch. GET /ws upgrades and the engine drives the frame pump: frames are echoed on readiness and a pipelined burst leaves as one write. No cache anywhere, echo is per connection.",
+  "repo": "https://codeberg.org/prothegee/zix",
+  "enabled": true,
+  "tests": [
+    "echo-ws",
+    "echo-ws-pipeline",
+    "echo-ws-limited"
+  ],
+  "maintainers": [
+    "prothegee"
+  ]
+}
