@@ -39,6 +39,14 @@ fn run(io: std.Io, server_path: []const u8) !void {
 
     if (!std.mem.eql(u8, both[0], "42")) return error.UnexpectedBody;
     if (!std.mem.eql(u8, both[1], "3")) return error.UnexpectedBody;
+
+    // A request BODY must reach the handler: POST "20" to /echo, which answers with the byte count it
+    // received, whether that was the whole body, and the body itself. An empty body would answer
+    // "0:whole:", which is what this engine did before the receive path kept the DATA frame.
+    var echo_buf: [256]u8 = undefined;
+    const echoed = try http3_client.post(io, SERVER_IP, SERVER_PORT, "/echo", "20", &echo_buf);
+
+    if (!std.mem.eql(u8, echoed, "2:whole:20")) return error.UnexpectedBody;
 }
 
 // --------------------------------------------------------- //
