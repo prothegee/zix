@@ -191,6 +191,31 @@ pub fn decodeLiteralNameRef(data: []const u8) error{ ZixTruncated, ZixNotLiteral
     return .{ .static = is_static, .name_index = name.value, .value = data[pos .. pos + length.value], .huffman = huffman, .len = pos + @as(usize, @intCast(length.value)) };
 }
 
+/// Encode a Literal Field Line with Name Reference against the static table (RFC 9204 4.5.4): the
+/// field name comes from a static entry, the value is written out as a plain (non-Huffman) literal.
+///
+/// Note:
+/// - This is how a field whose exact name-and-value pair has no static entry is sent. `:status 413`
+///   is one: the static table carries only a handful of statuses, so the name is borrowed from one
+///   of those entries and the value is spelled out.
+///
+/// Param:
+/// out - []u8 (destination, must hold the encoded field line)
+/// name_index - u64 (static entry whose NAME is used, its value is ignored)
+/// value - []const u8 (the field value, written literally)
+///
+/// Return:
+/// - usize (bytes written)
+pub fn encodeStaticLiteralNameRef(out: []u8, name_index: u64, value: []const u8) usize {
+    // '01' literal-with-name-reference, N unset (may be indexed downstream), T set (static table).
+    var pos = encodePrefixedInt(out, 4, 0x40 | 0x10, name_index);
+
+    pos += encodePrefixedInt(out[pos..], 7, 0x00, value.len);
+    @memcpy(out[pos..][0..value.len], value);
+
+    return pos + value.len;
+}
+
 /// Look up a static-table entry by index, or null if out of range.
 pub fn staticEntry(index: u64) ?Field {
     if (index >= static_table.len) return null;
@@ -266,4 +291,21 @@ test "zix http3: RFC 9204 4.5 static-table field line representations" {
     const lit = try decodeLiteralNameRef(&hexBytes("500b6578616d706c652e636f6d"));
     try std.testing.expect(lit.static and std.mem.eql(u8, static_table[lit.name_index].name, ":authority"));
     try std.testing.expect(std.mem.eql(u8, lit.value, "example.com") and !lit.huffman);
+}
+
+test "zix http3: encodeStaticLiteralNameRef writes a field line its own decoder reads back" {
+    // The `:authority: example.com` line above, built rather than parsed: a 4-bit prefix name index
+    // (0 fits in the prefix byte) and a plain 8-bit prefix string literal.
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &hexBytes("500b6578616d706c652e636f6d"), buf[0..encodeStaticLiteralNameRef(&buf, 0, "example.com")]);
+
+    // A name index past what the 4-bit prefix holds, which is the shape a response status uses: the
+    // prefix saturates and the remainder follows as a continuation byte.
+    const status_len = encodeStaticLiteralNameRef(&buf, 24, "413");
+    const decoded = try decodeLiteralNameRef(buf[0..status_len]);
+
+    try std.testing.expect(decoded.static and !decoded.huffman);
+    try std.testing.expectEqualStrings(":status", static_table[decoded.name_index].name);
+    try std.testing.expectEqualStrings("413", decoded.value);
+    try std.testing.expectEqual(status_len, decoded.len);
 }
