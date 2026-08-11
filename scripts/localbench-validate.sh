@@ -199,8 +199,25 @@ needs_db() {
     has_test async-db || has_test crud || has_test api-4 || has_test api-16 || has_test gateway-64
 }
 
+# port_owner PORT
+# The command holding a listening TCP port, or empty when the port is free. Used
+# to name the process in a collision rather than reporting an unexplained hang.
+port_owner() {
+    ss -ltnp 2>/dev/null | awk -v want=":$1\$" '$4 ~ want {print $NF; exit}'
+}
+
 start_sidecar() {
     command -v docker >/dev/null 2>&1 || die "docker (or the podman shim) is not installed"
+
+    # The sidecar runs on the host network, so anything already holding 5432 keeps it and the
+    # sidecar silently serves nobody. This is not hypothetical: an unrelated project's postgres
+    # left running is enough, and the failure then reads as broken database endpoints in the
+    # engine. Named here, before the container is started, rather than diagnosed afterwards.
+    local owner
+    owner="$(port_owner 5432)"
+    if [ -n "$owner" ] && ! docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" >/dev/null 2>&1; then
+        die "port 5432 is already taken by $owner, stop it first: the sidecar shares the host network and cannot bind a port something else owns"
+    fi
 
     SIDECAR_UP=1
     info "starting postgres sidecar"
@@ -211,12 +228,14 @@ start_sidecar() {
         -v "$DATA_DIR/pgdb-seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro" \
         postgres:18 -c max_connections=256 >/dev/null
 
+    # The probe dials 127.0.0.1 rather than the container's own unix socket, because that is the
+    # route the server takes. A socket probe passes whenever postgres is alive at all, so it
+    # reported ready while the server was reaching a different database entirely on the same port.
     local waited=0
     while [ "$waited" -lt 120 ]; do
-        if docker exec "$PG_CONTAINER" pg_isready -U bench -d benchmark >/dev/null 2>&1 &&
-           docker exec "$PG_CONTAINER" psql -U bench -d benchmark -tAc \
-               'SELECT 1 FROM items LIMIT 1' 2>/dev/null | grep -q 1; then
-            info "postgres ready (seeded)"
+        if docker exec "$PG_CONTAINER" env PGPASSWORD=bench psql -h 127.0.0.1 -p 5432 -U bench \
+               -d benchmark -tAc 'SELECT 1 FROM items LIMIT 1' 2>/dev/null | grep -q 1; then
+            info "postgres ready and seeded, reachable at 127.0.0.1:5432"
             return 0
         fi
 
@@ -224,7 +243,7 @@ start_sidecar() {
         waited=$((waited + 1))
     done
 
-    die "postgres did not become ready within 120s"
+    die "postgres did not answer on 127.0.0.1:5432 within 120s (owner: ${owner:-none})"
 }
 
 # grpc_call METHOD JSON_REQUEST
@@ -450,6 +469,79 @@ check_static() {
         "http://localhost:$PORT/static/app.js" | grep -i '^content-encoding:' |
         tr -d '\r' | awk '{print $2}')"
     expect "GET /static/app.js negotiates br" "br" "${encoding:-none}"
+}
+
+# The 20 fixtures the arena's static profiles drive, in its own order. Three of them are past the
+# engine's TLS response staging (header.html 120K, components.css 200K, vendor.js 300K), and
+# vendor.js is past it even as its precompressed sibling, which is what makes the full list a
+# regression check over TLS rather than a smoke test.
+STATIC_FILES=(
+    reset.css layout.css theme.css components.css utilities.css
+    analytics.js helpers.js app.js vendor.js router.js
+    header.html footer.html regular.woff2 bold.woff2 logo.svg
+    icon-sprite.svg hero.webp thumb1.webp thumb2.webp manifest.json
+)
+
+# check_static_tls
+# The static contract over the h1 TLS listener, the arena's static-tls profile.
+#
+# Note:
+# - The host is localhost, never 127.0.0.1: the cert SAN is localhost, and an IP literal earns a 421
+#   that says nothing about static files.
+# - The size sweep sends no Accept-Encoding on purpose. With one, a precompressed sibling stands in
+#   for the file and the response shrinks under the boundary the sweep exists to cross.
+check_static_tls() {
+    echo "[test] static-tls" | tee -a "$REPORT"
+
+    # ALPN has to land on http/1.1 here. A server offering h2 on this port would be answering a
+    # different engine's checks with the same fixtures.
+    expect "https /static negotiates HTTP/1.1" "1.1" \
+        "$(curl -sk --max-time 10 --http1.1 -o /dev/null -w '%{http_version}' "https://localhost:$TLS_PORT/static/reset.css")"
+
+    expect "GET https /static/reset.css Content-Type" "text/css" \
+        "$(header_value content-type "https://localhost:$TLS_PORT/static/reset.css" -k)"
+    expect "GET https /static/manifest.json Content-Type" "application/json" \
+        "$(header_value content-type "https://localhost:$TLS_PORT/static/manifest.json" -k)"
+    expect "GET https /static missing file" "404" \
+        "$(curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "https://localhost:$TLS_PORT/static/absent-file.txt")"
+
+    local file expected actual short=0
+    for file in "${STATIC_FILES[@]}"; do
+        expected="$(wc -c < "$DATA_DIR/static/$file" 2>/dev/null || echo 0)"
+        actual="$(curl -sk --max-time 30 -o /dev/null -w '%{size_download}' "https://localhost:$TLS_PORT/static/$file" || echo 0)"
+
+        if [ "$actual" != "$expected" ]; then
+            no "GET https /static/$file size" "expected $expected bytes, got $actual"
+            short=1
+        fi
+    done
+
+    if [ "$short" -eq 0 ]; then
+        ok "static-tls serves all ${#STATIC_FILES[@]} files at full size"
+    fi
+
+    # A negotiated sibling still has to decompress back to the original. vendor.js is the one that
+    # earns its place: its .br is itself larger than the response staging, so the compressed answer
+    # crosses the same boundary the identity one does.
+    local encoding decoded
+    for file in header.html components.css vendor.js; do
+        expected="$(wc -c < "$DATA_DIR/static/$file" 2>/dev/null || echo 0)"
+        encoding="$(header_value content-encoding "https://localhost:$TLS_PORT/static/$file" -k -H 'Accept-Encoding: br')"
+        decoded="$(curl -sk --max-time 30 --compressed "https://localhost:$TLS_PORT/static/$file" | wc -c)"
+
+        expect "GET https /static/$file negotiates br" "br" "${encoding:-none}"
+        expect "GET https /static/$file decompressed size" "$expected" "$decoded"
+    done
+
+    # One connection, an oversized response, then a small one. A response that leaves in pieces has
+    # to put the session's record sequence exactly where a buffered one would, and a reused
+    # connection is the only place that shows.
+    local after
+    after="$(curl -sk --max-time 40 -w '%{num_connects} %{http_code} %{size_download}\n' \
+        -o /dev/null "https://localhost:$TLS_PORT/static/vendor.js" \
+        -o /dev/null "https://localhost:$TLS_PORT/static/theme.css" | tail -1)"
+    expect "static-tls answers on the same connection after an oversized response" \
+        "0 200 $(wc -c < "$DATA_DIR/static/theme.css")" "$after"
 }
 
 check_baseline_h2() {
@@ -758,7 +850,7 @@ PY
         *) no "POST /upload truncated body" "unexpected status '$status'" ;;
     esac
 
-    if entry_has json-tls; then
+    if entry_has json-tls || entry_has static-tls; then
         check_upload_tls
     fi
 }
@@ -959,6 +1051,7 @@ has_test limited-conn && check_baseline
 has_test json-comp && check_json_comp
 has_test json-tls && check_json_tls
 has_test static && check_static
+has_test static-tls && check_static_tls
 has_test baseline-h2 && check_baseline_h2
 has_test baseline-h2c && check_baseline_h2c
 has_test json-h2c && check_json_h2c
