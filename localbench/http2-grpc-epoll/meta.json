@@ -1,0 +1,16 @@
+{
+  "display_name": "zix-localbench-http2-grpc-epoll",
+  "language": "Zig",
+  "type": "engine",
+  "engine": "zix.Grpc EPOLL Dispatch Model",
+  "description": "gRPC over h2c on the zix.Grpc engine built on zix.Http2, .EPOLL dispatch: each worker owns its SO_REUSEPORT listener, epoll set, and connections, with no shared state across cores. Replies use comptime-cached HPACK blocks. Implements GetSum (unary) and StreamSum (server-streaming). No response cache: the reply is a few bytes, so a lookup would cost more than the add.",
+  "repo": "https://codeberg.org/prothegee/zix",
+  "enabled": true,
+  "tests": [
+    "unary-grpc",
+    "stream-grpc"
+  ],
+  "maintainers": [
+    "prothegee"
+  ]
+}
