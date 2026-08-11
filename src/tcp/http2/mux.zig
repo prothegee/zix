@@ -18,6 +18,7 @@
 const std = @import("std");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
+const stream_body = @import("stream_body.zig");
 const core = @import("core.zig");
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
@@ -309,6 +310,75 @@ fn muxDispatch(handler: core.HandlerFn, conn: *MuxConn, slot: usize) void {
 
     // Free the slot unless the response body is parked on a window, then a WINDOW_UPDATE resumes it.
     if (s.pending_body.len == 0) releaseSlot(conn, slot);
+}
+
+/// Dispatch a stream whose END_STREAM has arrived, unless its body is short of (or past) the
+/// content-length its own headers declared.
+///
+/// Note:
+/// - RFC 9113 8.1.1 makes that request malformed, a stream error of type PROTOCOL_ERROR, so the
+///   stream is reset and its slot freed instead. A handler is therefore never handed a body that is
+///   not whole, which is the same promise the truncated-body answer makes on http1.
+/// - A body past `max_body` is a different case, answered upstream with 413: that request is valid
+///   h2 the engine will not carry, where this one is not valid h2 at all.
+///
+/// Param:
+/// handler - core.HandlerFn (the router entry point)
+/// conn - *MuxConn (the connection owning the stream)
+/// slot - usize (the stream's slot index)
+///
+/// Return:
+/// - void
+fn dispatchWhole(handler: core.HandlerFn, conn: *MuxConn, slot: usize) void {
+    const s = conn.streams[slot];
+    if (!stream_body.isWhole(s.headers[0..s.header_count], s.body_len)) {
+        frame.sendRstStreamFD(conn.fd, s.id, frame.ERR_PROTOCOL_ERROR) catch {};
+        releaseSlot(conn, slot);
+
+        return;
+    }
+
+    muxDispatch(handler, conn, slot);
+}
+
+/// Whether any stream is still waiting for the rest of its request. A slot held only by a parked
+/// response body does not count: that request arrived whole and the debt is ours, not the peer's.
+///
+/// Param:
+/// conn - *const MuxConn (the connection to inspect)
+///
+/// Return:
+/// - bool (true when a request was in flight)
+pub fn requestInFlight(conn: *const MuxConn) bool {
+    for (conn.slots, 0..) |in_use, slot| {
+        if (in_use and !conn.streams[slot].end_stream) return true;
+    }
+
+    return false;
+}
+
+/// What a peer gets when it hangs up part way through a request.
+///
+/// Note:
+/// - A stream the peer opened and never ended is a request that never finished arriving. GOAWAY says
+///   the connection ended by decision, where a bare close reads the same to the peer as a crash, a
+///   timeout, or a dropped connection. h2 gives a client RST_STREAM and GOAWAY to abandon work, so
+///   dropping the transport mid-stream is a protocol error rather than an ordinary end.
+/// - A connection with no request in flight closes without a byte, which is the ordinary end of a
+///   connection and not an error.
+/// - Nothing is dispatched either way: the partial request is dropped, never served.
+///
+/// Param:
+/// conn - *MuxConn (the connection whose peer just hung up)
+///
+/// Return:
+/// - bool (true when a GOAWAY was written)
+pub fn hangupGoaway(conn: *MuxConn) bool {
+    if (!requestInFlight(conn)) return false;
+
+    frame.sendGoawayFD(conn.fd, conn.last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+
+    return true;
 }
 
 /// Send DATA for `body` up to the connection and stream send windows and the max frame size. What
@@ -620,7 +690,7 @@ fn muxFrameLoop(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
 
                 if (s.end_headers and s.end_stream) {
-                    muxDispatch(handler, conn, slot);
+                    dispatchWhole(handler, conn, slot);
                 }
             },
 
@@ -639,7 +709,7 @@ fn muxFrameLoop(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
                 s.header_count += count;
                 s.end_headers = (fh.flags & frame.FLAG_END_HEADERS) != 0;
                 if (s.end_headers and s.end_stream) {
-                    muxDispatch(handler, conn, slot);
+                    dispatchWhole(handler, conn, slot);
                 }
             },
 
@@ -689,7 +759,7 @@ fn muxFrameLoop(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
 
                 stream.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
                 if (stream.end_stream) {
-                    muxDispatch(handler, conn, slot);
+                    dispatchWhole(handler, conn, slot);
                 }
             },
 
@@ -738,7 +808,11 @@ pub fn onReadable(handler: core.HandlerFn, conn: *MuxConn) ConnOutcome {
             error.WouldBlock => return .keep_alive,
             else => return .close,
         };
-        if (got == 0) return .close;
+        if (got == 0) {
+            _ = hangupGoaway(conn);
+
+            return .close;
+        }
         conn.rend += got;
 
         if (muxProcess(handler, conn) == .close) return .close;
@@ -1538,4 +1612,298 @@ test "zix http2: static DATA frames respect the peer max frame size, not the ser
     }
 
     try std.testing.expectEqual(@as(usize, payload.len), data_bytes);
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+var cl_dispatches: usize = 0;
+var cl_body_len: usize = 0;
+
+fn clHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    cl_dispatches += 1;
+    cl_body_len = req.body.len;
+
+    try res.sendText("ok");
+}
+
+const cl_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = clHandler }});
+
+/// Read every byte the connection wrote, tallying the reset codes and the statuses it answered with.
+/// The write end is shut down first so the read ends at EOF rather than blocking.
+const WireTally = struct {
+    rst_protocol_error: usize = 0,
+    goaway_protocol_error: usize = 0,
+    status_200: usize = 0,
+};
+
+fn tallyWire(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, buf: []u8) WireTally {
+    _ = std.os.linux.shutdown(write_fd, std.os.linux.SHUT.WR);
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = std.posix.read(read_fd, buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var tally = WireTally{};
+    var dec = hpack.HpackDecoder.init();
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = frame.parseFrameHeader(buf[off..][0..9]);
+        off += 9;
+        if (off + fh.length > total) break;
+
+        const payload = buf[off..][0..fh.length];
+        off += fh.length;
+
+        switch (fh.frame_type) {
+            frame.FRAME_TYPE_RST_STREAM => {
+                const code = std.mem.readInt(u32, payload[0..4], .big);
+                if (code == frame.ERR_PROTOCOL_ERROR) tally.rst_protocol_error += 1;
+            },
+            frame.FRAME_TYPE_GOAWAY => {
+                const code = std.mem.readInt(u32, payload[4..8], .big);
+                if (code == frame.ERR_PROTOCOL_ERROR) tally.goaway_protocol_error += 1;
+            },
+            frame.FRAME_TYPE_HEADERS => {
+                var hdrs: [frame.MAX_HEADERS]hpack.Header = undefined;
+                var scratch: [256]u8 = undefined;
+                const count = dec.decode(payload, &hdrs, &scratch) catch continue;
+                for (hdrs[0..count]) |hdr| {
+                    if (std.mem.eql(u8, hdr.name, ":status") and std.mem.eql(u8, hdr.value, "200")) tally.status_200 += 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return tally;
+}
+
+/// Open a connection in the .h2 phase over a socketpair, ready to be fed frames.
+fn openTestConn(fd: std.posix.fd_t, opts: core.ServeOpts) !*MuxConn {
+    const conn = MuxConn.init(fd, opts, undefined) orelse return error.OutOfMemory;
+    conn.phase = .h2;
+
+    return conn;
+}
+
+/// Feed a POST whose headers declare `content_length` and whose DATA carries `body`, ending the
+/// stream. The two disagree exactly when a truncated (or overlong) body is being modelled.
+fn feedDeclaredPost(conn: *MuxConn, content_length: []const u8, body: []const u8) !void {
+    var hblk: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    try enc.writeHeader("content-length", content_length);
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, enc.encoded());
+    feedFrame(conn, frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, body);
+}
+
+test "zix http2: mux resets a stream whose body is short of its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+
+    const conn = try openTestConn(pair[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 });
+    defer conn.deinit();
+
+    // 100 bytes promised, 40 delivered, then END_STREAM: the request never finished arriving
+    const short: [40]u8 = @splat('x');
+    cl_dispatches = 0;
+    try feedDeclaredPost(conn, "100", &short);
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(cl_router.dispatch, conn));
+
+    // the handler never ran, so no truncated body was ever served
+    try std.testing.expectEqual(@as(usize, 0), cl_dispatches);
+
+    // the slot is freed, so the connection stays usable for its other streams
+    try std.testing.expect(findSlot(1, conn.streams, conn.slots) == null);
+
+    var buf: [4096]u8 = undefined;
+    const tally = tallyWire(pair[0], pair[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.rst_protocol_error);
+    try std.testing.expectEqual(@as(usize, 0), tally.status_200);
+}
+
+test "zix http2: mux serves a stream whose body matches its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+
+    const conn = try openTestConn(pair[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 });
+    defer conn.deinit();
+
+    const whole: [40]u8 = @splat('x');
+    cl_dispatches = 0;
+    cl_body_len = 0;
+    try feedDeclaredPost(conn, "40", &whole);
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(cl_router.dispatch, conn));
+
+    // the guard only sheds a body that disagrees with its own headers, an honest one still serves
+    try std.testing.expectEqual(@as(usize, 1), cl_dispatches);
+    try std.testing.expectEqual(@as(usize, 40), cl_body_len);
+
+    var buf: [4096]u8 = undefined;
+    const tally = tallyWire(pair[0], pair[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.rst_protocol_error);
+    try std.testing.expectEqual(@as(usize, 1), tally.status_200);
+}
+
+test "zix http2: mux resets a stream whose body runs past its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+
+    const conn = try openTestConn(pair[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 });
+    defer conn.deinit();
+
+    const overlong: [40]u8 = @splat('x');
+    cl_dispatches = 0;
+    try feedDeclaredPost(conn, "10", &overlong);
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(cl_router.dispatch, conn));
+
+    try std.testing.expectEqual(@as(usize, 0), cl_dispatches);
+
+    var buf: [4096]u8 = undefined;
+    const tally = tallyWire(pair[0], pair[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.rst_protocol_error);
+}
+
+test "zix http2: mux resets a stream that declares a body then ends with none" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+
+    const conn = try openTestConn(pair[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 });
+    defer conn.deinit();
+
+    // END_STREAM rides the HEADERS, so no DATA frame ever arrives for a promised 5 bytes
+    var hblk: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    try enc.writeHeader("content-length", "5");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
+
+    cl_dispatches = 0;
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(cl_router.dispatch, conn));
+
+    try std.testing.expectEqual(@as(usize, 0), cl_dispatches);
+
+    var buf: [4096]u8 = undefined;
+    const tally = tallyWire(pair[0], pair[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.rst_protocol_error);
+}
+
+test "zix http2: mux answers a peer that hangs up with a request unfinished" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+
+    const conn = try openTestConn(pair[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 });
+    defer conn.deinit();
+
+    // a POST that opens its stream and never ends it: the body is still on its way
+    var hblk: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    try enc.writeHeader("content-length", "100");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, enc.encoded());
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(cl_router.dispatch, conn));
+
+    try std.testing.expect(requestInFlight(conn));
+    try std.testing.expect(hangupGoaway(conn));
+
+    var buf: [4096]u8 = undefined;
+    const tally = tallyWire(pair[0], pair[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.goaway_protocol_error);
+}
+
+test "zix http2: mux closes an idle connection without a GOAWAY" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+
+    const conn = try openTestConn(pair[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 });
+    defer conn.deinit();
+
+    // a whole request, served, its slot given back: nothing is owed when the peer leaves
+    const whole: [8]u8 = @splat('x');
+    try feedDeclaredPost(conn, "8", &whole);
+    try std.testing.expectEqual(ConnOutcome.keep_alive, muxFrameLoop(cl_router.dispatch, conn));
+
+    try std.testing.expect(!requestInFlight(conn));
+    try std.testing.expect(!hangupGoaway(conn));
+
+    var buf: [4096]u8 = undefined;
+    const tally = tallyWire(pair[0], pair[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.goaway_protocol_error);
+}
+
+test "zix http2: a stream parked on a send window is not a request in flight" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair: [2]std.posix.fd_t = undefined;
+    try std.testing.expect(std.posix.errno(std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = std.posix.system.close(pair[0]);
+    defer _ = std.posix.system.close(pair[1]);
+
+    const conn = try openTestConn(pair[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 1024 });
+    defer conn.deinit();
+
+    // tiny windows, so the handler's reply parks and the slot stays held after END_STREAM
+    @memset(&fc_test_body, 'q');
+    conn.send_window = 100;
+    conn.peer_init_window = 100;
+
+    var hblk: [64]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&hblk);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/");
+    feedFrame(conn, frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
+    _ = muxFrameLoop(fc_test_router.dispatch, conn);
+
+    const slot = findSlot(1, conn.streams, conn.slots).?;
+    try std.testing.expect(conn.streams[slot].pending_body.len > 0);
+
+    // the slot is held by a reply we still owe, not by a request that never arrived, so a peer
+    // leaving now gets the ordinary silent close
+    try std.testing.expect(!requestInFlight(conn));
+    try std.testing.expect(!hangupGoaway(conn));
 }
