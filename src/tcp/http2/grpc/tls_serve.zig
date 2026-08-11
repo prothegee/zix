@@ -104,7 +104,16 @@ fn runInlineGrpcMux(comptime RouterType: type, opts: core.GrpcServeOpts, fd: pos
 
         if (mux_conn.rend == mux_conn.rbuf.len) break; // a single frame larger than the buffer
 
-        const rec = terminator.readRecord(fd, record_buf) catch break;
+        const rec = terminator.readRecord(fd, record_buf) catch {
+            // The peer went away. If it left a request part way through, say so with a GOAWAY
+            // instead of a bare close, exactly as the cleartext models do. The write hook is still
+            // installed, so the frame seals into a record on its way out.
+            _ = mux.stageHangupGoaway(mux_conn);
+            mux_conn.flushStage();
+            enc.flush();
+
+            break;
+        };
         if (rec.content_type == terminator.content_type_change_cipher_spec) continue;
         if (rec.content_type != terminator.content_type_application_data) break; // alert / close_notify
 

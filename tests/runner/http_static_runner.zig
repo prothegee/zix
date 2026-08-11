@@ -102,6 +102,10 @@ fn run(
     if (resp.status() != 200) return error.ZixUnexpectedStatus;
 
     // Multipart upload round trip (http1_static only): POST to the upload route, then GET the
-    // saved file back through the engine static fallback at /u/<name>.
-    if (multipart_path) |mp_path| try common.multipartUploadRoundTrip(io, port, mp_path);
+    // saved file back through the engine static fallback at /u/<name>. The second call covers the
+    // refusal: a body past max_recv_buf must come back 413 with nothing stored.
+    if (multipart_path) |mp_path| {
+        try common.multipartUploadRoundTrip(io, port, mp_path);
+        try common.multipartUploadRefusesOversize(io, port, mp_path);
+    }
 }

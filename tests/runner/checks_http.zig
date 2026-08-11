@@ -197,7 +197,12 @@ pub fn runHttpStatic(
 
     // Multipart upload round trip (http1_static only): POST a multipart/form-data body to the
     // upload route, then GET the saved file back through the engine static fallback at /u/<name>.
-    if (multipart_path) |mp_path| try common.multipartUploadRoundTrip(io, port, mp_path);
+    // The second call is the refusal side: a body past max_recv_buf reaches the handler short, and
+    // must come back 413 with nothing stored rather than 200 over a half file.
+    if (multipart_path) |mp_path| {
+        try common.multipartUploadRoundTrip(io, port, mp_path);
+        try common.multipartUploadRefusesOversize(io, port, mp_path);
+    }
 }
 
 // Validate every available coding the compression examples serve. The /gzip, /deflate, /br routes

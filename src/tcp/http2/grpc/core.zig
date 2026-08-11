@@ -7,6 +7,7 @@ const fd_io = @import("../../../utils/fd_io.zig");
 const win_io = @import("../../../utils/windows_io.zig");
 const peer_addr = @import("../../../utils/peer_addr.zig");
 const h2 = @import("../Http2.zig");
+const stream_body = @import("../stream_body.zig");
 const frame = @import("frame.zig");
 const status = @import("status.zig");
 const Logger = @import("../../../logger/logger.zig").Logger;
@@ -1038,6 +1039,93 @@ fn dispatchStream(
     }
 }
 
+/// Dispatch a stream whose END_STREAM has arrived, unless its body is short of (or past) the
+/// content-length its own headers declared.
+///
+/// Note:
+/// - RFC 9113 8.1.1 makes that request malformed, a stream error of type PROTOCOL_ERROR, so the
+///   stream is reset and never dispatched. A handler is therefore never handed a message that is not
+///   whole, which is what a short body would produce: a length prefix promising bytes that never came.
+/// - A body past max_body is a different case, answered upstream with RESOURCE_EXHAUSTED trailers:
+///   that request is valid h2 the engine will not carry, where this one is not valid h2 at all.
+/// - The caller frees the slot either way, so nothing is left holding it.
+///
+/// Param:
+/// RouterType - type (the comptime router, carrying the route table)
+/// stream - *Stream (the stream whose request side just closed)
+/// fd - std.posix.fd_t (connection fd)
+/// opts - GrpcServeOpts (serve limits carried to the handler trio)
+/// conn_mutex - *ConnMutex (guards every write on a connection shared with spawned stream threads)
+/// io - std.Io (backend carried on Context)
+///
+/// Return:
+/// - void
+fn dispatchWhole(
+    comptime RouterType: type,
+    stream: *Stream,
+    fd: std.posix.fd_t,
+    opts: GrpcServeOpts,
+    conn_mutex: *ConnMutex,
+    io: std.Io,
+) void {
+    if (!stream_body.isWhole(stream.headers[0..stream.header_count], stream.body_len)) {
+        {
+            conn_mutex.lock();
+            defer conn_mutex.unlock();
+            h2.sendRstStreamFD(fd, stream.id, h2.ERR_PROTOCOL_ERROR) catch {};
+        }
+
+        return;
+    }
+
+    dispatchStream(RouterType, stream, fd, opts, conn_mutex, io);
+}
+
+/// Whether any stream is still waiting for the rest of its request.
+///
+/// Param:
+/// streams - []const Stream (the connection's stream table)
+/// used - []const bool (which entries of the table are live)
+///
+/// Return:
+/// - bool (true when a request was in flight)
+fn requestInFlight(streams: []const Stream, used: []const bool) bool {
+    for (used, 0..) |in_use, slot| {
+        if (in_use and !streams[slot].end_stream) return true;
+    }
+
+    return false;
+}
+
+/// What a peer gets when it hangs up part way through a request.
+///
+/// Note:
+/// - A stream the peer opened and never ended is a request that never finished arriving. GOAWAY says
+///   the connection ended by decision, where a bare close reads the same to the peer as a crash, a
+///   timeout, or a dropped connection. h2 gives a client RST_STREAM and GOAWAY to abandon work, so
+///   dropping the transport mid-stream is a protocol error rather than an ordinary end.
+/// - A connection with no request in flight closes without a byte, which is the ordinary end of a
+///   connection and not an error.
+/// - Nothing is dispatched either way: the partial request is dropped, never served.
+///
+/// Param:
+/// fd - std.posix.fd_t (connection fd)
+/// streams - []const Stream (the connection's stream table)
+/// used - []const bool (which entries of the table are live)
+/// last_stream_id - u31 (highest stream id seen, carried on the GOAWAY)
+/// conn_mutex - *ConnMutex (guards every write on a connection shared with spawned stream threads)
+///
+/// Return:
+/// - void
+fn hangupGoaway(fd: std.posix.fd_t, streams: []const Stream, used: []const bool, last_stream_id: u31, conn_mutex: *ConnMutex) void {
+    if (!requestInFlight(streams, used)) return;
+
+    conn_mutex.lock();
+    defer conn_mutex.unlock();
+
+    h2.sendGoawayFD(fd, last_stream_id, h2.ERR_PROTOCOL_ERROR) catch {};
+}
+
 // --------------------------------------------------------- //
 
 /// Read some bytes from fd: the ntdll shim on Windows, std.posix.read elsewhere.
@@ -1260,7 +1348,11 @@ fn serveGrpcLoop(
     defer conn_mutex.release();
 
     while (true) {
-        try reader.ensure(9);
+        reader.ensure(9) catch |err| {
+            hangupGoaway(fd, streams, stream_slots, last_stream_id, conn_mutex);
+
+            return err;
+        };
         const frame_header = h2.parseFrameHeader(reader.take(9));
 
         if (frame_header.length > max_payload) {
@@ -1383,7 +1475,7 @@ fn serveGrpcLoop(
                 stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_headers and stream.end_stream) {
-                    dispatchStream(RouterType, stream, fd, opts, conn_mutex, io);
+                    dispatchWhole(RouterType, stream, fd, opts, conn_mutex, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -1411,7 +1503,7 @@ fn serveGrpcLoop(
                 stream.header_count += count;
                 stream.end_headers = (frame_header.flags & h2.FLAG_END_HEADERS) != 0;
                 if (stream.end_headers and stream.end_stream) {
-                    dispatchStream(RouterType, stream, fd, opts, conn_mutex, io);
+                    dispatchWhole(RouterType, stream, fd, opts, conn_mutex, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -1484,7 +1576,7 @@ fn serveGrpcLoop(
                 stream.end_stream = (frame_header.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_stream) {
-                    dispatchStream(RouterType, stream, fd, opts, conn_mutex, io);
+                    dispatchWhole(RouterType, stream, fd, opts, conn_mutex, io);
                     stream_slots[slot] = false;
                 }
             },
@@ -2037,4 +2129,189 @@ test "zix grpc: streaming sendMessage past the inline cap keeps the two-write pa
     ctx.sendMessage("application/grpc", &big);
 
     try std.testing.expectEqual(@as(usize, 2), probe.count);
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+var grpc_async_dispatches: usize = 0;
+var grpc_async_body_len: usize = 0;
+
+fn grpcAsyncHandler(req: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {
+    grpc_async_dispatches += 1;
+    grpc_async_body_len = if (req.recvMessage()) |msg| msg.len else 0;
+}
+
+const grpc_async_router = Router(&[_]Route{.{ .path = "/svc.Svc/Method", .handler = grpcAsyncHandler }});
+
+/// Write one complete frame (9-byte header + payload) to a fd, the way a client would.
+fn writeGrpcFrameTo(fd: std.posix.fd_t, ftype: u8, flags: u8, sid: u31, payload: []const u8) !void {
+    var fh: [9]u8 = undefined;
+    h2.encodeFrameHeader(&fh, .{ .length = @intCast(payload.len), .frame_type = ftype, .flags = flags, .stream_id = sid });
+
+    try h2.writeAllFD(fd, &fh);
+    if (payload.len > 0) try h2.writeAllFD(fd, payload);
+}
+
+/// Write a call head declaring `content_length`, ending the headers but not the stream.
+fn writeDeclaredCallHead(fd: std.posix.fd_t, content_length: []const u8) !void {
+    var block: [256]u8 = undefined;
+    var enc = h2.HpackEncoder.init(&block);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/svc.Svc/Method");
+    try enc.writeHeader("content-length", content_length);
+
+    try writeGrpcFrameTo(fd, h2.FRAME_TYPE_HEADERS, h2.FLAG_END_HEADERS, 1, enc.encoded());
+}
+
+/// Run the blocking frame loop over everything already written to the connection. The client end is
+/// shut down for writing first, so the loop reaches EOF and returns instead of parking on a read.
+fn runGrpcLoopToEof(client_fd: std.posix.fd_t, server_fd: std.posix.fd_t) void {
+    _ = std.os.linux.shutdown(client_fd, std.os.linux.SHUT.WR);
+
+    var dec = h2.HpackDecoder.init();
+    serveGrpcLoop(grpc_async_router, server_fd, &dec, .{}, 0, std.testing.io) catch {};
+}
+
+/// What the blocking loop answered with, read back after it returned.
+const GrpcAsyncTally = struct {
+    rst_protocol_error: usize = 0,
+    goaway_protocol_error: usize = 0,
+};
+
+fn tallyGrpcAsyncWire(read_fd: std.posix.fd_t, server_fd: std.posix.fd_t, buf: []u8) GrpcAsyncTally {
+    // The server end still holds the socket open, so without this the read below waits on bytes that
+    // are never coming rather than ending at EOF.
+    _ = std.os.linux.shutdown(server_fd, std.os.linux.SHUT.WR);
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = std.posix.read(read_fd, buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var tally = GrpcAsyncTally{};
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = h2.parseFrameHeader(buf[off..][0..9]);
+        off += 9;
+        if (off + fh.length > total) break;
+
+        if (fh.frame_type == h2.FRAME_TYPE_RST_STREAM and std.mem.readInt(u32, buf[off..][0..4], .big) == h2.ERR_PROTOCOL_ERROR) tally.rst_protocol_error += 1;
+        if (fh.frame_type == h2.FRAME_TYPE_GOAWAY and std.mem.readInt(u32, buf[off + 4 ..][0..4], .big) == h2.ERR_PROTOCOL_ERROR) tally.goaway_protocol_error += 1;
+        off += fh.length;
+    }
+
+    return tally;
+}
+
+test "zix grpc: the blocking loop resets a stream whose body is short of its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // 100 bytes promised, 40 delivered, then END_STREAM: the message never finished arriving
+    try writeDeclaredCallHead(fds[0], "100");
+    const short: [40]u8 = @splat('x');
+    try writeGrpcFrameTo(fds[0], h2.FRAME_TYPE_DATA, h2.FLAG_END_STREAM, 1, &short);
+
+    grpc_async_dispatches = 0;
+    runGrpcLoopToEof(fds[0], fds[1]);
+
+    // the handler never ran, so no truncated message was ever served
+    try std.testing.expectEqual(@as(usize, 0), grpc_async_dispatches);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyGrpcAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.rst_protocol_error);
+}
+
+test "zix grpc: the blocking loop serves a stream whose body matches its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // a 5-byte gRPC length prefix and its 4 payload bytes, so the message is whole as well
+    try writeDeclaredCallHead(fds[0], "9");
+    const whole = [_]u8{ 0, 0, 0, 0, 4, 'p', 'i', 'n', 'g' };
+    try writeGrpcFrameTo(fds[0], h2.FRAME_TYPE_DATA, h2.FLAG_END_STREAM, 1, &whole);
+
+    grpc_async_dispatches = 0;
+    grpc_async_body_len = 0;
+    runGrpcLoopToEof(fds[0], fds[1]);
+
+    // the guard only sheds a body that disagrees with its own headers, an honest one still serves
+    try std.testing.expectEqual(@as(usize, 1), grpc_async_dispatches);
+    try std.testing.expectEqual(@as(usize, 4), grpc_async_body_len);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyGrpcAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.rst_protocol_error);
+}
+
+test "zix grpc: the blocking loop answers a peer that hangs up with a request unfinished" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // a call that opens its stream and never ends it, then the peer simply goes away
+    try writeDeclaredCallHead(fds[0], "100");
+
+    grpc_async_dispatches = 0;
+    runGrpcLoopToEof(fds[0], fds[1]);
+
+    try std.testing.expectEqual(@as(usize, 0), grpc_async_dispatches);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyGrpcAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.goaway_protocol_error);
+}
+
+test "zix grpc: the blocking loop closes an idle connection without a GOAWAY" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // one whole call, served and its slot given back: nothing is owed when the peer leaves
+    try writeDeclaredCallHead(fds[0], "5");
+    const whole = [_]u8{ 0, 0, 0, 0, 0 };
+    try writeGrpcFrameTo(fds[0], h2.FRAME_TYPE_DATA, h2.FLAG_END_STREAM, 1, &whole);
+
+    grpc_async_dispatches = 0;
+    runGrpcLoopToEof(fds[0], fds[1]);
+
+    try std.testing.expectEqual(@as(usize, 1), grpc_async_dispatches);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyGrpcAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.goaway_protocol_error);
 }

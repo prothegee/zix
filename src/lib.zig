@@ -203,6 +203,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("tls/context.zig"));
     std.testing.refAllDecls(@import("tcp/tls/h2_terminator.zig"));
     std.testing.refAllDecls(@import("tcp/tls/tls_session.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/tls_feed.zig"));
     std.testing.refAllDecls(@import("tcp/http1/tls_serve.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http1/tls_mux.zig"));
 
@@ -237,6 +238,7 @@ test "zix: unit test" {
     // # zix.Http2
     std.testing.refAllDecls(@import("tcp/http2/frame.zig"));
     std.testing.refAllDecls(@import("tcp/http2/hpack.zig"));
+    std.testing.refAllDecls(@import("tcp/http2/stream_body.zig"));
     std.testing.refAllDecls(@import("tcp/http2/core.zig"));
     if (comptime builtin.os.tag == .linux) std.testing.refAllDecls(@import("tcp/http2/mux.zig"));
     std.testing.refAllDecls(@import("tcp/http2/config.zig"));

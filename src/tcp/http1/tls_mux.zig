@@ -27,6 +27,7 @@ const core = @import("core.zig");
 const Config = @import("config.zig").Http1ServerConfig;
 const common = @import("dispatch/common.zig");
 const listen_report = @import("../../multiplexers/listen_report.zig");
+const tls_feed = @import("tls_feed.zig");
 const tls_serve = @import("tls_serve.zig");
 const ws = @import("websocket.zig");
 const Tls = @import("../../tls/Tls.zig");
@@ -66,9 +67,12 @@ pub const TlsConn = struct {
     // decrypted bytes are frames, pumped instead of parsed as HTTP.
     ws: ?core.WsFrameFn = null,
 
-    // Partial request bytes across reads (and pipelined requests): the live bytes are rbuf[0..rlen].
+    // Partial request bytes across reads (and pipelined requests): the live bytes are
+    // rbuf[0..feed.filled]. WebSocket frame bytes accumulate in the same buffer after an upgrade.
     rbuf: [REQUEST_BUF_SIZE]u8 = undefined,
-    rlen: usize = 0,
+    /// Where the request feed is: how much is buffered, and whether a body is being counted off the
+    /// wire for a request whose head is parked. See tls_feed.
+    feed: tls_feed.State = .{},
 };
 
 /// Per-worker fd -> TlsConn map (shared-nothing, one worker owns a connection for its lifetime).
@@ -103,6 +107,35 @@ fn streamWrite(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
     return true;
 }
 
+const BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const PAYLOAD_TOO_LARGE = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const HEAD_TOO_LARGE = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// What a peer gets when it hangs up part way through a request.
+///
+/// Note:
+/// - Buffered bytes, or a head parked on a drain that can now never reach zero, are a request that
+///   never finished arriving. The client is told it was refused, because a bare close reads the same
+///   to it as a crash, a timeout, or a dropped connection.
+/// - A connection the peer closes between requests owes nothing and is answered nothing, which is
+///   the ordinary end of a keep-alive connection.
+/// - A WebSocket connection is answered nothing either: a status line is not a frame.
+///
+/// Param:
+/// conn - *TlsConn (the connection whose peer just hung up)
+///
+/// Return:
+/// - bool (true when the connection must stay to flush the answer, false to close now)
+pub fn hangupAnswer(conn: *TlsConn) bool {
+    if (conn.ws != null) return false;
+    if (!conn.feed.inFlight()) return false;
+
+    _ = sendPlain(conn, BAD_REQUEST);
+    conn.transport.wclose = true;
+
+    return conn.transport.want_out;
+}
+
 /// Handle a readable TLS connection: decrypt available records, drive the handshake, then feed the
 /// plaintext to the http1 request loop (or the WebSocket frame pump) and seal the replies. Returns
 /// false when the connection must close. payload_buf / out_buf are per-worker scratch for the frame
@@ -111,10 +144,16 @@ pub fn onReadable(conn: *TlsConn, payload_buf: []u8, out_buf: []u8) bool {
     var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
 
     while (true) {
-        const rc = linux.read(conn.transport.fd, &cipher, cipher.len);
+        // Sized by what the session can take, not by the staging buffer. The staging buffer is wider
+        // than one TLS record, so a busy socket (an upload in flight) would otherwise hand feed two
+        // records at once, which it refuses by closing the connection.
+        const room = conn.transport.tls.readRoom();
+        if (room == 0) return false;
+
+        const rc = linux.read(conn.transport.fd, &cipher, @min(cipher.len, room));
         switch (posix.errno(rc)) {
             .SUCCESS => {
-                if (rc == 0) return false; // peer closed
+                if (rc == 0) return hangupAnswer(conn); // peer closed
             },
             .INTR => continue,
             .AGAIN => return true, // drained
@@ -154,19 +193,61 @@ pub fn onCiphertext(conn: *TlsConn, cipher: []const u8, payload_buf: []u8, out_b
     return true;
 }
 
-/// Accumulate decrypted plaintext and dispatch every complete request now buffered. Pipelined requests
-/// drain in one pass. Returns false when the connection must close (request too large, bad request, or
-/// a fatal write). Sets transport.wclose when the client asked to close after the response.
+/// Accumulate decrypted plaintext and dispatch every complete request now buffered.
+///
+/// Note:
+/// - A body larger than rbuf is never buffered. Its head is parked at the front, the remaining body
+///   bytes are counted off the wire and dropped, and the parked request is served once the count
+///   reaches the declared length. So rbuf bounds the HEAD, not the body, and connection memory does
+///   not track upload size. This is the shape the cleartext event loops already use.
+/// - A plaintext chunk can be larger than rbuf, so this takes what fits, serves, and comes back for
+///   the rest rather than treating one chunk as one bufferful.
+///
+/// Return:
+/// - bool (false when the connection must close now, true when it stays or flushes first)
 fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_buf: []u8) bool {
-    // overflow guard: a single request larger than the buffer is rejected (matches tls_serve's cap).
-    if (plaintext.len > conn.rbuf.len - conn.rlen) {
-        conn.transport.wclose = true;
-        return true;
+    var rest = plaintext;
+
+    while (true) {
+        if (conn.feed.drain > 0) {
+            rest = conn.feed.takeDrain(rest);
+            if (conn.feed.drain > 0) return true;
+
+            conn.feed.releaseParked();
+        } else {
+            if (rest.len == 0) return true;
+
+            if (conn.feed.headOverflowed(conn.rbuf.len)) {
+                // rbuf is full and no whole head came out of it, so the head alone is larger than
+                // the buffer and never will parse. A body cannot reach this: it drains instead.
+                _ = sendPlain(conn, HEAD_TOO_LARGE);
+                conn.transport.wclose = true;
+
+                return true;
+            }
+
+            rest = conn.feed.fill(&conn.rbuf, rest);
+        }
+
+        if (!serveBuffered(conn, payload_buf, out_buf)) return false;
+        if (conn.transport.wclose) return true;
+
+        // Just upgraded: the rest of this plaintext is frames, not requests.
+        if (conn.ws) |on_frame| {
+            if (rest.len == 0) return true;
+
+            return feedFrames(conn, on_frame, rest, payload_buf, out_buf);
+        }
     }
+}
 
-    @memcpy(conn.rbuf[conn.rlen..][0..plaintext.len], plaintext);
-    conn.rlen += plaintext.len;
-
+/// Dispatch every complete request sitting in rbuf, then decide what the remainder is: a head still
+/// arriving, a body still arriving, or a body too large to hold, which parks the request and arms
+/// the drain. Pipelined requests all leave in one pass.
+///
+/// Return:
+/// - bool (false when the connection must close now, true when it stays or flushes first)
+fn serveBuffered(conn: *TlsConn, payload_buf: []u8, out_buf: []u8) bool {
     // The per-connection stream sink (ADR-054): a handler that calls beginStream (SSE) or
     // WebSocket.serveTls detaches the buffered capture, and every subsequent write seals records
     // through the transport, staging on backpressure instead of parking the worker.
@@ -176,18 +257,36 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_bu
 
     var response_buf: [RESPONSE_BUF_SIZE]u8 = undefined;
 
-    while (conn.rlen > 0) {
-        const parsed = core.parseHead(conn.rbuf[0..conn.rlen]) catch |err| {
+    while (conn.feed.filled > 0) {
+        const parsed = core.parseHead(conn.rbuf[0..conn.feed.filled]) catch |err| {
             if (err == error.ZixIncompleteHeader) return true; // wait for the rest of the head
 
             conn.transport.wclose = true; // malformed request: close
             return true;
         };
-        const total = parsed.body_offset + parsed.head.content_length;
-        if (conn.rlen < total) return true; // wait for the full body
-
         const head = parsed.head;
-        const body = conn.rbuf[parsed.body_offset..total];
+
+        const serve = switch (conn.feed.classify(parsed.body_offset, @intCast(head.content_length), conn.rbuf.len, core.tl_max_request_body)) {
+            .SERVE => |decided| decided,
+            // Waiting for the rest of the body, or the head was just parked and the body is now
+            // being counted off the wire. Either way there is nothing to dispatch yet.
+            .WAIT => return true,
+            .REFUSE_BODY => {
+                _ = sendPlain(conn, PAYLOAD_TOO_LARGE);
+                conn.transport.wclose = true;
+
+                return true;
+            },
+            .REFUSE_HEAD => {
+                _ = sendPlain(conn, HEAD_TOO_LARGE);
+                conn.transport.wclose = true;
+
+                return true;
+            },
+        };
+
+        const body = conn.rbuf[parsed.body_offset..][0..serve.body_len];
+        if (serve.received > 0) core.tl_body_info = .{ .received = serve.received, .complete = true };
 
         // RFC 9110 7.4: a request for an authority this cert does not serve is a misdirected request.
         // Match the Host (port stripped) against the cert SAN, respond 421 + close on a mismatch.
@@ -197,6 +296,7 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_bu
                 const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 _ = sendPlain(conn, misdirected);
                 conn.transport.wclose = true;
+
                 return true;
             };
         }
@@ -212,9 +312,7 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_bu
         if (!result.streamed and !sendPlain(conn, result.bytes)) return false;
 
         // consume this request, sliding any pipelined bytes to the front.
-        const remaining = conn.rlen - total;
-        if (remaining > 0) std.mem.copyForwards(u8, conn.rbuf[0..remaining], conn.rbuf[total..conn.rlen]);
-        conn.rlen = remaining;
+        conn.feed.consume(&conn.rbuf, serve.request_len);
 
         // WebSocket handoff (serve or serveTls): from now on rbuf holds frames. The client may have
         // pipelined its first frame with the handshake, so pump what is already buffered.
@@ -239,10 +337,10 @@ fn feedRequests(conn: *TlsConn, plaintext: []const u8, payload_buf: []u8, out_bu
 /// Append decrypted plaintext (frame bytes) to the accumulator and pump the frames.
 fn feedFrames(conn: *TlsConn, on_frame: core.WsFrameFn, plaintext: []const u8, payload_buf: []u8, out_buf: []u8) bool {
     // A frame that cannot ever fit the accumulator can never complete: close.
-    if (plaintext.len > conn.rbuf.len - conn.rlen) return false;
+    if (plaintext.len > conn.rbuf.len - conn.feed.filled) return false;
 
-    @memcpy(conn.rbuf[conn.rlen..][0..plaintext.len], plaintext);
-    conn.rlen += plaintext.len;
+    @memcpy(conn.rbuf[conn.feed.filled..][0..plaintext.len], plaintext);
+    conn.feed.filled += plaintext.len;
 
     return pumpFrames(conn, on_frame, payload_buf, out_buf);
 }
@@ -251,19 +349,19 @@ fn feedFrames(conn: *TlsConn, on_frame: core.WsFrameFn, plaintext: []const u8, p
 /// pong / close frames leave through the stream sink, sealed as records (coalesced per pass by the
 /// frame send sink). Mirrors serveEpollWs, with encrypt-on-write.
 fn pumpFrames(conn: *TlsConn, on_frame: core.WsFrameFn, payload_buf: []u8, out_buf: []u8) bool {
-    if (conn.rlen == 0) return true;
+    if (conn.feed.filled == 0) return true;
 
     var stream_sink = core.TlsStreamSink{ .ctx = &conn.transport, .writeFn = streamWrite };
     core.tl_tls_stream = &stream_sink;
     defer core.tl_tls_stream = null;
 
-    const result = ws.pump(conn.transport.fd, conn.rbuf[0..conn.rlen], payload_buf, out_buf, on_frame);
+    const result = ws.pump(conn.transport.fd, conn.rbuf[0..conn.feed.filled], payload_buf, out_buf, on_frame);
 
-    if (result.consumed >= conn.rlen) {
-        conn.rlen = 0;
+    if (result.consumed >= conn.feed.filled) {
+        conn.feed.filled = 0;
     } else if (result.consumed > 0) {
-        std.mem.copyForwards(u8, conn.rbuf[0 .. conn.rlen - result.consumed], conn.rbuf[result.consumed..conn.rlen]);
-        conn.rlen -= result.consumed;
+        std.mem.copyForwards(u8, conn.rbuf[0 .. conn.feed.filled - result.consumed], conn.rbuf[result.consumed..conn.feed.filled]);
+        conn.feed.filled -= result.consumed;
     }
 
     if (result.close or stream_sink.failed) {
@@ -274,7 +372,7 @@ fn pumpFrames(conn: *TlsConn, on_frame: core.WsFrameFn, payload_buf: []u8, out_b
     }
 
     // A frame wider than the whole buffer can never complete: close rather than spin.
-    if (conn.rlen >= conn.rbuf.len) return false;
+    if (conn.feed.filled >= conn.rbuf.len) return false;
 
     return true;
 }
@@ -332,6 +430,8 @@ const WorkerCtx = struct {
     ctx: *const Tls.Context,
     public_dir: []const u8 = "",
     max_response_headers: usize = 16,
+    /// Declared bodies past this are refused with 413 before a byte is taken. 0 removes the check.
+    max_request_body: usize = 0,
     /// Where this worker says whether its listener came up, shared with the whole group.
     report: *listen_report.Report,
 };
@@ -343,6 +443,7 @@ fn workerRun(worker: WorkerCtx) void {
 
     core.setStatic(worker.public_dir, worker.io);
     core.setMaxResponseHeaders(worker.max_response_headers);
+    core.setMaxRequestBody(worker.max_request_body);
 
     // Every exit between here and the event loop has to reach the group, or the workers that
     // did bind wait on one that is already gone.
@@ -450,6 +551,7 @@ pub fn runTlsMux(handler: HandlerFn, config: Config) !void {
             .ctx = ctx,
             .public_dir = config.public_dir,
             .max_response_headers = config.max_response_headers.value(),
+            .max_request_body = config.max_request_body,
             .report = &report,
         }}) catch |err| {
             common.logSystem(config, .ERROR, "could not spawn tls worker {d} of {d} ({s})", .{ i, worker_count, @errorName(err) });

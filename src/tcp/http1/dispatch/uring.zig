@@ -219,6 +219,43 @@ const UringConn = struct {
     ws: ?core.WsFrameFn = null,
 };
 
+/// Stage what a peer gets when it hangs up part way through a request, so the
+/// close that follows carries a status instead of nothing.
+///
+/// Note:
+/// - Bytes left in buf, or a head parked on a drain that can now never reach
+///   zero, are a request that never finished arriving. The client is told the
+///   request was refused, because a bare close reads the same to it as a crash,
+///   a timeout, or a dropped connection.
+/// - An idle keep-alive connection has neither and closes without a byte, which
+///   is the ordinary end of a connection and not an error.
+/// - Staged rather than written to the fd, so the worker never blocks on a send
+///   buffer that is full. beginClose submits it and the close follows the send.
+/// - Nothing is staged on a negative result (the socket is already dead), on a
+///   WebSocket connection (a status line is not a frame), or when send_buf is
+///   already carrying a response.
+///
+/// Param:
+/// conn - *UringConn (the connection whose recv just completed)
+/// recv_res - i32 (the recv cqe result, 0 for a clean hangup)
+///
+/// Return:
+/// - bool (true when an answer was staged in conn.send_buf)
+fn stageHangupAnswer(conn: *UringConn, recv_res: i32) bool {
+    if (recv_res != 0 or conn.ws != null) return false;
+    if (conn.filled == 0 and conn.pending_head_len == 0) return false;
+    if (conn.staged > 0 or conn.direct.len > 0) return false;
+
+    const answer = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    if (answer.len > conn.send_buf.len) return false;
+
+    @memcpy(conn.send_buf[0..answer.len], answer);
+    conn.staged_off = 0;
+    conn.staged = answer.len;
+
+    return true;
+}
+
 /// Which re-arm a parked process-queue entry retries.
 const ParkKind = enum(u8) { recv, drain_recv, send, external };
 
@@ -782,6 +819,11 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
                     if (self.ws_bufs) |*bg| bg.put(cqe) catch {};
                 }
 
+                // A request that was still arriving when the peer left is
+                // answered here. beginClose submits the staged bytes and the
+                // close follows the send completion.
+                _ = stageHangupAnswer(conn, cqe.res);
+
                 self.beginClose(conn);
                 return;
             }
@@ -1289,11 +1331,20 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
         }
 
         fn armTlsRecv(self: *Self, ring_conn: *UringTlsConn) void {
+            // Sized by what the session can take, not by the staging buffer. The staging buffer is
+            // wider than one TLS record, so a busy socket (an upload in flight) would otherwise hand
+            // the session two records at once, which it refuses by closing the connection.
+            const room = ring_conn.conn.transport.tls.readRoom();
+            if (room == 0) {
+                self.closeTls(ring_conn);
+                return;
+            }
+
             const sqe = self.getSqe() orelse {
                 self.closeTls(ring_conn);
                 return;
             };
-            sqe.prep_recv(ring_conn.conn.transport.fd, ring_conn.cipher_buf, 0);
+            sqe.prep_recv(ring_conn.conn.transport.fd, ring_conn.cipher_buf[0..@min(ring_conn.cipher_buf.len, room)], 0);
             sqe.user_data = uring.packUserData(.tls_recv, ring_conn.gen, ring_conn.conn.transport.fd);
         }
 
@@ -1313,6 +1364,14 @@ fn UringWorker(comptime handler_fn: HandlerFn) type {
             const ring_conn = self.lookupTls(decoded) orelse return;
 
             if (cqe.res <= 0) {
+                // A request that was still arriving when the peer left is answered before the close,
+                // the same as the .EPOLL TLS read loop does. A staged answer flushes first, and the
+                // send completion runs the close.
+                if (cqe.res == 0 and tls_mux.hangupAnswer(&ring_conn.conn)) {
+                    self.submitTlsSend(ring_conn);
+                    return;
+                }
+
                 self.closeTls(ring_conn);
                 return;
             }
@@ -2164,6 +2223,75 @@ test "zix http1: URING keeps a deferred request parked while its drain is unfini
     try std.testing.expectEqual(head.len, conn.pending_head_len);
     try std.testing.expectEqual(@as(usize, 0), conn.staged);
     try std.testing.expectEqual(served_before, worker.requests_served);
+}
+
+test "zix http1: URING answers 400 when the peer quits with a request unfinished" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    // The counterpart of the .EPOLL hangup answer, which this model had no test
+    // for at all: a recv completing with zero while a request is still arriving
+    // leaves a status staged, and beginClose sends it before the close.
+    var conn_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+
+    // Buffered partial: a declared body the peer stopped sending, small enough
+    // that it never armed a drain.
+    var buffered = UringConn{ .fd = -1, .gen = 0, .buf = &conn_buf, .filled = 54, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    try std.testing.expect(stageHangupAnswer(&buffered, 0));
+    try std.testing.expectStringStartsWith(send_buf[0..buffered.staged], "HTTP/1.1 400 Bad Request\r\n");
+    try std.testing.expect(std.mem.endsWith(u8, send_buf[0..buffered.staged], "Connection: close\r\n\r\n"));
+
+    // Parked head: buf carries no bytes of its own, the request lives in the
+    // drain that can now never reach zero.
+    var parked = UringConn{ .fd = -1, .gen = 0, .buf = &conn_buf, .filled = 0, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+    parked.pending_head_len = 49;
+    parked.drain = 4096;
+
+    try std.testing.expect(stageHangupAnswer(&parked, 0));
+    try std.testing.expectStringStartsWith(send_buf[0..parked.staged], "HTTP/1.1 400 Bad Request\r\n");
+}
+
+test "zix http1: URING stages nothing when a hangup finds no request in flight" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    const linux = std.os.linux;
+
+    var conn_buf: [256]u8 = undefined;
+    var send_buf: [256]u8 = undefined;
+
+    // Idle keep-alive: the peer left between requests and owes nothing, so an
+    // answer here would land on every ordinary connection teardown.
+    var idle = UringConn{ .fd = -1, .gen = 0, .buf = &conn_buf, .filled = 0, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    try std.testing.expect(!stageHangupAnswer(&idle, 0));
+    try std.testing.expectEqual(@as(usize, 0), idle.staged);
+
+    // A negative result is a dead socket rather than a hangup, so staging bytes
+    // for it is work that can only fail.
+    var errored = UringConn{ .fd = -1, .gen = 0, .buf = &conn_buf, .filled = 54, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false };
+
+    try std.testing.expect(!stageHangupAnswer(&errored, -@as(i32, @intFromEnum(linux.E.CONNRESET))));
+    try std.testing.expectEqual(@as(usize, 0), errored.staged);
+
+    // WebSocket: the peer reads frames, and a status line is not one.
+    var upgraded = UringConn{ .fd = -1, .gen = 0, .buf = &conn_buf, .filled = 54, .send_buf = &send_buf, .staged = 0, .inflight = 0, .closing = false, .ws = testWsEcho };
+
+    try std.testing.expect(!stageHangupAnswer(&upgraded, 0));
+    try std.testing.expectEqual(@as(usize, 0), upgraded.staged);
+
+    // A response already staged owns send_buf, and overwriting it would drop an
+    // answer the client is still owed.
+    var answering = UringConn{ .fd = -1, .gen = 0, .buf = &conn_buf, .filled = 54, .send_buf = &send_buf, .staged = 7, .inflight = 0, .closing = false };
+
+    try std.testing.expect(!stageHangupAnswer(&answering, 0));
+    try std.testing.expectEqual(@as(usize, 7), answering.staged);
 }
 
 test "zix http1: URING dispatch compacts the deferred head behind a pipelined request" {

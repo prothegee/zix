@@ -123,16 +123,52 @@ fn hookWrite(ctx: *anyopaque, bytes: []const u8) void {
     }
 }
 
+/// What a peer gets when it hangs up part way through a request, over TLS: the same GOAWAY the
+/// cleartext models send, sealed into a record first.
+///
+/// Note:
+/// - Nothing is written for a connection with no request in flight, or for one that never finished
+///   its handshake. Both close as ordinarily as they would in the clear.
+/// - The connection is marked for close either way. The return value only says whether ciphertext is
+///   still staged, so a caller that has to flush before closing knows to.
+///
+/// Param:
+/// conn - *TlsConn (the connection whose peer just hung up)
+///
+/// Return:
+/// - bool (true when staged ciphertext must be flushed before the close)
+pub fn hangupGoaway(conn: *TlsConn) bool {
+    const h2 = conn.h2 orelse return false;
+    if (!mux.requestInFlight(h2)) return false;
+
+    frame.write_hook = hookWrite;
+    frame.write_hook_ctx = conn;
+    _ = mux.hangupGoaway(h2);
+    flushPlain(conn);
+    frame.write_hook = null;
+    frame.write_hook_ctx = null;
+
+    conn.transport.wclose = true;
+
+    return conn.transport.wlen > conn.transport.woff;
+}
+
 /// Handle a readable TLS connection: decrypt available records, drive the handshake, then feed the
 /// plaintext to the h2 mux and seal its reply. Returns false when the connection must close.
 pub fn onReadable(handler: core.HandlerFn, conn: *TlsConn) bool {
     var cipher: [TLS_READ_STAGING_SIZE]u8 = undefined;
 
     while (true) {
-        const rc = linux.read(conn.transport.fd, &cipher, cipher.len);
+        // Sized by what the session can take, not by the staging buffer. The staging buffer is wider
+        // than one TLS record, so a busy socket (a large request in flight) would otherwise hand feed
+        // two records at once, which it refuses by closing the connection.
+        const room = conn.transport.tls.readRoom();
+        if (room == 0) return false;
+
+        const rc = linux.read(conn.transport.fd, &cipher, @min(cipher.len, room));
         switch (posix.errno(rc)) {
             .SUCCESS => {
-                if (rc == 0) return false; // peer closed
+                if (rc == 0) return hangupGoaway(conn); // peer closed
             },
             .INTR => continue,
             .AGAIN => return true, // drained
@@ -663,4 +699,360 @@ test "zix http2: h2 over TLS resumes flow-control-parked streams (static-h2 stal
         try std.testing.expectEqual(repro_body.len, received[idx]);
         try std.testing.expect(ended[idx]);
     }
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+/// Build the fixture TLS context into caller-owned storage, so the context outlives no buffer it
+/// points at. Only the certificate slice borrows, the signing key is held by value.
+fn testTlsContext(cert_buf: *[512]u8) !Tls.Context {
+    const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+    var skey: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&skey, repro_key_hex);
+    const server_key = try EcdsaP256.KeyPair.fromSecretKey(try EcdsaP256.SecretKey.fromBytes(skey));
+    const cert_der = try std.fmt.hexToBytes(cert_buf, repro_cert_hex);
+
+    return .{
+        .allocator = std.testing.allocator,
+        .cert_der = cert_der,
+        .signing_key = .{ .ecdsa_p256 = server_key },
+        .alpn = &.{.H2},
+        .curves = @import("../../tls/context.zig").default_curves,
+        .ciphers = @import("../../tls/context.zig").default_ciphers,
+        .min_version = .TLS_1_2,
+        .max_version = .TLS_1_3,
+        .prefer_server_ciphers = true,
+        .hsts_max_age_s = 0,
+    };
+}
+
+/// Run the TLS handshake against a server connection driven through onReadable, leaving both ends
+/// established and ALPN-negotiated to h2. Returns the client session that speaks to it.
+fn handshakeTlsConn(server_conn: *TlsConn, client_fd: posix.fd_t) !tls_client.ClientConnection {
+    var ch_buf: [512]u8 = undefined;
+    const started = try tls_client.start(.{ .client_random = @splat(0x11), .ephemeral_secret = @splat(0x42), .alpn = &.{.H2} }, &ch_buf);
+    var state = started.state;
+
+    var ch_rec: [600]u8 = undefined;
+    ch_rec[0] = 22;
+    std.mem.writeInt(u16, ch_rec[1..3], 0x0303, .big);
+    std.mem.writeInt(u16, ch_rec[3..5], @intCast(started.client_hello.len), .big);
+    @memcpy(ch_rec[5 .. 5 + started.client_hello.len], started.client_hello);
+    try writeAllBlocking(client_fd, ch_rec[0 .. 5 + started.client_hello.len]);
+
+    _ = onReadable(repro_router.dispatch, server_conn);
+
+    var flight_buf: [4096]u8 = undefined;
+    var flen: usize = 0;
+    for (0..3) |_| {
+        const rec = try readRecordBlocking(client_fd, flight_buf[flen..]);
+        flen += rec.len;
+    }
+
+    var fin_buf: [256]u8 = undefined;
+    const finished = try tls_client.finish(&state, flight_buf[0..flen], &fin_buf);
+    try writeAllBlocking(client_fd, finished.client_finished);
+
+    _ = onReadable(repro_router.dispatch, server_conn);
+    _ = server_conn.h2 orelse return error.ZixHandshakeIncomplete;
+
+    return finished.connection;
+}
+
+/// Encrypt and send the h2 connection preface plus an empty SETTINGS frame, which is what takes the
+/// server's mux out of its await_preface phase and into h2 proper.
+fn sendClientPreface(cc: *tls_client.ClientConnection, fd: posix.fd_t) !void {
+    var plain: [64]u8 = undefined;
+    @memcpy(plain[0..frame.PREFACE.len], frame.PREFACE);
+    frame.encodeFrameHeader(plain[frame.PREFACE.len..][0..9], .{ .length = 0, .frame_type = frame.FRAME_TYPE_SETTINGS, .flags = 0, .stream_id = 0 });
+
+    var enc: [256]u8 = undefined;
+    try writeAllBlocking(fd, cc.writeAppData(plain[0 .. frame.PREFACE.len + 9], &enc));
+}
+
+/// Encrypt and send one h2 frame the way a client would.
+fn sendClientFrame(cc: *tls_client.ClientConnection, fd: posix.fd_t, ftype: u8, flags: u8, sid: u31, payload: []const u8) !void {
+    var plain: [1024]u8 = undefined;
+    frame.encodeFrameHeader(plain[0..9], .{ .length = @intCast(payload.len), .frame_type = ftype, .flags = flags, .stream_id = sid });
+    @memcpy(plain[9..][0..payload.len], payload);
+
+    var enc: [2048]u8 = undefined;
+    try writeAllBlocking(fd, cc.writeAppData(plain[0 .. 9 + payload.len], &enc));
+}
+
+/// What the server answered with, decrypted from every record readable right now.
+const TlsTally = struct {
+    rst_protocol_error: usize = 0,
+    goaway_protocol_error: usize = 0,
+    statuses: usize = 0,
+};
+
+fn tallyTlsWire(cc: *tls_client.ClientConnection, client_fd: posix.fd_t) TlsTally {
+    var cipher: [64 * 1024]u8 = undefined;
+    const cipher_len = drainNonblock(client_fd, &cipher, 0);
+
+    var plain: [64 * 1024]u8 = undefined;
+    var plain_len: usize = 0;
+    var off: usize = 0;
+    while (cipher_len - off >= 5) {
+        const rec_len = std.mem.readInt(u16, cipher[off + 3 ..][0..2], .big);
+        if (cipher_len - off < 5 + rec_len) break;
+
+        const dec = cc.readAppData(cipher[off .. off + 5 + rec_len], plain[plain_len..]) catch break;
+        plain_len += dec.len;
+        off += 5 + rec_len;
+    }
+
+    var tally = TlsTally{};
+    var foff: usize = 0;
+    while (foff + 9 <= plain_len) {
+        const fh = frame.parseFrameHeader(plain[foff..][0..9]);
+        foff += 9;
+        if (foff + fh.length > plain_len) break;
+
+        switch (fh.frame_type) {
+            frame.FRAME_TYPE_RST_STREAM => {
+                if (std.mem.readInt(u32, plain[foff..][0..4], .big) == frame.ERR_PROTOCOL_ERROR) tally.rst_protocol_error += 1;
+            },
+            frame.FRAME_TYPE_GOAWAY => {
+                if (std.mem.readInt(u32, plain[foff + 4 ..][0..4], .big) == frame.ERR_PROTOCOL_ERROR) tally.goaway_protocol_error += 1;
+            },
+            frame.FRAME_TYPE_HEADERS => tally.statuses += 1,
+            else => {},
+        }
+        foff += fh.length;
+    }
+
+    return tally;
+}
+
+/// Encode a POST head declaring `content_length`, ending the headers but not the stream.
+fn encodeTlsPostHead(block: []u8, content_length: []const u8) ![]const u8 {
+    var enc = hpack.HpackEncoder.init(block);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    try enc.writeHeader("content-length", content_length);
+
+    return enc.encoded();
+}
+
+test "zix http2: h2 over TLS resets a stream whose body is short of its content-length" {
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    var cert_buf: [512]u8 = undefined;
+    const ctx = try testTlsContext(&cert_buf);
+
+    var pair: [2]posix.fd_t = undefined;
+    try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = linux.close(pair[0]);
+    defer _ = linux.close(pair[1]);
+
+    common.setNonBlock(pair[1]);
+
+    var server_conn = TlsConn{ .transport = tls_conn.Transport.init(pair[1], &ctx), .opts = .{ .max_streams = 16 }, .io = undefined };
+    defer if (server_conn.h2) |h2| h2.deinit();
+    defer server_conn.transport.deinit();
+
+    var client = try handshakeTlsConn(&server_conn, pair[0]);
+    common.setNonBlock(pair[0]);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    try sendClientPreface(&client, pair[0]);
+    _ = onReadable(repro_router.dispatch, &server_conn);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    // 100 bytes promised, 40 delivered, then END_STREAM: the request never finished arriving
+    var block: [128]u8 = undefined;
+    const head = try encodeTlsPostHead(&block, "100");
+    try sendClientFrame(&client, pair[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, head);
+
+    const short: [40]u8 = @splat('x');
+    try sendClientFrame(&client, pair[0], frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, &short);
+
+    _ = onReadable(repro_router.dispatch, &server_conn);
+
+    // the guard runs inside the same mux the cleartext models drive, and its answer seals into a
+    // record like any other frame: a reset, and no response headers from a handler that never ran
+    const tally = tallyTlsWire(&client, pair[0]);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.rst_protocol_error);
+    try std.testing.expectEqual(@as(usize, 0), tally.statuses);
+}
+
+test "zix http2: h2 over TLS answers a peer that hangs up with a request unfinished" {
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    var cert_buf: [512]u8 = undefined;
+    const ctx = try testTlsContext(&cert_buf);
+
+    var pair: [2]posix.fd_t = undefined;
+    try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = linux.close(pair[0]);
+    defer _ = linux.close(pair[1]);
+
+    common.setNonBlock(pair[1]);
+
+    var server_conn = TlsConn{ .transport = tls_conn.Transport.init(pair[1], &ctx), .opts = .{ .max_streams = 16 }, .io = undefined };
+    defer if (server_conn.h2) |h2| h2.deinit();
+    defer server_conn.transport.deinit();
+
+    var client = try handshakeTlsConn(&server_conn, pair[0]);
+    common.setNonBlock(pair[0]);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    try sendClientPreface(&client, pair[0]);
+    _ = onReadable(repro_router.dispatch, &server_conn);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    // a POST that opens its stream and never ends it: the body is still on its way
+    var block: [128]u8 = undefined;
+    const head = try encodeTlsPostHead(&block, "100");
+    try sendClientFrame(&client, pair[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, head);
+
+    _ = onReadable(repro_router.dispatch, &server_conn);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    // the peer goes away, and the GOAWAY that says so is sealed like any other frame
+    try std.testing.expect(mux.requestInFlight(server_conn.h2.?));
+    _ = hangupGoaway(&server_conn);
+
+    const tally = tallyTlsWire(&client, pair[0]);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.goaway_protocol_error);
+    try std.testing.expect(server_conn.transport.wclose);
+}
+
+test "zix http2: h2 over TLS closes an idle connection without a GOAWAY" {
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    var cert_buf: [512]u8 = undefined;
+    const ctx = try testTlsContext(&cert_buf);
+
+    var pair: [2]posix.fd_t = undefined;
+    try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = linux.close(pair[0]);
+    defer _ = linux.close(pair[1]);
+
+    common.setNonBlock(pair[1]);
+
+    var server_conn = TlsConn{ .transport = tls_conn.Transport.init(pair[1], &ctx), .opts = .{ .max_streams = 16 }, .io = undefined };
+    defer if (server_conn.h2) |h2| h2.deinit();
+    defer server_conn.transport.deinit();
+
+    var client = try handshakeTlsConn(&server_conn, pair[0]);
+    common.setNonBlock(pair[0]);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    try sendClientPreface(&client, pair[0]);
+    _ = onReadable(repro_router.dispatch, &server_conn);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    // nothing was ever opened, so the peer leaving is the ordinary end of a connection
+    try std.testing.expect(!mux.requestInFlight(server_conn.h2.?));
+    try std.testing.expect(!hangupGoaway(&server_conn));
+
+    const tally = tallyTlsWire(&client, pair[0]);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.goaway_protocol_error);
+}
+
+var tls_body_seen: usize = 0;
+var tls_body_dispatches: usize = 0;
+
+fn tlsBodyHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    tls_body_dispatches += 1;
+    tls_body_seen = req.body.len;
+
+    try res.sendText("ok");
+}
+
+const tls_body_router = core.Router(&[_]core.Route{.{ .path = "/", .handler = tlsBodyHandler }});
+
+/// Encrypt and send one h2 DATA frame as its own TLS record, from caller-owned scratch so the frame
+/// may be larger than the small-frame helper allows.
+fn sendClientData(cc: *tls_client.ClientConnection, fd: posix.fd_t, sid: u31, payload: []const u8, plain: []u8, enc: []u8, end_stream: bool) !void {
+    frame.encodeFrameHeader(plain[0..9], .{
+        .length = @intCast(payload.len),
+        .frame_type = frame.FRAME_TYPE_DATA,
+        .flags = if (end_stream) frame.FLAG_END_STREAM else 0,
+        .stream_id = sid,
+    });
+    @memcpy(plain[9..][0..payload.len], payload);
+
+    try writeAllBlocking(fd, cc.writeAppData(plain[0 .. 9 + payload.len], enc));
+}
+
+test "zix http2: h2 over TLS serves a request body spanning several TLS records" {
+    if (@import("builtin").os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    var cert_buf: [512]u8 = undefined;
+    const ctx = try testTlsContext(&cert_buf);
+
+    var pair: [2]posix.fd_t = undefined;
+    try std.testing.expect(posix.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair)) == .SUCCESS);
+    defer _ = linux.close(pair[0]);
+    defer _ = linux.close(pair[1]);
+
+    common.setNonBlock(pair[1]);
+
+    var server_conn = TlsConn{ .transport = tls_conn.Transport.init(pair[1], &ctx), .opts = .{ .max_streams = 16, .max_body = 65536 }, .io = undefined };
+    defer if (server_conn.h2) |h2| h2.deinit();
+    defer server_conn.transport.deinit();
+
+    var client = try handshakeTlsConn(&server_conn, pair[0]);
+    common.setNonBlock(pair[0]);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    try sendClientPreface(&client, pair[0]);
+    _ = onReadable(tls_body_router.dispatch, &server_conn);
+    _ = tallyTlsWire(&client, pair[0]);
+
+    const chunk_len: usize = 13000;
+    const chunks: usize = 3;
+    const body_len = chunk_len * chunks;
+
+    var head_block: [128]u8 = undefined;
+    const head = try encodeTlsPostHead(&head_block, "39000");
+    try sendClientFrame(&client, pair[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, head);
+
+    // Three DATA frames, one TLS record each, all sitting in the socket before the server reads.
+    // That is the condition the session's single-record reassembly buffer could not survive: a read
+    // wide enough to scoop up more than one record and hand them over together.
+    const payload = try std.testing.allocator.alloc(u8, chunk_len);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'u');
+
+    const plain = try std.testing.allocator.alloc(u8, chunk_len + 64);
+    defer std.testing.allocator.free(plain);
+    const enc = try std.testing.allocator.alloc(u8, chunk_len + 512);
+    defer std.testing.allocator.free(enc);
+
+    for (0..chunks) |idx| try sendClientData(&client, pair[0], 1, payload, plain, enc, idx == chunks - 1);
+
+    tls_body_dispatches = 0;
+    tls_body_seen = 0;
+    _ = onReadable(tls_body_router.dispatch, &server_conn);
+
+    // The whole body reached the handler, and the connection is still alive to answer
+    try std.testing.expectEqual(@as(usize, 1), tls_body_dispatches);
+    try std.testing.expectEqual(body_len, tls_body_seen);
+
+    const tally = tallyTlsWire(&client, pair[0]);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.rst_protocol_error);
+    try std.testing.expect(tally.statuses >= 1);
 }

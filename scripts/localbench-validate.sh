@@ -145,6 +145,12 @@ import json
 print('\n'.join(json.load(open('$ENTRY_DIR/meta.json'))['tests']))
 ")
 
+# What the entry subscribes to, kept before ONLY_PROFILE narrows TESTS. A check
+# asking what the entry CAN do (does it open a TLS listener) has to read this,
+# not the filtered list, or naming one profile would hide the entry's other
+# listeners from the checks that share a profile with them.
+ENTRY_TESTS=("${TESTS[@]}")
+
 if [ -n "$ONLY_PROFILE" ]; then
     printf '%s\n' "${TESTS[@]}" | grep -qx "$ONLY_PROFILE" ||
         die "$ENTRY does not subscribe to '$ONLY_PROFILE' (it has: ${TESTS[*]})"
@@ -153,8 +159,15 @@ if [ -n "$ONLY_PROFILE" ]; then
 fi
 
 # has_test NAME
+# Whether this run drives NAME.
 has_test() {
     printf '%s\n' "${TESTS[@]}" | grep -qx "$1"
+}
+
+# entry_has NAME
+# Whether the entry subscribes to NAME at all, whatever this run was narrowed to.
+entry_has() {
+    printf '%s\n' "${ENTRY_TESTS[@]}" | grep -qx "$1"
 }
 
 # ok LABEL
@@ -709,11 +722,13 @@ check_upload() {
         expect "POST /upload $label" "$size" "$got"
     done
 
-    # A peer that declares a length and then stops: the count must be what
-    # arrived, never the header. .EPOLL and .URING answer nothing here by
-    # design, so this reports the model's behaviour rather than failing.
-    local truncated
-    truncated="$(python3 - "$PORT" <<'PY'
+    # A peer that declares a length and then stops. Every model must answer:
+    # .ASYNC runs the handler on what arrived, .EPOLL and .URING hold the
+    # request until its body is whole and so refuse this one with 400. A closed
+    # connection and no bytes is the defect this replaced, because the client
+    # cannot tell that apart from a crash.
+    local status body
+    read -r status body <<< "$(python3 - "$PORT" <<'PY'
 import socket, sys
 
 sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10)
@@ -727,15 +742,109 @@ while True:
         break
     raw += chunk
 
-print(raw.split(b"\r\n\r\n", 1)[1].decode().strip() if b"\r\n\r\n" in raw else "no-reply")
+if not raw:
+    print("no-reply")
+elif b"\r\n\r\n" in raw:
+    head, payload = raw.split(b"\r\n\r\n", 1)
+    print(head.split(b"\r\n", 1)[0].split(b" ")[1].decode(), payload.decode(errors="replace").strip())
+else:
+    print("unparsed")
 PY
 )"
-    case "$truncated" in
-        5) ok "POST /upload truncated body counts what arrived (5)" ;;
-        no-reply) ok "POST /upload truncated body drops the request (event-loop behaviour)" ;;
-        100) no "POST /upload truncated body" "answered the declared length, not what arrived" ;;
-        *) no "POST /upload truncated body" "unexpected answer '$truncated'" ;;
+    case "$status" in
+        200) expect "POST /upload truncated body counts what arrived" "5" "$body" ;;
+        400) ok "POST /upload truncated body refused with 400" ;;
+        no-reply) no "POST /upload truncated body" "the connection closed without an answer" ;;
+        *) no "POST /upload truncated body" "unexpected status '$status'" ;;
     esac
+
+    if entry_has json-tls; then
+        check_upload_tls
+    fi
+}
+
+# check_upload_tls
+# The same upload contract over the TLS listener. Separate because the transport
+# has its own request path on every dispatch model, and it used to cap uploads
+# near 17 KB while cleartext carried 20 MiB. Only entries that open a TLS
+# listener reach this.
+#
+# Note:
+# - The host is localhost, never 127.0.0.1: the cert SAN is localhost, and an IP
+#   literal earns a 421 that says nothing about uploads.
+check_upload_tls() {
+    echo "[test] upload over tls" | tee -a "$REPORT"
+
+    local small
+    small="Hello, HttpArena!"
+    expect "POST https /upload small body" "${#small}" \
+        "$(curl -sk --max-time 30 --http1.1 -X POST -H "Content-Type: application/octet-stream" \
+            --data-binary "$small" "https://localhost:$TLS_PORT/upload")"
+
+    # Past the buffer the whole request used to have to fit, and the largest size
+    # the arena upload profile drives.
+    local spec label size got
+    for spec in "20K:20480" "20M:20971520"; do
+        label="${spec%%:*}"
+        size="${spec##*:}"
+        got="$({ dd if=/dev/urandom bs=1024 count=$((size / 1024)) 2>/dev/null |
+            curl -sk --max-time 180 --http1.1 -X POST -H "Content-Type: application/octet-stream" \
+                --data-binary @- "https://localhost:$TLS_PORT/upload"; } || true)"
+
+        expect "POST https /upload $label" "$size" "$got"
+    done
+
+    # A peer that declares a length and then stops, and one that declares more
+    # than the server accepts. Both must answer: a silent close over TLS is what
+    # this check exists to catch.
+    local truncated_status oversize_status
+    read -r truncated_status oversize_status <<< "$(python3 - "$TLS_PORT" <<'PY'
+import os, socket, ssl, sys
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+
+def probe(port, head, body):
+    """Send a request the peer never finishes, then half close and read the answer."""
+    try:
+        sock = socket.create_connection(("localhost", port), timeout=30)
+
+        # A dup of the fd: wrap_socket detaches the original and SSLSocket.shutdown
+        # drops the ssl object, so neither can half close and still read.
+        half = socket.socket(fileno=os.dup(sock.fileno()))
+        tls = ctx.wrap_socket(sock, server_hostname="localhost")
+        tls.sendall(head + body)
+        half.shutdown(socket.SHUT_WR)
+
+        raw = b""
+        while True:
+            try:
+                chunk = tls.recv(4096)
+            except Exception:
+                break
+            if not chunk:
+                break
+            raw += chunk
+    except Exception:
+        return "error"
+
+    if not raw:
+        return "no-reply"
+
+    return raw.split(b"\r\n", 1)[0].split(b" ")[1].decode()
+
+
+port = int(sys.argv[1])
+print(
+    probe(port, b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n", b"hello"),
+    probe(port, b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 99999999\r\n\r\n", b""),
+)
+PY
+)"
+    expect "POST https /upload truncated body refused with 400" "400" "$truncated_status"
+    expect "POST https /upload past max_request_body refused with 413" "413" "$oversize_status"
 }
 
 check_async_db() {

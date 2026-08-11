@@ -33,6 +33,7 @@ const ws = @import("websocket.zig");
 const Tls = @import("../../tls/Tls.zig");
 const tls12 = @import("../../tls/tls12_connection.zig");
 const record = @import("../../tls/record.zig");
+const tls_feed = @import("tls_feed.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const HandlerFn = core.HandlerFn;
@@ -80,6 +81,10 @@ const ws_record_plain_size: usize = 17 * 1024;
 const ws_payload_size: usize = 16 * 1024;
 const ws_out_size: usize = 32 * 1024;
 
+const BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const PAYLOAD_TOO_LARGE = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const HEAD_TOO_LARGE = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
 /// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
 /// clean teardown so the accept loop closes the connection rather than misreading it as a record.
 fn peerAlert(body: []const u8) anyerror {
@@ -110,7 +115,7 @@ pub fn runTls(handler: HandlerFn, config: Config) !void {
         const conn_fd = stream.socket.handle;
 
         const worker = std.Thread.spawn(.{ .stack_size = config.worker_stack_size_bytes }, connWorker, .{
-            ConnCtx{ .fd = conn_fd, .handler = handler, .ctx = ctx, .io = io, .public_dir = config.public_dir, .max_response_headers = config.max_response_headers.value(), .logger = config.logger },
+            ConnCtx{ .fd = conn_fd, .handler = handler, .ctx = ctx, .io = io, .public_dir = config.public_dir, .max_response_headers = config.max_response_headers.value(), .max_request_body = config.max_request_body, .logger = config.logger },
         }) catch {
             // Spawn failed (thread / pid limit under extreme load): drop this connection and keep
             // accepting. Serving inline here would block the accept loop for the connection's whole
@@ -132,6 +137,8 @@ const ConnCtx = struct {
     io: std.Io,
     public_dir: []const u8 = "",
     max_response_headers: usize = 16,
+    /// Declared bodies past this are refused with 413 before a byte is read. 0 removes the check.
+    max_request_body: usize = 0,
     /// The server's logger, borrowed, so a handshake that fails is not simply a closed socket.
     logger: ?*Logger = null,
 };
@@ -140,6 +147,7 @@ const ConnCtx = struct {
 fn connWorker(conn_ctx: ConnCtx) void {
     core.setStatic(conn_ctx.public_dir, conn_ctx.io);
     core.setMaxResponseHeaders(conn_ctx.max_response_headers);
+    core.setMaxRequestBody(conn_ctx.max_request_body);
 
     // A failed handshake used to close the socket with nothing said, so a client that could not
     // negotiate looked the same as one that never called. It files at DEBUG rather than WARN
@@ -303,6 +311,12 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
     var encrypt_buf: [app_data_encrypt_out_size]u8 = undefined;
     var close_buf: [encrypted_alert_size]u8 = undefined;
 
+    // Request bytes across records. A record carries at most record.max_plaintext, and a head can
+    // span two of them, so the bytes have to accumulate somewhere that outlives one record. Without
+    // this the handler was handed whatever landed in the first record and the rest was dropped.
+    var acc: [request_plain_size]u8 = undefined;
+    var state = tls_feed.State{};
+
     // arm the streaming sink for this connection (ADR-054): an SSE handler that called beginStream()
     // writes each event through it, encrypting one record per write. A normal handler never touches
     // it (the capture sink wins in core.writeAllFD).
@@ -315,17 +329,27 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
 
     while (true) {
         const request_rec = readRecord(fd, record_buf) catch |err| {
-            // the peer hung up between requests (no close_notify): a clean keep-alive end.
-            if (err == error.ZixConnectionClosed) return;
+            // the peer hung up (no close_notify). Between requests that is a clean keep-alive end,
+            // part way through one it is a request that never arrived, and the client cannot tell a
+            // bare close from a crash, so it is answered.
+            if (err == error.ZixConnectionClosed) {
+                if (state.inFlight()) writeAllFD(fd, conn.writeAppData(BAD_REQUEST, &encrypt_buf)) catch {};
+
+                return;
+            }
 
             return err;
         };
         if (request_rec.content_type == content_type_alert) return; // peer close_notify / alert: done.
         if (request_rec.content_type != content_type_application_data) return error.ZixUnexpectedRecord;
 
-        const request = conn.readAppData(request_rec.full, &request_plain) catch |err| {
+        const plaintext = conn.readAppData(request_rec.full, &request_plain) catch |err| {
             // client close_notify arrives as an inner alert -> PeerClosed: a clean end.
-            if (err == error.ZixPeerClosed) return;
+            if (err == error.ZixPeerClosed) {
+                if (state.inFlight()) writeAllFD(fd, conn.writeAppData(BAD_REQUEST, &encrypt_buf)) catch {};
+
+                return;
+            }
 
             // a post-handshake handshake message (renegotiation / KeyUpdate) is unexpected_message (RFC 8446 5.1).
             if (comptime @hasDecl(@TypeOf(conn.*), "encryptedAlert")) {
@@ -338,49 +362,103 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
             return err;
         };
 
-        const parsed = core.parseHead(request) catch return error.ZixBadRequest;
-        const head = parsed.head;
-        const body = request[parsed.body_offset..];
+        // One record's plaintext, fed through the same bounded state machine the .EPOLL and .URING
+        // TLS path uses: whole requests are served from acc, a body too large to hold is counted off
+        // the wire instead, and the buffer bounds the head rather than the upload.
+        var rest = plaintext;
+        while (true) {
+            if (state.drain > 0) {
+                rest = state.takeDrain(rest);
+                if (state.drain > 0) break;
 
-        // RFC 9110 7.4: a request for an authority this cert does not serve is a misdirected request.
-        // Match the Host (port stripped) against the cert SAN (DNS or IP), respond 421 on a mismatch.
-        if (hostFromHead(request[0..parsed.body_offset])) |host_raw| {
-            const host = stripPort(host_raw);
-            Tls.verifyCertIdentity(ctx.cert_der, host) catch {
-                const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                writeAllFD(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
-                writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+                state.releaseParked();
+            } else {
+                if (rest.len == 0) break;
 
-                return;
-            };
-        }
+                if (state.headOverflowed(acc.len)) {
+                    writeAllFD(fd, conn.writeAppData(HEAD_TOO_LARGE, &encrypt_buf)) catch {};
+                    writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
-        const result = try runHandlerToBuffer(handler, &head, body, &response_buf, core.tl_static_io orelse undefined);
+                    return;
+                }
 
-        if (core.takeWebSocket()) |handoff| {
-            // WebSocket upgrade over TLS (ADR-055): the 101 was already sent through the stream sink.
-            // Run the inline frame loop over this TLS session, then close.
-            serveWsTls(conn, fd, handoff.on_frame, record_buf) catch {};
-            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+                rest = state.fill(&acc, rest);
+            }
 
-            return;
-        }
+            while (state.filled > 0) {
+                const parsed = core.parseHead(acc[0..state.filled]) catch |err| {
+                    if (err == error.ZixIncompleteHeader) break; // wait for the rest of the head
 
-        if (result.streamed) {
-            // the handler streamed the whole response over TLS (already encrypted + sent through the
-            // stream sink). The stream owns the rest of the connection, so close after it returns.
-            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+                    return error.ZixBadRequest;
+                };
+                const head = parsed.head;
 
-            return;
-        }
+                const serve = switch (state.classify(parsed.body_offset, @intCast(head.content_length), acc.len, core.tl_max_request_body)) {
+                    .SERVE => |decided| decided,
+                    // Waiting for the rest of the body, or the head was just parked and the body is
+                    // now being counted off the wire. Nothing to dispatch either way.
+                    .WAIT => break,
+                    .REFUSE_BODY => {
+                        writeAllFD(fd, conn.writeAppData(PAYLOAD_TOO_LARGE, &encrypt_buf)) catch {};
+                        writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
-        try sendAppData(conn, fd, result.bytes, &encrypt_buf);
+                        return;
+                    },
+                    .REFUSE_HEAD => {
+                        writeAllFD(fd, conn.writeAppData(HEAD_TOO_LARGE, &encrypt_buf)) catch {};
+                        writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
 
-        // honor Connection: close (and the HTTP/1.0 default): close_notify, then end the connection.
-        if (!head.keep_alive) {
-            writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+                        return;
+                    },
+                };
 
-            return;
+                const body = acc[parsed.body_offset..][0..serve.body_len];
+                if (serve.received > 0) core.tl_body_info = .{ .received = serve.received, .complete = true };
+
+                // RFC 9110 7.4: a request for an authority this cert does not serve is a misdirected request.
+                // Match the Host (port stripped) against the cert SAN (DNS or IP), respond 421 on a mismatch.
+                if (hostFromHead(acc[0..parsed.body_offset])) |host_raw| {
+                    const host = stripPort(host_raw);
+                    Tls.verifyCertIdentity(ctx.cert_der, host) catch {
+                        const misdirected = "HTTP/1.1 421 Misdirected Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        writeAllFD(fd, conn.writeAppData(misdirected, &encrypt_buf)) catch {};
+                        writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+
+                        return;
+                    };
+                }
+
+                const result = try runHandlerToBuffer(handler, &head, body, &response_buf, core.tl_static_io orelse undefined);
+
+                // consume this request, sliding any pipelined bytes to the front.
+                state.consume(&acc, serve.request_len);
+
+                if (core.takeWebSocket()) |handoff| {
+                    // WebSocket upgrade over TLS (ADR-055): the 101 was already sent through the stream sink.
+                    // Run the inline frame loop over this TLS session, then close.
+                    serveWsTls(conn, fd, handoff.on_frame, record_buf) catch {};
+                    writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+
+                    return;
+                }
+
+                if (result.streamed) {
+                    // the handler streamed the whole response over TLS (already encrypted + sent through the
+                    // stream sink). The stream owns the rest of the connection, so close after it returns.
+                    writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+
+                    return;
+                }
+
+                try sendAppData(conn, fd, result.bytes, &encrypt_buf);
+
+                // honor Connection: close (and the HTTP/1.0 default): close_notify, then end the connection.
+                if (!head.keep_alive) {
+                    writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+
+                    return;
+                }
+            }
         }
     }
 }

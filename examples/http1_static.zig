@@ -66,18 +66,33 @@ fn homeHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Co
 // curl usage:
 // curl -X POST "http://localhost:9024/upload?name=file.txt" --data-binary @/path/to/file.txt
 //
-// Body-size limit: the body handed to a handler is capped by the dispatch model, NOT by
-// max_recv_buf.
-// - .ASYNC (blocking core.serveConn): body is capped at the fixed 8192-byte
-//   body_buf. A larger upload is silently truncated to 8192 bytes.
-// - .EPOLL (serveEpollConn): body must fit in max_recv_buf. A larger body arrives EMPTY (the
-//   rest is drained off the socket), so the handler sees an empty req.body().
-// For multipart or large uploads, use the high-level zix.Http static server instead.
+// Body-size limit: the body handed to a handler is bounded by max_recv_buf, which is 16 KB here.
+// - .ASYNC: the handler receives the first max_recv_buf bytes, the remainder is drained off the
+//   socket so the connection stays usable.
+// - .EPOLL and .URING: a body past max_recv_buf arrives EMPTY, the whole body is drained instead.
+// Either way req.bodyReceived() counts every body byte the socket gave up, so comparing it with
+// req.body().len is how this handler refuses an upload it cannot store whole rather than writing a
+// half file and answering 200. For large uploads use the high-level zix.Http static server instead.
 fn uploadHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
 
         try res.sendJson("{\"error\":\"method not allowed\"}");
+        return;
+    }
+
+    const body = try req.body();
+    if (!req.bodyComplete()) {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"incomplete body: the client stopped sending\"}");
+        return;
+    }
+
+    if (req.bodyReceived() != body.len) {
+        res.setStatus(.PAYLOAD_TOO_LARGE);
+
+        try res.sendJson("{\"error\":\"body larger than max_recv_buf: raise it or use zix.Http\"}");
         return;
     }
 
@@ -113,7 +128,7 @@ fn uploadHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Ht
 
     var write_buf: [8192]u8 = undefined;
     var writer = file.writer(ctx.io, &write_buf);
-    writer.interface.writeAll(try req.body()) catch {
+    writer.interface.writeAll(body) catch {
         res.setStatus(.INTERNAL_SERVER_ERROR);
 
         try res.sendJson("{\"error\":\"failed to write file\"}");
@@ -125,7 +140,7 @@ fn uploadHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Ht
     const resp = std.fmt.bufPrint(
         &resp_buf,
         "{{\"file\":{{\"name\":\"{s}\",\"size\":{d},\"path\":\"{s}\"}}}}",
-        .{ name, (try req.body()).len, file_path },
+        .{ name, body.len, file_path },
     ) catch return;
 
     try res.sendJson(resp);
@@ -143,14 +158,30 @@ fn uploadHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Ht
 // curl usage:
 // curl -X POST "http://localhost:9024/upload-multipart" -F "file=@/path/to/file.txt"
 //
-// Body-size cap: the multipart body is bounded by the same dispatch-model limit as /upload
-// (see above), so this demonstrates SMALL uploads only. For real or large multipart uploads,
-// use the high-level zix.Http static server instead.
+// Body-size cap: the multipart body is bounded by max_recv_buf, exactly as /upload is (see above),
+// so this demonstrates SMALL uploads only. The same bodyReceived() check guards it, because a
+// multipart body cut at the buffer loses its closing boundary and would otherwise be saved as a
+// half file. For real or large multipart uploads, use the high-level zix.Http static server.
 fn uploadMultipartHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.Http1.Context) !void {
     if (req.method() != .POST) {
         res.setStatus(.METHOD_NOT_ALLOWED);
 
         try res.sendJson("{\"error\":\"method not allowed\"}");
+        return;
+    }
+
+    const body = try req.body();
+    if (!req.bodyComplete()) {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"incomplete body: the client stopped sending\"}");
+        return;
+    }
+
+    if (req.bodyReceived() != body.len) {
+        res.setStatus(.PAYLOAD_TOO_LARGE);
+
+        try res.sendJson("{\"error\":\"body larger than max_recv_buf: raise it or use zix.Http\"}");
         return;
     }
 
@@ -175,7 +206,7 @@ fn uploadMultipartHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx
     var parser = zix.utils.multipart.Parser.init(ctx.allocator, boundary);
     defer parser.deinit();
 
-    parser.parse(try req.body()) catch {
+    parser.parse(body) catch {
         res.setStatus(.BAD_REQUEST);
 
         try res.sendJson("{\"error\":\"invalid multipart body\"}");
