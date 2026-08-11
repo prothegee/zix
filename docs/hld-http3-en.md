@@ -89,7 +89,7 @@ Access via `const zix = @import("zix");`
 | :- | :- | :- |
 | `zix.Http3.Server` | struct | `Server.init(handler, config)` returns the server, the handler baked in at comptime |
 | `zix.Http3.HandlerFn` | fn type | `*const fn(*const Request, *Response, *Context) anyerror!void` |
-| `zix.Http3.Request` | struct | Decoded request: `method`, `path`, `authority`, `body`, `accept_encoding` |
+| `zix.Http3.Request` | struct | Decoded request: `method`, `path`, `authority`, `body`, `accept_encoding`, plus `bodyReceived()` / `bodyComplete()` |
 | `zix.Http3.Response` | struct | Handler-filled response: `status`, `body`, `content_type`, `content_encoding`, `sent` |
 | `zix.Http3.Context` | struct | Per-request context: `stream_id` (the raw escape hatch, QUIC has no per-request fd), `io`, a stack-arena allocator, and the optional handler deadline |
 | `zix.Http3.ContentEncoding` | enum | `identity` / `gzip` / `br`, the coding the handler selected for `res.body` |
@@ -142,6 +142,9 @@ pub const Http3ServerConfig = struct {
     max_stream_chunk:     usize = 0,     // STREAM payload cap per packet, 0 = derive from datagram size
     max_inflight_packets: usize = 128,   // congestion-window ceiling / loss-log depth (RFC 9002)
     initial_window_packets: usize = 32,  // initial congestion window in packets (RFC default is 10)
+
+    max_pending_request_streams: usize = 16,   // requests one worker assembles at once, 0 holds none
+    max_request_stream_bytes:    usize = 8192, // largest request a handler can be given whole
 
     public_dir:                   []const u8 = "",  // static file root, "" disables static serving
     public_dir_cache_ttl_ms:      u32 = 0,          // 0 also disables static serving here, see below
@@ -224,7 +227,12 @@ pub const Request = struct {
     path:            []const u8,
     authority:       []const u8 = "",
     body:            []const u8 = "",
+    body_received:   u64        = 0,
+    body_complete:   bool       = true,
     accept_encoding: []const u8 = "",
+
+    pub fn bodyReceived(self: Request) u64 { return self.body_received; }
+    pub fn bodyComplete(self: Request) bool { return self.body_complete; }
 };
 
 pub const Response = struct {
@@ -240,7 +248,7 @@ pub const Response = struct {
 };
 ```
 
-The request slices point into the engine's per-connection decode buffer and are valid only for the duration of the handler call. On the current serve path `method`, `path`, and `accept_encoding` are populated from the wire (`authority` and `body` keep their defaults). The response body is copied into the send path after the handler returns, so it may point at handler-owned or static memory (see the example's threadlocal scratch and process-lifetime `big_body`). `content_type` is part of the handler API but the v1 response path QPACK-encodes only `:status` and, when the handler set one, `content-encoding`.
+The request slices point into the engine's per-connection decode buffer and are valid only for the duration of the handler call. On the current serve path `method`, `path`, `accept_encoding`, and `body` are populated from the wire (`authority` keeps its default). `body` carries the request body, `bodyReceived()` counts the body bytes that arrived, and `bodyComplete()` says whether the handler is holding all of them. A request with a body rarely arrives in one packet (a client commonly writes its HEADERS frame and its DATA frame separately), so the engine holds such a request until the client ends its stream and runs the handler once, with the whole body: see `reassembly.zig` in the LLD. `max_request_stream_bytes` is how large that body may be, so a deployment that accepts big uploads sizes it rather than living with a built-in limit. Past it the body is delivered cut, counted honestly, and reported false, never as a fragment that reads whole. When every one of the worker's `max_pending_request_streams` slots is busy with a request still arriving, a new one is answered 503: no handler is ever run against a body the engine knows it is missing. The response body is copied into the send path after the handler returns, so it may point at handler-owned or static memory (see the example's threadlocal scratch and process-lifetime `big_body`). `content_type` is part of the handler API but the v1 response path QPACK-encodes only `:status` and, when the handler set one, `content-encoding`.
 
 ### Handler error policy
 
