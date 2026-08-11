@@ -1,0 +1,14 @@
+.{
+    .name = .zix_localbench_http2_grpc_async,
+    .version = "0.1.0",
+    .fingerprint = 0xc78e3a4e5a1baaaa,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{
+        .zix = .{ .path = "../.." },
+    },
+}
