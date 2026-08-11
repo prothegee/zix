@@ -25,11 +25,72 @@ pub const Request = struct {
     method: []const u8,
     path: []const u8,
     authority: []const u8 = "",
+    /// The request body bytes handed to this handler, empty when the request carried none. This is the
+    /// DATA, `bodyReceived()` is the COUNT, and `bodyComplete()` says whether the two agree.
+    ///
+    /// Note:
+    /// - The slice borrows the connection decode buffer, like `path`, so copy it to keep it past the
+    ///   handler call. Handing it straight to `res.send` is only safe for a response that fits one
+    ///   packet, since a larger one is sent from the buffer after the next datagram has overwritten it.
     body: []const u8 = "",
+    /// Body bytes the engine decoded off the wire for this request. Read through `bodyReceived()`.
+    body_received: u64 = 0,
+    /// Whether the client finished sending this request and `body` holds all of it. Read through
+    /// `bodyComplete()`.
+    body_complete: bool = true,
     /// The client's `accept-encoding` value, or empty when it sent none. A handler negotiates a
     /// pre-compressed body against it (for example serving a `.br` variant when it contains `br`) and
     /// sets `res.content_encoding` to match.
     accept_encoding: []const u8 = "",
+
+    /// How many body bytes the engine decoded off the wire for this request, HTTP/3 framing excluded.
+    /// Counted from the DATA frames that carried them, never from a `content-length` field, so a lying
+    /// header cannot inflate it.
+    ///
+    /// Note:
+    /// - This is the COUNT, `body` is the DATA. A handler that only needs the size (an upload receipt,
+    ///   a metric) reads this and skips the bytes.
+    /// - Equal to `body.len` means the handler was given every byte that arrived. A larger count means
+    ///   bytes arrived that `body` does not hold, so any parse of `body` is working on a fragment.
+    /// - zix.Http1 and zix.Http answer the same question under the same name.
+    ///
+    /// Return:
+    /// - u64 (counted received body bytes)
+    pub fn bodyReceived(self: Request) u64 {
+        return self.body_received;
+    }
+
+    /// Whether the client finished sending this request and every byte it sent is in `body`.
+    ///
+    /// Note:
+    /// - False means the bytes in `body` are real but the request promised more: the client had not
+    ///   ended the QUIC stream, or it split the body across DATA frames or datagrams and only the
+    ///   first part is delivered. Check this before parsing a body as a whole document.
+    /// - This engine decodes one datagram at a time, so a body larger than a datagram reads false.
+    ///   Rejecting the request (413) or answering from what arrived is the handler's call.
+    /// - True for a request that carried no body, since a conforming client ends the stream with its
+    ///   HEADERS (RFC 9114 4.1) and there is nothing to fall short of.
+    /// - zix.Http1 answers the same question under the same name.
+    ///
+    /// Usage:
+    /// ```zig
+    /// fn uploadHandler(req: *const Request, res: *Response, _: *Context) !void {
+    ///     if (!req.bodyComplete()) {
+    ///         res.setStatus(400);
+    ///         res.send("incomplete body");
+    ///
+    ///         return;
+    ///     }
+    ///
+    ///     res.send(req.body);
+    /// }
+    /// ```
+    ///
+    /// Return:
+    /// - bool
+    pub fn bodyComplete(self: Request) bool {
+        return self.body_complete;
+    }
 };
 
 /// The response the handler fills. The body is copied into the engine's send path after the handler
@@ -193,6 +254,17 @@ fn negotiateHandler(req: *const Request, res: *Response, ctx: *Context) !void {
     }
 }
 
+// Scratch the body handler formats its answer into, so the slice it sends outlives the handler call
+// the way a real handler's does.
+threadlocal var body_reply_buf: [64]u8 = undefined;
+
+// A handler that answers from the request body and reports how many bytes of it arrived: the POST
+// shape that used to read empty on this engine, whatever the client sent.
+fn bodyEchoHandler(req: *const Request, res: *Response, ctx: *Context) !void {
+    _ = ctx;
+    res.send(std.fmt.bufPrint(&body_reply_buf, "{d}:{s}", .{ req.bodyReceived(), req.body }) catch "0:");
+}
+
 fn erroringHandler(req: *const Request, res: *Response, ctx: *Context) !void {
     _ = req;
     _ = res;
@@ -231,6 +303,39 @@ test "zix http3: a handler negotiates content-encoding off the request accept-en
     var plain_res = Response{};
     try negotiateHandler(&.{ .method = "GET", .path = "/x" }, &plain_res, &ctx);
     try std.testing.expectEqual(ContentEncoding.identity, plain_res.content_encoding);
+}
+
+test "zix http3: a handler answers from the request body and the count that came with it" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const req = Request{ .method = "POST", .path = "/upload", .body = "20", .body_received = 2 };
+    var res = Response{};
+    _ = invokeHandler(bodyEchoHandler, &req, &res, 0, io, null, "");
+
+    // The body reached the handler, which is the whole point: an empty one here is the defect this
+    // pins, a 200 computed as if the client had sent nothing.
+    try std.testing.expectEqualSlices(u8, "2:20", res.body);
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+}
+
+test "zix http3: a Request with no body reports nothing received and nothing missing" {
+    const req = Request{ .method = "GET", .path = "/" };
+
+    try std.testing.expectEqual(@as(usize, 0), req.body.len);
+    try std.testing.expectEqual(@as(u64, 0), req.bodyReceived());
+    try std.testing.expect(req.bodyComplete());
+}
+
+test "zix http3: a Request delivered short reports more received than it hands over" {
+    // What the engine builds when the client split its body: the first DATA frame is delivered, the
+    // count covers every frame, and the pair is what tells a handler it is holding a fragment.
+    const req = Request{ .method = "POST", .path = "/upload", .body = "20", .body_received = 4, .body_complete = false };
+
+    try std.testing.expectEqual(@as(u64, 4), req.bodyReceived());
+    try std.testing.expect(req.bodyReceived() != req.body.len);
+    try std.testing.expect(!req.bodyComplete());
 }
 
 test "zix http3: invokeHandler auto-500s when the handler errors and sent nothing" {
