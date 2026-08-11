@@ -460,20 +460,31 @@ fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid:
 /// name it holds no certificate for still answers this client.
 const AUTHORITY: []const u8 = "localhost";
 
-/// Seal a 1-RTT request packet: an HTTP/3 HEADERS frame on `stream_id`, sealed under the client
-/// 1-RTT keys with `client_pn`. The returned slice points into `pkt_buf`, which the caller owns.
+/// The QPACK static-table indices for the methods this client sends (RFC 9204 Appendix A).
+const METHOD_GET: u64 = 17;
+const METHOD_POST: u64 = 20;
+
+/// Seal a 1-RTT request packet: an HTTP/3 HEADERS frame on `stream_id`, followed by a DATA frame when
+/// the request carries a body, sealed under the client 1-RTT keys with `client_pn`. The returned slice
+/// points into `pkt_buf`, which the caller owns.
 ///
 /// Note:
 /// - All four pseudo-headers RFC 9114 4.3.1 requires are sent. A server free to shape its own
 ///   handler surface can serve less, a gateway rebuilding an http1 request cannot: without
 ///   :scheme and :authority there is no absolute target and no Host to send upstream.
-fn buildRequest(app_keys: keyschedule.AppKeys, server_scid: []const u8, stream_id: u64, client_pn: u32, path: []const u8, pkt_buf: []u8) ![]const u8 {
+/// - The STREAM frame carries FIN, so the whole request (headers and body) is one frame and the
+///   server sees a client that has finished sending.
+///
+/// Param:
+/// method_index - u64 (QPACK static index of the :method, METHOD_GET or METHOD_POST)
+/// body - []const u8 (request body, empty for a request that carries none)
+fn buildRequest(app_keys: keyschedule.AppKeys, server_scid: []const u8, stream_id: u64, client_pn: u32, method_index: u64, path: []const u8, body: []const u8, pkt_buf: []u8) ![]const u8 {
     var fields: [256]u8 = undefined;
     var fields_len: usize = 0;
     fields[0] = 0x00; // Required Insert Count 0
     fields[1] = 0x00; // Base 0
     fields_len = 2;
-    fields_len += qpack.encodeStaticIndexedFieldLine(fields[fields_len..], 17); // :method GET
+    fields_len += qpack.encodeStaticIndexedFieldLine(fields[fields_len..], method_index); // :method
     fields_len += qpack.encodeStaticIndexedFieldLine(fields[fields_len..], 23); // :scheme https
     fields_len += qpack.encodePrefixedInt(fields[fields_len..], 4, 0x50, 0); // :authority literal, static name index 0
     fields_len += qpack.encodePrefixedInt(fields[fields_len..], 7, 0x00, AUTHORITY.len); // value length, non-Huffman
@@ -491,6 +502,18 @@ fn buildRequest(app_keys: keyschedule.AppKeys, server_scid: []const u8, stream_i
     content_len += varint.write(content[content_len..], fields_len);
     @memcpy(content[content_len..][0..fields_len], fields[0..fields_len]);
     content_len += fields_len;
+
+    if (body.len != 0) {
+        // DATA frame (RFC 9114 7.2.1), the frame the request body travels in. Refused rather than
+        // truncated when it would not fit, so a short body can never be read as the whole one.
+        if (content_len + 1 + 8 + body.len > content.len) return error.ZixRequestTooLarge;
+
+        content[content_len] = 0x00;
+        content_len += 1;
+        content_len += varint.write(content[content_len..], body.len);
+        @memcpy(content[content_len..][0..body.len], body);
+        content_len += body.len;
+    }
 
     var req_payload: [1024]u8 = undefined;
     var payload_pos: usize = 0;
@@ -542,6 +565,27 @@ fn recvBody(io: std.Io, sock: anytype, app_keys: keyschedule.AppKeys, stream_id:
 /// - the response body (slice into body_out)
 /// - an error if any handshake or framing step fails
 pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const u8, body_out: []u8) ![]const u8 {
+    return roundTrip(io, server_ip, server_port, METHOD_GET, path, "", body_out);
+}
+
+/// Do one HTTP/3 POST round trip, sending `body` as the request DATA frame and returning the decrypted
+/// response body. This is what proves a request body reaches the handler: everything else about the
+/// exchange is identical to fetch.
+///
+/// Param:
+/// path - []const u8 (the request :path)
+/// body - []const u8 (the request body, sent as one DATA frame after HEADERS)
+/// body_out - []u8 (scratch the returned response body slice points into)
+///
+/// Return:
+/// - the response body (slice into body_out)
+/// - an error if any handshake or framing step fails
+pub fn post(io: std.Io, server_ip: []const u8, server_port: u16, path: []const u8, body: []const u8, body_out: []u8) ![]const u8 {
+    return roundTrip(io, server_ip, server_port, METHOD_POST, path, body, body_out);
+}
+
+/// Handshake, send one request on client bidi stream 0, and read its response.
+fn roundTrip(io: std.Io, server_ip: []const u8, server_port: u16, method_index: u64, path: []const u8, body: []const u8, body_out: []u8) ![]const u8 {
     var rnd: [16 + 16 + 32 + 32]u8 = undefined;
     io.random(&rnd);
     const dcid = rnd[0..CID_LEN];
@@ -557,7 +601,7 @@ pub fn fetch(io: std.Io, server_ip: []const u8, server_port: u16, path: []const 
     const conn = try connect(io, sock, &server, dcid, scid, client_random, ephemeral);
 
     var req_pkt: [1200]u8 = undefined;
-    const request_packet = try buildRequest(conn.app_keys, conn.scid(), 0, 0, path, &req_pkt);
+    const request_packet = try buildRequest(conn.app_keys, conn.scid(), 0, 0, method_index, path, body, &req_pkt);
     try sock.send(io, &server, request_packet);
 
     return recvBody(io, sock, conn.app_keys, 0, body_out);
@@ -586,11 +630,11 @@ pub fn fetchTwo(io: std.Io, server_ip: []const u8, server_port: u16, path0: []co
     const conn = try connect(io, sock, &server, dcid, scid, client_random, ephemeral);
 
     var req0_pkt: [1200]u8 = undefined;
-    const req0 = try buildRequest(conn.app_keys, conn.scid(), 0, 0, path0, &req0_pkt);
+    const req0 = try buildRequest(conn.app_keys, conn.scid(), 0, 0, METHOD_GET, path0, "", &req0_pkt);
     try sock.send(io, &server, req0);
 
     var req1_pkt: [1200]u8 = undefined;
-    const req1 = try buildRequest(conn.app_keys, conn.scid(), 4, 1, path1, &req1_pkt);
+    const req1 = try buildRequest(conn.app_keys, conn.scid(), 4, 1, METHOD_GET, path1, "", &req1_pkt);
     try sock.send(io, &server, req1);
 
     const body0 = try recvBody(io, sock, conn.app_keys, 0, body0_out);
