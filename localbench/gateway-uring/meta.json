@@ -1,0 +1,15 @@
+{
+  "display_name": "zix-localbench-gateway-uring",
+  "language": "Zig",
+  "type": "gateway",
+  "engine": "zixer edge, zix.Http1 URING origin",
+  "description": "Two-tier stack: the zixer proxy gateway terminates TLS 1.3 and h2 on 8443, answers /static from its own public_dir, and re-originates http1 to a zix.Http1 origin on a private port. The origin runs .URING dispatch and serves baseline2, json, and async-db. zixer's own dispatch key is reserved (parsed and reported, never read by the serving path), so the edge loops are identical across the three gateway entries and only the origin's dispatch model differs. No response cache and no startup pre-serialization: json serializes every field per request.",
+  "repo": "https://codeberg.org/prothegee/zix",
+  "enabled": true,
+  "tests": [
+    "gateway-64"
+  ],
+  "maintainers": [
+    "prothegee"
+  ]
+}

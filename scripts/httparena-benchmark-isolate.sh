@@ -196,111 +196,15 @@ if [ "$SOURCE" = "local" ]; then
     ZIX_DIR="$(cd "$ZIX_DIR" && pwd)"
 fi
 
-# SMT-aware half-split: keeps SMT pairs together on server or loadgen side, and
-# counts the loadgen hardware threads for the derived THREADS value.
-# SERVER_PAIRS keeps the server half as one entry per physical core (the
-# core's full sibling set), so layouts that carve N physical cores out of the
-# half (redis pair, api-4, api-16) can be derived on any topology.
-LOADGEN_THREAD_COUNT=0
-SERVER_PAIRS=()
-derive_split() {
-    local -A core_to_siblings
-    local order=()
-
-    for d in /sys/devices/system/cpu/cpu[0-9]*; do
-        local siblings
-        siblings=$(<"$d/topology/thread_siblings_list")
-        local key=${siblings%%,*}
-
-        if [ -z "${core_to_siblings[$key]+set}" ]; then
-            order+=("$key")
-        fi
-        core_to_siblings[$key]="$siblings"
-    done
-
-    local total=${#order[@]}
-    local half=$((total / 2))
-
-    local server=() loadgen=() index=0
-    for key in $(printf '%s\n' "${order[@]}" | sort -n); do
-        if [ "$index" -lt "$half" ]; then
-            server+=("${core_to_siblings[$key]}")
-        else
-            loadgen+=("${core_to_siblings[$key]}")
-        fi
-        index=$((index + 1))
-    done
-
-    SERVER_PAIRS=("${server[@]}")
-    SERVER_CPUS=$(IFS=,; echo "${server[*]}")
-    LOADGEN_CPUS=$(IFS=,; echo "${loadgen[*]}")
-
-    # One load-gen thread per loadgen hardware thread (the arena runs 64 threads
-    # on a 64-HT half). Expand ranges to count entries.
-    local expanded
-    expanded=$(echo "$LOADGEN_CPUS" | tr ',' '\n' | awk -F- '{ if (NF == 2) n += $2 - $1 + 1; else n += 1 } END { print n + 0 }')
-    LOADGEN_THREAD_COUNT="$expanded"
-}
-
-# Saved pre-run state (empty = unreadable, skip restore). Only what quiesce
-# touches is saved: governor, sysctls, lo MTU, and (under --freq) min/max freq.
-SAVED_GOVERNOR=""
-SAVED_MIN_FREQ=""
-SAVED_MAX_FREQ=""
-SAVED_LO_MTU=""
-declare -A SAVED_SYSCTL=()
-SYSCTL_KEYS="net.core.somaxconn net.ipv4.tcp_max_syn_backlog net.core.netdev_max_backlog net.ipv4.ip_local_port_range net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_tw_reuse net.core.rmem_max net.core.wmem_max"
-RESTORED=0
-
-save_state() {
-    [ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ] &&
-        SAVED_GOVERNOR="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)"
-
-    [ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq ] &&
-        SAVED_MIN_FREQ="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq)"
-    [ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ] &&
-        SAVED_MAX_FREQ="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq)"
-
-    [ -r /sys/class/net/lo/mtu ] && SAVED_LO_MTU="$(cat /sys/class/net/lo/mtu)"
-
-    local key
-    for key in $SYSCTL_KEYS; do
-        SAVED_SYSCTL["$key"]="$(sysctl -n "$key" 2>/dev/null || true)"
-    done
-}
-
-# Idempotent, best-effort restore (tolerates failures to ensure all knobs run).
-restore_state() {
-    [ "$RESTORED" -eq 1 ] && return 0
-    RESTORED=1
-
-    [ "${IS_ROOT:-0}" -ne 1 ] && return 0
-
-    echo "[isol] restoring host state" >&2
-
-    if [ -n "$SAVED_GOVERNOR" ]; then
-        cpupower frequency-set -g "$SAVED_GOVERNOR" >/dev/null 2>&1 || true
-    fi
-
-    if [ -n "$FREQ_HZ" ] && [ -n "$SAVED_MIN_FREQ" ] && [ -n "$SAVED_MAX_FREQ" ]; then
-        cpupower frequency-set -d "${SAVED_MIN_FREQ}" -u "${SAVED_MAX_FREQ}" >/dev/null 2>&1 || true
-    fi
-
-    if [ -n "$SAVED_LO_MTU" ]; then
-        ip link set lo mtu "$SAVED_LO_MTU" 2>/dev/null || true
-    fi
-
-    local key
-    for key in $SYSCTL_KEYS; do
-        if [ -n "${SAVED_SYSCTL[$key]:-}" ]; then
-            sysctl -w "$key=${SAVED_SYSCTL[$key]}" >/dev/null 2>&1 || true
-        fi
-    done
-}
+# The CPU split, the host tuning, and the noise-floor gate are shared with
+# scripts/localbench-run.sh, so both runners prepare this box the same way and
+# hold it to the same quiet standard. LOG_TAG keeps the progress lines reading
+# as this script's own.
+LOG_TAG="isol"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bench-host.sh"
 
 PINNER_PID=""
 SAMPLER_PID=""
-PROBE_RESULT=""
 MEM_LOG=""
 SMAPS_FILE=""
 TIMEOUT_SHIM_DIR=""
@@ -323,138 +227,6 @@ cleanup() {
 
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-
-# Exact system_tune equivalent (same knobs, same values, nothing extra), saved
-# first and restored on exit. --freq adds an explicit fixed-frequency pin on
-# top (a deviation from the arena, off by default). Rootless mode skips all of it.
-quiesce() {
-    if [ "${IS_ROOT:-0}" -ne 1 ]; then
-        echo "[isol] not root, skipping host quiesce (governor/sysctl/mtu/etc.), pinning still applied" >&2
-        return 0
-    fi
-
-    echo "[isol] quiescing host (system_tune equivalent)" >&2
-
-    cpupower frequency-set -g performance >/dev/null 2>&1 || true
-
-    # Optional fixed-frequency pin, only when the user asked for it.
-    if [ -n "$FREQ_HZ" ]; then
-        cpupower frequency-set -d "$FREQ_HZ" -u "$FREQ_HZ" >/dev/null 2>&1 || true
-    fi
-
-    # system_tune's socket limits, port churn headroom, QUIC UDP buffers, and
-    # realistic Ethernet MTU on loopback, verbatim values.
-    sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_max_syn_backlog=65535 >/dev/null 2>&1 || true
-    sysctl -w net.core.netdev_max_backlog=65535 >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.ip_local_port_range='1024 65535' >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_max_tw_buckets=131072 >/dev/null 2>&1 || true
-    sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
-    sysctl -w net.core.rmem_max=7500000 >/dev/null 2>&1 || true
-    sysctl -w net.core.wmem_max=7500000 >/dev/null 2>&1 || true
-    ip link set lo mtu 1500 2>/dev/null || true
-
-    # system_tune restarts the docker daemon for clean networking state, then
-    # waits for it to come back. A podman shim has no daemon: the restart
-    # no-ops and the wait passes on the first docker info.
-    if systemctl restart docker 2>/dev/null; then
-        local i
-        for i in $(seq 1 15); do
-            if docker info >/dev/null 2>&1; then
-                sleep 2
-                break
-            fi
-            sleep 1
-        done
-    fi
-
-    sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
-    sync
-}
-
-# Noise-floor gate: times a pinned compute kernel. Aborts if relative stddev > 1%.
-probe_gate() {
-    local probe_core=${SERVER_CPUS%%,*}
-    probe_core=${probe_core%%-*}
-
-    if ! command -v cc >/dev/null 2>&1; then
-        echo "[isol] cc not found, skipping --probe noise-floor gate" >&2
-        PROBE_RESULT="skipped (no cc)"
-        return 0
-    fi
-
-    local probe_tmp src bin
-    probe_tmp="$(mktemp -d)"
-    src="$probe_tmp/spin.c"
-    bin="$probe_tmp/spin"
-
-    cat > "$src" <<'EOF'
-#include <stdint.h>
-int main(void) {
-    volatile uint64_t acc = 0;
-    for (uint64_t i = 0; i < 3000000000ULL; i++) acc += i * 2654435761ULL;
-    return (int)acc;
-}
-EOF
-    if ! cc -O2 -o "$bin" "$src" 2>/dev/null; then
-        echo "[isol] probe build failed, skipping --probe noise-floor gate" >&2
-        PROBE_RESULT="skipped (build failed)"
-        rm -rf "$probe_tmp"
-        return 0
-    fi
-
-    local runner=("$bin")
-    command -v taskset >/dev/null 2>&1 && runner=(taskset -c "$probe_core" "$bin")
-
-    local samples=() i start end
-    for i in $(seq 20); do
-        start=$(date +%s.%N)
-        "${runner[@]}" >/dev/null 2>&1 || true
-        end=$(date +%s.%N)
-
-        samples+=("$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.6f", b - a }')")
-    done
-
-    rm -rf "$probe_tmp"
-
-    local rel
-    rel=$(printf '%s\n' "${samples[@]}" | awk '
-        { sum += $1; sumsq += $1 * $1; n++ }
-        END {
-            if (n == 0) { print "ERR_NODATA"; exit }
-            mean = sum / n
-            if (mean <= 0) { print "ERR_ZEROMEAN"; exit }
-
-            sd = sqrt(sumsq / n - mean * mean)
-            printf "%.2f", 100 * sd / mean
-        }')
-
-    case "$rel" in
-        ERR_*)
-            echo "[isol] probe produced no usable timing ($rel), skipping gate" >&2
-            PROBE_RESULT="skipped (no usable timing)"
-            return 0 ;;
-    esac
-
-    echo "[isol] noise-floor relative stddev: ${rel}%" >&2
-
-    if awk -v r="$rel" 'BEGIN { exit !(r > 1.0) }'; then
-        PROBE_RESULT="${rel}% (ABORT, box not quiet >1%)"
-        echo "[isol] box is not quiet (>1%), aborting before bench" >&2
-
-        {
-            echo "$START_BANNER"
-            echo
-            echo "# zix isolate full bench (ABORTED at probe)"
-            echo "# probe_rel:   $PROBE_RESULT"
-        } > "$RESULT_TXT" 2>/dev/null || true
-        echo "[isol] aborted-probe record -> $RESULT_TXT" >&2
-
-        exit 1
-    fi
-
-    PROBE_RESULT="${rel}% (PASS, <=1%)"
-}
 
 # Safety net behind the patched profile cpusets: watch for container creation
 # and apply the server cpuset (idempotent when the profile already carries it).
@@ -555,8 +327,20 @@ if [ "$DO_QUIESCE" -eq 1 ]; then
     quiesce
 fi
 
-if [ "$DO_PROBE" -eq 1 ]; then
-    probe_gate
+# A box that cannot repeat fixed arithmetic within 1% cannot repeat a benchmark
+# either, so a failed gate records why and stops before anything is measured.
+if [ "$DO_PROBE" -eq 1 ] && ! probe_gate; then
+    echo "[isol] box is not quiet (>1%), aborting before bench" >&2
+
+    {
+        echo "$START_BANNER"
+        echo
+        echo "# zix isolate full bench (ABORTED at probe)"
+        echo "# probe_rel:   $PROBE_RESULT"
+    } > "$RESULT_TXT" 2>/dev/null || true
+    echo "[isol] aborted-probe record -> $RESULT_TXT" >&2
+
+    exit 1
 fi
 
 if [ "$DO_QUIESCE" -eq 1 ]; then
@@ -822,33 +606,47 @@ PATH="$BENCH_PATH" "$BENCH_PATCHED" "${RUN_ARGS[@]}" 2>&1 | tee -a "$RESULT_TXT"
 echo "[isol] settling ${SETTLE}s before restore" >&2
 sleep "$SETTLE"
 
-# Summarize memory samples (peak + steady-state median) into the main log.
+# Summarize memory samples (peak + steady state) into the main log.
+#
+# The rows are sorted by total and the middle ROW is picked, so every field
+# printed comes from the same snapshot. Sorting each field on its own would pair
+# a total from one moment with an anon from another, which is how a summary ends
+# up claiming more anonymous memory than the cgroup was using. An even sample
+# count has no single middle, so the lower of the two is used: averaging the
+# pair would put a number in the output that was never measured.
 if [ "$DO_SAMPLE_MEM" -eq 1 ] && [ -n "$MEM_LOG" ] && [ -s "$MEM_LOG" ]; then
     {
         echo
         echo "# memory (from $(basename "$MEM_LOG")):"
 
-        awk -F'current=' 'NF > 1 { print $2 + 0 }' "$MEM_LOG" | sort -n | awk '
-            { a[n++] = $1 }
-            END {
-                if (n == 0) { print "#   no samples"; exit }
-                peak = a[n - 1]
-                median = (n % 2) ? a[int(n / 2)] : (a[n / 2 - 1] + a[n / 2]) / 2
-                printf "#   total: peak=%.1fMiB  steady_median=%.1fMiB  samples=%d\n", peak / 1048576, median / 1048576, n
-            }'
+        awk '
+            /current=/ {
+                total = anon = sock = slab = 0
+                for (field = 1; field <= NF; field++) {
+                    split($field, pair, "=")
+                    if      (pair[1] == "current") total = pair[2] + 0
+                    else if (pair[1] == "anon")    anon  = pair[2] + 0
+                    else if (pair[1] == "sock")    sock  = pair[2] + 0
+                    else if (pair[1] == "slab")    slab  = pair[2] + 0
+                }
 
-        for field in anon sock slab; do
-            grep -ho "$field=[0-9]*" "$MEM_LOG" 2>/dev/null | cut -d= -f2 | sort -n | awk -v f="$field" '
-                { a[n++] = $1 }
-                END {
-                    if (n == 0) exit
-                    median = (n % 2) ? a[int(n / 2)] : (a[n / 2 - 1] + a[n / 2]) / 2
-                    printf "#   %-5s median=%.1fMiB\n", f, median / 1048576
-                }' || true
-        done
+                printf "%d %d %d %d\n", total, anon, sock, slab
+            }' "$MEM_LOG" | sort -n -k1,1 | awk '
+            { row[count++] = $0 }
+            END {
+                if (count == 0) { print "#   no samples"; exit }
+
+                split(row[count - 1], peak)
+                split(row[int((count - 1) / 2)], mid)
+
+                printf "#   total: peak=%.1fMiB  steady=%.1fMiB  samples=%d\n", peak[1] / 1048576, mid[1] / 1048576, count
+                printf "#   anon  at_steady=%.1fMiB\n", mid[2] / 1048576
+                printf "#   sock  at_steady=%.1fMiB\n", mid[3] / 1048576
+                printf "#   slab  at_steady=%.1fMiB\n", mid[4] / 1048576
+            }' || true
 
         if [ -n "$SMAPS_FILE" ] && [ -s "$SMAPS_FILE" ]; then
-            echo "#   --- top regions at peak (from $(basename "$SMAPS_FILE")) ---"
+            echo "#   top regions at peak (from $(basename "$SMAPS_FILE")):"
             awk '
                 /^[0-9a-f]+-[0-9a-f]+ / {
                     label = $6 == "" ? "[anon]" : $6

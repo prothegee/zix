@@ -1,0 +1,14 @@
+.{
+    .name = .zix_localbench_http1_ws_async,
+    .version = "0.1.0",
+    .fingerprint = 0x033a7f4a5a1b4444,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{
+        .zix = .{ .path = "../.." },
+    },
+}

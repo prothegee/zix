@@ -1,0 +1,14 @@
+.{
+    .name = .zix_localbench_http1_uring,
+    .version = "0.1.0",
+    .fingerprint = 0x1d98d8705a1b3333,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{
+        .zix = .{ .path = "../.." },
+    },
+}
