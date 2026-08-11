@@ -9,6 +9,7 @@ const std = @import("std");
 
 const Logger = @import("../../logger/logger.zig").Logger;
 const Tls = @import("../../tls/Tls.zig");
+const reassembly = @import("reassembly.zig");
 
 /// The dispatch model, shared with the TCP engines and the UDP raw path (ADR-050). `.ASYNC` runs a
 /// single-worker recv with internal CID demux. `.EPOLL` / `.URING` run one SO_REUSEPORT worker per
@@ -88,6 +89,20 @@ pub const Http3ServerConfig = struct {
     /// default 10). Default 32 (~38 KiB at 1200) cuts ACK-clocked rounds. Raise to cover a whole
     /// response on a trusted path, keep modest on a lossy one. Burst = min(this, max_inflight, ring cap).
     initial_window_packets: usize = 32,
+    /// Request streams one worker assembles at once. A client commonly sends a request with a body as
+    /// two packets (HEADERS, then DATA), so the engine holds such a request until the client ends its
+    /// stream. Only those requests take a slot: a request that arrived whole in one packet, which is
+    /// every conforming GET, never touches the pool. When every slot is busy with a request still
+    /// arriving, a new one is answered 503 rather than run against a body the engine knows is
+    /// incomplete. 0 holds nothing and costs no memory, for a server whose routes take no body.
+    /// Cost: workers * this * max_request_stream_bytes * 9 / 8.
+    max_pending_request_streams: usize = reassembly.default_pending_streams,
+    /// Bytes one assembled request stream may hold: the HTTP/3 HEADERS frame plus the request body.
+    /// This is the largest request body a handler can be given whole over this engine, so raise it to
+    /// the largest upload the routes accept. A body past it is delivered cut to what fits, with
+    /// `bodyReceived()` counting what really arrived and `bodyComplete()` false, never as a whole one.
+    /// Raised to 1024 when set smaller, so a slot always has room for a HEADERS frame.
+    max_request_stream_bytes: usize = reassembly.default_stream_bytes,
     /// TLS 1.3 context: cert / key / ALPN. QUIC requires TLS 1.3. Caller owns, must outlive the
     /// server. Null is rejected at run (QUIC has no cleartext mode).
     tls: ?*Tls.Context = null,
@@ -143,5 +158,28 @@ test "zix http3: Http3ServerConfig default field values" {
     try std.testing.expectEqual(@as(usize, 0), cfg.max_stream_chunk);
     try std.testing.expectEqual(@as(usize, 128), cfg.max_inflight_packets);
     try std.testing.expectEqual(@as(usize, 32), cfg.initial_window_packets);
+    try std.testing.expectEqual(@as(usize, 16), cfg.max_pending_request_streams);
+    try std.testing.expectEqual(@as(usize, 8192), cfg.max_request_stream_bytes);
     try std.testing.expect(cfg.tls == null);
+}
+
+test "zix http3: Http3ServerConfig carries a raised request-stream ceiling to the pool" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+
+    const cfg = Http3ServerConfig{
+        .io = threaded.io(),
+        .allocator = std.testing.allocator,
+        .ip = "127.0.0.1",
+        .port = 9063,
+        .dispatch_model = .ASYNC,
+        .max_pending_request_streams = 2,
+        .max_request_stream_bytes = 64 * 1024,
+    };
+
+    var pool = try reassembly.Pool.init(cfg.allocator, cfg.max_pending_request_streams, cfg.max_request_stream_bytes);
+    defer pool.deinit(cfg.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), pool.slots.len);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), pool.slots[0].buf.len);
 }

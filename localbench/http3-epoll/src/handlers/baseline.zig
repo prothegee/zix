@@ -1,14 +1,12 @@
-//! GET /baseline2?a=..&b=.. : sum the query values. Answers the sum as
-//! text/plain.
+//! GET/POST /baseline2?a=..&b=.. : sum the query values, plus the POST body
+//! read as an integer. Answers the sum as text/plain.
 //!
 //! Note:
 //! - This engine's Request carries the query inside path, so the split happens
 //!   here rather than being handed over already done.
-//! - Query only, unlike the h1 and h2 baseline handlers which also add a POST
-//!   body. The HTTP/3 dispatch path builds its Request from the method, path,
-//!   and accept-encoding, and never fills body, so a request body cannot reach
-//!   a handler on this engine yet. The baseline-h3 profile drives GET, so the
-//!   profile is covered either way.
+//! - A body the engine only received part of is refused with 413 rather than
+//!   summed. Over QUIC a request can span packets, and a fragment parsed as a
+//!   whole body answers a wrong number with a 200 on it.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -39,12 +37,41 @@ fn sumQuery(query: []const u8) i64 {
     return sum;
 }
 
+/// Read a leading integer out of `text`, skipping surrounding whitespace and
+/// stopping at the first non-digit. A body with no digits reads as 0.
+fn parseIntLoose(text: []const u8) i64 {
+    var index: usize = 0;
+    while (index < text.len and (text[index] == ' ' or text[index] == '\t' or text[index] == '\r' or text[index] == '\n')) index += 1;
+
+    var negative = false;
+    if (index < text.len and text[index] == '-') {
+        negative = true;
+        index += 1;
+    }
+
+    var value: i64 = 0;
+    while (index < text.len and text[index] >= '0' and text[index] <= '9') : (index += 1) {
+        value = value * 10 + (text[index] - '0');
+    }
+
+    return if (negative) -value else value;
+}
+
 // --------------------------------------------------------- //
 
 pub fn RESPONSE(req: *const zix.Http3.Request, res: *zix.Http3.Response, _: *zix.Http3.Context) !void {
+    if (!req.bodyComplete()) {
+        res.setStatus(413);
+        res.content_type = "text/plain";
+        res.send("request body incomplete");
+
+        return;
+    }
+
     const query = if (std.mem.indexOfScalar(u8, req.path, '?')) |mark| req.path[mark + 1 ..] else "";
 
-    const sum = sumQuery(query);
+    var sum = sumQuery(query);
+    if (req.body.len > 0) sum += parseIntLoose(req.body);
 
     // The engine copies the body out after this returns, so per-worker storage
     // outlives the call by enough.

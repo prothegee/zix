@@ -648,9 +648,46 @@ check_baseline_h3() {
     expect "GET /baseline2 sum over h3" "55" \
         "$(curl -sk --max-time 10 --http3-only "https://localhost:$H3_PORT/baseline2?a=13&b=42")"
 
-    # No POST-body assertion here, unlike the h1 and h2 baselines. The HTTP/3
-    # dispatch path builds its Request from method, path, and accept-encoding
-    # only, so a request body never reaches a handler. baseline-h3 drives GET.
+    # The same POST assertion the h1 and h2 baselines carry, and the reason this
+    # block exists: curl writes the headers and the body as two packets on one
+    # stream, so a 55 here means the engine answered the first packet and the
+    # body landed after the response.
+    expect "POST /baseline2 sum with body over h3" "75" \
+        "$(curl -sk --max-time 10 --http3-only -X POST -d '20' "https://localhost:$H3_PORT/baseline2?a=13&b=42")"
+
+    # A body several packets long, still inside max_request_stream_bytes. The
+    # handler refuses anything it only received part of, so a sum here is proof
+    # the whole upload was reassembled and not just its first datagram.
+    local spanning_body
+    spanning_body="20$(head -c 4000 /dev/zero | tr '\0' 'x')"
+    expect "POST /baseline2 body spanning packets over h3" "75" \
+        "$(curl -sk --max-time 10 --http3-only -X POST --data-binary "$spanning_body" "https://localhost:$H3_PORT/baseline2?a=13&b=42")"
+
+    # Past max_request_stream_bytes: delivered cut, so the handler refuses it
+    # rather than summing a fragment. A 200 here would be the silent wrong
+    # answer this whole path exists to prevent.
+    local oversize_body
+    oversize_body="20$(head -c 32000 /dev/zero | tr '\0' 'x')"
+    expect "POST /baseline2 body past the pool size over h3" "413" \
+        "$(curl -sk --max-time 10 --http3-only -X POST --data-binary "$oversize_body" -o /dev/null -w '%{http_code}' "https://localhost:$H3_PORT/baseline2?a=13&b=42")"
+
+    # Past the per-stream credit the handshake grants (256 KiB). The answer
+    # matters less than getting one: without a rolling MAX_STREAM_DATA the
+    # client blocks waiting for credit, the engine waits for the rest of the
+    # request, and this check times out with no response at all. The body goes
+    # through a file: an argument this long never reaches curl.
+    local past_credit_file
+    past_credit_file="$(mktemp)"
+    { printf '20'; head -c 400000 /dev/zero | tr '\0' 'x'; } > "$past_credit_file"
+    expect "POST /baseline2 body past the stream credit over h3" "413" \
+        "$(curl -sk --max-time 30 --http3-only -X POST --data-binary "@$past_credit_file" -o /dev/null -w '%{http_code}' "https://localhost:$H3_PORT/baseline2?a=13&b=42")"
+    rm -f "$past_credit_file"
+
+    # Empty POST: no body to add and nothing missing either, so it answers the
+    # query sum rather than the 413 an incomplete body gets.
+    expect "POST /baseline2 empty body over h3" "55" \
+        "$(curl -sk --max-time 10 --http3-only -X POST -d '' "https://localhost:$H3_PORT/baseline2?a=13&b=42")"
+
     local a b
     a=$((RANDOM % 900 + 100))
     b=$((RANDOM % 900 + 100))

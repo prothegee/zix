@@ -53,19 +53,37 @@ pub fn writeStreamFrame(out: []u8, pos: *usize, stream_id: u64, fin: bool, data:
     return true;
 }
 
-/// The QPACK indexed field line for a `:status` value from the static table (RFC 9204 Appendix A
-/// entries 24..28). Falls back to 200 for an unlisted status.
-fn statusIndexedFieldLine(out: []u8, status: u16) usize {
+/// The static entry whose name is `:status`, borrowed when a status has no entry of its own.
+const status_name_index: u64 = 24;
+
+/// The QPACK field line for a `:status` value: one indexed byte for a status the static table carries
+/// (RFC 9204 Appendix A entries 24..28), otherwise a literal field line spelling the status out.
+///
+/// Note:
+/// - The literal form is what keeps every other status honest. An unlisted status used to fall back
+///   to the index for 200, so a 413 or a 500 reached the client as a success.
+fn statusFieldLine(out: []u8, status: u16) usize {
     const index: u64 = switch (status) {
         103 => 24,
         200 => 25,
         304 => 26,
         404 => 27,
         503 => 28,
-        else => 25,
+        else => {
+            var digits: [3]u8 = undefined;
+            const text = std.fmt.bufPrint(&digits, "{d}", .{clampStatus(status)}) catch unreachable;
+
+            return qpack.encodeStaticLiteralNameRef(out, status_name_index, text);
+        },
     };
 
     return qpack.encodeStaticIndexedFieldLine(out, index);
+}
+
+/// Keep a status inside the three digits HTTP defines (RFC 9110 15), so the literal form above always
+/// fits the buffer it writes into. A handler that sets something outside the range sends 500.
+fn clampStatus(status: u16) u16 {
+    return if (status >= 100 and status <= 599) status else 500;
 }
 
 /// Build the response content for the request stream: a HEADERS frame carrying `:status`, then a DATA
@@ -84,7 +102,7 @@ pub fn buildRequestStreamContent(out: []u8, status: u16, content_encoding: Conte
     fp += 1;
     fields[fp] = 0x00; // Base 0
     fp += 1;
-    fp += statusIndexedFieldLine(fields[fp..], status);
+    fp += statusFieldLine(fields[fp..], status);
     fp += contentEncodingFieldLine(fields[fp..], content_encoding);
 
     const headers_len = 1 + varint.encodedLen(fp) + fp;
@@ -122,7 +140,7 @@ pub fn buildStreamPrefix(out: []u8, status: u16, content_encoding: ContentEncodi
     fp += 1;
     fields[fp] = 0x00; // Base 0
     fp += 1;
-    fp += statusIndexedFieldLine(fields[fp..], status);
+    fp += statusFieldLine(fields[fp..], status);
     fp += contentEncodingFieldLine(fields[fp..], content_encoding);
 
     const headers_len = 1 + varint.encodedLen(fp) + fp;
@@ -233,6 +251,31 @@ pub fn buildMaxData(out: []u8, max_data: u64) usize {
     out[0] = 0x10; // MAX_DATA
     var pos: usize = 1;
     pos += varint.write(out[pos..], max_data);
+
+    return pos;
+}
+
+/// Build a MAX_STREAM_DATA frame (RFC 9000 19.10, type 0x11): raise the cumulative byte budget the
+/// peer may send on one stream. The handshake advertises a one-time initial_max_stream_data, so a
+/// client uploading more than that on a single request stream blocks for good without this: it waits
+/// for credit while the server waits for the rest of the request, and neither moves. Returns 0 when
+/// the frame does not fit in `out` (nothing is written).
+///
+/// Param:
+/// out - []u8 (destination)
+/// stream_id - u64 (the stream being extended)
+/// max_stream_data - u64 (the new cumulative limit, an absolute offset, not an increment)
+///
+/// Return:
+/// - usize (bytes written, 0 when it does not fit)
+pub fn buildMaxStreamData(out: []u8, stream_id: u64, max_stream_data: u64) usize {
+    const frame_len = 1 + varint.encodedLen(stream_id) + varint.encodedLen(max_stream_data);
+    if (frame_len > out.len) return 0;
+
+    out[0] = 0x11; // MAX_STREAM_DATA
+    var pos: usize = 1;
+    pos += varint.write(out[pos..], stream_id);
+    pos += varint.write(out[pos..], max_stream_data);
 
     return pos;
 }
@@ -485,6 +528,69 @@ test "zix http3: content-encoding rides the HEADERS frame as one indexed field l
     const id_len = buildStreamPrefix(&out, 200, .identity, 200000).?;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x03, 0x00, 0x00, 0xd9 }, out[0..5]);
     try std.testing.expect(id_len < br_len); // identity prefix is one byte shorter
+}
+
+/// The field section out of a built request-stream response: the bytes after the HEADERS frame type
+/// and its length.
+fn fieldSection(content: []const u8) []const u8 {
+    return content[2 .. 2 + content[1]];
+}
+
+test "zix http3: a status with no static entry goes out as itself, never as 200" {
+    // The failure this pins: an unlisted status used to fall back to the indexed field line for 200,
+    // so a client read a 413 or a 500 as a success and parsed the error text as the answer.
+    var content: [64]u8 = undefined;
+    const len = buildRequestStreamContent(&content, 413, .identity, "").?;
+    const fields = fieldSection(content[0..len]);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00 }, fields[0..2]);
+
+    const literal = try qpack.decodeLiteralNameRef(fields[2..]);
+    try std.testing.expect(literal.static);
+    try std.testing.expect(!literal.huffman);
+    try std.testing.expectEqualStrings(":status", qpack.staticEntry(literal.name_index).?.name);
+    try std.testing.expectEqualStrings("413", literal.value);
+}
+
+test "zix http3: the statuses the static table carries stay one indexed byte" {
+    // The literal form above must not cost the common answers anything: 200 and 404 are still a
+    // single byte each, which is what keeps the response prefix lean.
+    var content: [64]u8 = undefined;
+
+    const ok_len = buildRequestStreamContent(&content, 200, .identity, "").?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0xd9 }, fieldSection(content[0..ok_len]));
+
+    const missing_len = buildRequestStreamContent(&content, 404, .identity, "").?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0xdb }, fieldSection(content[0..missing_len]));
+}
+
+test "zix http3: a status outside the HTTP range is sent as 500 rather than as three wrong digits" {
+    var content: [64]u8 = undefined;
+    const len = buildRequestStreamContent(&content, 9999, .identity, "").?;
+
+    const literal = try qpack.decodeLiteralNameRef(fieldSection(content[0..len])[2..]);
+    try std.testing.expectEqualStrings("500", literal.value);
+}
+
+test "zix http3: buildStreamPrefix spells an unlisted status out the same way" {
+    // The multi-packet path builds its own field section, so it needs the same fix: a large body
+    // answered 413 must not reach the client as a 200 with the body attached.
+    var out: [64]u8 = undefined;
+    const len = buildStreamPrefix(&out, 413, .identity, 200000).?;
+
+    const literal = try qpack.decodeLiteralNameRef(fieldSection(out[0..len])[2..]);
+    try std.testing.expectEqualStrings("413", literal.value);
+}
+
+test "zix http3: buildMaxStreamData raises one stream's budget, and refuses to overflow" {
+    var out: [16]u8 = undefined;
+
+    // Type 0x11, stream 0, limit 300000 (a 4-byte varint: 0x80 0x04 0x93 0xe0).
+    const len = buildMaxStreamData(&out, 0, 300000);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x00, 0x80, 0x04, 0x93, 0xe0 }, out[0..len]);
+
+    var tiny: [3]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), buildMaxStreamData(&tiny, 0, 300000));
 }
 
 test "zix http3: writeStreamFrame refuses a frame that would overflow the buffer" {

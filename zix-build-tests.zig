@@ -172,6 +172,7 @@ pub fn addSteps(
         "tests/behaviour/http2/config_test.zig",
         // http3
         "tests/behaviour/http3/config_test.zig",
+        "tests/behaviour/http3/body_test.zig",
         // webrtc
         "tests/behaviour/webrtc/session_test.zig",
         // websocket
@@ -233,6 +234,7 @@ pub fn addSteps(
         "tests/edge/http2/static_test.zig",
         // http3
         "tests/edge/http3/static_test.zig",
+        "tests/edge/http3/body_test.zig",
         // webrtc
         "tests/edge/webrtc/session_test.zig",
         // websocket
