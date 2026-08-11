@@ -30,6 +30,7 @@ const serverhello = @import("../serverhello.zig");
 const flight = @import("../flight.zig");
 const response = @import("../response.zig");
 const request = @import("../request.zig");
+const reassembly = @import("../reassembly.zig");
 const huffman = @import("../huffman.zig");
 const transport_params = @import("../transport_params.zig");
 const keyschedule = @import("../keyschedule.zig");
@@ -412,6 +413,20 @@ pub fn setBusyPoll(fd: std.posix.socket_t, us: u32) void {
     ) catch {};
 }
 
+/// Open one worker's request-stream reassembly pool from the server config. Every worker loop calls
+/// this once and owns the result for its life, beside its connection table: a request with a body can
+/// span datagrams, so the bytes have to outlive the datagram that carried the first of them.
+///
+/// Param:
+/// config - Http3ServerConfig (max_pending_request_streams and max_request_stream_bytes size it)
+///
+/// Return:
+/// - reassembly.Pool (the caller deinits it with config.allocator)
+/// - error.OutOfMemory
+pub fn openReassemblyPool(config: Http3ServerConfig) !reassembly.Pool {
+    return reassembly.Pool.init(config.allocator, config.max_pending_request_streams, config.max_request_stream_bytes);
+}
+
 /// The single-worker HTTP/3 recv loop (.ASYNC): bind one UDP socket, own a CID table, and
 /// run the blocking recvmmsg / demux / respond loop on the calling thread. `reuse` sets SO_REUSEPORT so
 /// several per-core workers can bind the same port, and a per-core worker pins to its CPU.
@@ -438,6 +453,9 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
     defer config.allocator.destroy(table);
     table.* = .{};
 
+    var pool = openReassemblyPool(config) catch return;
+    defer pool.deinit(config.allocator);
+
     var rx = datagram.RecvBatch.init(config.allocator, config.recv_batch, config.max_recv_buf) catch return;
     defer rx.deinit();
 
@@ -453,7 +471,7 @@ pub fn workerLoop(comptime handler: core.HandlerFn, config: Http3ServerConfig, r
 
         for (0..count) |i| {
             const dg = rx.get(i);
-            serveDatagram(handler, table, dg, &tx, fd, config, null);
+            serveDatagram(handler, table, &pool, dg, &tx, fd, config, null);
         }
 
         // Flush once per recv batch: the SendBatch coalesces every reply in the batch into one flush.
@@ -508,6 +526,9 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: Http3ServerConfig) 
     defer config.allocator.destroy(table);
     table.* = .{};
 
+    var pool = try openReassemblyPool(config);
+    defer pool.deinit(config.allocator);
+
     const buf = try config.allocator.alloc(u8, config.max_recv_buf);
     defer config.allocator.free(buf);
 
@@ -526,7 +547,7 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: Http3ServerConfig) 
         const msg = socket.receive(io, buf) catch continue;
 
         const dg = datagram.Datagram{ .data = msg.data, .from = datagram.ipToSockaddr6(msg.from) };
-        serveDatagram(handler, table, dg, &tx, NO_SOCKET, config, null);
+        serveDatagram(handler, table, &pool, dg, &tx, NO_SOCKET, config, null);
 
         tx.flushPortable(socket, io);
 
@@ -542,8 +563,9 @@ pub fn runFallback(comptime handler: core.HandlerFn, config: Http3ServerConfig) 
 /// Process one received datagram: demux + decrypt, then drive the matching handshake or response step.
 /// Shared by the recvmmsg worker loop (workerLoop) and the EPOLL worker loop (workerLoopEpoll). When
 /// `stats` is non-null its request counter is bumped on a decrypted 1-RTT request (the epoll loop passes
-/// it, the recvmmsg loop passes null).
-pub fn serveDatagram(comptime handler: core.HandlerFn, table: *ConnTable, dg: datagram.Datagram, tx: *datagram.SendBatch, fd: std.posix.socket_t, config: Http3ServerConfig, stats: ?*WorkerStats) void {
+/// it, the recvmmsg loop passes null). `pool` is the worker's own request-stream reassembly pool,
+/// owned beside its connection table because a request with a body can span datagrams.
+pub fn serveDatagram(comptime handler: core.HandlerFn, table: *ConnTable, pool: *reassembly.Pool, dg: datagram.Datagram, tx: *datagram.SendBatch, fd: std.posix.socket_t, config: Http3ServerConfig, stats: ?*WorkerStats) void {
     if (stats) |st| st.conns = table.count;
 
     switch (processDatagram(table, dg.data, config.cid_len, config.max_datagram_size, config.initial_window_packets)) {
@@ -559,7 +581,7 @@ pub fn serveDatagram(comptime handler: core.HandlerFn, table: *ConnTable, dg: da
             if (stats) |st| st.requests += 1;
 
             logSystem(config, .INFO, "decrypted client 1-RTT request (application keys correct, validated live)", .{});
-            sendResponseFD(handler, table, dg.data, tx, fd, dg.from, config.cid_len, config, stats);
+            sendResponseFD(handler, table, pool, dg.data, tx, fd, dg.from, config.cid_len, config, stats);
         },
         else => {},
     }
@@ -924,6 +946,102 @@ fn decodeAcceptEncoding(scratch: []u8, req: request.DecodedRequest) []const u8 {
     return req.accept_encoding;
 }
 
+/// What one request-stream frame means for the serve loop.
+const Ready = union(enum) {
+    /// Run the handler on this request.
+    serve: request.DecodedRequest,
+    /// Nothing to answer for this frame: the rest of the request is still on its way, or the frame
+    /// carries no request of its own. Carries the slot holding the request when there is one, so the
+    /// loop can extend the client's stream credit before the client blocks waiting for it.
+    hold: ?*reassembly.PendingStream,
+    /// The worker had no slot left to assemble this request in. The loop answers 503 rather than
+    /// running a handler against a body the engine knows is missing. Carries the head that did
+    /// arrive, so the refusal is still logged with the method and path it refused.
+    overloaded: request.DecodedRequest,
+};
+
+/// Decide what one request-stream frame means: a request to serve now, bytes to hold, a held request
+/// this frame completes, or a request the worker has no room to assemble.
+///
+/// Note:
+/// - A request that arrived whole in one packet is served straight from the decrypted payload, with
+///   no copy and no slot. That is every GET, and every POST small enough that the client wrote it in
+///   one go, so the common path pays one branch.
+/// - Anything else is held. A client with a body commonly sends its HEADERS frame and its DATA frame
+///   in separate packets, and answering the first one would run the handler with an empty body and
+///   leave the real body arriving after the response.
+/// - A refused frame that carries the start of a request becomes a 503. A refused frame that carries
+///   only body bytes is dropped instead: the engine has no request to answer on that stream, and the
+///   frame is as likely to be a retransmit of one already answered as the tail of a refused one.
+///
+/// Param:
+/// pool - *reassembly.Pool (the worker's own, sized from the server config)
+/// now_us - u64 (monotonic microseconds, for reclaiming a slot nobody is finishing)
+/// cid - *const demux.ConnId (the connection the stream belongs to)
+/// piece - request.StreamPiece (one client request-stream frame out of this payload)
+/// held - *?*reassembly.PendingStream (set to the slot the caller must release once it has served)
+///
+/// Return:
+/// - Ready (serve with the decoded request, hold, or overloaded)
+fn takeReadyRequest(pool: *reassembly.Pool, now_us: u64, cid: *const demux.ConnId, piece: request.StreamPiece, held: *?*reassembly.PendingStream) Ready {
+    if (piece.request) |whole| {
+        if (whole.body_complete) return .{ .serve = whole };
+    }
+
+    switch (pool.feed(now_us, cid, piece.stream_id, piece.offset, piece.data, piece.fin)) {
+        .ready => |slot| {
+            // The joining decode, not the read-only one: the slot is the worker's own buffer, so a
+            // body the client wrote as several DATA frames is joined in place into one slice rather
+            // than delivered as its first frame with the rest reported missing.
+            var decoded = request.decodeAssembledRequest(slot.assembledMutable(), true) orelse {
+                pool.release(slot);
+
+                return .{ .hold = null };
+            };
+
+            // A body cut by the configured stream size is served, never as a whole one: the count
+            // says more arrived than the handler is holding.
+            if (slot.dropped != 0) {
+                decoded.body_received += slot.dropped;
+                decoded.body_complete = false;
+            }
+
+            held.* = slot;
+
+            return .{ .serve = decoded };
+        },
+        .waiting => |slot| return .{ .hold = slot },
+        .refused => return if (piece.request) |head| .{ .overloaded = head } else .{ .hold = null },
+    }
+}
+
+/// Build the handler-facing Request from one decoded request stream.
+///
+/// Note:
+/// - The body needs no expansion step: DATA frames are never Huffman-coded, so the slice the decoder
+///   kept is handed straight through. It borrows the connection's decrypted payload, which outlives
+///   the handler call, the same lifetime the method and a non-Huffman path already have.
+/// - The two body facts travel with it. Without them a handler cannot tell a body the client never
+///   sent from one this engine only received part of.
+///
+/// Param:
+/// conn - *Connection (owns the Huffman scratch a path is expanded into)
+/// ae_scratch - []u8 (caller-owned scratch for a Huffman-coded accept-encoding)
+/// decoded - request.DecodedRequest (one request stream out of the payload)
+///
+/// Return:
+/// - core.Request (every slice borrowing the connection, valid for the handler call)
+fn buildRequest(conn: *Connection, ae_scratch: []u8, decoded: request.DecodedRequest) core.Request {
+    return .{
+        .method = decoded.method,
+        .path = decodePath(conn, decoded),
+        .body = decoded.body,
+        .body_received = decoded.body_received,
+        .body_complete = decoded.body_complete,
+        .accept_encoding = decodeAcceptEncoding(ae_scratch, decoded),
+    };
+}
+
 /// Copy `dst.len` bytes of the logical response stream (the HTTP/3 prefix followed by the body) into
 /// `dst`, starting at stream offset `off`. The prefix and body stay separate, so a large body is
 /// never concatenated into one buffer.
@@ -1270,7 +1388,7 @@ fn writeAccessRecord(
     );
 }
 
-fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig, stats: ?*WorkerStats) void {
+fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, pool: *reassembly.Pool, data: []const u8, tx: *datagram.SendBatch, fd: std.posix.socket_t, peer: std.posix.sockaddr.in6, cid_len: usize, config: Http3ServerConfig, stats: ?*WorkerStats) void {
     if (data.len < 1 + cid_len) return;
 
     const dcid = demux.ConnId.fromSlice(data[1 .. 1 + cid_len]);
@@ -1287,16 +1405,16 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
     // The honest ACK (with ranges) is built in the prologue below from conn.ack. The pump carries none.
     var ack_pending: ?u64 = null;
 
-    var reqs: [request.max_requests_per_packet]request.StreamRequest = undefined;
-    const count = request.parseRequests(payload_view, &reqs);
+    var pieces: [request.max_requests_per_packet]request.StreamPiece = undefined;
+    const count = request.parseStreamPieces(payload_view, &pieces);
 
     // Extend the client's request-stream credit before it runs out (RFC 9000 4.6): find the highest
     // bidi request stream this packet opened and decide whether a MAX_STREAMS must ride a reply. Without
     // it the connection stalls at the one-time handshake allowance. Rides the first reply, like the ACK.
     var highest_bidi_id: ?u64 = null;
-    for (reqs[0..count]) |stream_req| {
-        if (stream_req.stream_id % 4 != 0) continue;
-        if (highest_bidi_id == null or stream_req.stream_id > highest_bidi_id.?) highest_bidi_id = stream_req.stream_id;
+    for (pieces[0..count]) |piece| {
+        if (piece.stream_id % 4 != 0) continue;
+        if (highest_bidi_id == null or piece.stream_id > highest_bidi_id.?) highest_bidi_id = piece.stream_id;
     }
     var max_streams_pending: ?u64 = if (highest_bidi_id) |hid| conn.replenishBidiStreams(hid, config.max_streams) else null;
 
@@ -1333,16 +1451,51 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
     if (maxStreamsTake(&max_streams_pending)) |granted| plen += response.buildMaxStreams(pbuf[plen..], granted);
     if (maxDataTake(&max_data_pending)) |granted| plen += response.buildMaxData(pbuf[plen..], granted);
 
-    for (reqs[0..count]) |stream_req| {
+    for (pieces[0..count]) |piece| {
         // A retransmit of a request already being streamed: leave its progress, the pump continues it.
-        if (conn.findSendStream(stream_req.stream_id) != null) continue;
+        if (conn.findSendStream(piece.stream_id) != null) continue;
 
+        // A request the client has not finished is held until it does, so the handler runs once and
+        // runs with the whole body. `held` is the reassembly slot to give back once it is served.
+        var held: ?*reassembly.PendingStream = null;
+        defer if (held) |slot| pool.release(slot);
+
+        var content: [1024]u8 = undefined;
         var ae_scratch: [128]u8 = undefined;
-        var req = core.Request{
-            .method = stream_req.request.method,
-            .path = decodePath(conn, stream_req.request),
-            .accept_encoding = decodeAcceptEncoding(&ae_scratch, stream_req.request),
+
+        const decoded = switch (takeReadyRequest(pool, conn.last_activity_us, &conn.dcid, piece, &held)) {
+            .serve => |ready| ready,
+            .hold => |pending| {
+                // A held request has no reply to ride, so its client's stream credit has to be
+                // extended here or not at all. Without it an upload larger than the handshake
+                // allowance stops: the client waits for credit, the engine waits for the rest of the
+                // request, and nothing times out short of the idle timeout.
+                if (pending) |slot| {
+                    if (slot.replenishStreamData(flight.initial_max_stream_data)) |granted| {
+                        plen += response.buildMaxStreamData(pbuf[plen..], piece.stream_id, granted);
+                    }
+                }
+
+                continue;
+            },
+            .overloaded => |head| {
+                // Every slot is busy with a request still arriving, so this one cannot be assembled.
+                // It is answered rather than left hanging, and answered 503 rather than run against a
+                // body that is still on its way: a wrong number is the failure this whole path exists
+                // to prevent. Raise max_pending_request_streams if this shows up under normal load.
+                const overload_len = response.buildRequestStreamContent(&content, 503, .identity, "") orelse continue;
+
+                const overload_req = buildRequest(conn, &ae_scratch, head);
+                writeAccessRecord(config, &overload_req, &core.Response{ .status = 503 }, conn.peer_addr);
+                tl_requests_served += 1;
+
+                packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, piece.stream_id, content[0..overload_len]);
+
+                continue;
+            },
         };
+
+        var req = buildRequest(conn, &ae_scratch, decoded);
         var res = core.Response{};
         const deadline_ns: ?u64 = if (config.handler_timeout_ms == 0)
             null
@@ -1352,19 +1505,18 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
         // stay readable for every packet and every retransmission below. Whoever finishes with the
         // body releases it: the send stream when it retires, or this loop for a body that was
         // already copied into a packet.
-        const static_slot = core.invokeHandler(handler, &req, &res, stream_req.stream_id, config.io, deadline_ns, config.public_dir);
+        const static_slot = core.invokeHandler(handler, &req, &res, piece.stream_id, config.io, deadline_ns, config.public_dir);
         tl_requests_served += 1;
 
         writeAccessRecord(config, &req, &res, conn.peer_addr);
 
-        var content: [1024]u8 = undefined;
         const content_len = response.buildRequestStreamContent(&content, res.status, res.content_encoding, res.body) orelse {
             // A body too large for one packet: register a send stream the pump fragments within flow
             // control, or answer 500 (packed like a small response) when no slot is free.
-            if (conn.reserveSendStream(stream_req.stream_id)) |slot| {
+            if (conn.reserveSendStream(piece.stream_id)) |slot| {
                 slot.* = .{
                     .active = true,
-                    .stream_id = stream_req.stream_id,
+                    .stream_id = piece.stream_id,
                     .status = res.status,
                     .body = res.body,
                     .content_encoding = res.content_encoding,
@@ -1378,7 +1530,7 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
                 static.releasePin(static_slot);
 
                 const five = response.buildRequestStreamContent(&content, 500, .identity, "") orelse continue;
-                packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, stream_req.stream_id, content[0..five]);
+                packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, piece.stream_id, content[0..five]);
             }
             continue;
         };
@@ -1387,7 +1539,7 @@ fn sendResponseFD(handler: core.HandlerFn, table: *ConnTable, data: []const u8, 
         // pin has done its job.
         static.releasePin(static_slot);
 
-        packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, stream_req.stream_id, content[0..content_len]);
+        packStreamFrame(conn, tx, fd, peer, &pbuf, &plen, piece.stream_id, content[0..content_len]);
     }
 
     // Apply this packet's flow-control credit after registering requests, so a MAX_STREAM_DATA that
@@ -1675,6 +1827,254 @@ test "zix http3: orderPhysicalCoresFirst keeps mask order on unique keys" {
     orderPhysicalCoresFirst(&cpus, &keys);
 
     try std.testing.expectEqualSlices(u32, &.{ 3, 7, 11 }, &cpus);
+}
+
+/// One POST on client bidi stream 0, as it arrives in a decrypted 1-RTT payload: a STREAM frame with
+/// LEN and FIN (0x0b) holding a 17-byte HEADERS frame (:method POST, :path /baseline2) then a 4-byte
+/// DATA frame carrying "20". The body payload sits at offset 22.
+const post_payload_hex = "0b0015" ++ "010f" ++ "0000" ++ "d4" ++ "510a" ++ "2f626173656c696e6532" ++ "0002" ++ "3230";
+
+/// The same request with no DATA frame and no end-of-stream bit (0x0a): a bodyless GET the client has
+/// not finished, which is what a body still on its way looks like at this layer.
+const open_get_payload_hex = "0a0011" ++ "010f" ++ "0000" ++ "d1" ++ "510a" ++ "2f626173656c696e6532";
+
+/// The head of the POST above with the stream left open (0x0a), the first of the two packets a client
+/// sends when it writes its headers and its body separately.
+const post_head_payload_hex = "0a0011" ++ "010f" ++ "0000" ++ "d4" ++ "510a" ++ "2f626173656c696e6532";
+
+/// The body of that POST: a STREAM frame at offset 17 (0x0f is STREAM | OFF | LEN | FIN) carrying the
+/// DATA frame and ending the stream.
+const post_body_payload_hex = "0f001104" ++ "0002" ++ "3230";
+
+/// Decode the one request-stream frame a test payload carries.
+fn onlyPiece(payload: []const u8) request.StreamPiece {
+    var pieces: [2]request.StreamPiece = undefined;
+
+    std.debug.assert(request.parseStreamPieces(payload, &pieces) == 1);
+
+    return pieces[0];
+}
+
+/// A pool sized as a worker's would be, for the policy tests below.
+fn testPool(streams: usize) !reassembly.Pool {
+    return reassembly.Pool.init(std.testing.allocator, streams, reassembly.default_stream_bytes);
+}
+
+test "zix http3: takeReadyRequest serves a request that arrived whole without holding it" {
+    var payload: [post_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&payload, post_payload_hex);
+
+    var pool = try testPool(reassembly.default_pending_streams);
+    defer pool.deinit(std.testing.allocator);
+
+    const cid = demux.ConnId.fromSlice(&[_]u8{ 0x11, 2, 3, 4, 5, 6, 7, 8 });
+    var held: ?*reassembly.PendingStream = null;
+
+    const decoded = switch (takeReadyRequest(&pool, 1_000, &cid, onlyPiece(&payload), &held)) {
+        .serve => |ready| ready,
+        else => return error.TestUnexpectedResult,
+    };
+
+    // Served straight from the payload: the fast path takes no reassembly slot, which is what keeps a
+    // GET (and a small POST written in one go) as cheap as it was.
+    try std.testing.expect(held == null);
+    try std.testing.expectEqualSlices(u8, "20", decoded.body);
+    try std.testing.expect(decoded.body_complete);
+}
+
+test "zix http3: takeReadyRequest holds a request until the client ends its stream" {
+    var head: [post_head_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&head, post_head_payload_hex);
+    var body: [post_body_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&body, post_body_payload_hex);
+
+    var pool = try testPool(reassembly.default_pending_streams);
+    defer pool.deinit(std.testing.allocator);
+
+    const cid = demux.ConnId.fromSlice(&[_]u8{ 0x22, 2, 3, 4, 5, 6, 7, 8 });
+
+    // The head alone answers nothing. Answering it would run the handler with an empty body and leave
+    // the real body arriving after the response, which is the defect this holds back.
+    var first_held: ?*reassembly.PendingStream = null;
+    switch (takeReadyRequest(&pool, 1_000, &cid, onlyPiece(&head), &first_held)) {
+        .hold => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(first_held == null);
+
+    // The body completes it, and now the whole request is served in one handler call.
+    var held: ?*reassembly.PendingStream = null;
+    defer if (held) |slot| pool.release(slot);
+
+    const decoded = switch (takeReadyRequest(&pool, 1_100, &cid, onlyPiece(&body), &held)) {
+        .serve => |ready| ready,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expect(held != null);
+    try std.testing.expectEqualSlices(u8, "POST", decoded.method);
+    try std.testing.expectEqualSlices(u8, "/baseline2", decoded.path);
+    try std.testing.expectEqualSlices(u8, "20", decoded.body);
+    try std.testing.expectEqual(@as(u64, 2), decoded.body_received);
+    try std.testing.expect(decoded.body_complete);
+}
+
+test "zix http3: a held request hands back the slot its client's credit is extended from" {
+    // The serve loop has no reply to attach a MAX_STREAM_DATA to while a request is still arriving,
+    // so the hold carries the slot it is arriving into. Without that the loop cannot grant credit and
+    // an upload past the handshake allowance stops halfway, unanswered.
+    var head: [post_head_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&head, post_head_payload_hex);
+
+    var pool = try testPool(reassembly.default_pending_streams);
+    defer pool.deinit(std.testing.allocator);
+
+    const cid = demux.ConnId.fromSlice(&[_]u8{ 0x77, 2, 3, 4, 5, 6, 7, 8 });
+    var held: ?*reassembly.PendingStream = null;
+
+    const pending = switch (takeReadyRequest(&pool, 1_000, &cid, onlyPiece(&head), &held)) {
+        .hold => |slot| slot,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const slot = pending orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, head.len - 3), slot.reached); // the STREAM frame header is not stream data
+
+    // A window this stream has already eaten into: the grant moves out past where it has reached.
+    try std.testing.expect(slot.replenishStreamData(16).? > slot.reached);
+}
+
+test "zix http3: takeReadyRequest calls a request overloaded rather than running it half-arrived" {
+    // A pool with no room at all, which is what a worker whose slots are all busy looks like to the
+    // next request head. The old behaviour handed the handler what had arrived, so a POST answered
+    // from an empty body: a wrong number, silently. The loop answers 503 on this instead.
+    var head: [post_head_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&head, post_head_payload_hex);
+
+    var pool = try testPool(0);
+    defer pool.deinit(std.testing.allocator);
+
+    const cid = demux.ConnId.fromSlice(&[_]u8{ 0x33, 2, 3, 4, 5, 6, 7, 8 });
+    var held: ?*reassembly.PendingStream = null;
+
+    // The head it refused travels with the refusal, so the 503 is still logged as the request it was.
+    switch (takeReadyRequest(&pool, 1_000, &cid, onlyPiece(&head), &held)) {
+        .overloaded => |refused| try std.testing.expectEqualSlices(u8, "POST", refused.method),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(held == null);
+}
+
+test "zix http3: takeReadyRequest drops a refused frame that carries no request of its own" {
+    // Body-only bytes for a stream the pool is not holding. There is no request here to answer, and
+    // the frame is as likely to be a retransmit of one already answered, so a 503 would contradict a
+    // 200 the client already has.
+    var body: [post_body_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&body, post_body_payload_hex);
+
+    var pool = try testPool(0);
+    defer pool.deinit(std.testing.allocator);
+
+    const cid = demux.ConnId.fromSlice(&[_]u8{ 0x44, 2, 3, 4, 5, 6, 7, 8 });
+    var held: ?*reassembly.PendingStream = null;
+
+    switch (takeReadyRequest(&pool, 1_000, &cid, onlyPiece(&body), &held)) {
+        .hold => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "zix http3: takeReadyRequest serves a whole request while the pool holds nothing" {
+    // The GET fast path with reassembly configured off entirely: a request that arrived whole never
+    // reaches the pool, so turning the pool off costs a bodyless request nothing.
+    var payload: [post_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&payload, post_payload_hex);
+
+    var pool = try testPool(0);
+    defer pool.deinit(std.testing.allocator);
+
+    const cid = demux.ConnId.fromSlice(&[_]u8{ 0x55, 2, 3, 4, 5, 6, 7, 8 });
+    var held: ?*reassembly.PendingStream = null;
+
+    const decoded = switch (takeReadyRequest(&pool, 1_000, &cid, onlyPiece(&payload), &held)) {
+        .serve => |ready| ready,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expect(held == null);
+    try std.testing.expect(decoded.body_complete);
+}
+
+test "zix http3: takeReadyRequest carries a raised stream size into what a handler is given whole" {
+    // The same two-packet request against a pool sized well past the body: what the config knob buys
+    // is that the handler is handed the whole thing instead of the front of it.
+    var head: [post_head_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&head, post_head_payload_hex);
+    var body: [post_body_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&body, post_body_payload_hex);
+
+    var pool = try reassembly.Pool.init(std.testing.allocator, 1, 64 * 1024);
+    defer pool.deinit(std.testing.allocator);
+
+    const cid = demux.ConnId.fromSlice(&[_]u8{ 0x66, 2, 3, 4, 5, 6, 7, 8 });
+
+    var first_held: ?*reassembly.PendingStream = null;
+    _ = takeReadyRequest(&pool, 1_000, &cid, onlyPiece(&head), &first_held);
+
+    var held: ?*reassembly.PendingStream = null;
+    defer if (held) |slot| pool.release(slot);
+
+    const decoded = switch (takeReadyRequest(&pool, 1_100, &cid, onlyPiece(&body), &held)) {
+        .serve => |ready| ready,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try std.testing.expectEqualSlices(u8, "20", decoded.body);
+    try std.testing.expect(decoded.body_complete);
+}
+
+test "zix http3: buildRequest hands the decoded body and its counts to the handler Request" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var conn = Connection.init(&dcid, 1200, 10);
+
+    var payload: [post_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&payload, post_payload_hex);
+
+    var reqs: [2]request.StreamRequest = undefined;
+    try std.testing.expectEqual(@as(usize, 1), request.parseRequests(&payload, &reqs));
+
+    var ae_scratch: [128]u8 = undefined;
+    const req = buildRequest(&conn, &ae_scratch, reqs[0].request);
+
+    try std.testing.expectEqualSlices(u8, "POST", req.method);
+    try std.testing.expectEqualSlices(u8, "/baseline2", req.path);
+    try std.testing.expectEqualSlices(u8, "20", req.body);
+    try std.testing.expectEqual(@as(u64, 2), req.bodyReceived());
+    try std.testing.expect(req.bodyComplete());
+
+    // The body borrows the payload rather than being copied out of it, so it costs the engine nothing
+    // and lives exactly as long as the method and the path do.
+    try std.testing.expect(req.body.ptr == payload[22..].ptr);
+}
+
+test "zix http3: buildRequest reports a bodyless request the client has not ended as incomplete" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var conn = Connection.init(&dcid, 1200, 10);
+
+    var payload: [open_get_payload_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&payload, open_get_payload_hex);
+
+    var reqs: [2]request.StreamRequest = undefined;
+    try std.testing.expectEqual(@as(usize, 1), request.parseRequests(&payload, &reqs));
+
+    var ae_scratch: [128]u8 = undefined;
+    const req = buildRequest(&conn, &ae_scratch, reqs[0].request);
+
+    // Nothing arrived, and the stream is still open, so a handler must not read the emptiness as
+    // "the client sent no body".
+    try std.testing.expectEqual(@as(usize, 0), req.body.len);
+    try std.testing.expectEqual(@as(u64, 0), req.bodyReceived());
+    try std.testing.expect(!req.bodyComplete());
 }
 
 test "zix http3: a served request writes one access record naming the engine and the QUIC peer" {
