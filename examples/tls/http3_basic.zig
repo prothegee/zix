@@ -36,6 +36,25 @@ fn baseline(req: *const zix.Http3.Request, res: *zix.Http3.Response, _: *zix.Htt
     res.send(text);
 }
 
+// Per-worker scratch for the echo answer, thread-local for the same reason as sum_buf above.
+threadlocal var echo_buf: [256]u8 = undefined;
+
+// POST /echo -> how many body bytes arrived, whether that was all of them, then the body itself
+// ("2:whole:20" for a body of "20"). A body larger than the engine could hold answers "cut", which is
+// how a handler tells a whole upload from a fragment: the count stays honest either way, and the
+// echoed part is capped to what this scratch holds.
+fn echo(req: *const zix.Http3.Request, res: *zix.Http3.Response, _: *zix.Http3.Context) !void {
+    const room = echo_buf.len - 32;
+    const shown = req.body[0..@min(req.body.len, room)];
+
+    const text = std.fmt.bufPrint(&echo_buf, "{d}:{s}:{s}", .{
+        req.bodyReceived(),
+        if (req.bodyComplete()) "whole" else "cut",
+        shown,
+    }) catch "0:cut:";
+    res.send(text);
+}
+
 // A large (256 KiB) response body, static for the process lifetime so the slice handed to `res.send`
 // stays valid. It exercises the streamed multi-packet send path (one response fragmented across many
 // 1-RTT packets within the congestion window), which the single-packet routes above do not, and is what
@@ -96,11 +115,13 @@ fn queryInt(path: []const u8, name: []const u8) ?i64 {
 // - curl --http3-only -k "https://127.0.0.1:9063/baseline2?a=20&b=22" -> "42"
 // - curl --http3-only -k https://127.0.0.1:9063/big -o /dev/null -w '%{size_download}\n' -> 262144
 // - curl --http3-only -k --compressed -D- https://127.0.0.1:9063/negotiated -> content-encoding: br
+// - curl --http3-only -k -X POST --data-binary '20' https://127.0.0.1:9063/echo -> "2:whole:20"
 const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
     .{ .path = "/", .handler = home },
     .{ .path = "/baseline2", .handler = baseline },
     .{ .path = "/big", .handler = big },
     .{ .path = "/negotiated", .handler = negotiated },
+    .{ .path = "/echo", .handler = echo },
 });
 
 pub fn main(process: std.process.Init) !void {
