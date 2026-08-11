@@ -121,7 +121,9 @@ pub const Request = struct {
     /// - The two are equal whenever the body fit the receive buffer.
     /// - Past the receive buffer every dispatch model counts the drained
     ///   remainder as well, so the same request reports the same number on all
-    ///   three and one handler can be written against any of them.
+    ///   three and one handler can be written against any of them. That holds
+    ///   for a body that arrived whole. One the peer cut short never reaches a
+    ///   handler on .EPOLL or .URING, see bodyComplete().
     /// - For a chunked body this counts the wire bytes, framing included, so it
     ///   is larger than body().len by the size of that framing.
     ///
@@ -138,6 +140,11 @@ pub const Request = struct {
     /// - False means the peer stopped sending part way. The bytes in body() are
     ///   real, there are just fewer of them than the request promised, so an
     ///   upload that looks small may be a large one that was cut off.
+    /// - Only .ASYNC ever reports false. It reads the body inline and runs the
+    ///   handler with whatever arrived. .EPOLL and .URING hold the request until
+    ///   its body is whole, so a peer that quits part way never reaches a
+    ///   handler there: the engine answers 400 with Connection: close itself and
+    ///   drops the request. This reads true on both by construction.
     /// - True for a request that declared no body, since there was nothing to
     ///   fall short of.
     /// - True does not mean the handler was given every byte. A body past the
@@ -153,6 +160,9 @@ pub const Request = struct {
     ///
     /// Usage:
     /// ```zig
+    /// // The guard runs on .ASYNC. On .EPOLL and .URING the engine already
+    /// // refused the cut-short upload, so the handler only sees whole ones and
+    /// // the branch is never taken.
     /// fn uploadHandler(req: *Request, res: *Response, _: *Context) !void {
     ///     if (!req.bodyComplete()) {
     ///         res.setStatus(.BAD_REQUEST);
