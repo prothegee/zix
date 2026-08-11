@@ -71,7 +71,9 @@ const encrypted_alert_size: usize = 64;
 /// Decrypted request plaintext buffer: the effective max request size over TLS.
 const request_plain_size: usize = 17 * 1024;
 
-/// Handler response buffer: the effective max response size over TLS.
+/// Handler response staging. Not a ceiling: a response larger than this spills through the
+/// connection's stream sink as it is rendered (runHandlerToBuffer), so this bounds how much of a
+/// response is held at once, not how large one may be.
 const response_buf_size: usize = 64 * 1024;
 
 /// WebSocket-over-TLS frame loop buffers (ADR-055): accumulated client frame bytes, one decrypted
@@ -84,6 +86,7 @@ const ws_out_size: usize = 32 * 1024;
 const BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const PAYLOAD_TOO_LARGE = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const HEAD_TOO_LARGE = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const INTERNAL_ERROR = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// A plaintext alert arriving mid-handshake (the peer aborted): parse it (RFC 8446 6) and signal a
 /// clean teardown so the accept loop closes the connection rather than misreading it as a record.
@@ -283,7 +286,7 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, io:
 /// Param:
 /// conn - the established connection (TLS 1.3 or TLS 1.2)
 /// fd - posix.fd_t (the connection socket)
-/// plaintext - []const u8 (whole response bytes, any length)
+/// plaintext - []const u8 (response bytes, any length, empty sends nothing)
 /// enc - []u8 (staging for one sealed record, at least app_data_encrypt_out_size)
 ///
 /// Return:
@@ -291,6 +294,8 @@ fn serveConnTls(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, io:
 /// - error.ZixRecordSealFailed when enc cannot hold one sealed record
 /// - the write error when the socket rejects a record
 fn sendAppData(conn: anytype, fd: posix.fd_t, plaintext: []const u8, enc: []u8) !void {
+    if (plaintext.len == 0) return; // a response the spill already carried whole leaves no tail
+
     var rest = plaintext;
 
     while (true) {
@@ -428,7 +433,22 @@ fn serveRequests(fd: posix.fd_t, handler: HandlerFn, ctx: *const Tls.Context, co
                     };
                 }
 
-                const result = try runHandlerToBuffer(handler, &head, body, &response_buf, core.tl_static_io orelse undefined);
+                // The stream sink doubles as the response spill, so a response larger than
+                // response_buf leaves as records while it renders instead of failing at the buffer.
+                stream_sink.wrote = false;
+                const result = runHandlerToBuffer(handler, &head, body, &response_buf, core.tl_static_io orelse undefined, &stream_sink) catch {
+                    _ = core.takeWebSocket(); // a failed upgrade leaves a handoff nothing will run
+
+                    // Nothing of this response reached the wire, so it can still carry a status. A
+                    // bare close here is what made an unsendable response look like a dropped
+                    // connection from the client side.
+                    if (!stream_sink.wrote) {
+                        writeAllFD(fd, conn.writeAppData(INTERNAL_ERROR, &encrypt_buf)) catch {};
+                        writeAllFD(fd, conn.closeNotify(&close_buf)) catch {};
+                    }
+
+                    return;
+                };
 
                 // consume this request, sliding any pipelined bytes to the front.
                 state.consume(&acc, serve.request_len);
@@ -593,16 +613,34 @@ pub const HandlerResult = struct {
     streamed: bool = false,
 };
 
-/// Run the handler with a response sink installed, returning the plaintext response it wrote into
-/// `out`. The handler's writeAllFD appends to `out` directly (core.tl_resp_sink), so there is no
-/// pipe2 / read / close per request, just an in-memory copy. An overflowing response (the sink would
-/// flush to the sentinel fd, which fails) surfaces as error.ZixResponseTooLarge.
+/// Run the handler with a response sink installed, returning the plaintext response bytes still
+/// staged in `out`. The handler's writeAllFD appends to `out` directly (core.tl_resp_sink), so there
+/// is no pipe2 / read / close per request, just an in-memory copy.
 ///
 /// Note:
+/// - `spill` is what keeps `out` a staging buffer rather than a ceiling. A response that outgrows it
+///   hands the staged bytes to the connection's TLS stream sink and keeps rendering, so the wire
+///   sees the same bytes in the same order and per-connection memory stays flat at any response
+///   size. The returned slice is then only the tail the buffer still holds, which the caller sends
+///   after it. Passing null keeps the buffer as a hard limit, reported as
+///   error.ZixResponseTooLarge.
 /// - A streaming handler calls beginStream(), which detaches the capture sink. With the stream sink
 ///   armed it already streamed over TLS (ADR-054), reported as streamed = true.
-pub fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body: []const u8, out: []u8, io: std.Io) !HandlerResult {
-    var sink = core.RespSink{ .fd = sink_fd, .buf = out };
+///
+/// Param:
+/// handler - HandlerFn (the route handler to run)
+/// head - *const core.ParsedHead (the parsed request head)
+/// body - []const u8 (the request body, empty when there is none)
+/// out - []u8 (response staging, the whole response when it fits)
+/// io - std.Io (handed to the handler for static serving)
+/// spill - ?*core.TlsStreamSink (where a response past `out` goes, null to cap at `out`)
+///
+/// Return:
+/// - HandlerResult (the staged tail, or streamed = true)
+/// - error.ZixResponseTooLarge when the response outgrew `out` and no spill was given
+/// - error.ZixStreamingNotSupported when the handler detached the sink with no stream armed
+pub fn runHandlerToBuffer(handler: HandlerFn, head: *const core.ParsedHead, body: []const u8, out: []u8, io: std.Io, spill: ?*core.TlsStreamSink) !HandlerResult {
+    var sink = core.RespSink{ .fd = sink_fd, .buf = out, .spill = spill };
     const prev = core.tl_resp_sink;
     core.tl_resp_sink = &sink;
     defer core.tl_resp_sink = prev;
@@ -922,12 +960,17 @@ fn sseTestHandler(req: *core.Request, _: *core.Response, _: *core.Context) anyer
 }
 
 /// Capture stream sink for the test: a streaming handler's writes land in `buf` instead of a socket.
+/// `refuse` stands in for a connection that is already gone, so the failure path is reachable
+/// without tearing down a live session.
 const CaptureStream = struct {
-    buf: [1024]u8 = undefined,
+    buf: [4096]u8 = undefined,
     len: usize = 0,
+    refuse: bool = false,
 
     fn write(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
         const self: *CaptureStream = @ptrCast(@alignCast(ctx_ptr));
+
+        if (self.refuse or self.len + plaintext.len > self.buf.len) return false;
 
         @memcpy(self.buf[self.len..][0..plaintext.len], plaintext);
         self.len += plaintext.len;
@@ -949,10 +992,128 @@ test "zix http1: tls_serve, runHandlerToBuffer streams over TLS when the stream 
     var out: [4096]u8 = undefined;
 
     // beginStream() detaches the capture sink, so both writes route through the stream sink.
-    const result = try runHandlerToBuffer(sseTestHandler, &parsed.head, req[parsed.body_offset..], &out, undefined);
+    const result = try runHandlerToBuffer(sseTestHandler, &parsed.head, req[parsed.body_offset..], &out, undefined, &stream_sink);
     try std.testing.expect(result.streamed);
     try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "text/event-stream") != null);
     try std.testing.expect(std.mem.indexOf(u8, capture.buf[0..capture.len], "data: hello") != null);
+}
+
+/// Test handler: answer with a body of the size named by the `n` query parameter, filled with a
+/// non-repeating pattern so a dropped or reordered spill cannot pass as correct.
+fn sizedTestHandler(req: *core.Request, res: *core.Response, _: *core.Context) anyerror!void {
+    const raw = core.queryParam(req.head, "n") orelse "16";
+    const want = std.fmt.parseInt(usize, raw, 10) catch 16;
+
+    var body: [8 * 1024]u8 = undefined;
+    for (body[0..@min(want, body.len)], 0..) |*byte, index| byte.* = @intCast('!' + index % 90);
+
+    try res.send(body[0..@min(want, body.len)]);
+}
+
+/// Render a sized response through runHandlerToBuffer and hand back what the peer would see: the
+/// spilled bytes followed by the tail still staged in `out`.
+fn renderSized(want: usize, out: []u8, capture: *CaptureStream, spill: ?*core.TlsStreamSink, seen: []u8) ![]const u8 {
+    var path_buf: [64]u8 = undefined;
+    var req_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/sized?n={d}", .{want});
+    const req = try std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: x\r\n\r\n", .{path});
+    const parsed = try core.parseHead(req);
+
+    const result = try runHandlerToBuffer(sizedTestHandler, &parsed.head, req[parsed.body_offset..], out, undefined, spill);
+
+    @memcpy(seen[0..capture.len], capture.buf[0..capture.len]);
+    @memcpy(seen[capture.len..][0..result.bytes.len], result.bytes);
+
+    return seen[0 .. capture.len + result.bytes.len];
+}
+
+test "zix http1: tls_serve, runHandlerToBuffer spills a response past its staging buffer" {
+    var capture = CaptureStream{};
+    var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
+
+    // 256 bytes of staging against a 600 byte response: the old path failed here, and this is the
+    // whole bug, a response larger than the buffer never reached the peer.
+    var out: [256]u8 = undefined;
+    var seen: [1024]u8 = undefined;
+    const response = try renderSized(600, &out, &capture, &stream_sink, &seen);
+
+    try std.testing.expect(stream_sink.wrote);
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Length: 600\r\n") != null);
+
+    const mark = std.mem.indexOf(u8, response, "\r\n\r\n").?;
+    const body = response[mark + 4 ..];
+    try std.testing.expectEqual(@as(usize, 600), body.len);
+    for (body, 0..) |byte, index| try std.testing.expectEqual(@as(u8, @intCast('!' + index % 90)), byte);
+}
+
+test "zix http1: tls_serve, runHandlerToBuffer leaves a fitting response whole in the buffer" {
+    var capture = CaptureStream{};
+    var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
+
+    // The buffered fast path is what almost every response takes, so a spill sink being installed
+    // must cost it nothing: no write leaves through the sink at all.
+    var out: [4096]u8 = undefined;
+    var seen: [4096]u8 = undefined;
+    const response = try renderSized(64, &out, &capture, &stream_sink, &seen);
+
+    try std.testing.expect(!stream_sink.wrote);
+    try std.testing.expectEqual(@as(usize, 0), capture.len);
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Length: 64\r\n") != null);
+}
+
+test "zix http1: tls_serve, runHandlerToBuffer without a spill still caps at its buffer" {
+    var capture = CaptureStream{};
+    var out: [256]u8 = undefined;
+    var seen: [1024]u8 = undefined;
+
+    // No spill sink means the buffer is the ceiling again, reported rather than half-sent, which is
+    // what a caller with no live session to stream through needs.
+    try std.testing.expectError(error.ZixResponseTooLarge, renderSized(600, &out, &capture, null, &seen));
+}
+
+/// Test handler: write a head, then switch to streaming, which is what a handler does when it
+/// decides mid-response that the body has no end.
+fn lateStreamTestHandler(req: *core.Request, _: *core.Response, _: *core.Context) anyerror!void {
+    core.writeAllFD(req.fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n") catch return;
+    core.beginStream();
+    core.writeAllFD(req.fd, "data: hello\n\n") catch return;
+}
+
+test "zix http1: tls_serve, beginStream carries the bytes a handler staged before it" {
+    var capture = CaptureStream{};
+    var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
+    const prev = core.tl_tls_stream;
+    core.tl_tls_stream = &stream_sink;
+    defer core.tl_tls_stream = prev;
+
+    const req = "GET /events HTTP/1.1\r\nHost: x\r\n\r\n";
+    const parsed = try core.parseHead(req);
+
+    var out: [4096]u8 = undefined;
+
+    // beginStream flushes whatever the capture sink already holds. With the spill installed that
+    // flush reaches the peer, where before it had only a sentinel descriptor to write to and the
+    // head was dropped while the events that followed it were sent.
+    const result = try runHandlerToBuffer(lateStreamTestHandler, &parsed.head, req[parsed.body_offset..], &out, undefined, &stream_sink);
+
+    try std.testing.expect(result.streamed);
+    try std.testing.expect(std.mem.startsWith(u8, capture.buf[0..capture.len], "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, capture.buf[0..capture.len], "data: hello\n\n"));
+}
+
+test "zix http1: tls_serve, runHandlerToBuffer reports a spill that cannot reach the peer" {
+    var capture = CaptureStream{ .refuse = true };
+    var stream_sink = core.TlsStreamSink{ .ctx = &capture, .writeFn = CaptureStream.write };
+
+    // A dead connection under the spill is not a too-large response, but it ends the same way: the
+    // caller closes rather than pretending the response was sent.
+    var out: [256]u8 = undefined;
+    var seen: [1024]u8 = undefined;
+
+    try std.testing.expectError(error.ZixResponseTooLarge, renderSized(600, &out, &capture, &stream_sink, &seen));
+    try std.testing.expect(stream_sink.failed);
+    try std.testing.expect(!stream_sink.wrote);
 }
 
 fn wsNoopFrame(fd: posix.fd_t, opcode: u8, payload: []const u8) void {
