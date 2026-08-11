@@ -89,7 +89,7 @@ Akses via `const zix = @import("zix");`
 | :- | :- | :- |
 | `zix.Http3.Server` | struct | `Server.init(handler, config)` mengembalikan server, handler dibaked saat comptime |
 | `zix.Http3.HandlerFn` | fn type | `*const fn(*const Request, *Response, *Context) anyerror!void` |
-| `zix.Http3.Request` | struct | Request terdekode: `method`, `path`, `authority`, `body`, `accept_encoding` |
+| `zix.Http3.Request` | struct | Request terdekode: `method`, `path`, `authority`, `body`, `accept_encoding`, plus `bodyReceived()` / `bodyComplete()` |
 | `zix.Http3.Response` | struct | Response yang diisi handler: `status`, `body`, `content_type`, `content_encoding`, `sent` |
 | `zix.Http3.Context` | struct | Context per-request: `stream_id` (raw escape hatch, QUIC tidak punya fd per-request), `io`, allocator stack-arena, dan deadline handler opsional |
 | `zix.Http3.ContentEncoding` | enum | `identity` / `gzip` / `br`, coding yang dipilih handler untuk `res.body` |
@@ -142,6 +142,9 @@ pub const Http3ServerConfig = struct {
     max_stream_chunk:     usize = 0,     // cap payload STREAM per packet, 0 = turunkan dari ukuran datagram
     max_inflight_packets: usize = 128,   // ceiling congestion-window / kedalaman loss-log (RFC 9002)
     initial_window_packets: usize = 32,  // congestion window awal dalam packet (default RFC = 10)
+
+    max_pending_request_streams: usize = 16,   // request yang dirakit satu worker sekaligus, 0 tidak menahan
+    max_request_stream_bytes:    usize = 8192, // request terbesar yang bisa diberikan utuh ke handler
 
     public_dir:                   []const u8 = "",  // root file static, "" menonaktifkan penyajian static
     public_dir_cache_ttl_ms:      u32 = 0,          // 0 juga mematikan penyajian static di sini, lihat bawah
@@ -224,7 +227,12 @@ pub const Request = struct {
     path:            []const u8,
     authority:       []const u8 = "",
     body:            []const u8 = "",
+    body_received:   u64        = 0,
+    body_complete:   bool       = true,
     accept_encoding: []const u8 = "",
+
+    pub fn bodyReceived(self: Request) u64 { return self.body_received; }
+    pub fn bodyComplete(self: Request) bool { return self.body_complete; }
 };
 
 pub const Response = struct {
@@ -240,7 +248,7 @@ pub const Response = struct {
 };
 ```
 
-Slice request menunjuk ke buffer dekode per-connection engine dan hanya valid selama pemanggilan handler. Pada jalur serve saat ini `method`, `path`, dan `accept_encoding` yang diisi dari wire (`authority` dan `body` tetap default). Body response disalin ke jalur kirim setelah handler kembali, jadi boleh menunjuk ke memori milik handler atau memori static (lihat scratch threadlocal dan `big_body` process-lifetime di contoh). `content_type` adalah bagian dari API handler tetapi jalur response v1 hanya meng-QPACK-encode `:status` dan, bila handler mengisinya, `content-encoding`.
+Slice request menunjuk ke buffer dekode per-connection engine dan hanya valid selama pemanggilan handler. Pada jalur serve saat ini `method`, `path`, `accept_encoding`, dan `body` diisi dari wire (`authority` tetap default). `body` membawa body request, `bodyReceived()` menghitung byte body yang tiba, dan `bodyComplete()` menyatakan apakah handler sedang memegang semuanya. Request dengan body jarang tiba dalam satu paket (client umumnya menulis HEADERS frame dan DATA frame secara terpisah), jadi engine menahan request seperti itu sampai client mengakhiri stream-nya lalu menjalankan handler sekali, dengan body utuh: lihat `reassembly.zig` di LLD. `max_request_stream_bytes` menentukan sebesar apa body itu boleh, jadi deployment yang menerima upload besar mengaturnya sendiri alih-alih terikat batas bawaan. Melewatinya, body diantar terpotong, dihitung apa adanya, dan dilaporkan false, tidak pernah sebagai fragment yang terbaca utuh. Ketika seluruh `max_pending_request_streams` slot milik worker sedang sibuk dengan request yang masih tiba, request baru dijawab 503: tidak ada handler yang dijalankan atas body yang engine tahu belum lengkap. Body response disalin ke jalur kirim setelah handler kembali, jadi boleh menunjuk ke memori milik handler atau memori static (lihat scratch threadlocal dan `big_body` process-lifetime di contoh). `content_type` adalah bagian dari API handler tetapi jalur response v1 hanya meng-QPACK-encode `:status` dan, bila handler mengisinya, `content-encoding`.
 
 ### Kebijakan error handler
 
