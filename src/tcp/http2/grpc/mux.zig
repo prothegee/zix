@@ -16,6 +16,7 @@ const std = @import("std");
 const socket_pair = @import("../../../utils/socket_pair.zig");
 const builtin = @import("builtin");
 const h2 = @import("../Http2.zig");
+const stream_body = @import("../stream_body.zig");
 const frame = @import("frame.zig");
 const core = @import("core.zig");
 
@@ -327,6 +328,74 @@ fn setTcpCork(fd: std.posix.fd_t, enable: bool) void {
     std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, 3, std.mem.asBytes(&val)) catch {};
 }
 
+/// Dispatch a stream whose END_STREAM has arrived, unless its body is short of (or past) the
+/// content-length its own headers declared.
+///
+/// Note:
+/// - RFC 9113 8.1.1 makes that request malformed, a stream error of type PROTOCOL_ERROR, so the
+///   stream is reset and never dispatched. A handler is therefore never handed a message that is not
+///   whole, which is what a short body would produce: a length prefix promising bytes that never came.
+/// - A body past max_body is a different case, answered upstream with RESOURCE_EXHAUSTED trailers:
+///   that request is valid h2 the engine will not carry, where this one is not valid h2 at all.
+/// - The caller frees the slot either way, so nothing is left holding it.
+///
+/// Param:
+/// RouterType - type (the comptime router, carrying the route table)
+/// conn - *GrpcMuxConn (the connection owning the stream)
+/// stream - *Stream (the stream whose request side just closed)
+///
+/// Return:
+/// - void
+fn muxDispatchWhole(comptime RouterType: type, conn: *GrpcMuxConn, stream: *Stream) void {
+    if (!stream_body.isWhole(stream.headers[0..stream.header_count], stream.body_len)) {
+        muxStageRst(conn, stream.id, h2.ERR_PROTOCOL_ERROR);
+
+        return;
+    }
+
+    muxDispatch(RouterType, conn, stream);
+}
+
+/// Whether any stream is still waiting for the rest of its request.
+///
+/// Param:
+/// conn - *const GrpcMuxConn (the connection to inspect)
+///
+/// Return:
+/// - bool (true when a request was in flight)
+pub fn requestInFlight(conn: *const GrpcMuxConn) bool {
+    for (conn.slots, 0..) |in_use, slot| {
+        if (in_use and !conn.streams[slot].end_stream) return true;
+    }
+
+    return false;
+}
+
+/// What a peer gets when it hangs up part way through a request.
+///
+/// Note:
+/// - A stream the peer opened and never ended is a request that never finished arriving. GOAWAY says
+///   the connection ended by decision, where a bare close reads the same to the peer as a crash, a
+///   timeout, or a dropped connection. h2 gives a client RST_STREAM and GOAWAY to abandon work, so
+///   dropping the transport mid-stream is a protocol error rather than an ordinary end.
+/// - A connection with no request in flight closes without a byte, which is the ordinary end of a
+///   connection and not an error.
+/// - The GOAWAY is staged, not written: the caller flushes the cork before closing, exactly as it
+///   does for every other frame this state machine produces.
+///
+/// Param:
+/// conn - *GrpcMuxConn (the connection whose peer just hung up)
+///
+/// Return:
+/// - bool (true when a GOAWAY was staged)
+pub fn stageHangupGoaway(conn: *GrpcMuxConn) bool {
+    if (!requestInFlight(conn)) return false;
+
+    muxStageGoaway(conn, conn.last_stream_id, h2.ERR_PROTOCOL_ERROR);
+
+    return true;
+}
+
 /// Dispatch one fully-received stream inline, staging the reply into the connection cork.
 /// Unlike the blocking path this never spawns a thread or takes a connection mutex: the worker
 /// owns the connection, so a streaming handler runs on the event loop and must stay bounded.
@@ -559,7 +628,7 @@ fn muxFrameLoop(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConnOutcome {
                 stream.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_headers and stream.end_stream) {
-                    muxDispatch(RouterType, conn, stream);
+                    muxDispatchWhole(RouterType, conn, stream);
                     muxReleaseSlot(conn, slot);
                 }
             },
@@ -579,7 +648,7 @@ fn muxFrameLoop(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConnOutcome {
                 stream.header_count += count;
                 stream.end_headers = (fh.flags & h2.FLAG_END_HEADERS) != 0;
                 if (stream.end_headers and stream.end_stream) {
-                    muxDispatch(RouterType, conn, stream);
+                    muxDispatchWhole(RouterType, conn, stream);
                     muxReleaseSlot(conn, slot);
                 }
             },
@@ -634,7 +703,7 @@ fn muxFrameLoop(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConnOutcome {
                 stream.end_stream = (fh.flags & h2.FLAG_END_STREAM) != 0;
 
                 if (stream.end_stream) {
-                    muxDispatch(RouterType, conn, stream);
+                    muxDispatchWhole(RouterType, conn, stream);
                     muxReleaseSlot(conn, slot);
                 }
             },
@@ -685,7 +754,9 @@ pub fn grpcMuxOnReadable(comptime RouterType: type, conn: *GrpcMuxConn) GrpcConn
             },
         };
         if (got == 0) {
+            _ = stageHangupGoaway(conn);
             conn.stage.flush();
+
             return .close;
         }
         conn.rend += got;
@@ -932,4 +1003,198 @@ test "zix grpc: mux HEADERS past max_streams is refused with REFUSED_STREAM" {
     const rst_code: u32 = (@as(u32, staged[9]) << 24) | (@as(u32, staged[10]) << 16) |
         (@as(u32, staged[11]) << 8) | staged[12];
     try std.testing.expectEqual(h2.ERR_REFUSED_STREAM, rst_code);
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+var grpc_cl_dispatches: usize = 0;
+var grpc_cl_body_len: usize = 0;
+
+fn grpcClHandler(req: *GrpcRequest, _: *GrpcResponse, _: *GrpcContext) anyerror!void {
+    grpc_cl_dispatches += 1;
+    grpc_cl_body_len = if (req.recvMessage()) |msg| msg.len else 0;
+}
+
+const grpc_cl_router = Router(&[_]Route{.{ .path = "/svc.Svc/Method", .handler = grpcClHandler }});
+
+/// Fill the connection's read accumulator with a POST whose headers declare `content_length` and
+/// whose DATA carries `body`, ending the stream. The two disagree exactly when a truncated (or
+/// overlong) body is being modelled.
+fn feedDeclaredCall(conn: *GrpcMuxConn, content_length: []const u8, body: []const u8, end_stream: bool) !void {
+    var enc_scratch: [256]u8 = undefined;
+    var enc = h2.HpackEncoder.init(&enc_scratch);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/svc.Svc/Method");
+    try enc.writeHeader("content-length", content_length);
+    const hblock = enc.encoded();
+
+    var off: usize = 0;
+    h2.encodeFrameHeader(conn.rbuf[off..][0..9], .{ .length = @intCast(hblock.len), .frame_type = h2.FRAME_TYPE_HEADERS, .flags = h2.FLAG_END_HEADERS, .stream_id = 1 });
+    @memcpy(conn.rbuf[off + 9 ..][0..hblock.len], hblock);
+    off += 9 + hblock.len;
+
+    if (end_stream) {
+        h2.encodeFrameHeader(conn.rbuf[off..][0..9], .{ .length = @intCast(body.len), .frame_type = h2.FRAME_TYPE_DATA, .flags = h2.FLAG_END_STREAM, .stream_id = 1 });
+        @memcpy(conn.rbuf[off + 9 ..][0..body.len], body);
+        off += 9 + body.len;
+    }
+
+    conn.rend = off;
+}
+
+/// How many RST_STREAM(PROTOCOL_ERROR) frames the connection staged this pass.
+fn stagedProtocolResets(conn: *const GrpcMuxConn) usize {
+    const staged = conn.stage.buf[0..conn.stage.len];
+
+    var seen: usize = 0;
+    var off: usize = 0;
+    while (off + 9 <= staged.len) {
+        const fh = h2.parseFrameHeader(staged[off..][0..9]);
+        off += 9;
+        if (off + fh.length > staged.len) break;
+
+        if (fh.frame_type == h2.FRAME_TYPE_RST_STREAM and std.mem.readInt(u32, staged[off..][0..4], .big) == h2.ERR_PROTOCOL_ERROR) seen += 1;
+        off += fh.length;
+    }
+
+    return seen;
+}
+
+/// How many GOAWAY(PROTOCOL_ERROR) frames the connection staged this pass.
+fn stagedProtocolGoaways(conn: *const GrpcMuxConn) usize {
+    const staged = conn.stage.buf[0..conn.stage.len];
+
+    var seen: usize = 0;
+    var off: usize = 0;
+    while (off + 9 <= staged.len) {
+        const fh = h2.parseFrameHeader(staged[off..][0..9]);
+        off += 9;
+        if (off + fh.length > staged.len) break;
+
+        if (fh.frame_type == h2.FRAME_TYPE_GOAWAY and std.mem.readInt(u32, staged[off + 4 ..][0..4], .big) == h2.ERR_PROTOCOL_ERROR) seen += 1;
+        off += fh.length;
+    }
+
+    return seen;
+}
+
+test "zix grpc: mux resets a stream whose body is short of its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+
+    const conn = GrpcMuxConn.init(pair.fds[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 256 }, undefined) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // 100 bytes promised, 40 delivered, then END_STREAM: the message never finished arriving
+    const short: [40]u8 = @splat('x');
+    grpc_cl_dispatches = 0;
+    try feedDeclaredCall(conn, "100", &short, true);
+
+    try std.testing.expectEqual(GrpcConnOutcome.keep_alive, muxFrameLoop(grpc_cl_router, conn));
+
+    // the handler never ran, so no truncated message was ever served
+    try std.testing.expectEqual(@as(usize, 0), grpc_cl_dispatches);
+    try std.testing.expectEqual(@as(usize, 1), stagedProtocolResets(conn));
+
+    // the slot is freed, so the connection stays usable for its other streams
+    for (conn.slots) |in_use| try std.testing.expect(!in_use);
+}
+
+test "zix grpc: mux serves a stream whose body matches its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+
+    const conn = GrpcMuxConn.init(pair.fds[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 256 }, undefined) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // a 5-byte gRPC length prefix and its 4 payload bytes, so the message is whole as well
+    const whole = [_]u8{ 0, 0, 0, 0, 4, 'p', 'i', 'n', 'g' };
+    grpc_cl_dispatches = 0;
+    grpc_cl_body_len = 0;
+    try feedDeclaredCall(conn, "9", &whole, true);
+
+    try std.testing.expectEqual(GrpcConnOutcome.keep_alive, muxFrameLoop(grpc_cl_router, conn));
+
+    // the guard only sheds a body that disagrees with its own headers, an honest one still serves
+    try std.testing.expectEqual(@as(usize, 1), grpc_cl_dispatches);
+    try std.testing.expectEqual(@as(usize, 4), grpc_cl_body_len);
+    try std.testing.expectEqual(@as(usize, 0), stagedProtocolResets(conn));
+}
+
+test "zix grpc: mux resets a stream whose body runs past its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+
+    const conn = GrpcMuxConn.init(pair.fds[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 256 }, undefined) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    const overlong: [40]u8 = @splat('x');
+    grpc_cl_dispatches = 0;
+    try feedDeclaredCall(conn, "10", &overlong, true);
+
+    try std.testing.expectEqual(GrpcConnOutcome.keep_alive, muxFrameLoop(grpc_cl_router, conn));
+
+    try std.testing.expectEqual(@as(usize, 0), grpc_cl_dispatches);
+    try std.testing.expectEqual(@as(usize, 1), stagedProtocolResets(conn));
+}
+
+test "zix grpc: mux stages a GOAWAY for a peer that hangs up with a request unfinished" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+
+    const conn = GrpcMuxConn.init(pair.fds[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 256 }, undefined) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // a call that opens its stream and never ends it: the message is still on its way
+    try feedDeclaredCall(conn, "100", &.{}, false);
+    try std.testing.expectEqual(GrpcConnOutcome.keep_alive, muxFrameLoop(grpc_cl_router, conn));
+
+    conn.stage.len = 0;
+    try std.testing.expect(requestInFlight(conn));
+    try std.testing.expect(stageHangupGoaway(conn));
+    try std.testing.expectEqual(@as(usize, 1), stagedProtocolGoaways(conn));
+}
+
+test "zix grpc: mux closes an idle connection without a GOAWAY" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+    var pair = try socket_pair.Pair.open(std.testing.allocator);
+    defer pair.deinit();
+
+    const conn = GrpcMuxConn.init(pair.fds[1], .{ .max_streams = 4, .max_body = 1024, .max_header_scratch = 256 }, undefined) orelse return error.OutOfMemory;
+    defer conn.deinit();
+    conn.phase = .h2;
+
+    // a whole call, served, its slot given back: nothing is owed when the peer leaves
+    const whole = [_]u8{ 0, 0, 0, 0, 0 };
+    try feedDeclaredCall(conn, "5", &whole, true);
+    try std.testing.expectEqual(GrpcConnOutcome.keep_alive, muxFrameLoop(grpc_cl_router, conn));
+
+    conn.stage.len = 0;
+    try std.testing.expect(!requestInFlight(conn));
+    try std.testing.expect(!stageHangupGoaway(conn));
+    try std.testing.expectEqual(@as(usize, 0), stagedProtocolGoaways(conn));
 }
