@@ -42,13 +42,20 @@ localbench holds something past a request on purpose.
 
 <br>
 
-## What this entry does not do
+## The POST body, and why the handler checks it
 
-`/baseline2` sums the query only, where the h1 and h2 baselines also add a
-POST body. The HTTP/3 dispatch path builds its Request from the method, path,
-and accept-encoding, and never fills `body`, so a request body cannot reach a
-handler on this engine yet. `baseline-h3` drives GET, so the profile is
-covered either way.
+`/baseline2` sums the query and the POST body, the same shape as the h1 and h2
+baselines, so the three answer the same number for the same request.
+
+The handler asks `req.bodyComplete()` before it reads `req.body`, which the TCP
+entries have no reason to do. Over QUIC a request can span packets, and the
+engine assembles it in a worker-owned pool sized by
+`max_request_stream_bytes`. A body past that size is delivered cut, with
+`bodyReceived()` counting what really arrived. Summing a fragment would answer
+a wrong number under a 200, so this entry answers 413 instead.
+
+`baseline-h3` drives GET, so none of this is on the measured path: a request
+that arrives whole in one packet never touches the pool.
 
 <br>
 
