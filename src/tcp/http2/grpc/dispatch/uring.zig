@@ -274,9 +274,14 @@ fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
             fn handleRecv(self: *Self, cqe: linux.io_uring_cqe, decoded: uring.Decoded) void {
                 const gc = self.lookup(decoded) orelse return;
 
-                // res == 0 is a peer hangup, res < 0 a receive error: both close.
+                // res == 0 is a peer hangup, res < 0 a receive error: both close. A clean hangup part
+                // way through a request stages a GOAWAY first, which beginClose sends before it frees
+                // the connection, so the peer is not left reading a bare close. A receive error says
+                // nothing: the connection is already broken.
                 if (cqe.res <= 0) {
+                    if (cqe.res == 0) _ = mux.stageHangupGoaway(gc.conn);
                     self.beginClose(gc);
+
                     return;
                 }
 
@@ -418,11 +423,21 @@ fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
             }
 
             fn armTlsRecv(self: *Self, ring_conn: *UringTlsConn) void {
+                // Sized by what the session can take, not by the staging buffer. The staging buffer
+                // is wider than one TLS record, so a busy socket (a large request in flight) would
+                // otherwise hand the session two records at once, which it refuses by closing the
+                // connection.
+                const room = ring_conn.conn.transport.tls.readRoom();
+                if (room == 0) {
+                    self.closeTls(ring_conn);
+                    return;
+                }
+
                 const sqe = self.getSqe() orelse {
                     self.closeTls(ring_conn);
                     return;
                 };
-                sqe.prep_recv(ring_conn.conn.transport.fd, ring_conn.cipher_buf, 0);
+                sqe.prep_recv(ring_conn.conn.transport.fd, ring_conn.cipher_buf[0..@min(ring_conn.cipher_buf.len, room)], 0);
                 sqe.user_data = uring.packUserData(.tls_recv, ring_conn.gen, ring_conn.conn.transport.fd);
             }
 
@@ -442,6 +457,15 @@ fn uringMuxWorkerFn(comptime RouterType: type) fn (UringMuxCtx) void {
                 const ring_conn = self.lookupTls(decoded) orelse return;
 
                 if (cqe.res <= 0) {
+                    // A clean hangup part way through a request seals a GOAWAY, which rides the ring
+                    // before the close (handleTlsSend closes on wclose once it drains). A receive
+                    // error says nothing: the connection is already broken.
+                    if (cqe.res == 0 and tls_mux.hangupGoaway(&ring_conn.conn)) {
+                        self.submitTlsSend(ring_conn);
+
+                        return;
+                    }
+
                     self.closeTls(ring_conn);
                     return;
                 }
