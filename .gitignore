@@ -41,6 +41,10 @@ orders.jsonl
 /tests/public
 /tests/logs
 /tests/runner/public
+/localbench/data
+/localbench/certs
+/localbench/requests
+/localbench/*/logs
 /*.a
 /*.so
 /*.pdb
