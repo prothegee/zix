@@ -414,6 +414,32 @@ fn serveEpollWrite(conn: *Conn, epfd: std.posix.fd_t) core.ConnOutcome {
     return if (should_close) .close else .keep_alive;
 }
 
+/// What a peer gets when it hangs up part way through a request.
+///
+/// Note:
+/// - Bytes left in conn.buf, or a head parked on a drain that can now never
+///   reach zero, are a request that never finished arriving. The client is told
+///   the request was refused, because a bare close reads the same to it as a
+///   crash, a timeout, or a dropped connection.
+/// - An idle keep-alive connection has neither and closes without a byte, which
+///   is the ordinary end of a connection and not an error.
+/// - Serving the partial request instead is the .ASYNC behaviour. This model
+///   holds a request until its body is whole, so a handler here is never given
+///   one that is not, and the answer comes from the engine.
+///
+/// Param:
+/// conn - *Conn (the connection whose peer just hung up)
+///
+/// Return:
+/// - core.ConnOutcome (always .close, the peer is gone either way)
+fn hangupOutcome(conn: *Conn) core.ConnOutcome {
+    if (conn.filled > 0 or conn.pending_head_len > 0) {
+        core.writeAllFD(conn.fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch {};
+    }
+
+    return .close;
+}
+
 /// Parse and serve every complete request in conn.buf.
 ///
 /// Note:
@@ -429,7 +455,8 @@ fn serveEpollConnInner(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []
         switch (std.posix.errno(rc)) {
             .SUCCESS => {
                 const n: usize = @intCast(rc);
-                if (n == 0) return .close;
+                if (n == 0) return hangupOutcome(conn);
+
                 conn.filled += n;
             },
             .AGAIN => {},
@@ -670,15 +697,19 @@ fn serveEpollDrain(conn: *Conn) core.ConnOutcome {
 /// Return:
 /// - .keep_alive while the drain is still running, or after the deferred request
 ///   was served on a keep-alive connection
-/// - .close on peer hangup, or when the deferred request asked to close
+/// - .close on peer hangup, where the parked request is answered 400 and dropped
+///   rather than served, or when the deferred request asked to close
 fn serveEpollDrainThenServe(comptime handler_fn: HandlerFn, conn: *Conn, body_buf: []u8, out_buf: []u8, handler_timeout_ms: u32, epfd: std.posix.fd_t, io: std.Io, arena: *std.heap.ArenaAllocator) core.ConnOutcome {
     const outcome = serveEpollDrain(conn);
 
     if (outcome == .close) {
+        // Answered before the parked head is dropped, because that head is what
+        // says a request was in flight when the peer left.
+        const hangup = hangupOutcome(conn);
         conn.pending_head_len = 0;
         conn.drain_received = 0;
 
-        return .close;
+        return hangup;
     }
 
     if (conn.drain > 0 or conn.pending_head_len == 0) return outcome;
@@ -1096,6 +1127,26 @@ fn testEchoReceivedHandler(req: *core.Request, res: *core.Response, _: *core.Con
     try res.send(out);
 }
 
+/// Read whatever is already waiting on a test socket, without blocking.
+///
+/// Note:
+/// - A test that asserts on an answer has to fail when the answer is missing.
+///   The server fd is still open at that point, so a blocking read would sit
+///   there waiting for a byte that is never coming instead.
+///
+/// Param:
+/// fd - std.posix.fd_t (the client side of the test pair)
+/// buf - []u8 (scratch the bytes are read into)
+///
+/// Return:
+/// - []u8 (the bytes available now, empty when there are none)
+fn testReadNow(fd: std.posix.fd_t, buf: []u8) []u8 {
+    const rc = std.os.linux.recvfrom(fd, buf.ptr, buf.len, std.os.linux.MSG.DONTWAIT, null, null);
+    if (std.posix.errno(rc) != .SUCCESS) return buf[0..0];
+
+    return buf[0..@intCast(rc)];
+}
+
 test "zix http1: EPOLL reports the counted body total for an over-large body" {
     if (comptime @import("builtin").target.os.tag != .linux) {
         std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
@@ -1147,7 +1198,8 @@ test "zix http1: EPOLL never serves a request whose peer quit mid-drain" {
 
     // The counterpart to .ASYNC reporting an incomplete body: this model does not
     // report one, it never invokes the handler at all. Nothing pinned that, and
-    // a future edit could start serving the parked request on a hangup.
+    // a future edit could start serving the parked request on a hangup. The
+    // client still gets an answer, which the last assertion pins.
     const fds = try core.testTcpPair();
     defer _ = std.os.linux.close(fds[0]);
     defer _ = std.os.linux.close(fds[1]);
@@ -1181,6 +1233,95 @@ test "zix http1: EPOLL never serves a request whose peer quit mid-drain" {
     try std.testing.expectEqual(served_before, tl_requests_served);
     try std.testing.expectEqual(@as(usize, 0), conn.pending_head_len);
     try std.testing.expectEqual(@as(usize, 0), conn.drain_received);
+
+    var recv: [1024]u8 = undefined;
+    try std.testing.expectStringStartsWith(testReadNow(fds[0], &recv), "HTTP/1.1 400 Bad Request\r\n");
+}
+
+test "zix http1: EPOLL answers 400 when the peer quits with a buffered request unfinished" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    // A body small enough to buffer never arms a drain, so it leaves by the
+    // read-returned-zero path instead. The client must still be told, because a
+    // silent close is what it cannot tell apart from a crash.
+    const fds = try core.testTcpPair();
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const partial = "POST /u HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\nhello";
+    try std.testing.expectEqual(partial.len, std.os.linux.write(fds[0], partial, partial.len));
+
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [256]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const served_before = tl_requests_served;
+
+    // Event 1 buffers head and the five body bytes, waiting for the other 95.
+    const first = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(partial.len, conn.filled);
+    try std.testing.expectEqual(@as(usize, 0), conn.drain);
+
+    // The peer goes away with the other 95 never sent.
+    _ = std.os.linux.shutdown(fds[0], std.os.linux.SHUT.WR);
+
+    const second = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+
+    try std.testing.expectEqual(core.ConnOutcome.close, second);
+    try std.testing.expectEqual(served_before, tl_requests_served);
+
+    var recv: [1024]u8 = undefined;
+    const answer = testReadNow(fds[0], &recv);
+    try std.testing.expectStringStartsWith(answer, "HTTP/1.1 400 Bad Request\r\n");
+    try std.testing.expect(std.mem.indexOf(u8, answer, "Connection: close") != null);
+}
+
+test "zix http1: EPOLL closes an idle keep-alive connection without answering" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("EPOLL/URING is Linux-only, test skipped", .{});
+        return;
+    }
+
+    // The other side of the rule above: a peer that leaves between requests owes
+    // nothing and is owed nothing, so answering it would put a 400 on every
+    // ordinary connection teardown.
+    const fds = try core.testTcpPair();
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    const req = "GET /ping HTTP/1.1\r\nHost: t\r\n\r\n";
+    try std.testing.expectEqual(req.len, std.os.linux.write(fds[0], req, req.len));
+
+    var conn_buf: [1024]u8 = undefined;
+    var conn = Conn{ .fd = fds[1], .buf = &conn_buf, .filled = 0 };
+    var body_buf: [256]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const first = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+    try std.testing.expectEqual(core.ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+
+    var recv: [1024]u8 = undefined;
+    try std.testing.expectStringStartsWith(testReadNow(fds[0], &recv), "HTTP/1.1 200 OK\r\n");
+
+    // Nothing buffered when the peer leaves: the connection just ends.
+    _ = std.os.linux.shutdown(fds[0], std.os.linux.SHUT.WR);
+
+    const second = serveEpollConn(testEchoReceivedHandler, &conn, &body_buf, &out_buf, 0, -1, undefined, &arena, true);
+
+    try std.testing.expectEqual(core.ConnOutcome.close, second);
+    try std.testing.expectEqual(@as(usize, 0), testReadNow(fds[0], &recv).len);
 }
 
 test "zix http1: EPOLL drain consumes exactly the declared body so the pipelined request survives" {
