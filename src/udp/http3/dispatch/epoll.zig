@@ -80,6 +80,9 @@ pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConf
     defer config.allocator.destroy(table);
     table.* = .{};
 
+    var pool = common.openReassemblyPool(config) catch return;
+    defer pool.deinit(config.allocator);
+
     var rx = datagram.RecvBatch.init(config.allocator, config.recv_batch, config.max_recv_buf) catch return;
     defer rx.deinit();
 
@@ -121,7 +124,7 @@ pub fn workerLoopEpoll(comptime handler: core.HandlerFn, config: Http3ServerConf
             stats.datagrams += count;
             for (0..count) |i| {
                 const dg = rx.get(i);
-                common.serveDatagram(handler, table, dg, &tx, fd, config, &stats);
+                common.serveDatagram(handler, table, &pool, dg, &tx, fd, config, &stats);
             }
 
             stats.packets += tx.count;
