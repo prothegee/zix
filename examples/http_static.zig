@@ -73,12 +73,27 @@ pub fn uploadHandler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.
     if (std.mem.indexOfScalar(u8, boundary, ';')) |semi| boundary = boundary[0..semi];
     boundary = std.mem.trim(u8, boundary, " \t\r\n\"");
 
+    // req.body() reads the whole declared length, and a length past max_request_body raises before a
+    // byte is reserved, which the dispatcher turns into 413. What it cannot decide is a peer that
+    // stopped part way: those bytes are real, there are just fewer of them than promised, so the
+    // multipart body would parse into a half file. That call belongs to the handler.
     const body = try req.body();
+    if (!req.bodyComplete()) {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"incomplete body: the client stopped sending\"}");
+        return;
+    }
 
     var parser = zix.utils.multipart.Parser.init(ctx.allocator, boundary);
     defer parser.deinit();
 
-    try parser.parse(body);
+    parser.parse(body) catch {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"error\":\"invalid multipart body\"}");
+        return;
+    };
 
     const file_field = parser.getField("file") orelse {
         res.setStatus(.BAD_REQUEST);
