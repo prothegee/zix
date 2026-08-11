@@ -5,6 +5,7 @@ const socket_pair = @import("../../utils/socket_pair.zig");
 const win_io = @import("../../utils/windows_io.zig");
 const frame = @import("frame.zig");
 const hpack = @import("hpack.zig");
+const stream_body = @import("stream_body.zig");
 const rc = @import("../../utils/response_cache.zig");
 const peer_addr = @import("../../utils/peer_addr.zig");
 const Logger = @import("../../logger/logger.zig").Logger;
@@ -189,7 +190,10 @@ pub const ServeOpts = struct {
     max_frame_size: u32 = frame.DEFAULT_MAX_FRAME_SIZE,
     /// HPACK scratch buffer size per connection (header string storage).
     max_header_scratch: usize = 4096,
-    /// Maximum request body buffered per stream in bytes. A larger request body is truncated to this.
+    /// Maximum request body buffered per stream in bytes. A body past what a stream can hold is shed
+    /// with 413 rather than truncated, so a handler never receives a partial one. The multiplexed
+    /// models size a pooled stream's buffer by this, the blocking model uses its own fixed per-stream
+    /// buffer and sheds at that.
     max_body: usize = 16384,
     /// Where served streams are recorded, from config.logger. Null logs nothing.
     logger: ?*Logger = null,
@@ -427,7 +431,11 @@ fn serveH2cLoop(
     var last_stream_id: u31 = initial_last_stream;
 
     while (true) {
-        const fh = try frame.readFrameHeader(fd);
+        const fh = frame.readFrameHeader(fd) catch |err| {
+            hangupGoaway(fd, streams, stream_slots, last_stream_id);
+
+            return err;
+        };
 
         if (fh.length > max_payload) {
             frame.sendGoawayFD(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR) catch {};
@@ -519,7 +527,7 @@ fn serveH2cLoop(
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
 
                 if (s.end_headers and s.end_stream) {
-                    dispatchStream(handler, s, fd, opts, io, peer_max_frame_size);
+                    dispatchWhole(handler, s, fd, opts, io, peer_max_frame_size);
                     stream_slots[slot] = false;
                 }
             },
@@ -539,7 +547,7 @@ fn serveH2cLoop(
                 s.header_count += count;
                 s.end_headers = (fh.flags & frame.FLAG_END_HEADERS) != 0;
                 if (s.end_headers and s.end_stream) {
-                    dispatchStream(handler, s, fd, opts, io, peer_max_frame_size);
+                    dispatchWhole(handler, s, fd, opts, io, peer_max_frame_size);
                     stream_slots[slot] = false;
                 }
             },
@@ -568,18 +576,30 @@ fn serveH2cLoop(
                 }
                 data = data[0 .. data.len - pad_len];
 
+                // A body past max_body sheds the stream instead of truncating it: 413 with
+                // END_STREAM, slot freed, so a corrupt body never dispatches. A follow-up DATA frame
+                // finds no slot and is answered with RST_STREAM above. Only the connection window is
+                // credited for the discarded bytes (the stream is done, the connection must stay
+                // usable for its other streams). Same shed as the multiplexed models.
+                if (data.len > s.body.len - s.body_len) {
+                    if (data.len > 0) frame.sendWindowUpdateFD(fd, 0, @intCast(data.len)) catch {};
+                    frame.sendResponseFD(fd, sid, 413, "text/plain", "") catch {};
+                    stream_slots[slot] = false;
+
+                    continue;
+                }
+
                 if (data.len > 0) {
                     frame.sendWindowUpdateFD(fd, 0, @intCast(data.len)) catch {};
                     frame.sendWindowUpdateFD(fd, sid, @intCast(data.len)) catch {};
                 }
 
-                const to_copy = @min(data.len, s.body.len - s.body_len);
-                @memcpy(s.body[s.body_len..][0..to_copy], data[0..to_copy]);
-                s.body_len += to_copy;
+                @memcpy(s.body[s.body_len..][0..data.len], data);
+                s.body_len += data.len;
 
                 s.end_stream = (fh.flags & frame.FLAG_END_STREAM) != 0;
                 if (s.end_stream) {
-                    dispatchStream(handler, s, fd, opts, io, peer_max_frame_size);
+                    dispatchWhole(handler, s, fd, opts, io, peer_max_frame_size);
                     stream_slots[slot] = false;
                 }
             },
@@ -598,6 +618,76 @@ fn serveH2cLoop(
             else => {},
         }
     }
+}
+
+/// Dispatch a stream whose END_STREAM has arrived, unless its body is short of (or past) the
+/// content-length its own headers declared.
+///
+/// Note:
+/// - RFC 9113 8.1.1 makes that request malformed, a stream error of type PROTOCOL_ERROR, so the
+///   stream is reset instead. A handler is therefore never handed a body that is not whole, which is
+///   the same promise the multiplexed models make.
+/// - The caller frees the slot either way, so nothing is left holding it.
+///
+/// Param:
+/// handler - HandlerFn (the router entry point)
+/// stream - *Stream (the stream whose request side just closed)
+/// fd - std.posix.fd_t (connection fd)
+/// opts - ServeOpts (serve limits carried to the handler trio)
+/// io - std.Io (backend carried on Context)
+/// peer_max_frame_size - u32 (largest DATA frame the peer accepts)
+///
+/// Return:
+/// - void
+fn dispatchWhole(handler: HandlerFn, stream: *Stream, fd: std.posix.fd_t, opts: ServeOpts, io: std.Io, peer_max_frame_size: u32) void {
+    if (!stream_body.isWhole(stream.headers[0..stream.header_count], stream.body_len)) {
+        frame.sendRstStreamFD(fd, stream.id, frame.ERR_PROTOCOL_ERROR) catch {};
+
+        return;
+    }
+
+    dispatchStream(handler, stream, fd, opts, io, peer_max_frame_size);
+}
+
+/// What a peer gets when it hangs up part way through a request.
+///
+/// Note:
+/// - A stream the peer opened and never ended is a request that never finished arriving. GOAWAY says
+///   the connection ended by decision, where a bare close reads the same to the peer as a crash, a
+///   timeout, or a dropped connection. h2 gives a client RST_STREAM and GOAWAY to abandon work, so
+///   dropping the transport mid-stream is a protocol error rather than an ordinary end.
+/// - A connection with no request in flight closes without a byte, which is the ordinary end of a
+///   connection and not an error.
+/// - Nothing is dispatched either way: the partial request is dropped, never served.
+///
+/// Param:
+/// fd - std.posix.fd_t (connection fd)
+/// streams - []const Stream (the connection's stream table)
+/// used - []const bool (which entries of the table are live)
+/// last_stream_id - u31 (highest stream id seen, carried on the GOAWAY)
+///
+/// Return:
+/// - void
+fn hangupGoaway(fd: std.posix.fd_t, streams: []const Stream, used: []const bool, last_stream_id: u31) void {
+    if (!requestInFlight(streams, used)) return;
+
+    frame.sendGoawayFD(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR) catch {};
+}
+
+/// Whether any stream is still waiting for the rest of its request.
+///
+/// Param:
+/// streams - []const Stream (the connection's stream table)
+/// used - []const bool (which entries of the table are live)
+///
+/// Return:
+/// - bool (true when a request was in flight)
+fn requestInFlight(streams: []const Stream, used: []const bool) bool {
+    for (used, 0..) |in_use, slot| {
+        if (in_use and !streams[slot].end_stream) return true;
+    }
+
+    return false;
 }
 
 fn slotFor(sid: u31, streams: []Stream, used: []bool) ?usize {
@@ -776,4 +866,261 @@ fn readAccessLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
     }
 
     return error.ZixNoLogLine;
+}
+
+// --------------------------------------------------------------- //
+// --------------------------------------------------------------- //
+
+var async_dispatches: usize = 0;
+var async_body_len: usize = 0;
+
+fn asyncBodyHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    async_dispatches += 1;
+    async_body_len = req.body.len;
+
+    try res.sendText("ok");
+}
+
+const async_body_router = Router(&[_]Route{.{ .path = "/", .handler = asyncBodyHandler }});
+
+/// Write one complete frame (9-byte header + payload) to a fd, the way a client would.
+fn writeFrameTo(fd: std.posix.fd_t, ftype: u8, flags: u8, sid: u31, payload: []const u8) !void {
+    var fh: [9]u8 = undefined;
+    frame.encodeFrameHeader(&fh, .{ .length = @intCast(payload.len), .frame_type = ftype, .flags = flags, .stream_id = sid });
+
+    try frame.writeAllFD(fd, &fh);
+    if (payload.len > 0) try frame.writeAllFD(fd, payload);
+}
+
+/// What the blocking loop answered with, read back after it returned.
+const AsyncWireTally = struct {
+    rst_protocol_error: usize = 0,
+    goaway_protocol_error: usize = 0,
+    status_200: usize = 0,
+    status_413: usize = 0,
+};
+
+fn tallyAsyncWire(read_fd: std.posix.fd_t, server_fd: std.posix.fd_t, buf: []u8) AsyncWireTally {
+    // The server end still holds the socket open, so without this the read below waits on bytes that
+    // are never coming rather than ending at EOF.
+    _ = std.os.linux.shutdown(server_fd, std.os.linux.SHUT.WR);
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const got = std.posix.read(read_fd, buf[total..]) catch break;
+        if (got == 0) break;
+        total += got;
+    }
+
+    var tally = AsyncWireTally{};
+    var dec = hpack.HpackDecoder.init();
+    var off: usize = 0;
+    while (off + 9 <= total) {
+        const fh = frame.parseFrameHeader(buf[off..][0..9]);
+        off += 9;
+        if (off + fh.length > total) break;
+
+        const payload = buf[off..][0..fh.length];
+        off += fh.length;
+
+        switch (fh.frame_type) {
+            frame.FRAME_TYPE_RST_STREAM => {
+                if (std.mem.readInt(u32, payload[0..4], .big) == frame.ERR_PROTOCOL_ERROR) tally.rst_protocol_error += 1;
+            },
+            frame.FRAME_TYPE_GOAWAY => {
+                if (std.mem.readInt(u32, payload[4..8], .big) == frame.ERR_PROTOCOL_ERROR) tally.goaway_protocol_error += 1;
+            },
+            frame.FRAME_TYPE_HEADERS => {
+                var hdrs: [frame.MAX_HEADERS]hpack.Header = undefined;
+                var scratch: [256]u8 = undefined;
+                const count = dec.decode(payload, &hdrs, &scratch) catch continue;
+                for (hdrs[0..count]) |hdr| {
+                    if (!std.mem.eql(u8, hdr.name, ":status")) continue;
+                    if (std.mem.eql(u8, hdr.value, "200")) tally.status_200 += 1;
+                    if (std.mem.eql(u8, hdr.value, "413")) tally.status_413 += 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return tally;
+}
+
+/// Encode a POST request head declaring `content_length`, ending the headers but not the stream.
+fn encodeDeclaredPostHead(block: []u8, content_length: []const u8) ![]const u8 {
+    var enc = hpack.HpackEncoder.init(block);
+    try enc.writeHeader(":method", "POST");
+    try enc.writeHeader(":path", "/");
+    try enc.writeHeader("content-length", content_length);
+
+    return enc.encoded();
+}
+
+/// Run the blocking frame loop over everything already written to the connection. The client end is
+/// shut down for writing first, so the loop reaches EOF and returns instead of parking on a read.
+fn runAsyncLoopToEof(client_fd: std.posix.fd_t, server_fd: std.posix.fd_t, opts: ServeOpts) void {
+    _ = std.os.linux.shutdown(client_fd, std.os.linux.SHUT.WR);
+
+    var dec = hpack.HpackDecoder.init();
+    serveH2cLoop(async_body_router.dispatch, server_fd, &dec, opts, 0, std.testing.io, frame.DEFAULT_MAX_FRAME_SIZE) catch {};
+}
+
+test "zix http2: the blocking loop resets a stream whose body is short of its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // 100 bytes promised, 40 delivered, then END_STREAM: the request never finished arriving
+    var block: [128]u8 = undefined;
+    const head = try encodeDeclaredPostHead(&block, "100");
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, head);
+
+    const short: [40]u8 = @splat('x');
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, &short);
+
+    async_dispatches = 0;
+    runAsyncLoopToEof(fds[0], fds[1], .{});
+
+    // the handler never ran, so no truncated body was ever served
+    try std.testing.expectEqual(@as(usize, 0), async_dispatches);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.rst_protocol_error);
+    try std.testing.expectEqual(@as(usize, 0), tally.status_200);
+}
+
+test "zix http2: the blocking loop serves a stream whose body matches its content-length" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var block: [128]u8 = undefined;
+    const head = try encodeDeclaredPostHead(&block, "40");
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, head);
+
+    const whole: [40]u8 = @splat('x');
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, &whole);
+
+    async_dispatches = 0;
+    async_body_len = 0;
+    runAsyncLoopToEof(fds[0], fds[1], .{});
+
+    // the guard only sheds a body that disagrees with its own headers, an honest one still serves
+    try std.testing.expectEqual(@as(usize, 1), async_dispatches);
+    try std.testing.expectEqual(@as(usize, 40), async_body_len);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.rst_protocol_error);
+    try std.testing.expectEqual(@as(usize, 1), tally.status_200);
+}
+
+test "zix http2: the blocking loop sheds a body past the stream buffer with 413" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    var block: [128]u8 = undefined;
+    const head = try encodeDeclaredPostHead(&block, "70000");
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, head);
+
+    // fill the per-stream buffer exactly, then one byte more: the stream is shed, not truncated
+    const chunk = try std.testing.allocator.alloc(u8, frame.DEFAULT_MAX_FRAME_SIZE);
+    defer std.testing.allocator.free(chunk);
+    @memset(chunk, 'y');
+
+    const frames = STREAM_BODY_BUF_SIZE / frame.DEFAULT_MAX_FRAME_SIZE;
+    for (0..frames) |_| try writeFrameTo(fds[0], frame.FRAME_TYPE_DATA, 0, 1, chunk);
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_DATA, frame.FLAG_END_STREAM, 1, chunk[0..1]);
+
+    async_dispatches = 0;
+    runAsyncLoopToEof(fds[0], fds[1], .{});
+
+    // no handler saw the first 64 KiB as though it were the whole 70000-byte body
+    try std.testing.expectEqual(@as(usize, 0), async_dispatches);
+
+    var buf: [32 * 1024]u8 = undefined;
+    const tally = tallyAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.status_413);
+    try std.testing.expectEqual(@as(usize, 0), tally.status_200);
+}
+
+test "zix http2: the blocking loop answers a peer that hangs up with a request unfinished" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // a POST that opens its stream and never ends it, then the peer simply goes away
+    var block: [128]u8 = undefined;
+    const head = try encodeDeclaredPostHead(&block, "100");
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS, 1, head);
+
+    async_dispatches = 0;
+    runAsyncLoopToEof(fds[0], fds[1], .{});
+
+    try std.testing.expectEqual(@as(usize, 0), async_dispatches);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), tally.goaway_protocol_error);
+}
+
+test "zix http2: the blocking loop closes an idle connection without a GOAWAY" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socket wire, test skipped", .{});
+        return;
+    }
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+    defer _ = std.os.linux.close(fds[1]);
+
+    // one whole request, served and its slot given back: nothing is owed when the peer leaves
+    var block: [128]u8 = undefined;
+    var enc = hpack.HpackEncoder.init(&block);
+    try enc.writeHeader(":method", "GET");
+    try enc.writeHeader(":path", "/");
+    try writeFrameTo(fds[0], frame.FRAME_TYPE_HEADERS, frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM, 1, enc.encoded());
+
+    async_dispatches = 0;
+    runAsyncLoopToEof(fds[0], fds[1], .{});
+
+    try std.testing.expectEqual(@as(usize, 1), async_dispatches);
+
+    var buf: [8192]u8 = undefined;
+    const tally = tallyAsyncWire(fds[0], fds[1], &buf);
+
+    try std.testing.expectEqual(@as(usize, 0), tally.goaway_protocol_error);
+    try std.testing.expectEqual(@as(usize, 1), tally.status_200);
 }
