@@ -356,6 +356,74 @@ pub fn multipartUploadRoundTrip(io: std.Io, port: u16, upload_path: []const u8) 
     if (!std.mem.eql(u8, get_resp.body(), MULTIPART_CONTENT)) return error.MultipartServeMismatch;
 }
 
+// File name and payload size of the upload that is deliberately larger than the example's
+// max_recv_buf (16 KB), so the engine can only hand the handler part of it.
+const OVERSIZE_NAME: []const u8 = "runner_mp_oversize.txt";
+const OVERSIZE_CONTENT_LEN: usize = 32 * 1024;
+
+/// Multipart upload the engine cannot deliver whole: POST a body past the example's max_recv_buf and
+/// require a refusal, then confirm nothing was saved under that name.
+///
+/// Note:
+/// - The engine itself answers 200 here, since the declared length is well inside max_request_body.
+///   What is under test is the handler comparing bodyReceived() with body().len, without which the
+///   truncated body would be parsed and a half file stored behind a 200.
+///
+/// Param:
+/// io - std.Io (client transport)
+/// port - u16 (server port)
+/// upload_path - []const u8 (multipart upload route, e.g. "/upload-multipart")
+///
+/// Return:
+/// - void on success
+/// - error.MultipartOversizeAccepted when the short body was not refused
+/// - error.MultipartOversizeStored when a file was saved from it anyway
+pub fn multipartUploadRefusesOversize(io: std.Io, port: u16, upload_path: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+
+    var client = zix.Http.Client.init(.{
+        .allocator = arena.allocator(),
+        .io = io,
+        .connect_timeout_ms = 3000,
+        .response_timeout_ms = RESPONSE_TIMEOUT_MS,
+        .read_timeout_ms = RESPONSE_TIMEOUT_MS,
+        .max_response_body = 4096,
+    });
+    defer client.deinit();
+
+    const fill = try arena.allocator().alloc(u8, OVERSIZE_CONTENT_LEN);
+    @memset(fill, 'Z');
+
+    const body = try std.fmt.allocPrint(
+        arena.allocator(),
+        "--{s}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{s}\"\r\nContent-Type: application/octet-stream\r\n\r\n{s}\r\n--{s}--\r\n",
+        .{ MULTIPART_BOUNDARY, OVERSIZE_NAME, fill, MULTIPART_BOUNDARY },
+    );
+
+    var ct_buf: [128]u8 = undefined;
+    const content_type = try std.fmt.bufPrint(&ct_buf, "multipart/form-data; boundary={s}", .{MULTIPART_BOUNDARY});
+
+    var post_url_buf: [256]u8 = undefined;
+    const post_url = try std.fmt.bufPrint(&post_url_buf, "http://127.0.0.1:{d}{s}", .{ port, upload_path });
+
+    var post_resp = try client.post(post_url, .{
+        .headers = &.{.{ .name = "content-type", .value = content_type }},
+        .body = body,
+    });
+    defer post_resp.deinit();
+
+    if (post_resp.status() != 413) return error.MultipartOversizeAccepted;
+
+    var get_url_buf: [256]u8 = undefined;
+    const get_url = try std.fmt.bufPrint(&get_url_buf, "http://127.0.0.1:{d}/u/{s}", .{ port, OVERSIZE_NAME });
+
+    var get_resp = try client.get(get_url, .{});
+    defer get_resp.deinit();
+
+    if (get_resp.status() == 200) return error.MultipartOversizeStored;
+}
+
 // --------------------------------------------------------- //
 
 // The GET that opens the SSE stream, the WS upgrade GET, and the content type of a TLS handshake
