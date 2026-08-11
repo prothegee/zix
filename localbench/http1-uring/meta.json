@@ -12,6 +12,7 @@
     "limited-conn",
     "upload",
     "static",
+    "static-tls",
     "json",
     "json-comp",
     "json-tls",
