@@ -1,0 +1,17 @@
+{
+  "display_name": "zix-localbench-http1-ws-uring",
+  "language": "Zig",
+  "type": "engine",
+  "engine": "zix.Http1 WebSocket URING Dispatch Model",
+  "description": "WebSocket echo on the zix.Http1 engine, .URING dispatch. GET /ws upgrades and the engine drives the frame pump: frames are echoed on readiness and a pipelined burst leaves as one write. No cache anywhere, echo is per connection.",
+  "repo": "https://codeberg.org/prothegee/zix",
+  "enabled": true,
+  "tests": [
+    "echo-ws",
+    "echo-ws-pipeline",
+    "echo-ws-limited"
+  ],
+  "maintainers": [
+    "prothegee"
+  ]
+}
