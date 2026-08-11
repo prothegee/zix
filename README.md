@@ -95,9 +95,9 @@
 
 <hr>
 
-<h4 align="center">
+<h2 align="center">
     <b><i>Benchmark</i></b>
-</h4>
+</h2>
 <h4 align="center">
     <b><i>HttpArena</i></b>
 </h4>
@@ -113,10 +113,10 @@
 </div>
 <br>
 <div align="center">
-    <!-- <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer"> -->
-    <!--     <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44"> -->
-    <!-- </a> -->
-    <!-- &nbsp;&nbsp; -->
+    <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
+        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44">
+    </a>
+    &nbsp;&nbsp;
     <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
         <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
     </a>
@@ -134,7 +134,7 @@
 RESERVED localbench
 -->
 
-<!-- <br> -->
+<!-- <hr> -->
 
 <!--
 RESERVED sponsor
@@ -142,7 +142,11 @@ RESERVED sponsor
 kofi: https://ko-fi.com/prothegee
 paypal: https://paypal.me/prothegee
 saweria: https://saweria.co/prothegee
+-->
 
+<!-- <hr> -->
+
+<!--
 RESERVED patrons
 -->
 
