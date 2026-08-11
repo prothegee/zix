@@ -755,6 +755,11 @@ pub const RespSink = struct {
     buf: []u8,
     len: usize = 0,
     failed: bool = false,
+    /// Where bytes past the staging buffer go when there is no descriptor to write them to. The
+    /// https paths install the connection's TLS stream sink here, so a response larger than buf
+    /// leaves as TLS records while it is still being rendered instead of failing at the buffer's
+    /// edge. null (cleartext) keeps the write-to-fd behavior.
+    spill: ?*TlsStreamSink = null,
     /// When set, an overflowing append grows buf (realloc up to grow_cap)
     /// instead of flushing to the socket. The URING dispatch installs this over
     /// the per-connection send buffer so a response larger than the staged
@@ -798,6 +803,22 @@ pub const RespSink = struct {
         self.append(bytes);
     }
 
+    /// Send bytes that are not staying in buf: through the spill sink when one is installed (https,
+    /// where the fd is a sentinel and every write has to become a TLS record), straight to the
+    /// descriptor otherwise. A write that does not land marks the sink failed, which the caller
+    /// reads as a broken peer.
+    fn writeOut(self: *RespSink, bytes: []const u8) void {
+        if (self.spill) |sink| {
+            if (!sink.write(bytes)) self.failed = true;
+
+            return;
+        }
+
+        writeAllDirectFD(self.fd, bytes) catch {
+            self.failed = true;
+        };
+    }
+
     pub fn append(self: *RespSink, bytes: []const u8) void {
         // Single response larger than the whole buffer: grow to hold it when
         // backed by an allocator, otherwise flush the staged batch and write
@@ -811,9 +832,7 @@ pub const RespSink = struct {
             }
 
             self.flush();
-            writeAllDirectFD(self.fd, bytes) catch {
-                self.failed = true;
-            };
+            self.writeOut(bytes);
 
             return;
         }
@@ -831,9 +850,7 @@ pub const RespSink = struct {
     pub fn flush(self: *RespSink) void {
         if (self.len == 0) return;
 
-        writeAllDirectFD(self.fd, self.buf[self.off..self.len]) catch {
-            self.failed = true;
-        };
+        self.writeOut(self.buf[self.off..self.len]);
         self.len = 0;
         self.off = 0;
     }
@@ -919,6 +936,10 @@ pub const TlsStreamSink = struct {
     ctx: *anyopaque,
     writeFn: *const fn (ctx: *anyopaque, plaintext: []const u8) bool,
     failed: bool = false,
+    /// Whether any plaintext has already left through this sink for the request being served. Once
+    /// bytes are on the wire the response is committed: a later failure can only close the
+    /// connection, because a status line appended to a half-sent body is not a response.
+    wrote: bool = false,
 
     pub fn write(self: *TlsStreamSink, bytes: []const u8) bool {
         if (self.failed) return false;
@@ -928,6 +949,8 @@ pub const TlsStreamSink = struct {
 
             return false;
         }
+
+        self.wrote = true;
 
         return true;
     }
@@ -2622,6 +2645,184 @@ test "zix http1: RespSink without a grow allocator does not grow" {
     // is never reallocated and overflow stays on the flush path.
     try std.testing.expect(!sink.grow(64));
     try std.testing.expectEqual(@as(usize, 8), sink.buf.len);
+}
+
+/// The sentinel descriptor the https capture path installs: no write ever reaches it, so the spill
+/// tests below can run on every target instead of skipping where a descriptor is not an int.
+const spill_test_fd: std.posix.fd_t = if (@import("builtin").os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
+/// Test-only spill target standing in for a TLS connection: it records every write it is handed, in
+/// order, and can be made to refuse one so the failure path is reachable without a live session.
+const SpillCollector = struct {
+    buf: [1024]u8 = undefined,
+    len: usize = 0,
+    writes: usize = 0,
+    refuse: bool = false,
+
+    fn write(ctx_ptr: *anyopaque, plaintext: []const u8) bool {
+        const self: *SpillCollector = @ptrCast(@alignCast(ctx_ptr));
+        self.writes += 1;
+
+        if (self.refuse or self.len + plaintext.len > self.buf.len) return false;
+
+        @memcpy(self.buf[self.len..][0..plaintext.len], plaintext);
+        self.len += plaintext.len;
+
+        return true;
+    }
+
+    fn collected(self: *const SpillCollector) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+test "zix http1: RespSink spills the staged batch when the next write overflows" {
+    var collector = SpillCollector{};
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    var stage: [8]u8 = undefined;
+    var sink = RespSink{ .fd = spill_test_fd, .buf = &stage, .spill = &stream };
+
+    sink.append("HEAD");
+    try std.testing.expectEqual(@as(usize, 0), collector.writes); // still fits, nothing left yet
+
+    // Cumulative overflow with no grow allocator: the staged batch goes out through the spill and
+    // the new bytes take the emptied buffer, instead of the write failing at the buffer's edge.
+    sink.append("BODY!");
+    try std.testing.expect(!sink.failed);
+    try std.testing.expectEqualStrings("HEAD", collector.collected());
+    try std.testing.expectEqualStrings("BODY!", stage[sink.off..sink.len]);
+}
+
+test "zix http1: RespSink hands the spill sink a payload larger than the whole buffer" {
+    var collector = SpillCollector{};
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    var stage: [8]u8 = undefined;
+    var sink = RespSink{ .fd = spill_test_fd, .buf = &stage, .spill = &stream };
+
+    // A single write past the buffer can never be staged, so it goes straight through the spill
+    // rather than being refused. This is the shape a static file body arrives in.
+    sink.append("0123456789ABCDEFGHIJ");
+
+    try std.testing.expect(!sink.failed);
+    try std.testing.expectEqual(@as(usize, 0), sink.len);
+    try std.testing.expectEqualStrings("0123456789ABCDEFGHIJ", collector.collected());
+    try std.testing.expect(stream.wrote);
+}
+
+test "zix http1: RespSink spill keeps a response byte-exact and in order across many writes" {
+    var collector = SpillCollector{};
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    var stage: [16]u8 = undefined;
+    var sink = RespSink{ .fd = spill_test_fd, .buf = &stage, .spill = &stream };
+
+    // Mixed small and oversized writes: what the peer sees is the spilled bytes followed by
+    // whatever is still staged, so the two together must rebuild the response exactly.
+    const parts = [_][]const u8{ "HTTP/1.1 200 OK\r\n", "Content-Length: 40\r\n", "\r\n", "0123456789", "abcdefghijklmnopqrstuvwxyz", "!!!!" };
+    var want: [128]u8 = undefined;
+    var want_len: usize = 0;
+    for (parts) |part| {
+        sink.append(part);
+        @memcpy(want[want_len..][0..part.len], part);
+        want_len += part.len;
+    }
+
+    var seen: [128]u8 = undefined;
+    @memcpy(seen[0..collector.len], collector.collected());
+    const staged = stage[sink.off..sink.len];
+    @memcpy(seen[collector.len..][0..staged.len], staged);
+
+    try std.testing.expect(!sink.failed);
+    try std.testing.expectEqualStrings(want[0..want_len], seen[0 .. collector.len + staged.len]);
+}
+
+test "zix http1: RespSink leaves the spill untouched for a response that exactly fills the buffer" {
+    var collector = SpillCollector{};
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    var stage: [8]u8 = undefined;
+    var sink = RespSink{ .fd = spill_test_fd, .buf = &stage, .spill = &stream };
+
+    // Exactly buf.len is the last size that still fits: one byte more is the first that spills.
+    sink.append("01234567");
+
+    try std.testing.expectEqual(@as(usize, 0), collector.writes);
+    try std.testing.expectEqual(@as(usize, 8), sink.len);
+    try std.testing.expect(!stream.wrote);
+}
+
+test "zix http1: RespSink flush with nothing staged never calls the spill sink" {
+    var collector = SpillCollector{};
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    var stage: [8]u8 = undefined;
+    var sink = RespSink{ .fd = spill_test_fd, .buf = &stage, .spill = &stream };
+
+    // An empty flush must not put a record on the wire: a TLS record carrying no bytes still costs
+    // a header, a tag, and a sequence number.
+    sink.flush();
+
+    try std.testing.expectEqual(@as(usize, 0), collector.writes);
+    try std.testing.expect(!sink.failed);
+}
+
+test "zix http1: RespSink spill sends the committed header, not the dead prefix before it" {
+    var collector = SpillCollector{};
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    var stage: [512]u8 = undefined;
+    var sink = RespSink{ .fd = spill_test_fd, .buf = &stage, .spill = &stream };
+
+    // A reserve-committed render right-aligns its header, so the staged region starts at off. The
+    // spill must honor that: sending from 0 would put uninitialized bytes on the wire.
+    const region = sink.reserve(4).?;
+    @memcpy(region, "body");
+    sink.commitSimple(200, "text/plain", 4);
+    sink.flush();
+
+    try std.testing.expect(!sink.failed);
+    try std.testing.expect(std.mem.startsWith(u8, collector.collected(), "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, collector.collected(), "\r\n\r\nbody"));
+}
+
+test "zix http1: RespSink spill failure marks the sink failed" {
+    var collector = SpillCollector{ .refuse = true };
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    var stage: [8]u8 = undefined;
+    var sink = RespSink{ .fd = spill_test_fd, .buf = &stage, .spill = &stream };
+
+    // A dead connection has to surface: writeAllFD turns failed into BrokenPipe, which the serve
+    // loop reads as a peer that is gone rather than a response it may keep rendering.
+    sink.append("0123456789ABCDEFGHIJ");
+
+    try std.testing.expect(sink.failed);
+    try std.testing.expect(stream.failed);
+    try std.testing.expect(!stream.wrote);
+}
+
+test "zix http1: TlsStreamSink reports whether bytes reached the wire" {
+    var collector = SpillCollector{};
+    var stream = TlsStreamSink{ .ctx = &collector, .writeFn = SpillCollector.write };
+
+    try std.testing.expect(!stream.wrote);
+    try std.testing.expect(stream.write("event: ping\n"));
+    try std.testing.expect(stream.wrote);
+
+    // A sink that fails on its first write never wrote, so the caller may still answer a status.
+    var refusing = SpillCollector{ .refuse = true };
+    var dead = TlsStreamSink{ .ctx = &refusing, .writeFn = SpillCollector.write };
+
+    try std.testing.expect(!dead.write("event: ping\n"));
+    try std.testing.expect(!dead.wrote);
+    try std.testing.expect(dead.failed);
+
+    // Once failed the sink refuses without calling through, so a broken connection is written to
+    // exactly once.
+    try std.testing.expect(!dead.write("more"));
+    try std.testing.expectEqual(@as(usize, 1), refusing.writes);
 }
 
 test "zix http1: sendGzipFD reuses the threadlocal compressor across calls, valid gzip, no leak" {
