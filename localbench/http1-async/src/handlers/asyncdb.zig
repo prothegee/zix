@@ -40,5 +40,5 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
         .limit = limit,
     } });
 
-    if (!queued) response.serviceUnavailable(fd);
+    if (!queued) try response.serviceUnavailable(fd);
 }
