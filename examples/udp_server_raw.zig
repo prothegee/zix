@@ -1,6 +1,3 @@
-// Usage:
-// zig run examples/udp_server_raw.zig -- --port 9064
-//
 // A raw-bytes UDP echo server (ADR-049). Unlike zix.Udp.Server(Packet), there is no fixed packet
 // struct: the handler receives the datagram bytes as-is, the peer address, and a Sink to reply
 // through. Replies are coalesced and leave as one sendmmsg per received batch.
@@ -27,6 +24,11 @@ fn handler(datagram: []const u8, peer: *const std.Io.net.IpAddress, sink: *zix.U
 
 const EchoServer = zix.Udp.Raw(handler);
 
+// Usage (build once, then run the binary, every flag optional):
+// zig build example-udp_server_raw
+// ./zig-out/bin/udp_server_raw --ip 127.0.0.1 --port 9064
+//
+// --ip / --port are engine flags (allow_args). A missing flag keeps the default.
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
@@ -35,7 +37,7 @@ pub fn main(process: std.process.Init) !void {
         .allocator = std.heap.smp_allocator,
         .ip = SERVER_IP,
         .port = SERVER_PORT,
-        .allow_args = false, // set true to read --ip / --port from the args passed below
+        .allow_args = true, // engine reads --ip / --port
         .dispatch_model = .ASYNC, // .ASYNC single worker, .EPOLL / .URING per-core
         .recv_batch = 32, // datagrams per recvmmsg
         .send_batch = 32, // replies coalesced per sendmmsg
