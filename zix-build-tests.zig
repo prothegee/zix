@@ -97,6 +97,7 @@ pub fn addSteps(
         "tests/integration/http/ws_client_test.zig",
         "tests/integration/http/sse_client_test.zig",
         "tests/integration/http/tls_dual_test.zig",
+        "tests/integration/http/handler_error_test.zig",
         // http1
         "tests/integration/http1/server_test.zig",
         "tests/integration/http1/router_test.zig",
