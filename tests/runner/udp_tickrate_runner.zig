@@ -15,7 +15,10 @@ const common = @import("common.zig");
 
 const SERVER_PORT: u16 = 9034;
 const RUNNER_BIND_PORT: u16 = 9194;
-const CLIENT_BIND_PORT: u16 = 9197;
+// The bind port the spawned client ends up on. On Windows CLI flags are skipped
+// (std.process.Args.Iterator is POSIX-only in Zig 0.16), so the --bind-port 9197
+// passed below is ignored and the client keeps its default 9035.
+const CLIENT_BIND_PORT: u16 = if (@import("builtin").target.os.tag == .windows) 9035 else 9197;
 const WAIT_MS: i64 = 600;
 // Upper bound on receives while hunting the expected states. The bound only matters
 // when a state never shows up: at tickrate 128 the stream is hundreds of datagrams
