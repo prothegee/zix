@@ -20,7 +20,5 @@ const PIPELINE_RESPONSE: []const u8 =
 pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.Context) !void {
     const fd = req.fd;
 
-    zix.Http1.writeAllFD(fd, PIPELINE_RESPONSE) catch {
-        try zix.Http1.sendSimpleFD(fd, @intFromEnum(zix.Http1.Status.Code.INTERNAL_SERVER_ERROR), zix.Http1.Content.Type.TEXT_PLAIN.asString(), zix.Http1.Status.Code.INTERNAL_SERVER_ERROR.asString());
-    };
+    try zix.Http1.writeAllFD(fd, PIPELINE_RESPONSE);
 }
