@@ -27,7 +27,7 @@ All three are raw-fd engines with the same three dispatch models and (since ADR-
 | Header codec | raw text parse | HPACK | HPACK |
 | Per-request allocator / context | per-request arena via `Context` | per-request stack arena via `Context` | per-request stack arena via `Context` |
 | Streaming responses | chunked / SSE helpers | flow-controlled DATA (`sendResponseStreamFD`, raw escape hatch) | `res.sendMessage` |
-| Handler error policy | auto-500 when nothing sent | auto-500 when nothing sent | passes through silently (`catch {}`, current wire behavior kept) |
+| Handler error policy | auto-500 when nothing answered | auto-500 when nothing answered | closes an open call with `grpc-status 13` (INTERNAL) |
 | `Server.init` shape | `init(handler, config)`, `Router(routes).dispatch` | `init(handler, config)`, `Router(routes).dispatch` | `init(Router(routes), config)` (the one exception: the engine must see `Route.is_server_streaming` before dispatch) |
 | Layer relationship | standalone | standalone | builds on `zix.Http2` |
 
