@@ -51,6 +51,7 @@ pub const Tag = enum(u16) {
     OrigClOrdID = 41,
     PossDupFlag = 43,
     Price = 44,
+    RefSeqNum = 45,
     SecurityID = 48,
     SenderCompID = 49,
     SenderSubID = 50,
@@ -437,20 +438,39 @@ pub const FixResponse = struct {
     target_comp_id: []const u8,
     _fd: std.posix.fd_t,
     _seq_out: *u32,
+    /// Whether a message for the request in flight was handed to the wire. Read by the engine on a
+    /// handler error, so a handler that already answered is not followed by a Reject the peer would
+    /// read as a second, contradictory answer.
+    sent: bool = false,
 
     /// Build and send a FIX message to the peer.
+    ///
+    /// Note:
+    /// - Both failures used to be swallowed here, so a handler could not tell a delivered message
+    ///   from one that never left. They are reported now: `try` hands them to the engine, which
+    ///   answers the peer with a Reject, and a handler that wants to answer differently catches
+    ///   them itself.
     ///
     /// Param:
     /// msg_type - []const u8 (tag-35 value, e.g. "8" for ExecutionReport)
     /// extra - []const BuildField (additional body fields after the standard header)
-    pub fn sendMessage(self: *FixResponse, msg_type: []const u8, extra: []const BuildField) void {
+    ///
+    /// Return:
+    /// - void
+    /// - error.ZixFixMessageTooLarge when the built message does not fit MAX_MSG_SIZE
+    /// - error.BrokenPipe when the peer is gone
+    pub fn sendMessage(self: *FixResponse, msg_type: []const u8, extra: []const BuildField) !void {
         var out_buf: [MAX_MSG_SIZE]u8 = undefined;
-        const n = buildMessage(&out_buf, self.target_comp_id, self.sender_comp_id, self._seq_out.*, msg_type, extra) catch return;
+        const n = buildMessage(&out_buf, self.target_comp_id, self.sender_comp_id, self._seq_out.*, msg_type, extra) catch {
+            return error.ZixFixMessageTooLarge;
+        };
+
         self._seq_out.* += 1;
+        self.sent = true;
 
         // Routes through tl_resp_sink on the ring (coalesced send), direct
         // posix write under the blocking serveConn path (sink null).
-        writeAllFD(self._fd, out_buf[0..n]) catch {};
+        return writeAllFD(self._fd, out_buf[0..n]);
     }
 };
 
@@ -508,9 +528,16 @@ pub const FixContext = struct {
     }
 };
 
-/// Build the trio and invoke a routed handler, mirroring Http1's core.invokeHandler
-/// (ADR-062). Fix's error policy passes handler errors through silently: the wire
-/// carries whatever the handler already sent (or nothing), current behavior kept.
+/// Build the trio and invoke a routed handler, mirroring Http1's core.invokeHandler (ADR-062).
+///
+/// Note:
+/// - A handler that returns an error without having sent anything leaves the peer waiting on a
+///   message that will never come. The engine answers it with a Reject (35=3) carrying the
+///   RefSeqNum of the message that failed, so the peer learns which one was refused.
+/// - A handler that already sent a message is left alone. A Reject after an answer reads to the
+///   peer as a second, contradictory reply to the same message.
+/// - An error the handler swallows itself is the handler's own business. The engine answers an
+///   error the handler RETURNS, nothing else.
 pub inline fn invokeHandler(handler_fn: HandlerFn, fields: []const Field, ctx: *FixContext) void {
     var req = FixRequest{ .fields = fields };
     var res = FixResponse{
@@ -520,8 +547,21 @@ pub inline fn invokeHandler(handler_fn: HandlerFn, fields: []const Field, ctx: *
         ._seq_out = ctx._seq_out,
     };
 
-    handler_fn(&req, &res, ctx) catch {};
+    handler_fn(&req, &res, ctx) catch {
+        if (res.sent) return;
+
+        const ref_seq = getField(fields, .MsgSeqNum) orelse "0";
+        res.sendMessage(MsgType.Reject, &[_]BuildField{
+            .{ .tag = .RefSeqNum, .value = ref_seq },
+            .{ .tag = .Text, .value = HANDLER_ERROR_TEXT },
+        }) catch {};
+    };
 }
+
+/// Reject text (tag 58) the engine answers with when a handler returned an error without sending
+/// anything. Deliberately says nothing about what failed: the counterparty is not the audience for
+/// a server-side fault, and a handler that knows the detail sends its own Reject instead.
+const HANDLER_ERROR_TEXT: []const u8 = "handler error";
 
 // --------------------------------------------------------- //
 
@@ -1206,7 +1246,7 @@ test "zix fix: FixResponse.sendMessage is byte-identical to a direct buildMessag
 
     var seq: u32 = 1;
     var res = FixResponse{ .sender_comp_id = "CLIENT", .target_comp_id = "SERVER", ._fd = fds[1], ._seq_out = &seq };
-    res.sendMessage(MsgType.ExecutionReport, &[_]BuildField{.{ .tag = .ClOrdID, .value = "ORD1" }});
+    try res.sendMessage(MsgType.ExecutionReport, &[_]BuildField{.{ .tag = .ClOrdID, .value = "ORD1" }});
 
     var buf: [MAX_MSG_SIZE]u8 = undefined;
     const n = try std.posix.read(fds[0], &buf);
@@ -1278,7 +1318,7 @@ test "zix fix: invokeHandler builds the trio and reaches the handler" {
             msgtype = req.getField(.MsgType) orelse "";
             _ = ctx;
 
-            res.sendMessage(MsgType.Heartbeat, &.{});
+            try res.sendMessage(MsgType.Heartbeat, &.{});
         }
     };
     captured.msgtype = "";
@@ -1303,12 +1343,16 @@ test "zix fix: invokeHandler builds the trio and reaches the handler" {
     try std.testing.expect(n > 0);
 }
 
-test "zix fix: invokeHandler swallows a handler error silently" {
-    const failing = struct {
-        fn handler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {
-            return error.ZixHandlerBoom;
-        }
-    };
+// --------------------------------------------------------- //
+// Handler-error completion: the peer is answered once, and only when the handler left it waiting
+
+/// Drive one handler over a socketpair and hand back everything the peer end received.
+fn fixWireOf(handler_fn: HandlerFn, buf: []u8) ![]u8 {
+    const linux = std.os.linux;
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[0]);
 
     var seq: u32 = 1;
     var ctx = FixContext{
@@ -1316,11 +1360,113 @@ test "zix fix: invokeHandler swallows a handler error silently" {
         .target_comp_id = "SERVER",
         .io = undefined,
         .allocator = std.testing.allocator,
-        ._fd = TEST_FD,
+        ._fd = fds[1],
         ._seq_out = &seq,
     };
 
-    const fields = [_]Field{.{ .tag = .MsgType, .value = "D" }};
+    const fields = [_]Field{
+        .{ .tag = .MsgType, .value = "D" },
+        .{ .tag = .MsgSeqNum, .value = "77" },
+    };
+    invokeHandler(handler_fn, &fields, &ctx);
 
-    invokeHandler(failing.handler, &fields, &ctx);
+    // Closed before the read so the peer sees EOF rather than blocking on a live socket.
+    _ = linux.close(fds[1]);
+
+    const n = std.posix.read(fds[0], buf) catch 0;
+
+    return buf[0..n];
+}
+
+/// Returns an error having sent nothing. The engine owes the peer a Reject.
+fn fixErrorBeforeAnswerHandler(_: *FixRequest, _: *FixResponse, _: *FixContext) anyerror!void {
+    return error.ZixHandlerBoom;
+}
+
+/// Answers, then returns an error. The engine must not add a Reject on top of the answer.
+fn fixAnswerThenErrorHandler(_: *FixRequest, res: *FixResponse, _: *FixContext) anyerror!void {
+    try res.sendMessage(MsgType.ExecutionReport, &[_]BuildField{.{ .tag = .ClOrdID, .value = "ORD1" }});
+
+    return error.ZixHandlerBoom;
+}
+
+/// Swallows its own failure and returns cleanly. The engine adds nothing, the handler owns it.
+fn fixSwallowedErrorHandler(_: *FixRequest, res: *FixResponse, _: *FixContext) anyerror!void {
+    res.sendMessage(MsgType.ExecutionReport, &[_]BuildField{.{ .tag = .ClOrdID, .value = "ORD1" }}) catch {
+        // The send is against a live socketpair here, so reaching this block at all means the
+        // wire broke and the message count below would be reading a truncated stream.
+        return error.ZixHandlerBoom;
+    };
+}
+
+/// Count complete FIX messages in a raw byte stream, by their tag-8 opening.
+fn countFixMessages(wire: []const u8) usize {
+    return std.mem.count(u8, wire, "8=" ++ VERSION);
+}
+
+test "zix fix: a handler error with nothing sent is answered with a Reject" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [MAX_MSG_SIZE]u8 = undefined;
+    const wire = try fixWireOf(fixErrorBeforeAnswerHandler, &buf);
+
+    std.log.info(".WIRE: {d} bytes, {d} messages", .{ wire.len, countFixMessages(wire) });
+
+    try std.testing.expectEqual(@as(usize, 1), countFixMessages(wire));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "35=" ++ MsgType.Reject) != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "45=77") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "58=handler error") != null);
+}
+
+test "zix fix: a handler that answered before failing gets no Reject on top" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [MAX_MSG_SIZE]u8 = undefined;
+    const wire = try fixWireOf(fixAnswerThenErrorHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), countFixMessages(wire));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "35=" ++ MsgType.ExecutionReport) != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "35=" ++ MsgType.Reject) == null);
+}
+
+test "zix fix: an error the handler swallows itself gets nothing from the engine" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [MAX_MSG_SIZE]u8 = undefined;
+    const wire = try fixWireOf(fixSwallowedErrorHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), countFixMessages(wire));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "35=" ++ MsgType.Reject) == null);
+}
+
+test "zix fix: sendMessage reports a dead peer instead of swallowing it" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    const linux = std.os.linux;
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[1]);
+
+    // The peer end goes first, so the send below has nowhere to land.
+    _ = linux.close(fds[0]);
+
+    var seq: u32 = 1;
+    var res = FixResponse{ .sender_comp_id = "CLIENT", .target_comp_id = "SERVER", ._fd = fds[1], ._seq_out = &seq };
+
+    const result = res.sendMessage(MsgType.Heartbeat, &.{});
+
+    try std.testing.expectError(error.BrokenPipe, result);
 }
