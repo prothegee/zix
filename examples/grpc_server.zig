@@ -42,24 +42,24 @@ const DISPATCH_MODEL: zix.Grpc.DispatchModel = if (builtin.os.tag == .linux) .UR
 fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = ctx;
     const msg = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{msg}) catch "Hello!";
 
-    res.sendMessage("application/grpc+proto", resp);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", resp);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = ctx;
     while (req.recvMessage()) |msg| {
-        res.sendMessage("application/grpc+proto", msg);
+        try res.sendMessage("application/grpc+proto", msg);
     }
 
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 /// Server-streaming StreamSum: read one SumRequest{a, b, count}, then emit `count` reply messages
@@ -68,7 +68,7 @@ fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.C
 fn streamSumHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = ctx;
     const msg = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
@@ -94,10 +94,10 @@ fn streamSumHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.G
     var i: i32 = 0;
     while (i < req_count) : (i += 1) {
         const reply_len = zix.Grpc.encodeInt32(1, sum + i, &reply_buf);
-        res.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
+        try res.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
     }
 
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 const Routes = [_]zix.Grpc.Route{
