@@ -92,7 +92,7 @@ fn handleNewOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fix.C
     , .{ record_id, ts, account, ctx.sender_comp_id, symbol, side_label, qty_str, price_str, cl_ord_id, order_id_str }) catch return;
     appendRecord(rec);
 
-    res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+    try res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
         .{ .tag = .ClOrdID, .value = cl_ord_id },
         .{ .tag = .OrderID, .value = order_id_str },
         .{ .tag = .ExecID, .value = exec_id_str },
@@ -132,7 +132,7 @@ fn handleCancelOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fi
     , .{ record_id, ts, account, ctx.sender_comp_id, symbol, side_label, orig_cl_ord_id, cl_ord_id, order_id_str }) catch return;
     appendRecord(rec);
 
-    res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
+    try res.sendMessage(zix.Fix.MsgType.ExecutionReport, &[_]zix.Fix.BuildField{
         .{ .tag = .ClOrdID, .value = cl_ord_id },
         .{ .tag = .OrigClOrdID, .value = orig_cl_ord_id },
         .{ .tag = .OrderID, .value = order_id_str },
