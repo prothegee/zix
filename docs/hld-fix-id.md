@@ -340,6 +340,37 @@ try r.dispatch(req, res, ctx);
 
 ---
 
+## Kebijakan Error Handler
+
+Handler mengembalikan `anyerror!void`, dan `res.sendMessage` mengembalikan error union, bukan `void`, jadi langkah build maupun tulis soketnya sama-sama bisa dilaporkan.
+
+| Kondisi | Yang dikirim engine |
+| :- | :- |
+| handler mengembalikan error tanpa mengirim apa pun | Reject (`35=3`) dengan `RefSeqNum` (tag 45) dari pesan yang gagal dan `Text` (tag 58) `handler error` |
+| handler mengembalikan error setelah mengirim pesan | tidak ada, pesan yang sudah dikirimnya berlaku sebagai jawaban |
+| handler menangkap sendiri error itu | tidak ada, jawabannya milik handler |
+
+`res.sendMessage` melaporkan dua kegagalan yang dulu tidak bisa dilihat handler:
+
+- `error.ZixFixMessageTooLarge` saat pesan hasil build tidak muat di `MAX_MSG_SIZE`.
+- `error.BrokenPipe` saat counterparty sudah tiada.
+
+`try` adalah cara mencapai Reject di atas. Handler yang ingin menjawab dengan cara lain memakai catch:
+
+```zig
+fn handleNewOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fix.Context) anyerror!void {
+    // try: kegagalan di sini dijawab dengan Reject yang membawa RefSeqNum
+    const filled = try matchOrder(req);
+
+    // catch: jawabannya milik handler, engine tidak menambahkan apa pun
+    res.sendMessage(zix.Fix.MsgType.ExecutionReport, filled.fields) catch {
+        try res.sendMessage(zix.Fix.MsgType.OrderCancelReject, filled.reject_fields);
+    };
+}
+```
+
+Reject tidak pernah dikirim di atas pesan yang sudah dikirim handler: bagi counterparty itu terbaca sebagai dua jawaban yang saling bertentangan untuk satu pesan.
+
 ## Format Frame
 
 FIX menggunakan framing berbasis delimiter (SOH = 0x01), bukan framing length-prefix. Receive loop mengumpulkan byte melalui `takeByte` sampai `findMessageEnd` mendeteksi pesan yang lengkap. Cara ini menghindari deadlock `readSliceShort` yang terjadi ketika buffer besar diteruskan tetapi pesan lebih pendek dari kapasitas buffer (deadlock buffer-lebih-besar-dari-pesan).
