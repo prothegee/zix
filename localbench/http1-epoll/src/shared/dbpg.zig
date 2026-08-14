@@ -875,6 +875,12 @@ fn send404(fd: std.posix.fd_t) void {
 }
 
 /// 200 JSON with the X-Cache state the crud profile's validator reads.
+///
+/// Note:
+/// - Returns void, unlike the handler-side responders in shared/response.zig.
+///   Most callers are database completions running after their handler
+///   returned, so there is no frame left to report into, and `deliver` parks an
+///   unfinished write rather than failing it.
 pub fn sendCrudBody(fd: std.posix.fd_t, body: []const u8, cache_state: []const u8) void {
     var head_buf: [128]u8 = undefined;
     const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Cache: {s}\r\nContent-Length: {d}\r\n\r\n", .{ cache_state, body.len }) catch return;
