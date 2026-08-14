@@ -234,7 +234,51 @@ pub fn addSteps(
 
     // --------------------------------------------------------- //
 
-    // test-runner-all: one binary, all 58 server paths as argv.
+    // test-runner-udp-tickrate: server + client executables.
+    // argv[1]: udp_server_tickrate path. argv[2]: udp_client_tickrate path. argv[3]: label.
+    {
+        const tick_srv_mod = b.createModule(.{
+            .root_source_file = b.path("examples/udp_server_tickrate.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        tick_srv_mod.addImport("zix", zix);
+        const tick_srv_exe = b.addExecutable(.{ .name = "tr-server-udp-tickrate", .root_module = tick_srv_mod });
+
+        const tick_cli_mod = b.createModule(.{
+            .root_source_file = b.path("examples/udp_client_tickrate.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        tick_cli_mod.addImport("zix", zix);
+        const tick_cli_exe = b.addExecutable(.{ .name = "tr-client-udp-tickrate", .root_module = tick_cli_mod });
+
+        const tick_runner_mod = b.createModule(.{
+            .root_source_file = b.path("tests/runner/udp_tickrate_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        tick_runner_mod.addImport("zix", zix);
+        const tick_runner_exe = b.addExecutable(.{ .name = "test-runner-udp-tickrate", .root_module = tick_runner_mod });
+
+        const run_tick = b.addRunArtifact(tick_runner_exe);
+        run_tick.addFileArg(tick_srv_exe.getEmittedBin()); // argv[1]: server path
+        run_tick.addFileArg(tick_cli_exe.getEmittedBin()); // argv[2]: client path
+        run_tick.addArg("udp-tickrate"); // argv[3]: label
+
+        const tick_step = b.step("test-runner-udp-tickrate", "Run test-runner-udp-tickrate");
+        if (foreign_target) {
+            tick_step.dependOn(&tick_srv_exe.step);
+            tick_step.dependOn(&tick_cli_exe.step);
+            tick_step.dependOn(&tick_runner_exe.step);
+        } else {
+            tick_step.dependOn(&run_tick.step);
+        }
+    }
+
+    // --------------------------------------------------------- //
+
+    // test-runner-all: one binary, all 60 server paths as argv.
     // Independent of the individual test-runner-* steps above.
     // argv order matches the path declarations in all_runner.zig.
     {
@@ -321,6 +365,10 @@ pub fn addSteps(
 
             // jzon over http1: appended last, argv order stays stable
             .{ "tr-all-server-http1-jzon", "examples/http1_jzon.zig" },
+
+            // udp tickrate pair (2 paths for one test): appended last, argv order stays stable
+            .{ "tr-all-server-udp-tickrate", "examples/udp_server_tickrate.zig" },
+            .{ "tr-all-server-udp-tickrate-client", "examples/udp_client_tickrate.zig" },
         };
 
         const all_runner_mod = b.createModule(.{
