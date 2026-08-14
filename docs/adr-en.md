@@ -1411,7 +1411,7 @@ Router had a matching split. `Http`, `Http2`, `Grpc`, `Fix` took a route array s
 - Trio on all engines: `Request`, `Response`, `Context`, with `HandlerFn = *const fn(*Request, *Response, *Context) anyerror!void`. Not forced into identical structs, each engine keeps its own shapes for what its protocol actually carries, but the three roles exist everywhere and the idiom matches Http1's (`try res.foo(...)`, a `Response.sent` guard, `Context` holding io, a per-request arena, a deadline, and the fd / session escape hatch).
 - Router: `Server.init(handler, config)` everywhere, the user building the handler via `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...}).dispatch`. Breaking change for `Http`, `Http2`, `Grpc`, `Fix`, mirroring ADR-062's approach on Http1. Every example and the affected test suites moved to the same call-site idiom.
 - Names stay bare per namespace (`zix.Http2.Request`), not engine-prefixed.
-- Handler-error wire policy: `Http1`, `Http2`, `Http3` auto-send one 500 when the handler errors and nothing was sent (the ADR-062 rule, extended). `Grpc` and `Fix` pass errors through silently, current wire behavior kept, invoke site is `handler(&req, &res, &ctx) catch {}`.
+- Handler-error wire policy: `Http1`, `Http2`, `Http3` auto-send one 500 when the handler errors and nothing was sent (the ADR-062 rule, extended). `Grpc` and `Fix` pass errors through silently, current wire behavior kept, invoke site is `handler(&req, &res, &ctx) catch {}`. **Superseded in part by ADR-068**, which gives `Grpc` and `Fix` a wire answer of their own and makes "nothing was sent" count an fd answer as well.
 - Raw expose: the raw `send*FD` surfaces stay public on `Http1`, `Http2`, `Grpc`, `Http3`. `Http` and `Fix` get no raw expose.
 - Fix timeout fold: `server_timeout_ms` stopped being a bare third `dispatch` argument. The effective-timeout calculation moved to where `Context` is built, and `deadline_ns` carries the result. No raw timeout field was added.
 
@@ -1701,6 +1701,34 @@ The last one is the sharpest. A browser reads remote candidates off the BUNDLE-t
 **How a browser was driven without a display:** the page reassigns its own `log` to also `fetch('http://' + location.hostname + ':9099/' + encodeURIComponent(line), {mode: 'no-cors'})` against a small threaded `http.server`, then Firefox runs headless with `media.navigator.streams.fake=true` and `media.navigator.permission.disabled=true`. That is what makes a headless browser report back. For DTLS alone, `openssl s_client -dtls1_2 -connect <ip>:<port> -state` reaches the DTLS server directly, because the demux routes DTLS with no ICE gate in front of it.
 
 **Guardrails held:** `zig fmt` clean, `test-all` 2913 tests over 167 steps on both `zig-0.16` and `zig-0.17` with a fresh cache directory, `test-runner-all` green across all 55 protocols, and all 7 CI legs green on the branch. Every ladder phase exit was met by an independent implementation rather than by inspection: OpenSSL for the DTLS handshake, a hand-built STUN binding request for ICE, and real browsers for the data channel, file transfer, mesh call and forwarding examples. The forwarding exit was one sending Firefox and two watching Firefox, both watchers decoding 640x480 with nothing sent back to the sender.
+
+---
+
+## ADR-068: one answer per failed handler, on every engine
+
+**Status:** Accepted
+
+**Context:** ADR-063 set the handler-error wire policy for the whole family, and two parts of it turned out to be wrong once they were read against the wire rather than against the source.
+
+The first is that "the handler wrote nothing" was decided by `Response.sent`, and only the `Response` builder sets that flag. Every engine that also exposes fd writers (`Http1`, `Http2`) therefore read a handler that answered with `sendSimpleFD` or `sendResponseFD` as never having answered at all. A handler that answered and then returned an error got its answer followed by a second one. On the wire that is `HTTP/1.1 200 OK ... okHTTP/1.1 500 Internal Server Error`, one connection, one request, two responses. On HTTP/2 it is a second HEADERS frame on a stream the peer already saw closed.
+
+The second is that `Grpc` and `Fix` were left answering nothing at all, recorded as "current wire behavior kept". For a request-response protocol that is not a neutral default: a gRPC caller waits on a stream that will never carry a status, and a FIX counterparty waits on a message that will never arrive. Both engines also swallowed their own send failures, so a handler had nothing to `try` and nothing to `catch`, and could not tell a delivered message from one that never left.
+
+**Decision:** One rule, all six engines. A handler that RETURNS an error is answered exactly once.
+
+- Answered nothing: the engine sends the protocol default. `500 Internal Server Error` on `Http`, `Http1`, `Http2` and `Http3`, `grpc-status 13` (INTERNAL) on `Grpc`, Reject (`35=3`) carrying the failed message's RefSeqNum on `Fix`.
+- Already answered: the engine sends nothing more, and a status the handler chose itself is never overwritten.
+- "Answered" counts both answer styles. `Http1` and `Http2` mark it in their fd writers as well as their `Response` builder, so the check is one truthful answer rather than two half-answers.
+- An error the handler catches itself never reaches the engine. `catch {}` is a decision, not an oversight, and the handler owns what the caller gets.
+- `Grpc` and `Fix` sends return an error union rather than `void`, which is what makes that choice available to a handler at all. Breaking change for both.
+
+**Rationale:** A protocol answer is not optional. Every one of these protocols has a caller waiting on exactly one reply, so an engine that answers zero times and an engine that answers twice are the same class of defect, and both were present. Deciding it in one place per engine, off one flag that both answer styles set, is what keeps the two failure modes from trading places later.
+
+The alternative considered for the fd half was leaving fd handlers to fend for themselves and documenting the double answer. Rejected: the fd writers are the documented escape hatch on those engines (ADR-063 keeps them public on purpose), so a defect that only appears when the escape hatch is used is a defect in the escape hatch.
+
+The alternative considered for `Grpc` and `Fix` was keeping them silent and letting handlers answer, which is what ADR-063 chose. Rejected on the same ground: a handler that fails before it can answer is exactly the case where the engine has to.
+
+**Guardrails held:** `zig fmt` clean, `test-all` green on both `zig-0.16` and `zig-0.17`, examples building on both. Every engine has a test for the default on `try`, for the already-answered case, and for the error a handler swallows itself. Every guard was mutation-tested: removing the fd check reproduces `expected 1, found 2` status lines on `Http1` and the same count of HEADERS frames on `Http2`, removing the already-answered guards reproduces the Reject glued onto an answer and the twice-closed gRPC call, and removing the `Fix` fallback entirely reproduces the silent failure.
 
 ---
 
