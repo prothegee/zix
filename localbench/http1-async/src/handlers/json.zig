@@ -135,12 +135,24 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
 
     // The PREFIX route also matches a bare /json with no trailing slash, which
     // would slice out of bounds below.
-    if (head.path.len < PATH.len + 1) return response.badRequest(fd);
+    if (head.path.len < PATH.len + 1) {
+        try response.badRequest(fd);
+        return;
+    }
 
-    const rows = items() orelse return response.serviceUnavailable(fd);
+    const rows = items() orelse {
+        try response.serviceUnavailable(fd);
+        return;
+    };
 
-    const count = std.fmt.parseInt(u8, head.path[PATH.len + 1 ..], 10) catch return response.badRequest(fd);
-    if (count < 1 or count > dataset.ITEM_COUNT) return response.badRequest(fd);
+    const count = std.fmt.parseInt(u8, head.path[PATH.len + 1 ..], 10) catch {
+        try response.badRequest(fd);
+        return;
+    };
+    if (count < 1 or count > dataset.ITEM_COUNT) {
+        try response.badRequest(fd);
+        return;
+    }
 
     const multiplier: u64 = if (zix.Http1.queryParam(head, "m")) |raw|
         std.fmt.parseInt(u64, raw, 10) catch 1
@@ -154,7 +166,10 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
     // puts the head in front. The body is written once, with no copy.
     if (!want_gzip) {
         if (zix.Http1.responseReserve(fd, g_body_max)) |region| {
-            const body_len = renderBody(region, rows, count, multiplier) catch return response.badRequest(fd);
+            const body_len = renderBody(region, rows, count, multiplier) catch {
+                try response.badRequest(fd);
+                return;
+            };
 
             try zix.Http1.responseCommit(fd, 200, "application/json", body_len);
             return;
@@ -162,25 +177,28 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
     }
 
     const body = tl_resp_buf[HEAD_RESERVE..];
-    const body_len = renderBody(body, rows, count, multiplier) catch return response.badRequest(fd);
+    const body_len = renderBody(body, rows, count, multiplier) catch {
+        try response.badRequest(fd);
+        return;
+    };
 
     // Compress the body just rendered, every request.
     if (want_gzip) {
-        zix.Http1.sendGzipFD(fd, 200, "application/json", body[0..body_len]) catch {};
+        try zix.Http1.sendGzipFD(fd, 200, "application/json", body[0..body_len]);
         return;
     }
 
-    // The head is built right behind the body, so both leave as one slice.
+    // The head is built right behind the body, so both leave as one slice. A
+    // head that will not render falls back to the engine's own json sender,
+    // which builds its own.
     var head_buf: [HEAD_RESERVE]u8 = undefined;
     const rendered_head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{body_len}) catch {
-        zix.Http1.sendJsonFD(fd, 200, body[0..body_len]) catch {};
+        try zix.Http1.sendJsonFD(fd, 200, body[0..body_len]);
         return;
     };
 
     const start = HEAD_RESERVE - rendered_head.len;
     @memcpy(tl_resp_buf[start..HEAD_RESERVE], rendered_head);
 
-    zix.Http1.writeAllFD(fd, tl_resp_buf[start .. HEAD_RESERVE + body_len]) catch {
-        try zix.Http1.sendSimpleFD(fd, @intFromEnum(zix.Http1.Status.Code.INTERNAL_SERVER_ERROR), zix.Http1.Content.Type.TEXT_PLAIN.asString(), zix.Http1.Status.Code.INTERNAL_SERVER_ERROR.asString());
-    };
+    try zix.Http1.writeAllFD(fd, tl_resp_buf[start .. HEAD_RESERVE + body_len]);
 }
