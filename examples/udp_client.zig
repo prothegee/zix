@@ -1,13 +1,5 @@
-// Usage:
-// zig run examples/udp_client.zig -- --bind-port 9056 --server-port 9054
-// zig run examples/udp_client.zig -- --bind-port 9057 --server-port 9054
-//
 // Run multiple instances with different --bind-port values to observe broadcast.
 // Each client will receive packets relayed from all other connected clients.
-//
-// The --bind-ip / --bind-port / --server-port flags are only read when allow_args is true.
-// With allow_args false (the default), args are ignored and ports come from CLIENT_BIND_PORT
-// and SERVER_PORT below.
 
 const std = @import("std");
 const zix = @import("zix");
@@ -45,20 +37,20 @@ const ReceiveCapture = struct { client: *MyClient };
 //       Calling receiveFeedback() and send() sequentially would cause each to block the other.
 fn receiveLoop(cap: ReceiveCapture) void {
     while (true) {
-        const fb = cap.client.receiveFeedback() catch |err| {
+        const feedback = cap.client.receiveFeedback() catch |err| {
             std.debug.print("recv error: {}\n", .{err});
             continue;
         };
-        switch (fb) {
+        switch (feedback) {
             .ack => std.debug.print("recv | ACK\n", .{}),
             .nack => std.debug.print("recv | NACK\n", .{}),
-            .packet => |p| {
+            .packet => |relayed| {
                 // The id field is set by the sender: its meaning is the application's responsibility.
                 // With broadcast enabled on the server, this packet originated from another client.
-                const id_end = std.mem.indexOfScalar(u8, &p.id, 0) orelse p.id.len;
+                const id_end = std.mem.indexOfScalar(u8, &relayed.id, 0) orelse relayed.id.len;
                 std.debug.print(
                     "recv | from={s} packet_type={d} register={d} x={d:.4} y={d:.4} z={d:.4}\n",
-                    .{ p.id[0..id_end], p.packet_type, p.register, p.position[0], p.position[1], p.position[2] },
+                    .{ relayed.id[0..id_end], relayed.packet_type, relayed.register, relayed.position[0], relayed.position[1], relayed.position[2] },
                 );
             },
         }
@@ -67,15 +59,21 @@ fn receiveLoop(cap: ReceiveCapture) void {
 
 // --------------------------------------------------------- //
 
+// Usage (build once, then run the binary, every flag optional):
+// zig build example-udp_client
+// ./zig-out/bin/udp_client --bind-port 9056 --server-port 9054
+// ./zig-out/bin/udp_client --bind-port 9057 --server-port 9054
+//
+// --bind-ip / --bind-port / --server-port are engine flags (allow_args). A missing
+// flag keeps the default. Each extra instance needs its own --bind-port.
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
-    // allow_args true: reads --bind-ip / --bind-port / --server-port, else keeps the config values.
     var client = try MyClient.init(.{
         .ip = SERVER_IP,
         .server_port = SERVER_PORT,
         .bind_port = CLIENT_BIND_PORT,
-        .allow_args = true,
+        .allow_args = true, // engine reads --bind-ip / --bind-port / --server-port
         .endianness = .LITTLE, // must match the server, else silent data corruption
     }, io, process.minimal.args);
     defer client.deinit();
@@ -101,7 +99,7 @@ pub fn main(process: std.process.Init) !void {
     _ = std.fmt.bufPrint(&my_id, "client-{d}", .{client.config.bind_port}) catch {};
 
     while (true) {
-        const p = Packet{
+        const state = Packet{
             .id = my_id,
             .packet_type = 1,
             .register = 42,
@@ -113,13 +111,13 @@ pub fn main(process: std.process.Init) !void {
             },
         };
 
-        client.send(p) catch |err| {
+        client.send(state) catch |err| {
             std.debug.print("send error: {}\n", .{err});
         };
 
         std.debug.print(
             "sent | packet_type={d} register={d} x={d:.4} y={d:.4} z={d:.4}\n",
-            .{ p.packet_type, p.register, p.position[0], p.position[1], p.position[2] },
+            .{ state.packet_type, state.register, state.position[0], state.position[1], state.position[2] },
         );
 
         try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@as(i64, @intCast(SEND_INTERVAL_MS))), .awake);
