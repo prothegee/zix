@@ -21,15 +21,15 @@ const KEY: []const u8 = "examples/certs/ecdsa_p256_key.pem";
 fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = ctx;
     const msg = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{msg}) catch "Hello!";
 
-    res.sendMessage("application/grpc+proto", resp);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", resp);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 const Routes = [_]zix.Grpc.Route{
