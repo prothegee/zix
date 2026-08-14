@@ -155,8 +155,12 @@ pub fn runUdpTickrate(io: std.Io, server_path: []const u8, client_path: []const 
 
     var runner_id: [16]u8 = @splat(0);
     _ = std.fmt.bufPrint(&runner_id, "runner", .{}) catch {};
+    // The bind port the spawned client ends up on. On Windows CLI flags are skipped
+    // (std.process.Args.Iterator is POSIX-only in Zig 0.16), so the --bind-port 9197
+    // passed above is ignored and the client keeps its default 9035.
+    const child_bind_port: u16 = if (@import("builtin").target.os.tag == .windows) 9035 else 9197;
     var child_id: [16]u8 = @splat(0);
-    _ = std.fmt.bufPrint(&child_id, "client-{d}", .{@as(u16, 9197)}) catch {};
+    _ = std.fmt.bufPrint(&child_id, "client-{d}", .{child_bind_port}) catch {};
 
     const pkt = Packet{
         .id = runner_id,
