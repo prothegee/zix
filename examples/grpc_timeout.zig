@@ -24,20 +24,20 @@ const zix = @import("zix");
 // In production, check between each expensive step (DB call, codec, etc.).
 fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     const msg = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
     if (ctx.isExpired()) {
-        res.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
+        try res.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
         return;
     }
 
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{msg}) catch "Hello!";
 
-    res.sendMessage("application/grpc+proto", resp);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", resp);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 // Streaming echo handler. Checks ctx.isExpired() before each response message.
@@ -45,14 +45,14 @@ fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Gr
 fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     while (req.recvMessage()) |msg| {
         if (ctx.isExpired()) {
-            res.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
+            try res.finish(zix.Grpc.Status.DEADLINE_EXCEEDED, "");
             return;
         }
 
-        res.sendMessage("application/grpc+proto", msg);
+        try res.sendMessage("application/grpc+proto", msg);
     }
 
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 // Handler that overrides its own deadline at runtime.
@@ -66,12 +66,12 @@ fn extendedHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Gr
     }
 
     const msg = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
-    res.sendMessage("application/grpc+proto", msg);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", msg);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 // --------------------------------------------------------- //

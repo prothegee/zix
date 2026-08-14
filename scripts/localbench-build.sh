@@ -21,14 +21,15 @@
 # Args (flags anywhere, positionals are <entry> [httparena-dir]):
 #   <entry>           Required. An entry directory name, or "all" for every entry.
 #   [httparena-dir]   Optional. HttpArena checkout (default: sibling HttpArena next to this one).
-#   --release         Optional. Build with --release=fast (default: debug, as zix does elsewhere).
+#   --release MODE    Optional. debug, fast, safe, or small (default: debug, as zix does
+#                     elsewhere). debug adds no flag, the rest pass --release=MODE to zig.
 #   --out-dir DIR     Optional. Log directory (default: logs/localbench).
 #   --list            Optional. Print the entries that have sources and exit.
 #
 # Usage:
 #   ./scripts/localbench-build.sh all
 #   ./scripts/localbench-build.sh http1-uring
-#   ./scripts/localbench-build.sh http1-uring /path/HttpArena --release --out-dir logs/localbench
+#   ./scripts/localbench-build.sh http1-uring /path/HttpArena --release fast --out-dir logs/localbench
 
 set -euo pipefail
 
@@ -68,13 +69,16 @@ entries_with_sources() {
     done | sort
 }
 
-RELEASE=0
+RELEASE_MODE="debug"
 DO_LIST=0
 OUT_DIR=""
 POSITIONAL=()
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --release) RELEASE=1; shift ;;
+        --release)
+            [ "$#" -ge 2 ] || fail "--release needs a mode: debug, fast, safe, or small"
+            RELEASE_MODE="$2"; shift 2 ;;
+        --release=*) RELEASE_MODE="${1#*=}"; shift ;;
         --list) DO_LIST=1; shift ;;
         --out-dir)
             [ "$#" -ge 2 ] || fail "--out-dir needs a value"
@@ -86,13 +90,18 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+case "$RELEASE_MODE" in
+    debug|fast|safe|small) ;;
+    *) fail "unknown release mode '$RELEASE_MODE' (debug, fast, safe, small)" ;;
+esac
+
 if [ "$DO_LIST" -eq 1 ]; then
     entries_with_sources
     exit 0
 fi
 
 if [ "${#POSITIONAL[@]}" -eq 0 ]; then
-    echo "usage: $(basename "$0") <entry|all> [httparena-dir] [--release] [--out-dir DIR]" >&2
+    echo "usage: $(basename "$0") <entry|all> [httparena-dir] [--release MODE] [--out-dir DIR]" >&2
     echo "       entries with sources: $(entries_with_sources | tr '\n' ' ')" >&2
     exit 1
 fi
@@ -183,9 +192,11 @@ build_gateway_edge() {
     mkdir -p "$BENCH_DIR/$entry/logs"
 
     local -a args=("$ZIG_BIN" build zixer)
-    [ "$RELEASE" -eq 1 ] && args+=(--release=fast)
+    if [ "$RELEASE_MODE" != "debug" ]; then
+        args+=("--release=$RELEASE_MODE")
+    fi
 
-    info "building the zixer edge for $entry"
+    info "building the zixer edge for $entry ($RELEASE_MODE)"
     (cd "$ROOT_DIR" && "${args[@]}") 2>&1 | tee -a "$LOG_FILE"
 }
 
@@ -197,9 +208,11 @@ build_entry() {
     [ -f "$dir/build.zig" ] || fail "$entry has no build.zig (still an empty scaffold?)"
 
     local -a args=("$ZIG_BIN" build)
-    [ "$RELEASE" -eq 1 ] && args+=(--release=fast)
+    if [ "$RELEASE_MODE" != "debug" ]; then
+        args+=("--release=$RELEASE_MODE")
+    fi
 
-    info "building $entry"
+    info "building $entry ($RELEASE_MODE)"
     (cd "$dir" && "${args[@]}") 2>&1 | tee -a "$LOG_FILE"
 
     case "$entry" in

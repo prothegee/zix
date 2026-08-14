@@ -63,9 +63,7 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
     }
 
     var body_buf: [SUM_BUF]u8 = undefined;
-    const out = std.fmt.bufPrint(&body_buf, "{d}", .{sum}) catch return;
+    const out = try std.fmt.bufPrint(&body_buf, "{d}", .{sum});
 
-    zix.Http1.sendSimpleFD(fd, 200, "text/plain", out) catch {
-        try zix.Http1.sendSimpleFD(fd, @intFromEnum(zix.Http1.Status.Code.INTERNAL_SERVER_ERROR), zix.Http1.Content.Type.TEXT_PLAIN.asString(), zix.Http1.Status.Code.INTERNAL_SERVER_ERROR.asString());
-    };
+    try zix.Http1.sendSimpleFD(fd, 200, "text/plain", out);
 }

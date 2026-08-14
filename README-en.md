@@ -56,6 +56,7 @@
     - [HTTP/1](./README-en.md#http1)
     - [Minimal](./README-en.md#minimal-examples)
     - [Routing](./README-en.md#routing)
+    - [Handler Errors](./README-en.md#handler-errors)
     - [Concurrency Model](./README-en.md#concurrency-model)
     - [Timeouts](./README-en.md#timeouts)
     - [Middleware](./README-en.md#middleware)
@@ -838,6 +839,54 @@ Per-route param capture is capped at 8 params per match..
 **When to use:** use the comptime route table whenever a service has more than one endpoint. Prefer `.EXACT` for fixed paths, `.PARAM` for resource ids, and `.PREFIX` for sub-trees or fallthrough to static serving. Register more-literal patterns before all-param patterns of the same depth so the intended route wins.
 
 <br>
+
+### Handler Errors
+
+Every handler returns `anyerror!void`, and every engine follows one rule: **a handler that returns an error is answered exactly once**. It answered nothing, the engine sends the protocol default. It already answered, the engine stays quiet rather than gluing a second answer onto the first.
+
+| engine | default when the handler answered nothing |
+| :- | :- |
+| `zix.Http` | `500`, `text/plain`, body `Internal Server Error` |
+| `zix.Http1` | `500`, `text/plain`, body `Internal Server Error` |
+| `zix.Http2` | `500`, `text/plain`, body `Internal Server Error` |
+| `zix.Http3` | `500`, empty body |
+| `zix.Grpc` | trailers carrying `grpc-status 13` (INTERNAL) |
+| `zix.Fix` | Reject (`35=3`) carrying the RefSeqNum of the message that failed |
+
+"Answered" counts both ways of answering: the `Response` builder and the fd writers (`zix.Http1.sendSimpleFD`, `zix.Http2.sendResponseFD`, `writeAllFD`). A handler that answers through either one is not answered again.
+
+`try` is how the default is reached. An error the handler catches itself never reaches the engine, so the handler owns what the caller gets:
+
+```zig
+fn handler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
+    // try: the engine completes a failure as the default above
+    const row = try db.fetch(req.param("id").?);
+
+    // catch: the answer is yours, the engine adds nothing to it
+    res.sendJson(row.json) catch {
+        res.setStatus(.SERVICE_UNAVAILABLE);
+        try res.sendText("try again shortly");
+    };
+}
+```
+
+The same choice exists on every engine, in that engine's own vocabulary:
+
+```zig
+// zix.Grpc
+try res.sendMessage(ct, reply);                 // failure closes the call with grpc-status 13
+res.sendMessage(ct, reply) catch {              // yours to close
+    try res.finish(zix.Grpc.Status.UNAVAILABLE, "backend down");
+};
+
+// zix.Fix
+try res.sendMessage(zix.Fix.MsgType.ExecutionReport, fields);  // failure answers with a Reject
+res.sendMessage(zix.Fix.MsgType.ExecutionReport, fields) catch {
+    try res.sendMessage(zix.Fix.MsgType.OrderCancelReject, reason_fields);
+};
+```
+
+One exception: `zix.Http3.Response.send` returns `void`, not an error union. It only stores the body, the engine sends it after the handler returns, so there is nothing to `try` at that line. A handler error still reaches the engine and still becomes a 500.
 
 ### Concurrency Model
 
@@ -2081,6 +2130,8 @@ pub fn main(process: std.process.Init) !void {
 - [examples/udp_server.zig](examples/udp_server.zig) - typed server, full working example with broadcast and configurable ports
 - [examples/udp_client.zig](examples/udp_client.zig) - matching client
 - [examples/udp_server_raw.zig](examples/udp_server_raw.zig) - raw-bytes echo server (recvmmsg / sendmmsg batching, dispatch models)
+- [examples/udp_server_tickrate.zig](examples/udp_server_tickrate.zig) - game-server-like tick loop on the raw path, broadcasts a world snapshot per tick (--tickrate, 64 or 128)
+- [examples/udp_client_tickrate.zig](examples/udp_client_tickrate.zig) - matching client, run several instances with distinct --bind-port values
 
 [`docs/hld-udp-en.md`](docs/hld-udp-en.md) for details.
 

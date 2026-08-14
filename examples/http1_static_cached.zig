@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const zix = @import("zix");
 
 const IP: []const u8 = "127.0.0.1";
-const PORT: u16 = 9077;
+const PORT: u16 = 9039;
 // Pick the model per target at comptime (ADR-065): .URING is the Linux shared-nothing
 // completion loop, .ASYNC the portable model. .EPOLL and .URING are Linux-only, and run()
 // returns error.ZixDispatchModelUnsupported rather than silently serving a different model.
@@ -53,7 +53,7 @@ fn writeFile(io: std.Io, path: []const u8, data: []const u8) void {
 // --------------------------------------------------------- //
 
 // GET /
-// curl usage: curl -X GET "http://localhost:9077/"
+// curl usage: curl -X GET "http://localhost:9039/"
 fn homeHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
     res.setContentType(.TEXT_PLAIN);
 
@@ -66,12 +66,12 @@ fn homeHandler(_: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Co
 // the cache lives.
 //
 // curl usage:
-// curl -i "http://localhost:9077/hello.txt"                              (200, plain)
-// curl -i "http://localhost:9077/hello.txt" -H "Range: bytes=0-6"        (206, from the same open file)
-// curl -i "http://localhost:9077/app.js" -H "Accept-Encoding: br"        (200, Content-Encoding: br)
-// curl -i "http://localhost:9077/app.js" -H "Accept-Encoding: gzip"      (200, Content-Encoding: gzip)
-// curl -i "http://localhost:9077/app.js"                                 (200, no Content-Encoding)
-// curl -i "http://localhost:9077/absent.txt"                             (404)
+// curl -i "http://localhost:9039/hello.txt"                              (200, plain)
+// curl -i "http://localhost:9039/hello.txt" -H "Range: bytes=0-6"        (206, from the same open file)
+// curl -i "http://localhost:9039/app.js" -H "Accept-Encoding: br"        (200, Content-Encoding: br)
+// curl -i "http://localhost:9039/app.js" -H "Accept-Encoding: gzip"      (200, Content-Encoding: gzip)
+// curl -i "http://localhost:9039/app.js"                                 (200, no Content-Encoding)
+// curl -i "http://localhost:9039/absent.txt"                             (404)
 const Router = zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 });

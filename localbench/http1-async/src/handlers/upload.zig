@@ -43,9 +43,7 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
     const received: u64 = req.bodyReceived();
 
     var body_buf: [COUNT_BUF]u8 = undefined;
-    const out = std.fmt.bufPrint(&body_buf, "{d}", .{received}) catch return;
+    const out = try std.fmt.bufPrint(&body_buf, "{d}", .{received});
 
-    zix.Http1.sendSimpleFD(fd, @intFromEnum(zix.Http1.Status.Code.OK), zix.Http1.Content.Type.TEXT_PLAIN.asString(), out) catch {
-        try zix.Http1.sendSimpleFD(fd, @intFromEnum(zix.Http1.Status.Code.INTERNAL_SERVER_ERROR), zix.Http1.Content.Type.TEXT_PLAIN.asString(), zix.Http1.Status.Code.INTERNAL_SERVER_ERROR.asString());
-    };
+    try zix.Http1.sendSimpleFD(fd, @intFromEnum(zix.Http1.Status.Code.OK), zix.Http1.Content.Type.TEXT_PLAIN.asString(), out);
 }

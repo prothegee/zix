@@ -103,6 +103,101 @@ pub fn runUdpRaw(io: std.Io, server_path: []const u8) !void {
     if (!std.mem.eql(u8, msg.data, "raw-echo-ping")) return error.EchoMismatch;
 }
 
+// Tickrate pair check (udp_server_tickrate + udp_client_tickrate, UDP port 9034).
+// Spawns the server with explicit flags (--ip / --port engine-parsed, --tickrate
+// example-parsed) and the client executable as a second process, joins as another
+// client, and asserts on the snapshot stream: the own state returns more than once
+// (per-tick re-broadcast), the client executable's state arrives (multi client),
+// and wrong-size datagrams are dropped without entering the stream.
+pub fn runUdpTickrate(io: std.Io, server_path: []const u8, client_path: []const u8) !void {
+    var server_child = try std.process.spawn(io, .{
+        .argv = &.{ server_path, "--ip", "127.0.0.1", "--port", "9034", "--tickrate", "128" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer server_child.kill(io);
+
+    // UDP has no connection handshake, give the server time to bind.
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(600), .awake);
+
+    // Wrong-size datagrams from a stranger socket: short and oversized, both must be
+    // dropped. If either entered the registry, the snapshot stream below would carry
+    // an odd-size datagram and receiveFeedback would fail with ZixUnexpectedPacketSize.
+    {
+        const stranger_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        const stranger = try stranger_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+        defer stranger.close(io);
+
+        const server_addr = try std.Io.net.IpAddress.parse("127.0.0.1", 9034);
+        var oversized: [100]u8 = @splat('x');
+        try stranger.send(io, &server_addr, "bad");
+        try stranger.send(io, &server_addr, &oversized);
+    }
+
+    var client_child = try std.process.spawn(io, .{
+        .argv = &.{ client_path, "--bind-port", "9197", "--server-ip", "127.0.0.1", "--server-port", "9034" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer client_child.kill(io);
+
+    var runner_client = try MyUdpClient.init(.{
+        .ip = "127.0.0.1",
+        .server_port = 9034,
+        .bind_ip = "127.0.0.1",
+        .bind_port = 9194,
+        .endianness = .LITTLE,
+        .recv_timeout_ms = 3000,
+    }, io, .{});
+    defer runner_client.deinit();
+
+    var runner_id: [16]u8 = @splat(0);
+    _ = std.fmt.bufPrint(&runner_id, "runner", .{}) catch {};
+    // The bind port the spawned client ends up on. On Windows CLI flags are skipped
+    // (std.process.Args.Iterator is POSIX-only in Zig 0.16), so the --bind-port 9197
+    // passed above is ignored and the client keeps its default 9035.
+    const child_bind_port: u16 = if (@import("builtin").target.os.tag == .windows) 9035 else 9197;
+    var child_id: [16]u8 = @splat(0);
+    _ = std.fmt.bufPrint(&child_id, "client-{d}", .{child_bind_port}) catch {};
+
+    const pkt = Packet{
+        .id = runner_id,
+        .packet_type = 1,
+        .register = 42,
+        .position = .{ 0.25, 0.5, 0.75 },
+    };
+    try runner_client.send(pkt);
+
+    // Hunt the snapshot stream. Any ack, nack, unknown sender, or odd-size datagram
+    // (receiveFeedback error) fails the check. The bound only matters when a state
+    // never shows up: a healthy run exits in well under a second.
+    var own_seen: usize = 0;
+    var child_seen: usize = 0;
+    var receives: usize = 0;
+    while (receives < 2000 and (own_seen < 2 or child_seen < 1)) : (receives += 1) {
+        const feedback = try runner_client.receiveFeedback();
+        switch (feedback) {
+            .packet => |received| {
+                if (std.mem.eql(u8, &received.id, &runner_id)) {
+                    if (received.register != pkt.register) return error.StateCorrupted;
+                    own_seen += 1;
+                } else if (std.mem.eql(u8, &received.id, &child_id)) {
+                    child_seen += 1;
+                } else {
+                    return error.UnexpectedClientId;
+                }
+            },
+            .ack => return error.UnexpectedAck,
+            .nack => return error.UnexpectedNack,
+        }
+    }
+
+    if (own_seen < 2) return error.SnapshotRebroadcastMissing;
+    if (child_seen < 1) return error.ClientStateMissing;
+}
+
 pub fn runUds(io: std.Io, server_path: []const u8) !void {
     std.Io.Dir.cwd().deleteFile(io, "tmp/zix.sock") catch {};
 

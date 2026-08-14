@@ -239,7 +239,7 @@ try server.run();
 
 - The handler is a comptime argument: it is baked into the server type, there is no dynamic registration after init.
 - The trio is built per request by `core.invokeHandler`: `Request` is a zero-copy view (all slices point into the receive buffer, valid only for the call), `Response` delegates to the fd write helpers byte-identically, `Context` carries io, the per-request arena, and the fd escape hatch.
-- A handler error is completed by the engine as one 500, only when nothing was sent yet (`Response.sent`). The house idiom is `try res.foo(...)`, never `return res.foo(...)`.
+- A handler error is completed by the engine as one 500, only when nothing was answered yet. Both answer styles count: the `Response` builder (`Response.sent`) and the fd writers (`respondedFD`), so a handler that answered with `sendSimpleFD` is not answered a second time. The house idiom is `try res.foo(...)`, never `return res.foo(...)`. An error the handler swallows itself is the handler's own business, the engine adds nothing to it.
 - The handler may be a bare function, a `Router(routes).dispatch`, or a comptime wrapper chain (the middleware idiom, see `examples/http1_middleware.zig`).
 
 ### ParsedHead

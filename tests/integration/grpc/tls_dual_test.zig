@@ -21,8 +21,8 @@ fn helloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.
     _ = req;
     _ = ctx;
 
-    res.sendMessage("application/grpc+proto", "dual");
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", "dual");
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 const Routes = [_]zix.Grpc.Route{

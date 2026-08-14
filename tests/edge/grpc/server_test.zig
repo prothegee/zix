@@ -16,13 +16,13 @@ const ServerCtx = struct {
 fn nopHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = req;
     _ = ctx;
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 fn errorOnlyHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = req;
     _ = ctx;
-    res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad");
+    try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad");
 }
 
 fn runServer(ctx: *ServerCtx, io: std.Io) void {

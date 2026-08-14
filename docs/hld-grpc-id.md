@@ -48,7 +48,7 @@ graph LR
 | `zix.Grpc.Request` | view `{ path, headers }`, `header(name)`, `recvMessage()`. Wrapper delegasi tipis atas `Context`, tanpa logika internal yang dipindah |
 | `zix.Grpc.Response` | `sendHeaders()`, `sendMessage()`, `finish()`, `serveCached()`, `sendCached()`. Wrapper delegasi tipis atas `Context`, wire byte-identical |
 | `zix.Grpc.Context` | `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
-| `zix.Grpc.HandlerFn` | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063). Error diteruskan diam-diam (`catch {}`), perilaku wire saat ini dipertahankan |
+| `zix.Grpc.HandlerFn` | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063). Error yang dikembalikan menutup call yang masih terbuka dengan `grpc-status 13` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | tipe comptime: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok). `Server.init` menerima TIPE Router itu sendiri, bukan `.dispatch`, karena engine membaca `Route.is_server_streaming` dari `route_slice` sebelum dispatch |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
@@ -128,7 +128,7 @@ Aturan penting:
 - `res.finish()` harus selalu dipanggil sebelum return. Fungsi ini mengirim trailer grpc-status.
 - `res.sendMessage()` mengirim HEADERS respons awal pada panggilan pertama. Jangan memanggil `res.sendHeaders()` secara manual jika menggunakan `sendMessage`.
 - `req.recvMessage()` mengembalikan `null` saat semua pesan client telah dikonsumsi (client mengirim END_STREAM).
-- Error handler diteruskan diam-diam (`catch {}` di titik pemanggilan), mencocokkan perilaku wire dari sebelum ADR-063: tidak ada padanan auto-500 untuk gRPC.
+- Error handler menutup call. Saat handler mengembalikan error tanpa memanggil `res.finish`, engine menutup stream dengan `grpc-status 13` (INTERNAL) dan grpc-message `handler error`, jadi caller tidak pernah ditinggal menunggu stream yang tidak akan membawa status. Call yang sudah ditutup handler mempertahankan status pilihan handler itu. Error yang ditangkap sendiri oleh handler tidak pernah sampai ke engine, jadi handler itu yang menentukan apa yang diterima caller: `try res.sendMessage(...)` memakai default, `res.sendMessage(...) catch { ... }` menjawab dengan caranya sendiri.
 - Route unary (`is_server_streaming = false`, default) di-dispatch secara sinkron pada connection thread. Route server-streaming (`is_server_streaming = true`) masing-masing berjalan pada thread tersendiri yang berbagi write mutex tingkat koneksi.
 - Server mem-buffer semua DATA client sebelum melakukan dispatch handler.
 - `parsePath` dan dispatch berbasis path di dalam handler tidak diperlukan: tabel route menangani hal tersebut.

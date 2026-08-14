@@ -217,6 +217,7 @@ pub fn init(process: std.process.Init) void {
 
     g_config = postgrez.parseUrl(url_text) catch return;
     g_config.tls = .OFF;
+    g_config.dispatch_model = .URING;
     g_io = process.io;
     g_enabled = true;
 

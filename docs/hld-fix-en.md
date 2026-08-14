@@ -340,6 +340,37 @@ try r.dispatch(req, res, ctx);
 
 ---
 
+## Handler Error Policy
+
+The handler returns `anyerror!void`, and `res.sendMessage` returns an error union rather than `void`, so both the build step and the socket write are reportable.
+
+| Condition | What the engine sends |
+| :- | :- |
+| the handler returned an error having sent nothing | Reject (`35=3`) with `RefSeqNum` (tag 45) of the failed message and `Text` (tag 58) `handler error` |
+| the handler returned an error after sending a message | nothing, the message it sent stands as the answer |
+| the handler caught the error itself | nothing, the handler owns the answer |
+
+`res.sendMessage` reports two failures a handler could not see before:
+
+- `error.ZixFixMessageTooLarge` when the built message does not fit `MAX_MSG_SIZE`.
+- `error.BrokenPipe` when the counterparty is gone.
+
+`try` is how the Reject above is reached. A handler that wants to answer differently catches instead:
+
+```zig
+fn handleNewOrder(req: *zix.Fix.Request, res: *zix.Fix.Response, ctx: *zix.Fix.Context) anyerror!void {
+    // try: a failure here is answered with a Reject carrying the RefSeqNum
+    const filled = try matchOrder(req);
+
+    // catch: the answer is the handler's, the engine adds nothing
+    res.sendMessage(zix.Fix.MsgType.ExecutionReport, filled.fields) catch {
+        try res.sendMessage(zix.Fix.MsgType.OrderCancelReject, filled.reject_fields);
+    };
+}
+```
+
+A Reject is never sent on top of a message the handler already sent: to a counterparty that reads as two contradictory answers to one message.
+
 ## Framing
 
 FIX uses delimiter-based framing (SOH = 0x01), not length-prefix framing. The receive loop accumulates bytes via `takeByte` until `findMessageEnd` detects a complete message. This avoids the `readSliceShort` deadlock that occurs when a large buffer is passed but the message is shorter than the buffer capacity (the buffer-larger-than-message deadlock).

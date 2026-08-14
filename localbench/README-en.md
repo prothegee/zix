@@ -14,7 +14,7 @@ Run every command from the repository root.
 The three steps in order, for a run whose numbers you intend to quote:
 
 ```bash
-./scripts/localbench-build.sh all --release
+./scripts/localbench-build.sh all --release fast
 ./scripts/localbench-validate.sh http1-uring
 sudo -E ./scripts/localbench-isolate.sh http1-uring --probe --sample-mem --summarize
 ```
@@ -48,14 +48,15 @@ profiles and nothing else.
 ## Step 1: build
 
 ```bash
-./scripts/localbench-build.sh --list           # entries that have sources
-./scripts/localbench-build.sh http1-uring      # one entry
-./scripts/localbench-build.sh all --release    # every entry, release build
+./scripts/localbench-build.sh --list                # entries that have sources
+./scripts/localbench-build.sh http1-uring           # one entry
+./scripts/localbench-build.sh all --release fast    # every entry, release build
 ./scripts/localbench-build.sh http1-uring /path/HttpArena
 ```
 
-Debug is the default, matching how zix builds elsewhere. Use `--release` for any run whose
-numbers you intend to quote.
+Debug is the default, matching how zix builds elsewhere. `--release` takes the mode:
+`debug`, `fast`, `safe`, or `small`. Use `--release fast` for any run whose numbers you
+intend to quote.
 
 This step also generates `certs/server.crt` and `certs/server.key` if they are absent, and
 points `data/` at the fixtures. Neither is committed.

@@ -389,6 +389,14 @@ const checks = [_]Check{
             return checks_jzon.runJzon(io, paths[0], 9033);
         }
     }.call },
+
+    // udp tickrate pair (server + client executables, arity 2). Appended last so the
+    // argv order of the existing checks stays stable.
+    .{ .label = "udp-tickrate", .example = "udp_server_tickrate", .arity = 2, .run = &struct {
+        fn call(io: std.Io, paths: []const []const u8) anyerror!void {
+            return checks_misc.runUdpTickrate(io, paths[0], paths[1]);
+        }
+    }.call },
 };
 
 /// Total argv server paths the checks table consumes (sum of every row's arity).

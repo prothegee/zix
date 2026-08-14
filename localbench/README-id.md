@@ -15,7 +15,7 @@ Jalankan semua perintah dari root repository.
 Tiga langkah berurutan, untuk run yang angkanya akan Anda kutip:
 
 ```bash
-./scripts/localbench-build.sh all --release
+./scripts/localbench-build.sh all --release fast
 ./scripts/localbench-validate.sh http1-uring
 sudo -E ./scripts/localbench-isolate.sh http1-uring --probe --sample-mem --summarize
 ```
@@ -49,14 +49,15 @@ profile static.
 ## Langkah 1: build
 
 ```bash
-./scripts/localbench-build.sh --list           # entry yang punya source
-./scripts/localbench-build.sh http1-uring      # satu entry
-./scripts/localbench-build.sh all --release    # semua entry, build release
+./scripts/localbench-build.sh --list                # entry yang punya source
+./scripts/localbench-build.sh http1-uring           # satu entry
+./scripts/localbench-build.sh all --release fast    # semua entry, build release
 ./scripts/localbench-build.sh http1-uring /path/HttpArena
 ```
 
-Debug adalah default, sama seperti cara zix dibangun di tempat lain. Pakai `--release`
-untuk run yang angkanya akan Anda kutip.
+Debug adalah default, sama seperti cara zix dibangun di tempat lain. `--release` menerima
+mode: `debug`, `fast`, `safe`, atau `small`. Pakai `--release fast` untuk run yang angkanya
+akan Anda kutip.
 
 Langkah ini juga membuat `certs/server.crt` dan `certs/server.key` bila belum ada, lalu
 mengarahkan `data/` ke fixtures. Keduanya tidak di-commit.

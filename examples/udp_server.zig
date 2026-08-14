@@ -1,9 +1,3 @@
-// Usage:
-// zig run examples/udp_server.zig -- --port 9054
-//
-// The --port flag is only read when allow_args is true. With allow_args false (the default),
-// args are ignored and the port is taken from SERVER_PORT below.
-//
 // To observe broadcast: run two or more udp_client instances simultaneously.
 // Each client will receive packets relayed from all other connected clients.
 
@@ -40,6 +34,11 @@ const SERVER_PORT: u16 = 9054;
 
 const MyServer = zix.Udp.Server(Packet);
 
+// Usage (build once, then run the binary, every flag optional):
+// zig build example-udp_server
+// ./zig-out/bin/udp_server --ip 127.0.0.1 --port 9054
+//
+// --ip / --port are engine flags (allow_args). A missing flag keeps the default.
 pub fn main(process: std.process.Init) !void {
     const io = process.io;
 
@@ -60,13 +59,12 @@ pub fn main(process: std.process.Init) !void {
     // });
     // defer logger.deinit();
 
-    // allow_args false: args ignored, port taken from SERVER_PORT. Set true to read --ip / --port.
     var server = try MyServer.init(.{
         .io = io,
         .allocator = std.heap.smp_allocator,
         .ip = SERVER_IP,
         .port = SERVER_PORT,
-        .allow_args = false,
+        .allow_args = true, // engine reads --ip / --port
         .dispatch_model = .ASYNC, // typed Server is single async loop, only .ASYNC applies
         .endianness = .LITTLE, // must match all clients
         .broadcast = true, // relay each received packet to all connected clients

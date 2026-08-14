@@ -345,6 +345,30 @@ cpu_list_count() {
     echo "$total"
 }
 
+# raise_fd_limit
+# Lift this shell's soft file-descriptor limit to its hard one, so every load
+# generator started below inherits it. Only the soft limit moves, which needs
+# no privilege. A driver opens one descriptor per connection and none of them
+# raises this itself: at the common default of 1024 a 4096c tier is not the
+# run it claims to be. wrk keeps going with the ~1013 connections it got and
+# reports the rest under "Socket errors: connect", h2load aborts outright on
+# its first failed connect. The old and the new value are printed, so a box
+# that caps the hard limit at 1024 as well is visible in the log rather than
+# looking like a tier the server could not serve.
+raise_fd_limit() {
+    local before hard
+    before="$(ulimit -n)"
+    hard="$(ulimit -Hn)"
+
+    if [ "$hard" = "unlimited" ]; then
+        hard=1048576
+    fi
+
+    ulimit -S -n "$hard" 2>/dev/null || true
+
+    info "fd limit: $(ulimit -n) (was $before)"
+}
+
 # The CPU split and the host tuning come from the same file the arena isolate
 # runner uses, so both prepare this box identically and their numbers are read
 # against each other rather than against two different machines. The metric
@@ -358,6 +382,10 @@ source "$SELF_DIR/lib/bench-metrics.sh"
 source "$SELF_DIR/lib/bench-sample.sh"
 source "$SELF_DIR/lib/bench-memlog.sh"
 source "$SELF_DIR/lib/bench-summary.sh"
+
+# Before any tier runs, so no pass is bounded by a limit instead of by the
+# server it is meant to measure.
+raise_fd_limit
 
 # SMT-aware halves: server on one, load generator on the other, siblings kept
 # together. The naive core/2 split this replaced put SMT siblings of the same

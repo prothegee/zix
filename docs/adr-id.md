@@ -1411,7 +1411,7 @@ Router punya belahan yang sama. `Http`, `Http2`, `Grpc`, `Fix` menerima array ro
 - Trio di semua engine: `Request`, `Response`, `Context`, dengan `HandlerFn = *const fn(*Request, *Response, *Context) anyerror!void`. Tidak dipaksa menjadi struct identik, tiap engine mempertahankan bentuknya sendiri sesuai apa yang benar-benar dibawa protokolnya, tapi ketiga peran itu ada di mana-mana dan idiomnya menyamai Http1 (`try res.foo(...)`, guard `Response.sent`, `Context` membawa io, arena per-request, deadline, dan escape hatch fd / sesi).
 - Router: `Server.init(handler, config)` di mana-mana, pemanggil membangun handler via `zix.ENGINE.Router(&[_]zix.ENGINE.Route{...}).dispatch`. Breaking change untuk `Http`, `Http2`, `Grpc`, `Fix`, mencerminkan pendekatan ADR-062 pada Http1. Semua example dan test suite yang terdampak pindah ke idiom call-site yang sama.
 - Nama tetap bare per namespace (`zix.Http2.Request`), tidak diberi prefix nama engine.
-- Kebijakan wire saat handler error: `Http1`, `Http2`, `Http3` otomatis mengirim satu 500 saat handler error dan belum ada yang terkirim (aturan ADR-062, diperluas). `Grpc` dan `Fix` meneruskan error secara diam-diam, perilaku wire saat ini dipertahankan, titik pemanggilan adalah `handler(&req, &res, &ctx) catch {}`.
+- Kebijakan wire saat handler error: `Http1`, `Http2`, `Http3` otomatis mengirim satu 500 saat handler error dan belum ada yang terkirim (aturan ADR-062, diperluas). `Grpc` dan `Fix` meneruskan error secara diam-diam, perilaku wire saat ini dipertahankan, titik pemanggilan adalah `handler(&req, &res, &ctx) catch {}`. **Sebagian digantikan oleh ADR-068**, yang memberi `Grpc` dan `Fix` jawaban wire-nya sendiri dan membuat "belum ada yang terkirim" ikut menghitung jawaban lewat fd.
 - Raw expose: permukaan `send*FD` mentah tetap publik di `Http1`, `Http2`, `Grpc`, `Http3`. `Http` dan `Fix` tidak mendapat raw expose.
 - Fold timeout Fix: `server_timeout_ms` berhenti menjadi argumen ketiga `dispatch` yang bare. Perhitungan effective-timeout pindah ke tempat `Context` dibangun, dan `deadline_ns` membawa hasilnya. Tidak ada raw timeout field yang ditambahkan.
 
@@ -1701,6 +1701,34 @@ Yang terakhir paling tajam. Browser membaca candidate remote dari section bertan
 **Cara menggerakkan browser tanpa layar:** halaman menugaskan ulang `log` miliknya agar juga memanggil `fetch('http://' + location.hostname + ':9099/' + encodeURIComponent(line), {mode: 'no-cors'})` ke sebuah `http.server` berulir kecil, lalu Firefox dijalankan headless dengan `media.navigator.streams.fake=true` dan `media.navigator.permission.disabled=true`. Itulah yang membuat browser headless bisa melapor balik. Untuk DTLS saja, `openssl s_client -dtls1_2 -connect <ip>:<port> -state` menjangkau DTLS server secara langsung, karena demux merutekan DTLS tanpa gerbang ICE di depannya.
 
 **Guardrail yang terpenuhi:** `zig fmt` bersih, `test-all` 2913 test di 167 step pada `zig-0.16` maupun `zig-0.17` dengan cache directory baru, `test-runner-all` hijau di seluruh 55 protokol, dan ketujuh leg CI hijau di branch tersebut. Setiap exit fase ladder dipenuhi implementasi independen, bukan lewat inspeksi: OpenSSL untuk handshake DTLS, binding request STUN buatan tangan untuk ICE, dan browser sungguhan untuk example data channel, file transfer, panggilan mesh dan forwarding. Exit forwarding adalah satu Firefox pengirim dan dua Firefox penonton, kedua penonton mendekode 640x480 tanpa apa pun terkirim balik ke pengirim.
+
+---
+
+## ADR-068: satu jawaban per handler yang gagal, di setiap engine
+
+**Status:** Accepted
+
+**Context:** ADR-063 menetapkan kebijakan wire untuk error handler bagi seluruh keluarga engine, dan dua bagiannya ternyata keliru begitu dibaca terhadap wire, bukan terhadap source.
+
+Yang pertama, "handler belum menulis apa pun" diputuskan oleh `Response.sent`, dan hanya builder `Response` yang menyetel flag itu. Setiap engine yang juga mengekspos fd writer (`Http1`, `Http2`) karenanya membaca handler yang menjawab lewat `sendSimpleFD` atau `sendResponseFD` seolah belum pernah menjawab sama sekali. Handler yang menjawab lalu mengembalikan error mendapat jawabannya diikuti jawaban kedua. Di wire bentuknya `HTTP/1.1 200 OK ... okHTTP/1.1 500 Internal Server Error`, satu koneksi, satu request, dua response. Di HTTP/2 bentuknya HEADERS frame kedua di stream yang sudah dilihat peer tertutup.
+
+Yang kedua, `Grpc` dan `Fix` dibiarkan tidak menjawab apa pun, dicatat sebagai "current wire behavior kept". Untuk protokol request-response itu bukan default yang netral: caller gRPC menunggu stream yang tidak akan pernah membawa status, dan counterparty FIX menunggu pesan yang tidak akan pernah datang. Kedua engine itu juga menelan kegagalan send-nya sendiri, jadi handler tidak punya apa pun untuk di-`try` maupun di-`catch`, dan tidak bisa membedakan pesan yang terkirim dari yang tidak pernah berangkat.
+
+**Decision:** Satu aturan, enam engine. Handler yang MENGEMBALIKAN error dijawab tepat satu kali.
+
+- Belum menjawab apa pun: engine mengirim default protokolnya. `500 Internal Server Error` di `Http`, `Http1`, `Http2` dan `Http3`, `grpc-status 13` (INTERNAL) di `Grpc`, Reject (`35=3`) yang membawa RefSeqNum pesan yang gagal di `Fix`.
+- Sudah menjawab: engine tidak mengirim apa pun lagi, dan status pilihan handler sendiri tidak pernah ditimpa.
+- "Sudah menjawab" menghitung dua gaya jawaban. `Http1` dan `Http2` menandainya di fd writer sekaligus di builder `Response`-nya, jadi pemeriksaannya satu jawaban yang benar, bukan dua setengah jawaban.
+- Error yang ditangkap sendiri oleh handler tidak pernah sampai ke engine. `catch {}` adalah keputusan, bukan kelalaian, dan handler yang menentukan apa yang diterima caller.
+- Send di `Grpc` dan `Fix` mengembalikan error union, bukan `void`, dan justru itu yang membuat pilihan tadi tersedia bagi handler. Breaking change untuk keduanya.
+
+**Rationale:** Jawaban protokol bukan opsional. Setiap protokol di sini punya caller yang menunggu tepat satu balasan, jadi engine yang menjawab nol kali dan engine yang menjawab dua kali adalah kelas cacat yang sama, dan keduanya ada. Memutuskannya di satu tempat per engine, berdasar satu flag yang disetel oleh kedua gaya jawaban, itulah yang menjaga dua mode kegagalan tadi tidak saling bertukar tempat di kemudian hari.
+
+Alternatif yang dipertimbangkan untuk sisi fd adalah membiarkan handler fd mengurus dirinya sendiri dan mendokumentasikan jawaban gandanya. Ditolak: fd writer adalah escape hatch yang didokumentasikan di engine itu (ADR-063 sengaja mempertahankannya publik), jadi cacat yang hanya muncul saat escape hatch dipakai adalah cacat pada escape hatch itu.
+
+Alternatif yang dipertimbangkan untuk `Grpc` dan `Fix` adalah membiarkannya diam dan menyerahkan jawabannya ke handler, yang persis pilihan ADR-063. Ditolak dengan alasan yang sama: handler yang gagal sebelum sempat menjawab justru kasus di mana engine yang harus menjawab.
+
+**Guardrails held:** `zig fmt` bersih, `test-all` hijau di `zig-0.16` maupun `zig-0.17`, examples terbangun di keduanya. Setiap engine punya test untuk default pada `try`, untuk kasus sudah-menjawab, dan untuk error yang ditelan sendiri oleh handler. Setiap guard di-mutation-test: menghapus pemeriksaan fd memunculkan kembali `expected 1, found 2` baris status di `Http1` dan jumlah HEADERS frame yang sama di `Http2`, menghapus guard sudah-menjawab memunculkan kembali Reject yang menempel di sebuah jawaban dan call gRPC yang ditutup dua kali, dan menghapus fallback `Fix` seluruhnya memunculkan kembali kegagalan senyapnya.
 
 ---
 

@@ -21,27 +21,27 @@ const ServerCtx = struct {
 fn echoHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = ctx;
     while (req.recvMessage()) |msg| {
-        res.sendMessage("application/grpc+proto", msg);
+        try res.sendMessage("application/grpc+proto", msg);
     }
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 fn greetHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = ctx;
     const name = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "no message");
         return;
     };
     var out: [256]u8 = undefined;
     const resp = std.fmt.bufPrint(&out, "Hello, {s}!", .{name}) catch "Hello!";
-    res.sendMessage("application/grpc+proto", resp);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", resp);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 fn errorOnlyHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = req;
     _ = ctx;
-    res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad req");
+    try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "bad req");
 }
 
 fn collectHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
@@ -50,8 +50,8 @@ fn collectHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grp
     while (req.recvMessage()) |_| count += 1;
     var out: [32]u8 = undefined;
     const reply = std.fmt.bufPrint(&out, "got {d}", .{count}) catch "got ?";
-    res.sendMessage("application/grpc+proto", reply);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", reply);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 // --------------------------------------------------------- //
@@ -635,4 +635,135 @@ test "zix integration: GrpcClient, recv_timeout_ms fires when server sends no da
     var buf: [256]u8 = undefined;
     const result = client.recvResponse(sid, &buf);
     if (result) |_| return error.ExpectedRecvTimeout else |_| {}
+}
+
+// --------------------------------------------------------- //
+// Handler-error completion: the caller is answered, whether the handler answered or not
+
+/// Fails having answered nothing. The engine owes the caller a status.
+fn errorBeforeAnswerHandler(_: *zix.Grpc.Request, _: *zix.Grpc.Response, _: *zix.Grpc.Context) !void {
+    return error.ZixProbeFailure;
+}
+
+/// Closes the call itself, then fails. The status the handler chose must survive.
+fn answerThenErrorHandler(_: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Context) !void {
+    try res.finish(zix.Grpc.Status.NOT_FOUND, "gone");
+
+    return error.ZixProbeFailure;
+}
+
+/// Swallows its own failure and returns cleanly, closing the call on its own terms.
+fn swallowedErrorHandler(_: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Context) !void {
+    res.sendMessage("application/grpc+proto", "sent anyway") catch {
+        // The send is against a live connection here, so reaching this block means the wire broke
+        // and the status asserted below would be reading a call that failed for another reason.
+        try res.finish(zix.Grpc.Status.INTERNAL, "probe wire broke");
+
+        return;
+    };
+
+    try res.finish(zix.Grpc.Status.OK, "");
+}
+
+test "zix integration: gRPC handler error with nothing answered closes the call as INTERNAL" {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
+
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
+        .{ .path = "/svc.Svc/Boom", .handler = errorBeforeAnswerHandler },
+    }));
+    var ctx: ServerCtx = undefined;
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT + 9, Runner.run);
+
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 9 }, io);
+    defer client.deinit();
+
+    const stream_id = try client.openStream("/svc.Svc/Boom", "application/grpc+proto");
+    try client.sendMessage(stream_id, "trigger");
+    try client.endStream(stream_id);
+
+    var buf: [64]u8 = undefined;
+    const resp = try client.recvResponse(stream_id, &buf);
+
+    std.log.info(".STATUS: {any}", .{resp});
+
+    try std.testing.expect(resp == .status);
+    try std.testing.expectEqual(zix.Grpc.Status.INTERNAL, resp.status);
+
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    server_thread.join();
+    ctx.listener.deinit(io);
+    try std.testing.expect(ctx.err == null);
+}
+
+test "zix integration: gRPC handler that closed the call keeps its own status after failing" {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
+
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
+        .{ .path = "/svc.Svc/Boom", .handler = answerThenErrorHandler },
+    }));
+    var ctx: ServerCtx = undefined;
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT + 10, Runner.run);
+
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 10 }, io);
+    defer client.deinit();
+
+    const stream_id = try client.openStream("/svc.Svc/Boom", "application/grpc+proto");
+    try client.sendMessage(stream_id, "trigger");
+    try client.endStream(stream_id);
+
+    var buf: [64]u8 = undefined;
+    const resp = try client.recvResponse(stream_id, &buf);
+    try std.testing.expect(resp == .status);
+    try std.testing.expectEqual(zix.Grpc.Status.NOT_FOUND, resp.status);
+
+    zix.Http2.sendGoawayFD(client.fd, stream_id, zix.Http2.ERR_NO_ERROR) catch {};
+    server_thread.join();
+    ctx.listener.deinit(io);
+    try std.testing.expect(ctx.err == null);
+}
+
+test "zix integration: gRPC error the handler swallows itself gets nothing from the engine" {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        std.log.info("this test drives a POSIX descriptor, Windows handles are opaque, test skipped", .{});
+        return;
+    }
+
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{ .stack_size = 512 * 1024 });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Runner = makeRunner(zix.Grpc.Router(&[_]zix.Grpc.Route{
+        .{ .path = "/svc.Svc/Quiet", .handler = swallowedErrorHandler },
+    }));
+    var ctx: ServerCtx = undefined;
+    const server_thread = try spawnServer(&ctx, io, TEST_PORT + 11, Runner.run);
+
+    var client = try zix.Grpc.Client.connect(.{ .ip = "127.0.0.1", .port = TEST_PORT + 11 }, io);
+    defer client.deinit();
+
+    var buf: [64]u8 = undefined;
+    const resp = try client.unary("/svc.Svc/Quiet", "application/grpc+proto", "trigger", &buf);
+    try std.testing.expectEqualStrings("sent anyway", resp);
+
+    zix.Http2.sendGoawayFD(client.fd, 1, zix.Http2.ERR_NO_ERROR) catch {};
+    server_thread.join();
+    ctx.listener.deinit(io);
+    try std.testing.expect(ctx.err == null);
 }

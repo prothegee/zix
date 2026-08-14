@@ -136,7 +136,40 @@ pub fn writeFrameHeaderFD(fd: std.posix.fd_t, fh: FrameHeader) !void {
 pub threadlocal var write_hook: ?*const fn (ctx: *anyopaque, bytes: []const u8) void = null;
 pub threadlocal var write_hook_ctx: ?*anyopaque = null;
 
+/// Whether frames for the stream in flight have already left for the peer.
+///
+/// Note:
+/// - The `Response` builder tracks the same thing in `Response.sent`, but a handler may answer
+///   through the fd writers instead, which hold no `Response`. Without this the engine reads such
+///   a handler as never having answered and completes it a second time, putting a second HEADERS
+///   frame on a stream the peer already saw closed.
+/// - Cleared by core.invokeHandler, so an engine frame written before dispatch (SETTINGS, the
+///   WINDOW_UPDATE that paced the request body) is never mistaken for the handler answering.
+pub threadlocal var tl_responded: bool = false;
+
+/// Record that frames for the stream in flight left for the peer.
+///
+/// Note:
+/// - Called by the fd writers, never by a handler. `Response.send*` reaches them through
+///   `sendResponseEncodedFD`, so both answer styles set it.
+///
+/// Return:
+/// - void
+pub fn markResponded() void {
+    tl_responded = true;
+}
+
+/// Whether the stream in flight has been answered through the fd writers.
+///
+/// Return:
+/// - bool
+pub fn respondedFD() bool {
+    return tl_responded;
+}
+
 pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    markResponded();
+
     if (write_hook) |hook| {
         hook(write_hook_ctx.?, data);
         return;
@@ -217,6 +250,8 @@ fn writevAllRawFD(fd: std.posix.fd_t, head: []const u8, payload: []const u8) err
 /// Write a frame header + payload pair. A hook receives the two slices as two appends (its sink
 /// coalesces them itself), the cleartext path sends both in one vectored syscall.
 fn writePairFD(fd: std.posix.fd_t, head: []const u8, payload: []const u8) error{BrokenPipe}!void {
+    markResponded();
+
     if (write_hook) |hook| {
         hook(write_hook_ctx.?, head);
         hook(write_hook_ctx.?, payload);

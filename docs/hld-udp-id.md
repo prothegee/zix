@@ -377,7 +377,7 @@ Lihat `examples/udp_server_raw.zig` dan ADR-049 (`docs/adr-id.md`).
 | Batching `sendmmsg` di loop broadcast typed | Sudah ada di jalur raw (`zix.Udp.Raw`). Broadcast typed masih melakukan N `send()` berurutan |
 | GRO / ECN raw | Ditunda (ADR-049 fase 2): butuh jalur cmsg yang divalidasi hardware (GRO coalescing butuh splitter). GSO (UDP_SEGMENT) sudah diimplementasikan (`gso_enabled`) |
 | Struct feedback yang dapat dikonfigurasi | Saat ini echo mengirimkan kembali packet mentah. Produksi dapat menggunakan tagged result |
-| Preset tick-rate server (64 / 128 Hz) | Belum dibuat. Server game-loop perlu tick cadence tetap untuk loop kirimnya |
+| Preset tick-rate server (64 / 128 Hz) | Belum dibuat di engine. `examples/udp_server_tickrate.zig` menunjukkan polanya: tick loop tetap di atas `Raw(handler)` yang broadcast world snapshot per tick |
 
 ---
 

@@ -113,6 +113,14 @@ pub const Router = router_mod.Router;
 /// error is completed as one auto-500, but only when the handler wrote nothing, so a partially sent
 /// response is not corrupted.
 ///
+/// Note:
+/// - "Wrote nothing" covers both answer styles: the Response builder (`Response.sent`) and the fd
+///   writers (`frame.respondedFD`). A handler that answers with `sendResponseFD` or `writeAllFD`
+///   holds no Response, so checking `Response.sent` alone read it as unanswered and put a second
+///   HEADERS frame on a stream the peer already saw closed.
+/// - An error the handler swallows itself is the handler's own business. The engine completes an
+///   error the handler RETURNS, nothing else.
+///
 /// Param:
 /// handler - HandlerFn (built via Router(&[_]Route{...}).dispatch)
 /// req - Request (already built by the caller: method, path, query, headers, body)
@@ -129,8 +137,12 @@ pub inline fn invokeHandler(handler: HandlerFn, req: *Request, fd: std.posix.fd_
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     var ctx = Context{ .fd = fd, .sid = sid, .deadline_ns = deadline_ns, .io = io, .allocator = fba.allocator(), .public_dir = opts.public_dir, .max_frame_size = peer_max_frame_size };
 
+    // Cleared here rather than per connection: SETTINGS and the WINDOW_UPDATE frames that paced
+    // this request's body were written before dispatch, and neither is the handler answering.
+    frame.tl_responded = false;
+
     handler(req, &res, &ctx) catch {
-        if (!res.sent) {
+        if (!res.sent and !frame.respondedFD()) {
             frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error") catch {};
             res.status = 500;
         }
@@ -847,6 +859,147 @@ fn accessProbeHandler(req: *Request, res: *Response, ctx: *Context) !void {
 
     res.setStatus(202);
     try res.send("queued!");
+}
+
+// --------------------------------------------------------- //
+// Handler-error completion: one answer per stream, whichever way the handler answered
+
+/// Answers through the fd writers, then returns an error. The engine must leave the stream alone.
+fn fdThenErrorHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = res;
+
+    try frame.sendResponseFD(ctx.fd, ctx.sid, 200, "text/plain", "fd answered");
+
+    return error.ZixProbeFailure;
+}
+
+/// Answers through the Response builder, then returns an error. The engine must leave it alone.
+fn responseThenErrorHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = ctx;
+
+    try res.send("res answered");
+
+    return error.ZixProbeFailure;
+}
+
+/// Returns an error having answered nothing. The engine owes this stream a 500.
+fn errorBeforeAnswerHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = res;
+    _ = ctx;
+
+    return error.ZixProbeFailure;
+}
+
+/// Swallows its own failure and returns cleanly. The engine adds nothing, the handler owns it.
+fn swallowedErrorHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = ctx;
+
+    res.send("swallowed") catch {
+        // The send is against a live socketpair here, so reaching this block at all means the
+        // wire broke and the frame count below would be reading a truncated stream.
+        return error.ZixProbeFailure;
+    };
+}
+
+/// Drive one handler over a socketpair and hand back every byte the peer end received.
+fn h2WireOf(handler: HandlerFn, buf: []u8) ![]u8 {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+
+    var req = Request{
+        .method = "GET",
+        .path = "/probe",
+        .query = "",
+        .headers = &[_]hpack.Header{},
+        .body = "",
+    };
+
+    invokeHandler(handler, &req, fds[1], 1, std.testing.io, null, .{}, frame.DEFAULT_MAX_FRAME_SIZE);
+
+    // Closed before the read so the peer sees EOF rather than blocking on a live socket.
+    _ = std.os.linux.close(fds[1]);
+
+    const n = std.posix.read(fds[0], buf) catch 0;
+
+    return buf[0..n];
+}
+
+/// Count HEADERS frames addressed to stream 1 in a raw h2 byte stream. Two of them for one
+/// request is the defect this guards: a response the peer already read, then a second one.
+fn countHeadersFrames(wire: []const u8) usize {
+    var pos: usize = 0;
+    var found: usize = 0;
+
+    while (pos + frame.FRAME_HEADER_LEN <= wire.len) {
+        const length = (@as(usize, wire[pos]) << 16) | (@as(usize, wire[pos + 1]) << 8) | wire[pos + 2];
+        if (wire[pos + 3] == frame.FRAME_TYPE_HEADERS) found += 1;
+
+        pos += frame.FRAME_HEADER_LEN + length;
+    }
+
+    return found;
+}
+
+test "zix http2: an fd answer followed by a handler error is not answered a second time" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [4096]u8 = undefined;
+    const wire = try h2WireOf(fdThenErrorHandler, &buf);
+
+    std.log.info(".WIRE: {d} bytes, {d} HEADERS frames", .{ wire.len, countHeadersFrames(wire) });
+
+    try std.testing.expectEqual(@as(usize, 1), countHeadersFrames(wire));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "fd answered") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Internal Server Error") == null);
+}
+
+test "zix http2: a Response answer followed by a handler error is not answered a second time" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [4096]u8 = undefined;
+    const wire = try h2WireOf(responseThenErrorHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), countHeadersFrames(wire));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "res answered") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Internal Server Error") == null);
+}
+
+test "zix http2: a handler error with nothing answered is completed as one 500" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [4096]u8 = undefined;
+    const wire = try h2WireOf(errorBeforeAnswerHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), countHeadersFrames(wire));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Internal Server Error") != null);
+}
+
+test "zix http2: an error the handler swallows itself gets nothing from the engine" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [4096]u8 = undefined;
+    const wire = try h2WireOf(swallowedErrorHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), countHeadersFrames(wire));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "swallowed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Internal Server Error") == null);
 }
 
 /// Read back the one log file written under a temp root, for the access tests above.
