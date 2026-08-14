@@ -64,6 +64,14 @@ pub const HandlerFn = *const fn (
 /// 500, but only when the handler wrote nothing, so a handler that already sent a
 /// response and then failed does not corrupt the stream.
 ///
+/// Note:
+/// - "Wrote nothing" covers both answer styles: the Response builder (`Response.sent`) and the fd
+///   writers (`respondedFD`). A handler that answers with `sendSimpleFD` or `writeAllFD` holds no
+///   Response, so checking `Response.sent` alone read it as unanswered and appended a second
+///   status line to a response the peer was already reading.
+/// - An error the handler swallows itself is the handler's own business. The engine completes an
+///   error the handler RETURNS, nothing else.
+///
 /// Param:
 /// handler_fn - HandlerFn (the route or top-level handler)
 /// head - *const ParsedHead (borrows the receive buffer)
@@ -92,8 +100,12 @@ pub inline fn invokeHandler(
         tl_body_info = null;
     }
 
+    // Cleared here rather than at connection setup: the 100-continue an Expect request gets is
+    // written by the engine before this point, and that interim write is not the handler answering.
+    tl_responded = false;
+
     handler_fn(&req, &res, &ctx) catch {
-        if (!res.sent) {
+        if (!res.sent and !respondedFD()) {
             sendSimpleFD(fd, 500, "text/plain", "Internal Server Error") catch {};
             res.status = .INTERNAL_SERVER_ERROR;
         }
@@ -167,6 +179,37 @@ pub const BodyInfo = struct {
 /// one branch. Consumed and cleared by invokeHandler, so it never leaks into a
 /// later request on the same thread.
 pub threadlocal var tl_body_info: ?BodyInfo = null;
+
+/// Whether response bytes for the request in flight have already reached the wire.
+///
+/// Note:
+/// - The `Response` builder tracks the same thing in `Response.sent`, but a handler may answer
+///   through the fd writers instead, which hold no `Response`. Without this the engine reads such
+///   a handler as never having answered and completes it a second time, gluing a status line onto
+///   a response the peer is already reading.
+/// - A threadlocal because the fd writers take an fd and nothing else. Cleared by invokeHandler,
+///   so it never carries into the next request on this thread.
+pub threadlocal var tl_responded: bool = false;
+
+/// Record that response bytes for the request in flight reached the wire.
+///
+/// Note:
+/// - Called by the fd writers, never by a handler. `Response.send*` reaches it through the same
+///   writers, so both answer styles set it.
+///
+/// Return:
+/// - void
+pub fn markResponded() void {
+    tl_responded = true;
+}
+
+/// Whether the request in flight has been answered through the fd writers.
+///
+/// Return:
+/// - bool
+pub fn respondedFD() bool {
+    return tl_responded;
+}
 
 /// Options for serveConn.
 pub const ServeOpts = struct {
@@ -1026,7 +1069,14 @@ pub fn writeNonBlockFD(fd: std.posix.fd_t, data: []const u8) ?usize {
 /// Write response bytes to fd, the canonical write behind every send helper.
 /// Routes through the coalescing sink (tl_resp_sink) or the TLS stream sink
 /// when one is installed for this worker, otherwise writes directly.
+///
+/// Note:
+/// - Marks the request in flight as answered, so a handler that writes here directly is not
+///   completed a second time by invokeHandler. Every send helper lands here, the SSE prologue
+///   and the WebSocket 101 upgrade included.
 pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) error{BrokenPipe}!void {
+    markResponded();
+
     if (tl_resp_sink) |sink| {
         if (sink.fd == fd) {
             // Zero-copy cache replay: a whole-response hit written while the
@@ -1124,6 +1174,8 @@ pub fn responseReserve(fd: std.posix.fd_t, max_body: usize) ?[]u8 {
 /// - void
 /// - error.BrokenPipe when the sink already failed for this connection
 pub fn responseCommit(fd: std.posix.fd_t, status: u16, content_type: []const u8, body_len: usize) error{BrokenPipe}!void {
+    markResponded();
+
     const sink = tl_resp_sink orelse return error.BrokenPipe;
     if (sink.fd != fd) return error.BrokenPipe;
 
@@ -1133,12 +1185,18 @@ pub fn responseCommit(fd: std.posix.fd_t, status: u16, content_type: []const u8,
 }
 
 /// Response with Content-Length body.
+///
+/// Note:
+/// - Marks the request in flight as answered. The sink fast path below builds straight into the
+///   batch and never reaches writeAllFD, so the mark cannot be left to that writer alone.
 pub fn sendSimpleFD(
     fd: std.posix.fd_t,
     status: u16,
     content_type: []const u8,
     body: []const u8,
 ) !void {
+    markResponded();
+
     if (tl_resp_sink) |sink| {
         if (sink.fd == fd) {
             // A pending zero-copy replay must land in the batch before this
@@ -3986,6 +4044,139 @@ fn accessProbeHandler(req: *Request, res: *Response, ctx: *Context) !void {
 
     res.setStatus(.CREATED);
     try res.send("hello");
+}
+
+// --------------------------------------------------------- //
+// Handler-error completion: one answer per request, whichever way the handler answered
+
+/// Answers through the fd writers, then returns an error. The engine must leave it alone.
+fn fdThenErrorHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = res;
+    _ = ctx;
+
+    try sendSimpleFD(req.fd, 200, "text/plain", "fd answered");
+
+    return error.ZixProbeFailure;
+}
+
+/// Answers through the Response builder, then returns an error. The engine must leave it alone.
+fn responseThenErrorHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = ctx;
+
+    try res.send("res answered");
+
+    return error.ZixProbeFailure;
+}
+
+/// Returns an error having answered nothing. The engine owes this request a 500.
+fn errorBeforeAnswerHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = res;
+    _ = ctx;
+
+    return error.ZixProbeFailure;
+}
+
+/// Swallows its own failure and returns cleanly. The engine adds nothing, the handler owns it.
+fn swallowedErrorHandler(req: *Request, res: *Response, ctx: *Context) !void {
+    _ = req;
+    _ = ctx;
+
+    res.send("swallowed") catch {
+        // The send is against a live socketpair here, so reaching this block at all means the
+        // wire broke and the assertion below would be reading a truncated response.
+        return error.ZixProbeFailure;
+    };
+}
+
+/// Drive one handler over a socketpair and hand back everything the peer end received.
+fn wireOf(handler_fn: HandlerFn, buf: []u8) ![]u8 {
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
+    defer _ = std.os.linux.close(fds[0]);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const head = parser.ParsedHead{
+        .method = "GET",
+        .path = "/probe",
+        .query = "",
+        .raw_headers = "",
+        .version_minor = 1,
+        .keep_alive = true,
+        .content_length = 0,
+        .chunked_request = false,
+        .expect_continue = false,
+    };
+
+    invokeHandler(handler_fn, &head, "", fds[1], std.testing.io, arena.allocator());
+
+    // Closed before the read so the peer sees EOF rather than blocking on a live socket.
+    _ = std.os.linux.close(fds[1]);
+
+    const n = std.posix.read(fds[0], buf) catch 0;
+
+    return buf[0..n];
+}
+
+test "zix http1: an fd answer followed by a handler error is not answered a second time" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [1024]u8 = undefined;
+    const wire = try wireOf(fdThenErrorHandler, &buf);
+
+    std.log.info(".WIRE: {d} bytes, {d} status lines", .{ wire.len, std.mem.count(u8, wire, "HTTP/1.1 ") });
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wire, "HTTP/1.1 "));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "HTTP/1.1 200 OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "500") == null);
+}
+
+test "zix http1: a Response answer followed by a handler error is not answered a second time" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [1024]u8 = undefined;
+    const wire = try wireOf(responseThenErrorHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wire, "HTTP/1.1 "));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "res answered") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "500") == null);
+}
+
+test "zix http1: a handler error with nothing answered is completed as one 500" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [1024]u8 = undefined;
+    const wire = try wireOf(errorBeforeAnswerHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wire, "HTTP/1.1 "));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "HTTP/1.1 500 Internal Server Error") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "Internal Server Error") != null);
+}
+
+test "zix http1: an error the handler swallows itself gets nothing from the engine" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    var buf: [1024]u8 = undefined;
+    const wire = try wireOf(swallowedErrorHandler, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wire, "HTTP/1.1 "));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "swallowed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "500") == null);
 }
 
 /// Read back the one log file written under a temp root, for the access tests above.
