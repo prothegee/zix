@@ -132,7 +132,7 @@ Order is fixed: static_cache -> Http1 -> Http -> Http2 -> Http3, then docs. A ch
 - `static.zig` reworked: cache path first, the original open-stat-copy path kept as the fallback
 - Range served from the cached file with a freshly rendered 206 header
 - zero copy is refused when `fd` is negative or a TLS stream sink is installed. Both TLS paths (`tls_serve` and `tls_mux`) run the handler with `fd = -1` and capture the plaintext into a buffer they encrypt afterwards, so a direct `sendfile` there would have put plaintext on the wire
-- `example-http1_static_cached` (port 9077), 5 integration tests, 3 behaviour tests
+- `example-http1_static_cached` (port 9039), 5 integration tests, 3 behaviour tests
 - verified by hand with curl against the running example: 200 with `Vary`, 206 from the cached file, `.br` and `.gz` sibling selection, identity fallback, and 404 for an absent file
 - OPEN: no RPS or memory regression on the isolate bench, which is the user's to run
 
