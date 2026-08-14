@@ -56,6 +56,7 @@
     - [HTTP/1](./README-id.md#http1)
     - [Minimal](./README-id.md#contoh-minimal)
     - [Routing](./README-id.md#routing)
+    - [Error Handler](./README-id.md#error-handler)
     - [Model Konkurensi](./README-id.md#model-konkurensi)
     - [Timeout](./README-id.md#timeout)
     - [Middleware](./README-id.md#middleware)
@@ -838,6 +839,54 @@ Penangkapan param per-rute dibatasi 8 param per pencocokan..
 **Kapan digunakan:** pakai route table comptime setiap kali sebuah layanan punya lebih dari satu endpoint. Pilih `.EXACT` untuk path tetap, `.PARAM` untuk id resource, dan `.PREFIX` untuk sub-tree atau fallthrough ke static serving. Daftarkan pola yang lebih literal sebelum pola all-param dengan kedalaman sama agar rute yang dimaksud menang.
 
 <br>
+
+### Error Handler
+
+Setiap handler mengembalikan `anyerror!void`, dan setiap engine memakai satu aturan: **handler yang mengembalikan error dijawab tepat satu kali**. Kalau belum menjawab apa pun, engine mengirim default protokolnya. Kalau sudah menjawab, engine diam, bukan menempelkan jawaban kedua di atas yang pertama.
+
+| engine | default saat handler belum menjawab apa pun |
+| :- | :- |
+| `zix.Http` | `500`, `text/plain`, body `Internal Server Error` |
+| `zix.Http1` | `500`, `text/plain`, body `Internal Server Error` |
+| `zix.Http2` | `500`, `text/plain`, body `Internal Server Error` |
+| `zix.Http3` | `500`, body kosong |
+| `zix.Grpc` | trailer berisi `grpc-status 13` (INTERNAL) |
+| `zix.Fix` | Reject (`35=3`) yang membawa RefSeqNum dari pesan yang gagal |
+
+"Sudah menjawab" menghitung dua cara menjawab: builder `Response` dan fd writer (`zix.Http1.sendSimpleFD`, `zix.Http2.sendResponseFD`, `writeAllFD`). Handler yang menjawab lewat salah satunya tidak dijawab lagi.
+
+`try` adalah cara mencapai default itu. Error yang ditangkap sendiri oleh handler tidak pernah sampai ke engine, jadi handler yang menentukan apa yang diterima caller:
+
+```zig
+fn handler(req: *zix.Http.Request, res: *zix.Http.Response, ctx: *zix.Http.Context) anyerror!void {
+    // try: kegagalan dilengkapi engine dengan default di atas
+    const row = try db.fetch(req.param("id").?);
+
+    // catch: jawabannya milik kamu, engine tidak menambahkan apa pun
+    res.sendJson(row.json) catch {
+        res.setStatus(.SERVICE_UNAVAILABLE);
+        try res.sendText("coba lagi sebentar");
+    };
+}
+```
+
+Pilihan yang sama ada di setiap engine, dengan kosakata engine itu sendiri:
+
+```zig
+// zix.Grpc
+try res.sendMessage(ct, reply);                 // kegagalan menutup call dengan grpc-status 13
+res.sendMessage(ct, reply) catch {              // penutupannya milik kamu
+    try res.finish(zix.Grpc.Status.UNAVAILABLE, "backend down");
+};
+
+// zix.Fix
+try res.sendMessage(zix.Fix.MsgType.ExecutionReport, fields);  // kegagalan dijawab dengan Reject
+res.sendMessage(zix.Fix.MsgType.ExecutionReport, fields) catch {
+    try res.sendMessage(zix.Fix.MsgType.OrderCancelReject, reason_fields);
+};
+```
+
+Satu pengecualian: `zix.Http3.Response.send` mengembalikan `void`, bukan error union. Ia hanya menyimpan body, engine yang mengirimnya setelah handler selesai, jadi tidak ada yang bisa di-`try` di baris itu. Error handler tetap sampai ke engine dan tetap menjadi 500.
 
 ### Model Konkurensi
 
@@ -2090,6 +2139,8 @@ pub fn main(process: std.process.Init) !void {
 - [examples/udp_server.zig](examples/udp_server.zig) - server typed, contoh lengkap dengan broadcast dan port yang dapat dikonfigurasi
 - [examples/udp_client.zig](examples/udp_client.zig) - client yang cocok
 - [examples/udp_server_raw.zig](examples/udp_server_raw.zig) - server echo raw-bytes (batching recvmmsg / sendmmsg, dispatch model)
+- [examples/udp_server_tickrate.zig](examples/udp_server_tickrate.zig) - tick loop ala game server di path raw, broadcast world snapshot per tick (--tickrate, 64 atau 128)
+- [examples/udp_client_tickrate.zig](examples/udp_client_tickrate.zig) - client yang cocok, jalankan beberapa instance dengan --bind-port berbeda
 
 [`docs/hld-udp-id.md`](docs/hld-udp-id.md) untuk detail.
 
