@@ -67,9 +67,12 @@ fn parseBody(body: []const u8) ?CrudBody {
 
 // --------------------------------------------------------- //
 
-fn crudList(head: *const zix.Http1.ParsedHead, fd: std.posix.fd_t) void {
+fn crudList(head: *const zix.Http1.ParsedHead, fd: std.posix.fd_t) !void {
     const category = zix.Http1.queryParam(head, "category") orelse "";
-    if (category.len > dbpg.CATEGORY_MAX) return response.badRequest(fd);
+    if (category.len > dbpg.CATEGORY_MAX) {
+        try response.badRequest(fd);
+        return;
+    }
 
     const page = @max(queryInt(head, "page", 1), 1);
     const limit = std.math.clamp(queryInt(head, "limit", LIST_LIMIT_DEFAULT), 1, LIST_LIMIT_MAX);
@@ -83,30 +86,45 @@ fn crudList(head: *const zix.Http1.ParsedHead, fd: std.posix.fd_t) void {
     } };
     @memcpy(job.CRUD_LIST.category_buf[0..category.len], category);
 
-    if (!dbpg.submitJob(head, job)) response.serviceUnavailable(fd);
+    if (!dbpg.submitJob(head, job)) try response.serviceUnavailable(fd);
 }
 
-fn crudCreate(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) void {
-    const item = parseBody(body) orelse return response.badRequest(fd);
-    if (item.id < 1 or item.name.len == 0) return response.badRequest(fd);
-    if (item.name.len > dbpg.NAME_MAX or item.category.len > dbpg.CATEGORY_MAX) return response.badRequest(fd);
+fn crudCreate(head: *const zix.Http1.ParsedHead, body: []const u8, fd: std.posix.fd_t) !void {
+    const item = parseBody(body) orelse {
+        try response.badRequest(fd);
+        return;
+    };
+    if (item.id < 1 or item.name.len == 0) {
+        try response.badRequest(fd);
+        return;
+    }
+    if (item.name.len > dbpg.NAME_MAX or item.category.len > dbpg.CATEGORY_MAX) {
+        try response.badRequest(fd);
+        return;
+    }
 
     var job: dbpg.Job = .{ .CRUD_CREATE = writeJob(fd, item.id, item) };
     @memcpy(job.CRUD_CREATE.name_buf[0..item.name.len], item.name);
     @memcpy(job.CRUD_CREATE.category_buf[0..item.category.len], item.category);
 
-    if (!dbpg.submitJob(head, job)) response.serviceUnavailable(fd);
+    if (!dbpg.submitJob(head, job)) try response.serviceUnavailable(fd);
 }
 
-fn crudUpdate(head: *const zix.Http1.ParsedHead, id: i64, body: []const u8, fd: std.posix.fd_t) void {
-    const item = parseBody(body) orelse return response.badRequest(fd);
-    if (item.name.len > dbpg.NAME_MAX or item.category.len > dbpg.CATEGORY_MAX) return response.badRequest(fd);
+fn crudUpdate(head: *const zix.Http1.ParsedHead, id: i64, body: []const u8, fd: std.posix.fd_t) !void {
+    const item = parseBody(body) orelse {
+        try response.badRequest(fd);
+        return;
+    };
+    if (item.name.len > dbpg.NAME_MAX or item.category.len > dbpg.CATEGORY_MAX) {
+        try response.badRequest(fd);
+        return;
+    }
 
     var job: dbpg.Job = .{ .CRUD_UPDATE = writeJob(fd, id, item) };
     @memcpy(job.CRUD_UPDATE.name_buf[0..item.name.len], item.name);
     @memcpy(job.CRUD_UPDATE.category_buf[0..item.category.len], item.category);
 
-    if (!dbpg.submitJob(head, job)) response.serviceUnavailable(fd);
+    if (!dbpg.submitJob(head, job)) try response.serviceUnavailable(fd);
 }
 
 /// The scalar half of a write job. The caller copies the strings in, since
@@ -134,15 +152,28 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
     const sub = head.path[PATH.len..];
 
     if (sub.len == 0) {
-        if (req.method() == .GET) return crudList(head, fd);
-        if (req.method() == .POST) return crudCreate(head, body, fd);
+        if (req.method() == .GET) {
+            try crudList(head, fd);
+            return;
+        }
+        if (req.method() == .POST) {
+            try crudCreate(head, body, fd);
+            return;
+        }
 
-        return response.notFound(fd);
+        try response.notFound(fd);
+        return;
     }
 
-    if (sub[0] != '/' or sub.len == 1) return response.notFound(fd);
+    if (sub[0] != '/' or sub.len == 1) {
+        try response.notFound(fd);
+        return;
+    }
 
-    const id = std.fmt.parseInt(i64, sub[1..], 10) catch return response.badRequest(fd);
+    const id = std.fmt.parseInt(i64, sub[1..], 10) catch {
+        try response.badRequest(fd);
+        return;
+    };
 
     if (req.method() == .GET) {
         // A cache hit answers on this worker and never becomes a job.
@@ -152,11 +183,14 @@ pub fn RESPONSE(req: *zix.Http1.Request, _: *zix.Http1.Response, _: *zix.Http1.C
             return;
         }
 
-        if (!dbpg.submitJob(head, .{ .CRUD_GET = .{ .fd = fd, .id = id } })) response.serviceUnavailable(fd);
+        if (!dbpg.submitJob(head, .{ .CRUD_GET = .{ .fd = fd, .id = id } })) try response.serviceUnavailable(fd);
 
         return;
     }
-    if (req.method() == .PUT) return crudUpdate(head, id, body, fd);
+    if (req.method() == .PUT) {
+        try crudUpdate(head, id, body, fd);
+        return;
+    }
 
-    return response.notFound(fd);
+    try response.notFound(fd);
 }
