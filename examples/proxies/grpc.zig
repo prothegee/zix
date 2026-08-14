@@ -50,12 +50,12 @@ fn stringField(message: []const u8, field_number: u32) ?[]const u8 {
 /// the trailers.
 fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Context) !void {
     const message = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
     const name = stringField(message, 1) orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "HelloReq.name is missing");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "HelloReq.name is missing");
         return;
     };
 
@@ -65,8 +65,8 @@ fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc
     var reply_buf: [REPLY_MAX]u8 = undefined;
     const reply_len = zix.Grpc.encodeString(1, text, &reply_buf);
 
-    res.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 /// Server-streaming StreamSum: read StreamRequest{a, b, count}, emit `count`
@@ -74,7 +74,7 @@ fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc
 /// messages ahead of the trailing block is what an http1 hop could not carry.
 fn streamSumHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Context) !void {
     const message = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
@@ -101,10 +101,10 @@ fn streamSumHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grp
     var sent: i32 = 0;
     while (sent < count) : (sent += 1) {
         const reply_len = zix.Grpc.encodeInt32(1, sum + sent, &reply_buf);
-        res.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
+        try res.sendMessage("application/grpc+proto", reply_buf[0..reply_len]);
     }
 
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 // --------------------------------------------------------- //
