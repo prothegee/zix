@@ -30,7 +30,7 @@ fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Gr
     _ = ctx;
 
     const msg = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
@@ -47,15 +47,15 @@ fn sayHelloHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Gr
     var rpos: usize = 0;
     rpos += zix.Grpc.encodeString(1, greeting, resp[rpos..]);
 
-    res.sendMessage("application/grpc+proto", resp[0..rpos]);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", resp[0..rpos]);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 fn sendLocationAndSave(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.Context) !void {
     _ = ctx;
 
     const msg = req.recvMessage() orelse {
-        res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
+        try res.finish(zix.Grpc.Status.INVALID_ARGUMENT, "empty request");
         return;
     };
 
@@ -84,8 +84,8 @@ fn sendLocationAndSave(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zi
     rpos += zix.Grpc.encodeString(1, "saved", resp[rpos..]);
     rpos += zix.Grpc.encodeInt32(2, 1, resp[rpos..]);
 
-    res.sendMessage("application/grpc+proto", resp[0..rpos]);
-    res.finish(zix.Grpc.Status.OK, "");
+    try res.sendMessage("application/grpc+proto", resp[0..rpos]);
+    try res.finish(zix.Grpc.Status.OK, "");
 }
 
 // --------------------------------------------------------- //
