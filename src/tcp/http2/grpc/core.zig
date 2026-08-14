@@ -109,6 +109,10 @@ pub const GrpcContext = struct {
     _hdr_sent: bool,
     _sent_bytes: usize,
     _grpc_status: u8,
+    /// Whether the handler closed this call with `finish`. Read by the engine on a handler error,
+    /// so a call the handler already answered is not answered a second time with a status the
+    /// handler did not choose.
+    _finished: bool = false,
     /// Absolute deadline in nanoseconds (CLOCK_REALTIME basis). Null = no deadline.
     /// Set at dispatch from tighter_of(Route.timeout_ms, config.handler_timeout_ms, grpc-timeout header).
     /// Handler may read and overwrite. Use isExpired() to check.
@@ -179,33 +183,48 @@ pub const GrpcContext = struct {
     }
 
     /// Write initial HEADERS if not already sent. No lock acquired, caller must hold _write_mutex.
-    fn _flushHeaders(self: *GrpcContext, content_type: []const u8) void {
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the write failed, or the staged reply already failed one
+    fn _flushHeaders(self: *GrpcContext, content_type: []const u8) error{BrokenPipe}!void {
         if (self._hdr_sent) return;
 
         if (self._out) |out| {
+            if (out.failed) return error.BrokenPipe;
+
             var buf: [frame.headers_frame_scratch]u8 = undefined;
             const n = if (self._resp_gzip)
                 frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type)
             else
                 frame.buildGrpcHeaders(&buf, self.stream_id, content_type);
             out.append(buf[0..n]);
-        } else {
-            if (self._resp_gzip) {
-                var buf: [frame.headers_frame_scratch]u8 = undefined;
-                const n = frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type);
-                h2.writeAllFD(self.fd, buf[0..n]) catch {};
-            } else {
-                frame.sendGrpcHeadersFD(self.fd, self.stream_id, content_type) catch {};
-            }
+
+            self._hdr_sent = true;
+
+            return if (out.failed) error.BrokenPipe else {};
         }
+
+        if (self._resp_gzip) {
+            var buf: [frame.headers_frame_scratch]u8 = undefined;
+            const n = frame.buildGrpcHeadersGzip(&buf, self.stream_id, content_type);
+            h2.writeAllFD(self.fd, buf[0..n]) catch return error.BrokenPipe;
+        } else {
+            frame.sendGrpcHeadersFD(self.fd, self.stream_id, content_type) catch return error.BrokenPipe;
+        }
+
         self._hdr_sent = true;
     }
 
     /// Send the initial response HEADERS (:status 200, content-type). No-op if already sent.
-    pub fn sendHeaders(self: *GrpcContext, content_type: []const u8) void {
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone. `try` hands it to the engine, which answers the
+    ///   call with a gRPC status. Handle it yourself to answer differently.
+    pub fn sendHeaders(self: *GrpcContext, content_type: []const u8) error{BrokenPipe}!void {
         if (self._out != null) {
-            self._flushHeaders(content_type);
-            return;
+            return self._flushHeaders(content_type);
         }
 
         if (self._write_mutex) |mutex| mutex.lock();
@@ -213,7 +232,7 @@ pub const GrpcContext = struct {
             if (self._write_mutex) |mutex| mutex.unlock();
         }
 
-        self._flushHeaders(content_type);
+        return self._flushHeaders(content_type);
     }
 
     /// Send one gRPC response message DATA frame.
@@ -223,20 +242,26 @@ pub const GrpcContext = struct {
     /// Falls back to uncompressed on allocation or compression failure.
     /// On the staged (inline unary) path the frame is appended to the cork buffer.
     /// On the streaming path headers and data are written under a single lock to prevent interleaving.
-    pub fn sendMessage(self: *GrpcContext, content_type: []const u8, data: []const u8) void {
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone. `try` hands it to the engine, which answers the
+    ///   call with a gRPC status. Handle it yourself to answer differently.
+    pub fn sendMessage(self: *GrpcContext, content_type: []const u8, data: []const u8) error{BrokenPipe}!void {
         if (self._resp_gzip and data.len > 0) {
             const max_comp = data.len + frame.gzip_framing_headroom;
             if (std.heap.smp_allocator.alloc(u8, max_comp)) |comp_buf| {
+                defer std.heap.smp_allocator.free(comp_buf);
+
+                // A compression failure is not the caller's problem: the message still goes out,
+                // uncompressed, through the fall-through below.
                 if (frame.compressGrpcMessage(data, comp_buf)) |comp_len| {
-                    self._sendDataFrame(content_type, comp_buf[0..comp_len], true);
-                    std.heap.smp_allocator.free(comp_buf);
-                    return;
+                    return self._sendDataFrame(content_type, comp_buf[0..comp_len], true);
                 } else |_| {}
-                std.heap.smp_allocator.free(comp_buf);
             } else |_| {}
         }
 
-        self._sendDataFrame(content_type, data, false);
+        return self._sendDataFrame(content_type, data, false);
     }
 
     /// Emit the packed coalesce buffer as one h2 DATA frame into the cork, then reset it. No-op when
@@ -259,9 +284,12 @@ pub const GrpcContext = struct {
         self._coal_len = 0;
     }
 
-    fn _sendDataFrame(self: *GrpcContext, content_type: []const u8, payload: []const u8, compress: bool) void {
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the write failed, or the staged reply already failed one
+    fn _sendDataFrame(self: *GrpcContext, content_type: []const u8, payload: []const u8, compress: bool) error{BrokenPipe}!void {
         if (self._out) |out| {
-            self._flushHeaders(content_type);
+            try self._flushHeaders(content_type);
 
             // Streaming path: pack the gRPC-framed message (5-byte prefix + payload) into the
             // coalesce buffer, flushing it to a DATA frame first when this message would overflow.
@@ -276,7 +304,7 @@ pub const GrpcContext = struct {
                     self._coal_len += framed;
                     self._sent_bytes += payload.len;
 
-                    return;
+                    return if (out.failed) error.BrokenPipe else {};
                 }
 
                 // A single message larger than the coalesce buffer: flush what is packed, then let it
@@ -289,7 +317,8 @@ pub const GrpcContext = struct {
             out.append(&head);
             out.append(payload);
             self._sent_bytes += payload.len;
-            return;
+
+            return if (out.failed) error.BrokenPipe else {};
         }
 
         if (self._write_mutex) |mutex| mutex.lock();
@@ -297,7 +326,7 @@ pub const GrpcContext = struct {
             if (self._write_mutex) |mutex| mutex.unlock();
         }
 
-        self._flushHeaders(content_type);
+        try self._flushHeaders(content_type);
 
         var head: [14]u8 = undefined;
         const head_len = frame.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
@@ -310,18 +339,25 @@ pub const GrpcContext = struct {
             var one: [grpc_stream_inline_cap]u8 = undefined;
             @memcpy(one[0..head_len], head[0..head_len]);
             @memcpy(one[head_len..][0..payload.len], payload);
-            h2.writeAllFD(self.fd, one[0 .. head_len + payload.len]) catch {};
+            h2.writeAllFD(self.fd, one[0 .. head_len + payload.len]) catch return error.BrokenPipe;
         } else {
-            h2.writeAllFD(self.fd, head[0..head_len]) catch {};
-            h2.writeAllFD(self.fd, payload) catch {};
+            h2.writeAllFD(self.fd, head[0..head_len]) catch return error.BrokenPipe;
+            h2.writeAllFD(self.fd, payload) catch return error.BrokenPipe;
         }
+
         self._sent_bytes += payload.len;
     }
 
     /// Close the stream with a gRPC status. Must be called exactly once per handler.
     /// If no response messages were sent, sends a trailers-only (error) response.
-    pub fn finish(self: *GrpcContext, stat: GrpcStatus, grpc_message: []const u8) void {
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone. The call still counts as closed, so the engine
+    ///   does not answer it a second time on the way out.
+    pub fn finish(self: *GrpcContext, stat: GrpcStatus, grpc_message: []const u8) error{BrokenPipe}!void {
         self._grpc_status = @intFromEnum(stat);
+        self._finished = true;
         const status_code = self._grpc_status;
 
         if (self._out) |out| {
@@ -333,7 +369,8 @@ pub const GrpcContext = struct {
             else
                 frame.buildGrpcError(&buf, self.stream_id, status_code, grpc_message);
             out.append(buf[0..n]);
-            return;
+
+            return if (out.failed) error.BrokenPipe else {};
         }
 
         if (self._write_mutex) |mutex| mutex.lock();
@@ -342,10 +379,32 @@ pub const GrpcContext = struct {
         }
 
         if (self._hdr_sent) {
-            frame.sendGrpcTrailerFD(self.fd, self.stream_id, status_code, grpc_message) catch {};
+            frame.sendGrpcTrailerFD(self.fd, self.stream_id, status_code, grpc_message) catch return error.BrokenPipe;
         } else {
-            frame.sendGrpcErrorFD(self.fd, self.stream_id, status_code, grpc_message) catch {};
+            frame.sendGrpcErrorFD(self.fd, self.stream_id, status_code, grpc_message) catch return error.BrokenPipe;
         }
+    }
+
+    /// Answer a call the handler left open, and report whether anything was written.
+    ///
+    /// Note:
+    /// - Called by the engine on a handler error, never by a handler. A call the handler already
+    ///   closed with `finish` is left alone, so a status the handler chose is never overwritten.
+    ///   A call that got as far as HEADERS is closed with a trailer, one that got nothing is
+    ///   closed with a trailers-only response.
+    ///
+    /// Param:
+    /// stat - GrpcStatus (the status to close an unfinished call with)
+    /// grpc_message - []const u8 (the grpc-message text to carry with it)
+    ///
+    /// Return:
+    /// - bool, true when this closed the call, false when the handler had already closed it
+    pub fn finishIfOpen(self: *GrpcContext, stat: GrpcStatus, grpc_message: []const u8) bool {
+        if (self._finished) return false;
+
+        self.finish(stat, grpc_message) catch {};
+
+        return true;
     }
 
     /// Return true when deadline_ns has passed. False when deadline_ns is null.
@@ -369,23 +428,24 @@ pub const GrpcContext = struct {
     /// Usage:
     /// ```zig
     /// fn handler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Context) anyerror!void {
-    ///     if (res.serveCached("application/grpc")) return;
+    ///     if (try res.serveCached("application/grpc")) return;
     ///     const reply = buildExpensiveReply(req.recvMessage());
-    ///     res.sendCached("application/grpc", reply, 0);
-    ///     res.finish(.OK, "");
+    ///     try res.sendCached("application/grpc", reply, 0);
+    ///     try res.finish(.OK, "");
     /// }
     /// ```
     ///
     /// Return:
     /// - bool (true when served from cache, the handler should return)
-    pub fn serveCached(self: *GrpcContext, content_type: []const u8) bool {
+    /// - error.BrokenPipe when the peer went away mid-replay
+    pub fn serveCached(self: *GrpcContext, content_type: []const u8) error{BrokenPipe}!bool {
         const cache = tl_cache orelse return false;
         if (self.path.len == 0) return false;
 
         const bytes = cache.lookup(requestKey(self.path, self._body), rc.nowMillis()) orelse return false;
 
-        self.sendMessage(content_type, bytes);
-        self.finish(.OK, "");
+        try self.sendMessage(content_type, bytes);
+        try self.finish(.OK, "");
 
         return true;
     }
@@ -399,8 +459,13 @@ pub const GrpcContext = struct {
     /// content_type - []const u8 (response content type, e.g. "application/grpc")
     /// data - []const u8 (the uncompressed response message)
     /// ttl_ms - u32 (freshness in milliseconds, 0 means the worker default)
-    pub fn sendCached(self: *GrpcContext, content_type: []const u8, data: []const u8, ttl_ms: u32) void {
-        self.sendMessage(content_type, data);
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone. Nothing is stored in that case, a response the
+    ///   peer never received is not worth replaying.
+    pub fn sendCached(self: *GrpcContext, content_type: []const u8, data: []const u8, ttl_ms: u32) error{BrokenPipe}!void {
+        try self.sendMessage(content_type, data);
 
         const cache = tl_cache orelse return;
         if (self.path.len == 0) return;
@@ -475,28 +540,48 @@ pub const GrpcResponse = struct {
     _ctx: *GrpcContext,
 
     /// Send the initial response HEADERS (:status 200, content-type). No-op if already sent.
-    pub fn sendHeaders(self: GrpcResponse, content_type: []const u8) void {
-        self._ctx.sendHeaders(content_type);
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone
+    pub fn sendHeaders(self: GrpcResponse, content_type: []const u8) error{BrokenPipe}!void {
+        return self._ctx.sendHeaders(content_type);
     }
 
     /// Send one gRPC response message DATA frame.
-    pub fn sendMessage(self: GrpcResponse, content_type: []const u8, data: []const u8) void {
-        self._ctx.sendMessage(content_type, data);
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone
+    pub fn sendMessage(self: GrpcResponse, content_type: []const u8, data: []const u8) error{BrokenPipe}!void {
+        return self._ctx.sendMessage(content_type, data);
     }
 
     /// Close the stream with a gRPC status. Must be called exactly once per handler.
-    pub fn finish(self: GrpcResponse, stat: GrpcStatus, grpc_message: []const u8) void {
-        self._ctx.finish(stat, grpc_message);
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone
+    pub fn finish(self: GrpcResponse, stat: GrpcStatus, grpc_message: []const u8) error{BrokenPipe}!void {
+        return self._ctx.finish(stat, grpc_message);
     }
 
     /// Serve a cached unary response when one is present and fresh. See Context.serveCached.
-    pub fn serveCached(self: GrpcResponse, content_type: []const u8) bool {
+    ///
+    /// Return:
+    /// - bool (true when served from cache, the handler should return)
+    /// - error.BrokenPipe when the peer went away mid-replay
+    pub fn serveCached(self: GrpcResponse, content_type: []const u8) error{BrokenPipe}!bool {
         return self._ctx.serveCached(content_type);
     }
 
     /// Send a unary response message and store it for later serveCached hits. See Context.sendCached.
-    pub fn sendCached(self: GrpcResponse, content_type: []const u8, data: []const u8, ttl_ms: u32) void {
-        self._ctx.sendCached(content_type, data, ttl_ms);
+    ///
+    /// Return:
+    /// - void
+    /// - error.BrokenPipe when the peer is gone
+    pub fn sendCached(self: GrpcResponse, content_type: []const u8, data: []const u8, ttl_ms: u32) error{BrokenPipe}!void {
+        return self._ctx.sendCached(content_type, data, ttl_ms);
     }
 };
 
@@ -573,7 +658,7 @@ pub fn Router(comptime routes: []const Route) type {
                 }
             }
 
-            res.finish(.UNIMPLEMENTED, "unknown method");
+            return res.finish(.UNIMPLEMENTED, "unknown method");
         }
     };
 }
@@ -642,6 +727,29 @@ pub const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;
 /// buffer. The unary path already coalesces through the cork buffer, so this is streaming only.
 const grpc_stream_inline_cap: usize = 4096;
 
+/// grpc-message text the engine closes a call with when the handler returned an error without
+/// closing it. Deliberately says nothing about what failed: the caller is not the audience for a
+/// server-side fault, and the handler that knows the detail can send its own status instead.
+const HANDLER_ERROR_MESSAGE: []const u8 = "handler error";
+
+/// Answer a call whose handler returned an error, so the caller is never left waiting on a stream
+/// that will never carry a status.
+///
+/// Note:
+/// - The one place all three dispatch paths (blocking, mux, tls) complete a failed handler, so the
+///   three cannot drift into answering the same failure three different ways.
+/// - A call the handler already closed with `finish` is left exactly as the handler left it, and
+///   an error the handler swallowed itself never reaches here at all.
+///
+/// Param:
+/// ctx - *GrpcContext (the call the handler was invoked with)
+///
+/// Return:
+/// - void
+pub fn completeHandlerError(ctx: *GrpcContext) void {
+    _ = ctx.finishIfOpen(.INTERNAL, HANDLER_ERROR_MESSAGE);
+}
+
 /// Server-streaming DATA-frame coalescing cap (mux cork path). A server-streaming reply is many
 /// tiny gRPC messages. Emitting one h2 DATA frame per message spends a 9-byte frame header (and a
 /// client-side frame parse) on every 2-to-a-few-byte payload. Instead, consecutive messages are
@@ -684,12 +792,20 @@ pub const ReplyStage = struct {
     fd: std.posix.fd_t,
     buf: []u8,
     len: usize = 0,
+    /// Set once a write for this reply failed. Staged bytes are written after the handler has
+    /// returned, so the failure cannot be handed back at the call that staged them. It is read by
+    /// the next send instead, which reports error.BrokenPipe rather than staging onto a dead
+    /// connection.
+    failed: bool = false,
 
     pub fn append(self: *ReplyStage, bytes: []const u8) void {
         if (bytes.len > self.buf.len - self.len) {
             self.flush();
             if (bytes.len > self.buf.len) {
-                h2.writeAllFD(self.fd, bytes) catch {};
+                h2.writeAllFD(self.fd, bytes) catch {
+                    self.failed = true;
+                };
+
                 return;
             }
         }
@@ -701,7 +817,10 @@ pub const ReplyStage = struct {
     pub fn flush(self: *ReplyStage) void {
         if (self.len == 0) return;
 
-        h2.writeAllFD(self.fd, self.buf[0..self.len]) catch {};
+        h2.writeAllFD(self.fd, self.buf[0..self.len]) catch {
+            self.failed = true;
+        };
+
         self.len = 0;
     }
 };
@@ -833,7 +952,7 @@ fn DispatchTask(comptime RouterType: type) type {
             };
             var req = GrpcRequest{ .path = path, .headers = self.headers[0..self.header_count], ._ctx = &ctx };
             var res = GrpcResponse{ ._ctx = &ctx };
-            RouterType.dispatch(&req, &res, &ctx) catch {};
+            RouterType.dispatch(&req, &res, &ctx) catch completeHandlerError(&ctx);
 
             if (self.opts.logger) |logger| {
                 const dur_ms: u64 = (monotonicNs() -| time_start) / 1_000_000;
@@ -871,7 +990,8 @@ fn spawnGrpcStream(
             .io = io,
             .allocator = std.heap.smp_allocator,
         };
-        ctx.finish(.INTERNAL, "server overloaded");
+        ctx.finish(.INTERNAL, "server overloaded") catch {};
+
         return;
     };
 
@@ -937,7 +1057,8 @@ fn spawnGrpcStream(
                 .io = io,
                 .allocator = std.heap.smp_allocator,
             };
-            ctx.finish(.INTERNAL, "spawn failed");
+            ctx.finish(.INTERNAL, "spawn failed") catch {};
+
             return;
         };
         thread.detach();
@@ -1010,7 +1131,7 @@ fn dispatchGrpcInline(
     var res = GrpcResponse{ ._ctx = &ctx };
 
     if (need_mutex) conn_mutex.lock();
-    RouterType.dispatch(&req, &res, &ctx) catch {};
+    RouterType.dispatch(&req, &res, &ctx) catch completeHandlerError(&ctx);
     stage.flush();
     if (need_mutex) conn_mutex.unlock();
 
@@ -1297,7 +1418,7 @@ fn serveGrpcUpgrade(comptime RouterType: type, fd: std.posix.fd_t, opts: GrpcSer
     };
     var req = GrpcRequest{ .path = path, .headers = &stream1_headers, ._ctx = &ctx };
     var res = GrpcResponse{ ._ctx = &ctx };
-    RouterType.dispatch(&req, &res, &ctx) catch {};
+    RouterType.dispatch(&req, &res, &ctx) catch completeHandlerError(&ctx);
 
     if (opts.logger) |logger| {
         const dur_ms: u64 = (monotonicNs() -| time_start) / 1_000_000;
@@ -1899,6 +2020,85 @@ fn walkStagedDataFrames(buf: []const u8) StagedFrames {
     return out;
 }
 
+// --------------------------------------------------------- //
+// Handler-error completion: the caller is answered once, and only when the handler left it open
+
+/// A context staging into `stage`, with the call still open and no HEADERS written yet.
+fn openCallCtx(stage: *ReplyStage) GrpcContext {
+    return .{
+        .fd = TEST_FD,
+        .stream_id = 1,
+        ._body = &.{},
+        ._pos = 0,
+        ._hdr_sent = false,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+        ._out = stage,
+        .io = undefined,
+        .allocator = std.testing.allocator,
+    };
+}
+
+test "zix grpc: a handler error with the call still open closes it with INTERNAL" {
+    var backing: [1024]u8 = undefined;
+    var stage = ReplyStage{ .fd = TEST_FD, .buf = &backing };
+    var ctx = openCallCtx(&stage);
+
+    try std.testing.expect(ctx.finishIfOpen(.INTERNAL, HANDLER_ERROR_MESSAGE));
+
+    var expected: [frame.headers_frame_scratch]u8 = undefined;
+    const n = frame.buildGrpcError(&expected, 1, @intFromEnum(GrpcStatus.INTERNAL), HANDLER_ERROR_MESSAGE);
+
+    std.log.info(".STAGED: {d} bytes, expected {d}", .{ stage.len, n });
+
+    try std.testing.expectEqualSlices(u8, expected[0..n], stage.buf[0..stage.len]);
+}
+
+test "zix grpc: a call the handler already finished is left as the handler left it" {
+    var backing: [1024]u8 = undefined;
+    var stage = ReplyStage{ .fd = TEST_FD, .buf = &backing };
+    var ctx = openCallCtx(&stage);
+
+    try ctx.finish(.OK, "");
+    const closed_len = stage.len;
+
+    try std.testing.expect(!ctx.finishIfOpen(.INTERNAL, HANDLER_ERROR_MESSAGE));
+    try std.testing.expectEqual(closed_len, stage.len);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(GrpcStatus.OK)), ctx._grpc_status);
+}
+
+test "zix grpc: sendMessage reports a dead peer instead of swallowing it" {
+    if (comptime @import("builtin").target.os.tag != .linux) {
+        std.log.info("this test drives a Linux socketpair, test skipped", .{});
+        return;
+    }
+
+    const linux = std.os.linux;
+
+    var fds: [2]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds));
+    defer _ = linux.close(fds[1]);
+
+    // The peer end goes first, so the send below has nowhere to land.
+    _ = linux.close(fds[0]);
+
+    var ctx = GrpcContext{
+        .fd = fds[1],
+        .stream_id = 1,
+        ._body = &.{},
+        ._pos = 0,
+        ._hdr_sent = true,
+        ._sent_bytes = 0,
+        ._grpc_status = 0,
+        .io = undefined,
+        .allocator = std.testing.allocator,
+    };
+
+    const result = ctx.sendMessage("application/grpc", "payload");
+
+    try std.testing.expectError(error.BrokenPipe, result);
+}
+
 test "zix grpc: server-streaming packs many messages into one DATA frame" {
     var backing: [4096]u8 = undefined;
     var stage = ReplyStage{ .fd = TEST_FD, .buf = &backing };
@@ -1918,10 +2118,10 @@ test "zix grpc: server-streaming packs many messages into one DATA frame" {
         .allocator = std.testing.allocator,
     };
 
-    ctx.sendMessage("application/grpc", "aa");
-    ctx.sendMessage("application/grpc", "bb");
-    ctx.sendMessage("application/grpc", "cc");
-    ctx.finish(.OK, "");
+    try ctx.sendMessage("application/grpc", "aa");
+    try ctx.sendMessage("application/grpc", "bb");
+    try ctx.sendMessage("application/grpc", "cc");
+    try ctx.finish(.OK, "");
 
     const walked = walkStagedDataFrames(stage.buf[0..stage.len]);
     try std.testing.expectEqual(@as(usize, 1), walked.data_frames);
@@ -1948,8 +2148,8 @@ test "zix grpc: server-streaming DATA coalescing respects the frame cap" {
     };
 
     var sent: usize = 0;
-    while (sent < 5) : (sent += 1) ctx.sendMessage("application/grpc", "xy");
-    ctx.finish(.OK, "");
+    while (sent < 5) : (sent += 1) try ctx.sendMessage("application/grpc", "xy");
+    try ctx.finish(.OK, "");
 
     // Five 7-byte messages under a 16-byte cap pack two-per-frame: 3 DATA frames, none over the cap.
     const walked = walkStagedDataFrames(stage.buf[0..stage.len]);
@@ -1973,7 +2173,7 @@ test "zix grpc: serveCached is a no-op without a cache or with an empty path" {
         .io = undefined,
         .allocator = std.testing.allocator,
     };
-    try std.testing.expect(!ctx.serveCached("application/grpc"));
+    try std.testing.expect(!try ctx.serveCached("application/grpc"));
 
     // even with a cache installed, an empty path is never cached
     var cache = try rc.ResponseCache.init(std.testing.allocator, .{ .max_entries = 8, .max_value_bytes = 64 });
@@ -1984,7 +2184,7 @@ test "zix grpc: serveCached is a no-op without a cache or with an empty path" {
 
     var no_path = ctx;
     no_path.path = "";
-    try std.testing.expect(!no_path.serveCached("application/grpc"));
+    try std.testing.expect(!try no_path.serveCached("application/grpc"));
 }
 
 test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
@@ -2021,9 +2221,9 @@ test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
         .io = undefined,
         .allocator = std.testing.allocator,
     };
-    try std.testing.expect(!ctx.serveCached("application/grpc"));
-    ctx.sendCached("application/grpc", reply, 0);
-    ctx.finish(.OK, "");
+    try std.testing.expect(!try ctx.serveCached("application/grpc"));
+    try ctx.sendCached("application/grpc", reply, 0);
+    try ctx.finish(.OK, "");
 
     var first: [512]u8 = undefined;
     const n1 = try fd_io.readOnce(fds[0], &first);
@@ -2045,7 +2245,7 @@ test "zix grpc: sendCached stores the unary reply and serveCached replays it" {
         .io = undefined,
         .allocator = std.testing.allocator,
     };
-    try std.testing.expect(ctx2.serveCached("application/grpc"));
+    try std.testing.expect(try ctx2.serveCached("application/grpc"));
 
     var second: [512]u8 = undefined;
     const n2 = try fd_io.readOnce(fds[0], &second);
@@ -2096,7 +2296,7 @@ test "zix grpc: streaming sendMessage coalesces a small DATA frame into one writ
     // directly. Headers pre-marked sent so only the DATA frame goes through the hook.
     var ctx = GrpcContext{ .fd = TEST_FD, .stream_id = 1, ._body = &.{}, ._pos = 0, ._hdr_sent = true, ._sent_bytes = 0, ._grpc_status = 0, .io = undefined, .allocator = std.testing.allocator };
 
-    ctx.sendMessage("application/grpc", "pong");
+    try ctx.sendMessage("application/grpc", "pong");
 
     // One write: the 14-byte header and the 4-byte payload were coalesced.
     try std.testing.expectEqual(@as(usize, 1), probe.count);
@@ -2126,7 +2326,7 @@ test "zix grpc: streaming sendMessage past the inline cap keeps the two-write pa
     // writes), so it is never copied through the stack buffer.
     var big: [grpc_stream_inline_cap + 1]u8 = undefined;
     @memset(&big, 'x');
-    ctx.sendMessage("application/grpc", &big);
+    try ctx.sendMessage("application/grpc", &big);
 
     try std.testing.expectEqual(@as(usize, 2), probe.count);
 }
