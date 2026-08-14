@@ -44,9 +44,27 @@ __*Fix:*__
 
 <br>
 
-## MAJOR.MINOR.x (TBA)
+## 0.5.x-rc3 (2026-08-14)
+
+__*Fix:*__
+
+- Every engine answers a failed handler exactly once, and only when the handler left the caller waiting. What counts as answered now includes the fd writers, not just the `Response` builder: `zix.Http1` and `zix.Http2` tracked it in `Response.sent` alone, so a handler that answered with `sendSimpleFD` or `sendResponseFD` and then returned an error read to the engine as never having answered, and got a second response glued onto the first. A peer reading that saw one response followed by `HTTP/1.1 500 Internal Server Error`, or a second HEADERS frame on a stream it had already seen closed. Both engines now check the fd writers as well, so the handler is answered once whichever way it answered.
+
+- `zix.Grpc` and `zix.Fix` report the errors their sends used to swallow. `res.sendMessage` returned `void` on both, and a build failure or a dead peer was dropped inside the engine, so a handler could not tell a delivered message from one that never left, and had nothing to `try` or to `catch`. Both return an error union now: `try` hands the failure to the engine, and a handler that wants to answer differently catches it. `zix.Grpc.Response.sendHeaders`, `finish`, `sendCached` and `serveCached` moved with it, and `zix.Fix` reports `error.ZixFixMessageTooLarge` for a message that does not fit `MAX_MSG_SIZE`.
+
+- `zix.Grpc` and `zix.Fix` answer a handler that returns an error. Both used to pass it through silently (ADR-063, "current wire behavior kept"), so a caller was left waiting on a call that would never carry a status and a counterparty on a message that would never arrive. A gRPC call the handler left open is now closed with `grpc-status 13` (INTERNAL), and a FIX message the handler failed on is answered with a Reject (35=3) carrying the RefSeqNum of the message that failed. A call the handler already closed, or a message it already answered, is left exactly as the handler left it. An error the handler swallows itself is still the handler's own business on every engine, the engine adds nothing to it.
+
+- The six `localbench/http1-*` entries report their send failures instead of swallowing them. `baseline` and `upload` ended a failed render with a bare `catch return`, which answered nothing and left the client waiting for the read timeout. `baseline`, `upload`, `pipeline` and `json` each carried a hand-rolled 500 inside a `catch` on the send that had just failed, writing a second response down a descriptor that had already taken part of the first. The shared 400 / 404 / 503 responders in `shared/response.zig` swallowed theirs outright. All of them are `try` now, so the engine completes a failed request once, and the websocket entries' upgrade is `try` as well: `WebSocket.serve` writes the 101 itself, so the old `catch` answering "handshake failed" appended an HTTP body to a half-written upgrade. Two paths stay `void` because there is no handler frame left to report into, and each says so in place: the frame callback, which runs long after the handler returned, and the database completion path in `shared/dbpg.zig`, which parks an unfinished write rather than failing it.
+
+<br>
 
 __*Update:*__
+
+- `examples/udp_server_tickrate.zig` and `examples/udp_client_tickrate.zig` are a game-server-shaped pair on the raw UDP path. Clients send their state whenever they want, the server keeps only the latest state per client, and a fixed tick loop broadcasts a world snapshot to every connected client once per tick: `--tickrate` picks the cadence (64 the default, 128 the other common rate), `--ip` / `--port` on the server and `--bind-ip` / `--bind-port` / `--server-ip` / `--server-port` on the client stay optional, every missing flag keeps its default. The engine itself gained no tick concept: the tick loop, the client registry, and the snapshot sends all live in the example. `test-runner-udp-tickrate` drives both executables and rides `test-runner-all`, asserting the per-tick re-broadcast, the second client process, and that wrong-size datagrams never enter the stream.
+
+- The three udp examples are run as built binaries. Their headers used to say `zig run examples/<file>.zig -- <flags>`, which cannot work: the examples import zix, and only the build system wires that module in. Each usage comment now sits on `pub fn main` and shows the `zig build example-<name>` step and the installed binary with its flags, and the two servers set `allow_args` so `--ip` / `--port` are actually read (a missing flag keeps the default, so the test runners see the same server as before).
+
+- `examples/http1_static_cached.zig` moved from port 9077 to 9039: 9077 already belongs to the TLS listener of `examples/tls/tls_http1_dual.zig`, so the two examples could not run side by side. Every example now binds a port of its own.
 
 - `localbench-run.sh` raises its own soft file descriptor limit before the first tier runs, so a connection count is the load the server actually receives. A load generator opens one descriptor per connection and none of them lifts the limit itself, so on a box left at the usual 1024 every tier above roughly a thousand connections was measuring something else: `wrk` carried on with the 1013 connections it managed to open and counted the remainder under `Socket errors: connect`, while `h2load` aborts outright on its first failed connect, which took every HTTP/2 profile at 1024c and 4096c to zero. Only the soft limit moves, so no privilege is needed, and the old and the new value are printed into the run log. `localbench-isolate.sh` runs this script as a child and inherits it. Numbers recorded above roughly a thousand connections before this are not comparable with numbers recorded after it.
 
