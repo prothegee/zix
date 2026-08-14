@@ -392,6 +392,7 @@ The first two are the client's fault, so they do not become a `500`. Only a chun
 Two consequences are worth knowing:
 
 - A failed `send()` never produces a `500`. `send()` marks the response sent before it writes to the socket, so a failing `try res.send(...)` reaches the engine with `Response.sent` already true. The error is dropped and the connection dies on the next read or write, which is the only remedy left: a socket that just refused a write cannot carry a `500` either.
+- An error the handler catches itself never reaches the engine, so that handler owns what the client gets. `try res.send(...)` takes the table above, `res.send(...) catch { ... }` answers on its own terms. This engine exposes no fd writer, so `Response.sent` is the whole story here, unlike `zix.Http1` and `zix.Http2` where an fd answer counts as well.
 - The completion write is best effort. When it fails there is no second attempt and no log line from that path.
 
 ---
