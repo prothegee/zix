@@ -391,6 +391,7 @@ Dua yang pertama adalah kesalahan client, jadi tidak menjadi `500`. Hanya body c
 Dua konsekuensi yang perlu diketahui:
 
 - `send()` yang gagal tidak pernah menghasilkan `500`. `send()` menandai response sebagai terkirim sebelum menulis ke socket, jadi `try res.send(...)` yang gagal sampai ke engine dengan `Response.sent` sudah true. Error dibuang dan koneksi mati pada read atau write berikutnya, satu-satunya penanganan yang tersisa: socket yang baru saja menolak write juga tidak bisa membawa `500`.
+- Error yang ditangkap sendiri oleh handler tidak pernah sampai ke engine, jadi handler itu yang menentukan apa yang diterima client. `try res.send(...)` memakai tabel di atas, `res.send(...) catch { ... }` menjawab dengan caranya sendiri. Engine ini tidak mengekspos fd writer, jadi `Response.sent` sudah mewakili seluruhnya di sini, berbeda dari `zix.Http1` dan `zix.Http2` yang jawaban lewat fd-nya ikut dihitung.
 - Penulisan penutup itu best effort. Saat gagal, tidak ada percobaan kedua dan tidak ada baris log dari jalur itu.
 
 ---
