@@ -48,7 +48,7 @@ graph LR
 | `zix.Grpc.Request` | `{ path, headers }` view, `header(name)`, `recvMessage()`. Thin delegating wrapper over `Context`, zero internal logic moved |
 | `zix.Grpc.Response` | `sendHeaders()`, `sendMessage()`, `finish()`, `serveCached()`, `sendCached()`. Thin delegating wrapper over `Context`, byte-identical wire |
 | `zix.Grpc.Context` | `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
-| `zix.Grpc.HandlerFn` | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio). Errors pass through silently (`catch {}`), current wire behavior kept |
+| `zix.Grpc.HandlerFn` | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio). A returned error closes a still-open call with `grpc-status 13` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | comptime type: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (sends UNIMPLEMENTED if no route matches). `Server.init` takes the Router TYPE itself, not `.dispatch`, because the engine reads `Route.is_server_streaming` off `route_slice` before dispatch |
 | `zix.Grpc.ServerConfig` | see config fields below |
@@ -128,7 +128,7 @@ Key rules:
 - `res.finish()` must always be called before returning. It sends the grpc-status trailer.
 - `res.sendMessage()` sends initial response HEADERS on the first call. Do not call `res.sendHeaders()` manually if using `sendMessage`.
 - `req.recvMessage()` returns `null` when all client messages are consumed (client sent END_STREAM).
-- A handler error is passed through silently (`catch {}` at the invoke site), matching the wire behavior from before ADR-063: no auto-500-equivalent for gRPC.
+- A handler error closes the call. When the handler returned an error without calling `res.finish`, the engine closes the stream with `grpc-status 13` (INTERNAL) and grpc-message `handler error`, so the caller is never left waiting on a stream that will never carry a status. A call the handler already closed keeps the status the handler chose. An error the handler catches itself never reaches the engine, so that handler owns what the caller gets: `try res.sendMessage(...)` takes the default, `res.sendMessage(...) catch { ... }` answers on its own terms.
 - Unary routes (`is_server_streaming = false`, the default) dispatch synchronously on the connection thread. Server-streaming routes (`is_server_streaming = true`) each run on a dedicated thread sharing a connection-level write mutex.
 - The server buffers all client DATA before dispatching the handler.
 - `parsePath` and path-based dispatch inside the handler are not needed: the route table handles that.
