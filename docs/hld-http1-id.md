@@ -239,7 +239,7 @@ try server.run();
 
 - Handler adalah argumen comptime: dibakukan ke dalam tipe server, tidak ada registrasi dinamis setelah init.
 - Trio dibangun per request oleh `core.invokeHandler`: `Request` adalah view zero-copy (semua slice menunjuk ke receive buffer, hanya valid selama pemanggilan), `Response` mendelegasikan ke write helper fd secara byte-identik, `Context` membawa io, arena per-request, dan escape hatch fd.
-- Handler yang error dilengkapi engine dengan satu 500, hanya bila belum ada yang terkirim (`Response.sent`). Idiom rumahnya `try res.foo(...)`, tidak pernah `return res.foo(...)`.
+- Handler yang error dilengkapi engine dengan satu 500, hanya bila belum ada yang dijawab. Dua gaya jawaban sama-sama dihitung: builder `Response` (`Response.sent`) dan fd writer (`respondedFD`), jadi handler yang menjawab lewat `sendSimpleFD` tidak dijawab untuk kedua kalinya. Idiom rumahnya `try res.foo(...)`, tidak pernah `return res.foo(...)`. Error yang ditelan sendiri oleh handler adalah urusan handler itu, engine tidak menambahkan apa pun.
 - Handler boleh berupa fungsi polos, `Router(routes).dispatch`, atau rantai wrapper comptime (idiom middleware, lihat `examples/http1_middleware.zig`).
 
 ### ParsedHead
