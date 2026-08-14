@@ -27,7 +27,7 @@ Ketiganya adalah engine raw-fd dengan tiga model dispatch yang sama dan (sejak A
 | Codec header | parse teks mentah | HPACK | HPACK |
 | Allocator / context per-request | arena per-request via `Context` | stack arena per-request via `Context` | stack arena per-request via `Context` |
 | Response streaming | helper chunked / SSE | DATA dengan flow control (`sendResponseStreamFD`, raw escape hatch) | `res.sendMessage` |
-| Kebijakan error handler | auto-500 jika belum ada yang terkirim | auto-500 jika belum ada yang terkirim | diteruskan diam-diam (`catch {}`, perilaku wire saat ini dipertahankan) |
+| Kebijakan error handler | auto-500 jika belum ada yang dijawab | auto-500 jika belum ada yang dijawab | call yang masih terbuka ditutup dengan `grpc-status 13` (INTERNAL) |
 | Bentuk `Server.init` | `init(handler, config)`, `Router(routes).dispatch` | `init(handler, config)`, `Router(routes).dispatch` | `init(Router(routes), config)` (satu pengecualian: engine harus melihat `Route.is_server_streaming` sebelum dispatch) |
 | Relasi layer | standalone | standalone | dibangun di atas `zix.Http2` |
 
