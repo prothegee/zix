@@ -23,7 +23,7 @@ const CONTENT_TYPE = "application/grpc+proto";
 
 pub fn RESPONSE(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Context) !void {
     const msg = req.recvMessage() orelse {
-        res.finish(.INVALID_ARGUMENT, "empty request");
+        try res.finish(.INVALID_ARGUMENT, "empty request");
         return;
     };
 
@@ -36,8 +36,8 @@ pub fn RESPONSE(req: *zix.Grpc.Request, res: *zix.Grpc.Response, _: *zix.Grpc.Co
     while (index < replies) : (index += 1) {
         const reply_len = zix.Grpc.encodeInt32(1, sum +% index, &reply_buf);
 
-        res.sendMessage(CONTENT_TYPE, reply_buf[0..reply_len]);
+        try res.sendMessage(CONTENT_TYPE, reply_buf[0..reply_len]);
     }
 
-    res.finish(.OK, "");
+    try res.finish(.OK, "");
 }
