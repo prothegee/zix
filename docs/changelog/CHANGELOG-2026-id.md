@@ -10,6 +10,7 @@ IMPORTANT:
 ## MAJOR.MINOR.PATCH (YYYY-MM-DD)
 
 __*Update:*__
+
 - Foo
 
 - Bar:
@@ -44,7 +45,634 @@ __*Fix:*__
 
 <br>
 
-## MAJOR.MINOR.x (TBA)
+## 0.5.0 (2026-08-17)
+
+### __**Fitur Baru:**__
+
+<details>
+
+<summary><b>TLS 1.3 Stack</b></summary>
+
+Implementasi penuh di atas `std.crypto`, tanpa OpenSSL:
+- **Server TLS 1.3** (RFC 8446) + **fallback TLS 1.2** (RFC 5246/5288, ECDHE-ECDSA-AES128-GCM)
+- **Klien verifikasi native** `zix.Tls.Client` (1.3 dan 1.2) dengan ALPN, verifikasi rantai X.509 + hostname
+- Mendukung sertifikat **ECDSA P-256**, **Ed25519**, dan **RSA**
+- RSA minimum 2048-bit, modexp Montgomery waktu-konstan, tanda tangan PSS
+- **Dual listener TLS**: satu server melayani cleartext di `port` DAN TLS di `tls_port`
+- **HTTPS/1.1, h2 over TLS, gRPC over TLS, dan WebSocket over TLS (wss)** semuanya dilayani
+- **SSE over TLS** pada jalur thread-per-connection
+- Dispatch TLS multiplexed di bawah `.EPOLL`/`.URING` (tanpa thread per koneksi)
+
+CATATAN:
+- Pertimbangkan menggunakan Ed25519 atau ECDSA P-256
+- RSA agak lambat
+
+</details>
+
+<hr>
+
+<details>
+
+<summary><b>Tiga Driver Database Internal</b></summary>
+
+1. **`postgrez`** (PostgreSQL)
+   - Wire protocol 3.2 dengan fallback 3.0 (PostgreSQL 15+)
+   - SCRAM-SHA-256 dan SCRAM-PLUS (channel binding), auth cleartext
+   - TLS 1.3, COPY streaming, LISTEN/NOTIFY, prepared statements, pipelining query
+   - `Pool` thread-safe, `Executor` batching
+
+2. **`rediz`** (Redis)
+   - RESP3 via HELLO dengan fallback RESP2 (Redis 7/8)
+   - Helper nilai bertipe, raw command escape hatch
+   - Pipelining command, jalur write-behind ditangguhkan
+   - `Pool` thread-safe, TLS 1.3
+
+3. **`prometheuz`** (Prometheus)
+   - Parser format eksposisi teks 0.0.4, poller `Scraper` latar belakang
+   - Push `remote_write` (protobuf + snappy)
+   - Query PromQL instant dan ranged
+   - Registry metrik (`Counter`, `Gauge`)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Eksekutabel Baru: `zixer` (Proxy Gateway)</b></summary>
+
+Gateway berbasis konfigurasi yang dibangun di atas engine:
+- **Daemon tunggal** mengelola banyak site independen, masing-masing dengan port dan engine sendiri
+- **Lima tipe edge**: `http1`, `http2`, `grpc`, `http3`, `udp`
+- **Terminasi TLS** di edge (stack TLS zix), negosiasi ALPN, 421 untuk Host yang tidak cocok
+- **Upstream round-robin** dengan ketersediaan O(1), cooldown saat gagal
+- **Dibatasi di kedua sisi**: client_timeout_ms, conn_limit, upstream_timeout_ms, process_limit
+- **Pelayanan file statis** dengan sibling precompressed .br/.gz
+- **`Proxy-Status`** (RFC 9209) pada error yang dihasilkan gateway
+- **Pendamping port 80** untuk pembaruan ACME http-01 dan pengalihan `force_https`
+- **Injeksi header**: interpolasi `$client_ip`, `$scheme`, `$host`
+- **Validasi** mengumpulkan semua kesalahan sebelum binding, matematika numerik (mis. `16 * 1024`)
+- **15 demo yang dapat dijalankan** di `examples/proxies/`
+- Dokumentasi lengkap di `docs/zixer/` (Inggris dan Indonesia, masing-masing 5 file)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Engine Baru: `zix.Webrtc` (Peer WebRTC)</b></summary>
+
+Server WebRTC dibangun dari RFC 7983, 8445, 8489, 6347, 9260, 8831, dan 8832. Melayani:
+- **Pemeriksaan konektivitas ICE** melalui STUN
+- **Handshake DTLS 1.2** (ECDHE-ECDSA P-256 saja)
+- **Asosiasi SCTP** dengan data channel
+- **Mode Selective Forwarding Unit (SFU)** untuk media (penulisan ulang header RTP per penerima)
+- Tiga model dispatch: `.ASYNC` (cross-platform), `.EPOLL`, `.URING` (Linux)
+- Delapan contoh pada port 9081–9088, termasuk demo yang digerakkan oleh browser
+
+</details>
+
+<br>
+
+### __**Peningkatan Engine Inti:**__
+
+<details>
+
+<summary><b>HTTP/3 over QUIC</b></summary>
+
+- Implementasi penuh RFC 9000/9001/9002/9114
+- **Pemulihan loss dan kontrol kongesti** (ACK-driven, NewReno, PTO dengan backoff)
+- **QPACK** static-table field lines, decoder Huffman RFC 7541
+- **Rolling flow-control**: hibah MAX_STREAMS dan MAX_DATA diperbarui seiring pemakaian klien
+- **Negosiasi content-encoding**: `accept-encoding`, `content-encoding` br/gzip (static table indeks 31/42/43)
+- **Worker SO_REUSEPORT per-core** di bawah `.EPOLL`/`.URING`
+- Test runner native dengan klien QUIC buatan sendiri
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Dispatch Native HTTP/2</b></summary>
+
+- **Loop multiplexed shared-nothing `.EPOLL`/`.URING`** (sebelumnya hanya `.POOL`)
+- **Stream-slot pool per-worker**: memori residen melacak stream konkuren, bukan `connections * max_streams`
+- **Cache prefix header respons HPACK**: triple panas [:status, content-type, content-encoding] digunakan ulang
+- **Query-stripping** dan routing prefix (mirip `zix.Http1`)
+- **Penggabungan DATA-frame** untuk gRPC server-streaming (5000 pesan -> ~3 frame)
+- **Terminator TLS** dibagi dengan gRPC melalui `h2_terminator.zig`
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Perombakan Body Permintaan</b></summary>
+
+**14 cacat diperbaiki** di kedua engine HTTP:
+- `bodyReceived()` dan `bodyComplete()` baru pada kedua view permintaan
+- Satu decoder chunked bersama (`chunkedFrame`/`decodeChunkedInBuf`/`readChunkedBody`)
+- Konfig `max_request_body` (default 8 MiB, 0 menonaktifkan)
+- `Expect: 100-continue` dijawab pada setiap model
+- `.EPOLL` menunda handler sampai body terkuras penuh (bukan parsial)
+- Daftar `Transfer-Encoding` yang diakhiri `chunked` dikenali dengan benar
+- Body berukuran besar dibuang dengan 413 (bukan dipotong)
+- Frame chunked malformed -> 400
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Trio Request/Response/Context (ADR-062/063)</b></summary>
+
+- **Semua engine** sekarang menggunakan `HandlerFn(req: *Request, res: *Response, ctx: *Context) anyerror!void`
+- `Context` membawa: `io`, arena stack per-permintaan (`FixedBufferAllocator`), helper timeout
+- **Router** dengan `zix.ENGINE.Router(&[_]Route{...}).dispatch`
+- `zix.Grpc` adalah pengecualian: menerima `Router(&routes)` sendiri (membawa metadata `is_server_streaming`)
+- **Auto-500** pada error untuk `zix.Http`, `zix.Http2`, `zix.Http3`, pass-through diam untuk `zix.Grpc`/`zix.Fix`
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Kompresi Respons</b></summary>
+
+- **Encoder/decoder brotli** in-tree dari RFC 7932 (kamus statis 122.784 byte disematkan)
+- Negosiasi `Accept-Encoding` (gzip/deflate/brotli) dengan q-values, wildcard, batas ukuran
+- `sendNegotiated` pada kedua engine HTTP, aktif di bawah `.EPOLL`/`.URING`
+- **Encoder gzip cepat** (`compression.flate_fast`): LZ greedy, Huffman tetap, untuk body di bawah 64 KiB
+  - Benchmark lokal: json gzip dinamis dari ~35K menjadi 154-173K pada koneksi 512/4096/16384
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Perombakan Pelayanan File Statis (ADR-064)</b></summary>
+
+- **`static_cache.zig`**: tabel bersama per proses (fd terbuka, ukuran, header 200 pra-render)
+- **`static_send.zig`**: `sendfile` pada Linux cleartext, baca posisional + tulis untuk terenkripsi/di-staging
+- **Sibling `.br` dan `.gz` precompressed** diambil sekali, dilayani dengan `Vary: Accept-Encoding`
+- **Range requests** (RFC 7233) pada `zix.Http`, `zix.Http1`, `zix.Http2`, penanganan 206/416
+- Konfig baru: `public_dir_cache_ttl_ms` (default 0), `public_dir_cache_max_entries` (256)
+- `public_dir` pada `zix.Http2`/`zix.Http3` (sebelumnya tidak ada)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Penulisan Ulang Parser Multipart</b></summary>
+
+- **Pemindaian linear** (sebelumnya O(parts × size)), sekarang O(size)
+- **Zero-copy**: tanpa duplikasi alokator, semua field meminjam body
+- **Framing benar**: hanya dua byte CRLF yang dihapus (bukan semua leading/trailing)
+- **Batas penutup tanpa CRLF di akhir** diterima (perilaku umum klien)
+- **Ekstraksi nama field benar**: hanya cocok di awal parameter, bukan di dalam filename
+- Pelaporan error lengkap: `ZixMultipartNoBoundary`, `ZixMultipartUnterminated`
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Mode Datagram UDP Mentah</b></summary>
+
+- `zix.Udp.Raw(handler)` melayani datagram panjang variabel
+- **Linux**: batching `recvmmsg`/`sendmmsg`, worker `SO_REUSEPORT` per-core
+- **`.URING`** multishot recv dengan buffer ring (256 buffer)
+- **Dukungan GSO** di belakang `.URING`
+- Contoh: `udp_server_raw.zig` (port 9064)
+
+</details>
+
+<br>
+
+### __**Platform & Build:**__
+
+<details>
+
+<summary><b>Dukungan Kompilasi Lintas Platform</b></summary>
+
+- **Membangun dengan Zig 0.16.x dan 0.17.x** untuk: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd
+- **Windows**: shim ntdll (`NtReadFile`/`NtWriteFile`/`NtClose` + partial-disconnect AFD)
+- **BSD**: `TCP_NODELAY` diselesaikan pada comptime
+- **Jalur khusus Linux** dijaga (loop EPOLL/URING, afinitas CPU, madvise, batching UDP)
+- **`scripts/build-all-targets.sh`** menyapu semua opsi pada semua target
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Paritas Fitur `.ASYNC` (ADR-066)</b></summary>
+
+- **Kompresi dan cache respons** sekarang berfungsi di bawah `.ASYNC`
+- **TLS over `.ASYNC`** diperbaiki di macOS, FreeBSD, NetBSD, OpenBSD (pembagian tiga arah `windows`/`linux`/`posix`)
+- **Fallback datagram portabel HTTP/3** di luar Linux
+- **Path socket Unix-domain** diselesaikan menjadi path absolut (AF_UNIX Windows membutuhkannya)
+- Substrat bersama baru: `fd_io.zig`, `socket_pair.zig`, `socket_path.zig`, `async_cache.zig`
+
+</details>
+
+---
+
+<details>
+
+<summary><b>`.POOL` dan `.MIXED` Dihapus (ADR-065)</b></summary>
+
+- DispatchModel sekarang: `ASYNC = 0`, `EPOLL = 1`, `URING = 2`
+- Di luar Linux, `.EPOLL`/`.URING` mengembalikan `error.ZixDispatchModelUnsupported`
+- `pool_size` dihapus, `workers` digunakan sebagai gantinya
+- 16 file dispatch dihapus, 34 contoh -> 7 terpadu
+
+</details>
+
+<br>
+
+### __**Optimasi Kinerja:**__
+
+<details>
+
+<summary><b>Memori</b></summary>
+
+- **Pemadatan recv-slab EPOLL Http1**: dikemas ke koneksi aktif, puncak ~704->281 MiB
+- **Batas idle-pool URING Http1**: eviction LRU pool reconnect hangat, dibatasi oleh knop konfig
+- **Stream-slot pool Http2/gRPC**: `connections * max_streams` -> hanya stream konkuren
+  - Http2: potongan memori 6×, peningkatan throughput 8–20%
+  - gRPC: potongan memori 12× (916->77 MiB), peningkatan throughput 8–11%
+- **Seal-in-place TLS**: enkripsi-gabung dua slice plaintext menjadi satu record tanpa salinan staging
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Throughput</b></summary>
+
+- **Submit intra-batch `.URING`**: SQE didorong setiap 16 completion (bukan hanya setelah batch penuh): peningkatan 4–5%
+- **Penyatuan wakeup adaptif `.URING`**: 32 completion per enter dengan guard stall 20µs
+- **Fast path accept `.URING`**: SQE dikirim segera di dalam handler accept: penurunan p99 ~30%
+- **Cache prefix header respons HPACK**: peningkatan 18–26% pada sel body kecil
+- **Encoder gzip cepat**: 4–5× lebih cepat dari std pada rasio serupa
+
+</details>
+
+---
+
+<details>
+
+<summary><b>I/O</b></summary>
+
+- **Multishot recv `.URING`** untuk UDP/HTTP3 (buffer ring, 256 buffers)
+- **Backpressure antrian submit** (`process_queue_len`): parkir pada SQ penuh daripada menutup
+- **Perbaikan re-arm accept hilang** di semua dispatch `.URING`
+
+</details>
+
+<br>
+
+### __**Klien & Transport:**__
+
+<details>
+
+<summary><b>Timeout Klien HTTP</b></summary>
+
+- `response_timeout_ms` dan `read_timeout_ms` sekarang ditegakkan
+- Dijaga oleh poll kesiapan (`socket_poll.zig`)
+- Pembacaan descriptor mentah klien HTTP/2 diperbaiki (tanpa syscall Linux di macOS/BSD)
+- Klien SSE/WebSocket mendapatkan field yang sama
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Klien TLS</b></summary>
+
+- Klien verifikasi native (`zix.Tls.Client` 1.3, `zix.Tls.Client12`)
+- ALPN, verifikasi rantai X.509 + hostname (RFC 5280/6125)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>WebSocket over TLS</b></summary>
+
+- WSS pada jalur thread-per-connection (`.ASYNC`/`.POOL`/`.MIXED`)
+- `WebSocket.serveTls(fd, key, on_frame)` mengenkripsi melalui stream sink
+- Auto-pong, auto-echo close, jalur mux ditambahkan melalui ADR-060
+
+</details>
+
+---
+
+<details>
+
+<summary><b>SSE over TLS</b></summary>
+
+- `res.stream()` over TLS; `zix.Http1.beginStream()` (no-op di cleartext)
+
+</details>
+
+<br>
+
+### __**Diagnostik & Logging:**__
+
+<details>
+
+<summary><b>Perombakan Logger</b></summary>
+
+- Shim `logSystem` menerima `Logger.Level`
+- Tanpa logger: memanggil `std.log` pada level yang sesuai
+- `.ERROR`/`.WARN` bertahan di build release
+- Penulisan gagal mencoba ulang `.INTR`/`.AGAIN`, menjaga konsol
+- Per-peer/per-paket pada `.WARN` atau lebih rendah, bind/accept/config pada `.ERROR`
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Pelaporan Error</b></summary>
+
+- **Semua 21 situs bind** sekarang menjawab dengan `error.Zix<Engine>ListenFailed` + satu baris menyebutkan alamat, penyebab, jumlah worker
+- **Nama error diawali produk**: `Zix`, `Zixer`, `Jzon`, `Postgrez`, `Rediz`, `Prometheuz`
+- **jzon** mendapat `lastFailure()` dengan nama field dan posisi byte
+- **Error yang digabung dipisah**: sertifikat/kunci tidak ditemukan, adalah direktori, terlalu besar, tidak terbaca
+- **`reuseport_cbpf` tidak lagi diam**: penolakan kernel dilaporkan sekali per proses
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Logging Zixer</b></summary>
+
+- Kunci `log_level` di main.cfg (debug/info/warn/error, default info)
+- Setiap jawaban edge ditulis sekali: 5xx di `.WARN`, 4xx di `.DEBUG`
+- Pemberitahuan startup/gagal daemon pada logger (bukan stdout)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Windows</b></summary>
+
+- **Overflow clock monoton diperbaiki**: matematika bagi-dulu (sebelumnya kali-dulu, overflow ~31 menit uptime)
+- **`recv_timeout_ms` UDP ditegakkan**: poll kesiapan berbasis AFD (sebelumnya blocking, tanpa timeout)
+
+</details>
+
+<br>
+
+### __**Perubahan Breaking API:**__
+
+<details>
+
+<summary><b>Model Dispatch</b></summary>
+
+- **Field konfig wajib** (tanpa default): `dispatch_model` harus diatur secara eksplisit
+- `.POOL` dan `.MIXED` dihapus -> gunakan `.ASYNC`, `.EPOLL`, atau `.URING`
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Inisialisasi Server</b></summary>
+
+- Semua `Server.init` sekarang infallible, config disimpan, validasi dipindah ke `run()`
+- `zix.Http.Server.init` menghilangkan argumen comptime `stack_threshold`
+- `zix.Http3.Http3(handler)` generik -> `zix.Http3.Server.init(handler, config)`
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Signature Handler</b></summary>
+
+- Semua engine: `HandlerFn(req: *Request, res: *Response, ctx: *Context) anyerror!void`
+- `zix.Http1`: raw `fn(head, body, fd)` dihapus, `initRaw` dihapus, middleware dihapus
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Helper Respons Diganti Nama (ADR-059)</b></summary>
+
+- `fdWriteAll` -> `writeAllFD`
+- `writeSimple` -> `sendSimpleFD`
+- `writeJson` -> `sendJsonFD`
+- `writeGzip` -> `sendGzipFD`
+- `writeNegotiated` -> `sendNegotiateFD`
+- `writeChunkedStart` -> `sendChunkedStartFD`
+- Dan semua `write*` lainnya -> `send*` / `*FD` sesuai taksonomi
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Penanganan Metode HTTP (RFC 10008)</b></summary>
+
+- **Metode QUERY** didukung (RFC 10008)
+- `Method.codeFromString` adalah **pencocokan eksak** (case-sensitive, RFC 9110)
+- Metode tidak didukung -> `501 Not Implemented`
+- `zix.Http1` tidak lagi menerima metode huruf kecil (`get`/`Post`/`delete`)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Tipe Konten</b></summary>
+
+- `Content.Type.NA` dihapus, pencarian mengembalikan `?Type`
+- `enumFromString` -> `typeFromString`, keduanya mengembalikan null jika tidak cocok
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Nama Error</b></summary>
+
+- Semua nama error publik diawali produk: `ZixPortNotConfigured`, `ZixTlsCertFileNotFound`, dll.
+- Error std tetap menggunakan nama std (OutOfMemory, WriteFailed, dll.)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Field Konfig Dihapus/Diganti Nama</b></summary>
+
+- `pool_size` dihapus dari semua konfig
+- `pool_stack_size_bytes` dihapus dari `zix.Fix`
+- `max_client_response` dihapus dari `HttpServerConfig`
+- `max_gzip_out` -> `compression_max_out`
+- `connection_timeout_ms` -> `conn_timeout_ms` (koreksi dokumen)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Breaking Khusus QUERY</b></summary>
+
+- **Tidak ada caching untuk respons QUERY** (kunci cache hash(method+path+query), tanpa body)
+- **Tipe media ditambahkan**: `application/x-www-form-urlencoded`, `application/jsonpath`, `application/sql`, `multipart/form-data`
+- **`zix.Http.Client`** tidak dapat mengirim QUERY melalui TCP (std.http.Method tertutup)
+- **`requestUds`** dapat membawa QUERY, klien HTTP/2 sekarang mengirim body dengan QUERY
+
+</details>
+
+<br>
+
+### __**Tes & Validasi:**__
+
+<details>
+
+<summary><b>Ekspansi Runner</b></summary>
+
+- **55 protokol** (sebelumnya 34) di semua engine dan model dispatch
+- **Eksekusi sadar platform**: target asing dikompilasi dan dilewati dengan peringatan
+- **Langkah build test-run bernama** untuk diagnostik `--summary all`
+- **52 skenario lulus di setiap platform** (linux_only_labels kosong)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Tes Driver Tanpa Docker</b></summary>
+
+- `test-behaviour` dan `test-edge` untuk `postgrez`, `rediz`, `prometheuz`
+- Server in-process berbicara protokol nyata, tanpa container/daemon
+- Semua 7 jalur CI manual menjalankannya (sebelumnya hanya jalur Linux)
+- `test-integration` dan `test-runner` tetap khusus container (langkah lokal)
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Cakupan</b></summary>
+
+- **86 tes unit/perilaku/edge baru** untuk metode QUERY
+- **~80 tes unit/edge baru** untuk penanganan body permintaan
+- **Suite tes lengkap** di semua 55 protokol runner dan 13 demo proxy zixer
+
+</details>
+
+<br>
+
+### __**Contoh & Demo:**__
+
+<details>
+
+<summary><b>Contoh Baru (Port)</b></summary>
+
+- `http1_query.zig` (9079), `http_query.zig` (9080)
+- `http1_compression.zig` (9058), `http_compression.zig` (9059)
+- `udp_server_raw.zig` (9064), `udp_server_tickrate.zig`, `udp_client_tickrate.zig`
+- `tls/tls_http1_basic.zig` (9060), `tls/tls_http2_basic.zig` (9061)
+- `tls/tls_http1_ed25519.zig` (9062)
+- `tls/tls_http1_sse.zig` (9073), `tls/tls_http1_ws.zig` (9074), `tls/tls_http_ws.zig` (9075)
+- `tls/tls_http1_dual.zig` (9076 cleartext/9077 TLS)
+- `tls/tls_http_basic.zig` (9071), `tls/tls_http_sse.zig` (9072)
+- `http3_basic.zig` (9063)
+- `http2_basic_{async,pool,mixed,epoll,uring}.zig` (9065-9069)
+- **8 contoh WebRTC** (9081-9088): signalling relay, STUN binding, data echo, pasangan zix-to-zix, room chat, transfer file, siaran media, panggilan video mesh
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Contoh File Statis</b></summary>
+
+- Semua contoh yang menggunakan `public_dir` sekarang menggunakan jalur caching/serving baru
+- Sibling `.br` dan `.gz` precompressed diambil secara otomatis
+
+</details>
+
+<br>
+
+### __**Dokumentasi:**__
+
+<details>
+
+<summary><b>Dokumen Baru</b></summary>
+
+- **`docs/zixer/`**: README, how-to-use, config, HLD, LLD (Inggris + Indonesia)
+- **`docs/driver/postgrez/`**: README, HLD, LLD, ref config (EN + ID)
+- **`docs/driver/rediz/`**: README, HLD, LLD, ref config (EN + ID)
+- **`docs/driver/prometheuz/`**: README, HLD, LLD, ref config (EN + ID)
+- **`docs/hld-http3-en.md`**, **`lld-http3-en.md`** (dan -id)
+- **`docs/hld-tls-en.md`**, **`lld-tls-en.md`** (dan -id)
+- **`docs/hld-grpc-en.md`**, **`hld-grpc-proxy-en.md`** (dan -id) diperbarui untuk TLS native
+
+</details>
+
+---
+
+<details>
+
+<summary><b>Koreksi</b></summary>
+
+- Dokumen `zix.Http`: TLS didukung (sebelumnya "proxy-terminated by design")
+- Dokumen `zix.Grpc`: cache respons dan dual listener TLS dicatat
+- `zix.Uds`/`zix.Tcp`: encoding frame adalah big-endian (sebelumnya little-endian)
+- `zix.Fix`: `connection_timeout_ms` -> `conn_timeout_ms`
+- `zix.Tcp`: `max_msg_len` -> `max_recv_buf`
+
+</details>
+
+<br>
+
+### __**Riwayat Versi:**__
+
+- **0.5.0-rc1** (2026-07-15): Rilis kandidat awal
+- **0.5.x-rc2** (2026-07-27): Suite tes driver, build lintas platform, perombakan body
+- **0.5.x-rc3** (2026-08-14): zixer, WebRTC, pemulihan loss QUIC, perbaikan bug final
+
+<br>
+
+## 0.5.x-rc3 (2026-08-14)
 
 __*Fix:*__
 
