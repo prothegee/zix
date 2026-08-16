@@ -123,7 +123,8 @@
 </h2>
 <div align="center">
 
-[![kofi](https://img.shields.io/badge/kofi-prothegee-eb7215)](https://ko-fi.com/prothegee)
+[![ko-fi](https://img.shields.io/badge/kofi-prothegee-eb7215)](https://ko-fi.com/prothegee)
+[![github](https://img.shields.io/badge/github-prothegee-d705b4)](https://github.com/sponsors/prothegee)
 [![paypal](https://img.shields.io/badge/paypal-prothegee-2116ce)](https://paypal.me/prothegee)
 [![saweria](https://img.shields.io/badge/saweria-prothegee-fbba2b)](https://saweria.co/prothegee)
 
@@ -132,7 +133,8 @@
 <!--
 RESERVED sponsor
 
-kofi: https://ko-fi.com/prothegee
+ko-fi: https://ko-fi.com/prothegee
+github: https://github.com/sponsors/prothegee
 paypal: https://paypal.me/prothegee
 saweria: https://saweria.co/prothegee
 -->
