@@ -80,7 +80,7 @@
 <!--     <b><i>Zix Build Main Branch Status:</i></b> -->
 <!-- </h4> -->
 <!-- <p align="center"> -->
-<!--     <code><i>These built are not checking native docker/podman container</i></code> -->
+<!--     <code><i>These built are not checking native docker/podman container and manual trigger</i></code> -->
 <!-- </p> -->
 <!-- <div align="center"> -->
 <!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=zig-x86_64-Linux-0.16"> -->
@@ -103,38 +103,31 @@
 </h4>
 <br>
 <div align="center">
-    <a href="https://www.http-arena.com/#scope=h1&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h1.svg" alt="Benchmarked by HttpArena H/1.1" height="44">
-    </a>
-    &nbsp;&nbsp;
-    <a href="https://www.http-arena.com/#scope=ws&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-websocket.svg" alt="Benchmarked by HttpArena WebSocket" height="44">
-    </a>
+
+[![HttpArena H1](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h1.json)](https://www.http-arena.com/#scope=h1&type=engine&tuned=0)
+[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h2.json)](https://www.http-arena.com/#scope=h2&type=engine&tuned=0)
+[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h3.json)](https://www.http-arena.com/#scope=h3&type=engine&tuned=0)
+
 </div>
-<br>
 <div align="center">
-    <a href="https://www.http-arena.com/#scope=h2&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h2.svg" alt="Benchmarked by HttpArena H/2" height="44">
-    </a>
-    &nbsp;&nbsp;
-    <a href="https://www.http-arena.com/#scope=grpc&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-grpc.svg" alt="Benchmarked by HttpArena gRPC" height="44">
-    </a>
+
+[![HttpArena WebSocket](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/ws.json)](https://www.http-arena.com/#scope=ws&type=engine&tuned=0)
+[![HttpArena gRPC](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/grpc.json)](https://www.http-arena.com/#scope=grpc&type=engine&tuned=0)
+
 </div>
-<br>
+
+<hr>
+
+<h2 align="center">
+    <b><i>Sponsor This Project</i></b>
+</h2>
 <div align="center">
-    <a href="https://www.http-arena.com/#scope=h3&type=engine&tuned=0&q=zix" target="_blank" rel="noopener noreferrer">
-        <img src="https://cdn.jsdelivr.net/gh/MDA2AV/httparena-badge/httparena-badge-h3.svg" alt="Benchmarked by HttpArena H/3" height="44">
-    </a>
+
+[![kofi](https://img.shields.io/badge/kofi-prothegee-eb7215)](https://ko-fi.com/prothegee)
+[![paypal](https://img.shields.io/badge/paypal-prothegee-2116ce)](https://paypal.me/prothegee)
+[![saweria](https://img.shields.io/badge/saweria-prothegee-fbba2b)](https://saweria.co/prothegee)
+
 </div>
-
-<!-- <br> -->
-
-<!--
-RESERVED localbench
--->
-
-<!-- <hr> -->
 
 <!--
 RESERVED sponsor
