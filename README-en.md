@@ -194,6 +194,7 @@ __*Maintained Platforms:*__
 - Narrowing down the system thinking then be explicit.
 - A "nice to have" and "maybe we need this" is tertiary.
 - Always fix from our side first rather than Zig feature/s side.
+- What can be control/adjust to the caller/user, serve it to them when possible.
 - If bias/ambigue, try to discuss it. At least involved with other 1-2 entities.
 - Don't use abstraction on specific engine or specific intent, avoid it if you must.
 - Linux x86_64/aarch64 raw-syscall fast path is guarded, any change there can harm the implementation.
