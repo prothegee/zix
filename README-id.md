@@ -194,6 +194,7 @@ __*Maintained Platforms:*__
 - Persempit pemikiran sistem lalu bersikap eksplisit.
 - "Nice to have" dan "mungkin kita perlu ini" bersifat tersier.
 - Selalu perbaiki dari sisi kita terlebih dahulu daripada dari sisi fitur Zig.
+- Apa pun yang dapat dikontrol atau disesuaikan oleh penelepon/pengguna, sediakanlah hal tersebut bagi mereka jika memungkinkan.
 - Jika bias/ambigu, coba diskusikan. Minimal libatkan 1-2 entitas lain.
 - Jangan gunakan abstraksi yang bergantung pada mesin atau tujuan tertentu, hindarilah jika memang harus.
 - Fast path raw-syscall Linux x86_64/aarch64 itu guarded, perubahan di situ bisa merusak implementasi.
