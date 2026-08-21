@@ -576,7 +576,7 @@ For full memory details see [`docs/hld-http-en.md`](docs/hld-http-en.md) and [`d
     - [x] 0.16.x:
         - 0.16.0
     - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1606+a06534d73
+        - 0.17.0-dev.1818+7051f8e73
 
 <br>
 
