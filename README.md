@@ -99,20 +99,19 @@
     <b><i>Benchmark</i></b>
 </h2>
 <h4 align="center">
-    <b><i>HttpArena</i></b>
+    <a href="https://github.com/MDA2AV/HttpArena">
+        <b><i>HttpArena</i></b>
+    </a>
 </h4>
 <br>
 <div align="center">
 
-[![HttpArena H1](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h1.json)](https://www.http-arena.com/#scope=h1&type=engine&tuned=0)
-[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h2.json)](https://www.http-arena.com/#scope=h2&type=engine&tuned=0)
-[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h3.json)](https://www.http-arena.com/#scope=h3&type=engine&tuned=0)
+[![HttpArena H1](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h1.json&logo=zig)](https://www.http-arena.com/#scope=h1&type=engine&tuned=0)
+[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h2.json&logo=zig)](https://www.http-arena.com/#scope=h2&type=engine&tuned=0)
+[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h3.json&logo=zig)](https://www.http-arena.com/#scope=h3&type=engine&tuned=0)
 
-</div>
-<div align="center">
-
-[![HttpArena WebSocket](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/ws.json)](https://www.http-arena.com/#scope=ws&type=engine&tuned=0)
-[![HttpArena gRPC](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/grpc.json)](https://www.http-arena.com/#scope=grpc&type=engine&tuned=0)
+[![HttpArena WebSocket](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/ws.json&logo=zig)](https://www.http-arena.com/#scope=ws&type=engine&tuned=0)
+[![HttpArena gRPC](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/grpc.json&logo=zig)](https://www.http-arena.com/#scope=grpc&type=engine&tuned=0)
 
 </div>
 
