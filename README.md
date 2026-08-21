@@ -65,13 +65,13 @@
     <code><i>Yellow: Cross-Compiled</i></code>
 </p>
 <div align="center">
-    <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen">
-    <img src="https://img.shields.io/badge/aarch64-Linux-brightgreen">
-    <img src="https://img.shields.io/badge/x86__64-Windows-yellow">
-    <img src="https://img.shields.io/badge/aarch64-MacOS-yellow">
-    <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow">
-    <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow">
-    <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow">
+    <img src="https://img.shields.io/badge/x86__64-Linux-brightgreen?logo=linux">
+    <img src="https://img.shields.io/badge/aarch64-Linux-brightgreen?logo=linux"><br>
+    <img src="https://img.shields.io/badge/x86__64-Windows-yellow?logo=windows">
+    <img src="https://img.shields.io/badge/aarch64-MacOS-yellow?logo=macos">
+    <img src="https://img.shields.io/badge/x86__64-FreeBSD-yellow?logo=freebsd">
+    <img src="https://img.shields.io/badge/x86__64-NetBSD-yellow?logo=netbsd">
+    <img src="https://img.shields.io/badge/x86__64-OpenBSD-yellow?logo=openbsd">
 </div>
 
 <!-- <br> -->
@@ -83,13 +83,13 @@
 <!--     <code><i>These built are not checking native docker/podman container and manual trigger</i></code> -->
 <!-- </p> -->
 <!-- <div align="center"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=zig-x86_64-Linux-0.16"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-linux-0.16.yml?label=zig-aarch64-Linux-0.16"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-windows-0.16.yml?label=zig-x86_64-Windows-0.16"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-macos-0.16.yml?label=zig-aarch64-MacOS-0.16"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-freebsd-0.16.yml?label=zig-x86_64-FreeBSD-0.16"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-netbsd-0.16.yml?label=zig-x86_64-NetBSD-0.16"> -->
-<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-openbsd-0.16.yml?label=zig-x86_64-OpenBSD-0.16"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-linux-0.16.yml?label=zig-x86_64-Linux-0.16&logo=zig"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-linux-0.16.yml?label=zig-aarch64-Linux-0.16&logo=zig"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-windows-0.16.yml?label=zig-x86_64-Windows-0.16&logo=zig"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-aarch64-macos-0.16.yml?label=zig-aarch64-MacOS-0.16&logo=zig"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-freebsd-0.16.yml?label=zig-x86_64-FreeBSD-0.16&logo=zig"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-netbsd-0.16.yml?label=zig-x86_64-NetBSD-0.16&logo=zig"> -->
+<!--     <img src="https://img.shields.io/github/actions/workflow/status/prothegee/zix/zig-x86_64-openbsd-0.16.yml?label=zig-x86_64-OpenBSD-0.16&logo=zig"> -->
 <!-- </div> -->
 <!-- https://shields.io/badges/git-hub-actions-workflow-status -->
 
@@ -107,11 +107,12 @@
 <div align="center">
 
 [![HttpArena H1](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h1.json&logo=zig)](https://www.http-arena.com/#scope=h1&type=engine&tuned=0)
-[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h2.json&logo=zig)](https://www.http-arena.com/#scope=h2&type=engine&tuned=0)
-[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h3.json&logo=zig)](https://www.http-arena.com/#scope=h3&type=engine&tuned=0)
-
 [![HttpArena WebSocket](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/ws.json&logo=zig)](https://www.http-arena.com/#scope=ws&type=engine&tuned=0)
+
+[![HttpArena H2](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h2.json&logo=zig)](https://www.http-arena.com/#scope=h2&type=engine&tuned=0)
 [![HttpArena gRPC](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/grpc.json&logo=zig)](https://www.http-arena.com/#scope=grpc&type=engine&tuned=0)
+
+[![HttpArena H3](https://img.shields.io/endpoint?url=https://www.http-arena.com/badge/zix/h3.json&logo=zig)](https://www.http-arena.com/#scope=h3&type=engine&tuned=0)
 
 </div>
 
@@ -122,21 +123,12 @@
 </h2>
 <div align="center">
 
-[![ko-fi](https://img.shields.io/badge/kofi-prothegee-eb7215)](https://ko-fi.com/prothegee)
-[![github](https://img.shields.io/badge/github-prothegee-d705b4)](https://github.com/sponsors/prothegee)
-[![paypal](https://img.shields.io/badge/paypal-prothegee-2116ce)](https://paypal.me/prothegee)
+[![ko-fi](https://img.shields.io/badge/ko--fi-prothegee-eb7215?logo=ko-fi)](https://ko-fi.com/prothegee)
+[![github](https://img.shields.io/badge/github-prothegee-590fa7?logo=github)](https://github.com/sponsors/prothegee)
+[![paypal](https://img.shields.io/badge/paypal-prothegee-2116ce?logo=paypal)](https://paypal.me/prothegee)
 [![saweria](https://img.shields.io/badge/saweria-prothegee-fbba2b)](https://saweria.co/prothegee)
 
 </div>
-
-<!--
-RESERVED sponsor
-
-ko-fi: https://ko-fi.com/prothegee
-github: https://github.com/sponsors/prothegee
-paypal: https://paypal.me/prothegee
-saweria: https://saweria.co/prothegee
--->
 
 <!-- <hr> -->
 
