@@ -1350,6 +1350,8 @@ curl -X POST "http://localhost:9005/upload" \
 
 **When to use:** enable `public_dir` to serve a built frontend, assets, or downloads from the same server, with range requests handled for you. Use the multipart path for user uploads when you control the storage target. With `public_dir_cache_ttl_ms` set, a cleartext response hands the file to the kernel with `sendfile`, so the bytes never enter user space. A CDN is still the right answer for bulk file distribution across regions: this is for convenience and co-located assets.
 
+**Important:** consider tweak the `max_recv_buf` field depend on your upload chunk file size when you serving an upload functionality.
+
 <br>
 
 ### Response Header Cap (`HeaderSize`)
