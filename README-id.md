@@ -1359,6 +1359,8 @@ curl -X POST "http://localhost:9005/upload" \
 
 **Kapan digunakan:** aktifkan `public_dir` untuk menyajikan frontend hasil build, aset, atau unduhan dari server yang sama, dengan range request ditangani otomatis. Pakai jalur multipart untuk unggahan pengguna saat kamu mengontrol target penyimpanan. Dengan `public_dir_cache_ttl_ms` diatur, respons cleartext menyerahkan file ke kernel lewat `sendfile`, jadi byte-nya tidak pernah masuk user space. CDN tetap jawaban yang tepat untuk distribusi file massal lintas region: ini untuk kemudahan dan aset co-located.
 
+**Penting:** pertimbangkan untuk menyesuaikan kolom `max_recv_buf` berdasarkan ukuran *chunk* file unggahan saat menyediakan fitur unggah.
+
 <br>
 
 ### Kapasitas Header Respons (`HeaderSize`)
