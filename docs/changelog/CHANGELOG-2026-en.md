@@ -45,61 +45,50 @@ __**Fix:**__
 
 <br>
 
-## 0.5.0 (2026-08-17)
+## 0.5.0 (2026-08-26)
 
 ### __**New Features:**__
 
-<details>
-
-<summary><b>TLS 1.3 Stack</b></summary>
+#### TLS 1.3 Stack
 
 Full implementation on `std.crypto`, no OpenSSL:
-- **TLS 1.3 server** (RFC 8446) + **TLS 1.2 fallback** (RFC 5246/5288, ECDHE-ECDSA-AES128-GCM)
-- **Native verifying client** `zix.Tls.Client` (1.3 and 1.2) with ALPN, X.509 chain + hostname verification
-- **ECDSA P-256**, **Ed25519**, and **RSA** certificates supported
-- RSA minimum 2048-bit, constant-time Montgomery modexp, PSS signatures
-- **TLS dual listener**: one server serves cleartext on `port` AND TLS on `tls_port`
-- **HTTPS/1.1, h2 over TLS, gRPC over TLS, and WebSocket over TLS (wss)** all served
-- **SSE over TLS** on thread-per-connection path
-- Multiplexed TLS dispatch under `.EPOLL`/`.URING` (no thread per connection)
+- **TLS 1.3 server** (RFC 8446) + **TLS 1.2 fallback** (RFC 5246/5288, ECDHE-ECDSA-AES128-GCM).
+- **Native verifying client** `zix.Tls.Client` (1.3 and 1.2) with ALPN, X.509 chain + hostname verification.
+- **ECDSA P-256**, **Ed25519**, and **RSA** certificates supported.
+- RSA minimum 2048-bit, constant-time Montgomery modexp, PSS signatures.
+- **TLS dual listener**: one server serves cleartext on `port` AND TLS on `tls_port`.
+- **HTTPS/1.1, h2 over TLS, gRPC over TLS, and WebSocket over TLS (wss)** all served.
+- **SSE over TLS** on thread-per-connection path.
+- Multiplexed TLS dispatch under `.EPOLL`/`.URING` (no thread per connection).
 
 NOTE:
-- Consider use Ed25519 or ECDSA P-256
-- RSA is a bit slow
-
-</details>
-
-<hr>
-
-<details>
-
-<summary><b>Three Internal Database Drivers</b></summary>
-
-1. **`postgrez`** (PostgreSQL)
-   - Wire protocol 3.2 with 3.0 fallback (PostgreSQL 15+)
-   - SCRAM-SHA-256 and SCRAM-PLUS (channel binding), cleartext auth
-   - TLS 1.3, COPY streaming, LISTEN/NOTIFY, prepared statements, query pipelining
-   - Thread-safe `Pool`, batching `Executor`
-
-2. **`rediz`** (Redis)
-   - RESP3 via HELLO with RESP2 fallback (Redis 7/8)
-   - Typed value helpers, raw command escape hatch
-   - Command pipelining, deferred write-behind path
-   - Thread-safe `Pool`, TLS 1.3
-
-3. **`prometheuz`** (Prometheus)
-   - Text exposition 0.0.4 parser, background `Scraper` poller
-   - `remote_write` push (protobuf + snappy)
-   - PromQL instant and ranged query
-   - Metric registry (`Counter`, `Gauge`)
-
-</details>
+- Consider use Ed25519 or ECDSA P-256 (RSA is a bit slow).
 
 ---
 
-<details>
+#### Three Internal Drivers
 
-<summary><b>New Executable: `zixer` (Proxy Gateway)</b></summary>
+1. **`postgrez`** (PostgreSQL)
+   - Wire protocol 3.2 with 3.0 fallback (PostgreSQL 15+).
+   - SCRAM-SHA-256 and SCRAM-PLUS (channel binding), cleartext auth.
+   - TLS 1.3, COPY streaming, LISTEN/NOTIFY, prepared statements, query pipelining.
+   - Thread-safe `Pool`, batching `Executor`.
+
+2. **`rediz`** (Redis)
+   - RESP3 via HELLO with RESP2 fallback (Redis 7 or 8).
+   - Typed value helpers, raw command escape hatch.
+   - Command pipelining, deferred write-behind path.
+   - Thread-safe `Pool`, TLS 1.3.
+
+3. **`prometheuz`** (Prometheus)
+   - Text exposition 0.0.4 parser, background `Scraper` poller.
+   - `remote_write` push (protobuf + snappy).
+   - PromQL instant and ranged query.
+   - Metric registry (`Counter`, `Gauge`).
+
+---
+
+#### New Executable: `zixer` (Proxy Gateway)
 
 A config-driven gateway built on the engines:
 - **Single daemon** manages multiple independent sites, each with its own port and engine
@@ -115,557 +104,419 @@ A config-driven gateway built on the engines:
 - **15 runnable demos** under `examples/proxies/`
 - Complete documentation in `docs/zixer/` (English and Indonesian, 5 files each)
 
-</details>
-
 ---
 
-<details>
-
-<summary><b>New Engine: `zix.Webrtc` (WebRTC Peer)</b></summary>
+#### New Engine: `zix.Webrtc` (WebRTC Peer)
 
 A WebRTC server built from RFCs 7983, 8445, 8489, 6347, 9260, 8831, and 8832. Serves:
-- **ICE connectivity checks** over STUN
-- **DTLS 1.2 handshake** (ECDHE-ECDSA P-256 only)
-- **SCTP association** with data channels
-- **Selective Forwarding Unit (SFU)** mode for media (RTP header rewrite per receiver)
-- Three dispatch models: `.ASYNC` (cross-platform), `.EPOLL`, `.URING` (Linux)
-- Eight examples on ports 9081–9088, including browser-driven demos
-
-</details>
+- **ICE connectivity checks** over STUN.
+- **DTLS 1.2 handshake** (ECDHE-ECDSA P-256 only).
+- **SCTP association** with data channels.
+- **Selective Forwarding Unit (SFU)** mode for media (RTP header rewrite per receiver).
+- Three dispatch models: `.ASYNC` (cross-platform), `.EPOLL`, `.URING` (Linux).
+- Eight examples on ports 9081–9088, including browser-driven demos.
 
 <br>
+
+---
 
 ### __**Core Engine Improvement:**__
 
-<details>
+#### HTTP/3 over QUIC
 
-<summary><b>HTTP/3 over QUIC</b></summary>
-
-- Full RFC 9000/9001/9002/9114 implementation
-- **Loss recovery and congestion control** (ACK-driven, NewReno, PTO with backoff)
-- **QPACK** static-table field lines, RFC 7541 Huffman decoder
-- **Flow-control rolling**: MAX_STREAMS and MAX_DATA grants replenish as client spends
-- **Content-encoding negotiation**: `accept-encoding`, `content-encoding` br/gzip (static table indices 31/42/43)
-- **Per-core SO_REUSEPORT workers** under `.EPOLL`/`.URING`
-- Native test runner with hand-rolled QUIC client
-
-</details>
+- Full RFC 9000/9001/9002/9114 implementation.
+- **Loss recovery and congestion control** (ACK-driven, NewReno, PTO with backoff).
+- **QPACK** static-table field lines, RFC 7541 Huffman decoder.
+- **Flow-control rolling**: MAX_STREAMS and MAX_DATA grants replenish as client spends.
+- **Content-encoding negotiation**: `accept-encoding`, `content-encoding` br/gzip (static table indices 31/42/43).
+- **Per-core SO_REUSEPORT workers** under `.EPOLL`/`.URING`.
+- Native test runner with hand-rolled QUIC client.
 
 ---
 
-<details>
+#### HTTP/2 Native Dispatch
 
-<summary><b>HTTP/2 Native Dispatch</b></summary>
-
-- **`.EPOLL`/`.URING` shared-nothing multiplexed loops** (was `.POOL`-only)
-- **Per-worker stream-slot pool**: resident memory tracks concurrent streams, not `connections * max_streams`
-- **HPACK response-header prefix cache**: hot triple [:status, content-type, content-encoding] reused
-- **Query-stripping** and prefix routing (mirrors `zix.Http1`)
-- **DATA-frame coalescing** for gRPC server-streaming (5000 messages -> ~3 frames)
-- **TLS terminator** shared with gRPC via `h2_terminator.zig`
-
-</details>
+- **`.EPOLL`/`.URING` shared-nothing multiplexed loops** (was `.POOL`-only).
+- **Per-worker stream-slot pool**: resident memory tracks concurrent streams, not `connections * max_streams`.
+- **HPACK response-header prefix cache**: hot triple [:status, content-type, content-encoding] reused.
+- **Query-stripping** and prefix routing (mirrors `zix.Http1`).
+- **DATA-frame coalescing** for gRPC server-streaming (5000 messages -> ~3 frames).
+- **TLS terminator** shared with gRPC via `h2_terminator.zig`.
 
 ---
 
-<details>
-
-<summary><b>Request Body Overhaul</b></summary>
+#### Request Body Overhaul
 
 **14 defects fixed** across both HTTP engines:
-- New `bodyReceived()` and `bodyComplete()` on both request views
-- One shared chunked decoder (`chunkedFrame`/`decodeChunkedInBuf`/`readChunkedBody`)
-- `max_request_body` config (default 8 MiB, 0 disables)
-- `Expect: 100-continue` answered on every model
-- `.EPOLL` defers handler until body fully drained (not partial)
-- `Transfer-Encoding` list ending in `chunked` correctly recognized
-- Oversized body sheds with 413 (not truncated)
-- Malformed chunked frame -> 400
-
-</details>
+- New `bodyReceived()` and `bodyComplete()` on both request views.
+- One shared chunked decoder (`chunkedFrame`/`decodeChunkedInBuf`/`readChunkedBody`).
+- `max_request_body` config (default 8 MiB, 0 disables).
+- `Expect: 100-continue` answered on every model.
+- `.EPOLL` defers handler until body fully drained (not partial).
+- `Transfer-Encoding` list ending in `chunked` correctly recognized.
+- Oversized body sheds with 413 (not truncated).
+- Malformed chunked frame -> 400.
 
 ---
 
-<details>
+#### Request/Response/Context Trio (ADR-062/063)
 
-<summary><b>Request/Response/Context Trio (ADR-062/063)</b></summary>
-
-- **All engines** now use `HandlerFn(req: *Request, res: *Response, ctx: *Context) anyerror!void`
-- `Context` carries: `io`, per-request stack arena (`FixedBufferAllocator`), timeout helpers
-- **Router** with `zix.ENGINE.Router(&[_]Route{...}).dispatch`
-- `zix.Grpc` is the exception: takes `Router(&routes)` itself (carries `is_server_streaming` metadata)
-- **Auto-500** on error for `zix.Http`, `zix.Http2`, `zix.Http3`, silent pass-through for `zix.Grpc`/`zix.Fix`
-
-</details>
+- **All engines** now use `HandlerFn(req: *Request, res: *Response, ctx: *Context) anyerror!void`.
+- `Context` carries: `io`, per-request stack arena (`FixedBufferAllocator`), timeout helpers.
+- **Router** with `zix.ENGINE.Router(&[_]Route{...}).dispatch`.
+- `zix.Grpc` is the exception: takes `Router(&routes)` itself (carries `is_server_streaming` metadata).
+- **Auto-500** on error for `zix.Http`, `zix.Http2`, `zix.Http3`, silent pass-through for `zix.Grpc`/`zix.Fix`.
 
 ---
 
-<details>
+#### Response Compression
 
-<summary><b>Response Compression</b></summary>
-
-- **brotli** in-tree encoder/decoder from RFC 7932 (122,784-byte static dictionary embedded)
-- `Accept-Encoding` negotiation (gzip/deflate/brotli) with q-values, wildcards, size floor
-- `sendNegotiated` on both HTTP engines, active under `.EPOLL`/`.URING`
-- **Fast gzip encoder** (`compression.flate_fast`): greedy LZ, fixed Huffman, for bodies under 64 KiB
-  - Local bench: dynamic gzip json from ~35K to 154-173K at 512/4096/16384 connections
-
-</details>
+- **brotli** in-tree encoder/decoder from RFC 7932 (122,784-byte static dictionary embedded).
+- `Accept-Encoding` negotiation (gzip/deflate/brotli) with q-values, wildcards, size floor.
+- `sendNegotiated` on both HTTP engines, active under `.EPOLL`/`.URING`.
+- **Fast gzip encoder** (`compression.flate_fast`): greedy LZ, fixed Huffman, for bodies under 64 KiB.
 
 ---
 
-<details>
+#### Static File Serving Rework (ADR-064)
 
-<summary><b>Static File Serving Rework (ADR-064)</b></summary>
-
-- **`static_cache.zig`**: shared table per process (open fd, size, prerendered 200 header)
-- **`static_send.zig`**: `sendfile` on Linux cleartext, positional read + write for encrypted/staged
-- **Precompressed `.br` and `.gz` siblings** picked up once, served with `Vary: Accept-Encoding`
-- **Range requests** (RFC 7233) on `zix.Http`, `zix.Http1`, `zix.Http2`, 206/416 handling
+- **`static_cache.zig`**: shared table per process (open fd, size, prerendered 200 header).
+- **`static_send.zig`**: `sendfile` on Linux cleartext, positional read + write for encrypted/staged.
+- **Precompressed `.br` and `.gz` siblings** picked up once, served with `Vary: Accept-Encoding`.
+- **Range requests** (RFC 7233) on `zix.Http`, `zix.Http1`, `zix.Http2`, 206/416 handling.
 - New config: `public_dir_cache_ttl_ms` (default 0), `public_dir_cache_max_entries` (256)
-- `public_dir` on `zix.Http2`/`zix.Http3` (had none before)
-
-</details>
+- `public_dir` on `zix.Http2`/`zix.Http3` (had none before).
 
 ---
 
-<details>
+#### Multipart Parser Rewrite
 
-<summary><b>Multipart Parser Rewrite</b></summary>
-
-- **Linear scan** (was O(parts × size)), now O(size)
-- **Zero-copy**: no allocator duplication, all fields borrow the body
-- **Correct framing**: only two CRLF bytes removed (not all leading/trailing)
-- **Closing boundary without trailing CRLF** accepted (common client behavior)
-- **Correct field name extraction**: matches only at parameter start, not inside filename
-- Full error reporting: `ZixMultipartNoBoundary`, `ZixMultipartUnterminated`
-
-</details>
+- **Linear scan** (was O(parts × size)), now O(size).
+- **Zero-copy**: no allocator duplication, all fields borrow the body.
+- **Correct framing**: only two CRLF bytes removed (not all leading/trailing).
+- **Closing boundary without trailing CRLF** accepted (common client behavior).
+- **Correct field name extraction**: matches only at parameter start, not inside filename.
+- Full error reporting: `ZixMultipartNoBoundary`, `ZixMultipartUnterminated`.
 
 ---
 
-<details>
+#### UDP Datagram Raw Mode
 
-<summary><b>UDP Datagram Raw Mode</b></summary>
-
-- **Linear scan** (was O(parts × size)), now O(size)
-- **Zero-copy**: no allocator duplication, all fields borrow the body
-- **Correct framing**: only two CRLF bytes removed (not all leading/trailing)
-- **Closing boundary without trailing CRLF** accepted (common client behavior)
-- **Correct field name extraction**: matches only at parameter start, not inside filename
-- Full error reporting: `ZixMultipartNoBoundary`, `ZixMultipartUnterminated`
-
-</details>
+- **Linear scan** (was O(parts × size)), now O(size).
+- **Zero-copy**: no allocator duplication, all fields borrow the body.
+- **Correct framing**: only two CRLF bytes removed (not all leading/trailing).
+- **Closing boundary without trailing CRLF** accepted (common client behavior).
+- **Correct field name extraction**: matches only at parameter start, not inside filename.
+- Full error reporting: `ZixMultipartNoBoundary`, `ZixMultipartUnterminated`.
 
 <br>
+
+---
 
 ### __**Platform & Build:**__
 
-<details>
+#### Cross-Platform Compiled Support
 
-<summary><b>Cross-Platform Compiled Support</b></summary>
-
-- **Builds with Zig 0.16.x and 0.17.x** for: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd
-- **Windows**: ntdll shim (`NtReadFile`/`NtWriteFile`/`NtClose` + AFD partial-disconnect)
-- **BSDs**: `TCP_NODELAY` resolved at comptime
-- **Linux-only paths** gated (EPOLL/URING loops, CPU affinity, madvise, UDP batching)
-- **`scripts/build-all-targets.sh`** sweeps all options over all targets
-
-</details>
+- **Builds with Zig 0.16.x and 0.17.x** for: x86_64-linux, x86_64-windows, aarch64-macos, aarch64-linux, x86_64-freebsd, x86_64-netbsd, x86_64-openbsd.
+- **Windows**: ntdll shim (`NtReadFile`/`NtWriteFile`/`NtClose` + AFD partial-disconnect).
+- **BSDs**: `TCP_NODELAY` resolved at comptime.
+- **Linux-only paths** gated (EPOLL/URING loops, CPU affinity, madvise, UDP batching).
+- **`scripts/build-all-targets.sh`** sweeps all options over all targets.
 
 ---
 
-<details>
+#### `.ASYNC` Feature Parity (ADR-066)
 
-<summary><b><code>.ASYNC</code> Feature Parity (ADR-066)</b></summary>
-
-- **Response compression and cache** now work under `.ASYNC`
-- **TLS over `.ASYNC`** fixed on macOS, FreeBSD, NetBSD, OpenBSD (three-way `windows`/`linux`/`posix` split)
-- **HTTP/3 portable datagram fallback** off Linux
-- **Unix-domain socket paths** resolved to absolute paths (Windows AF_UNIX requires it)
-- New shared substrate: `fd_io.zig`, `socket_pair.zig`, `socket_path.zig`, `async_cache.zig`
-
-</details>
+- **Response compression and cache** now work under `.ASYNC`.
+- **TLS over `.ASYNC`** fixed on macOS, FreeBSD, NetBSD, OpenBSD (three-way `windows`/`linux`/`posix` split).
+- **HTTP/3 portable datagram fallback** off Linux.
+- **Unix-domain socket paths** resolved to absolute paths (Windows AF_UNIX requires it).
+- New shared substrate: `fd_io.zig`, `socket_pair.zig`, `socket_path.zig`, `async_cache.zig`.
 
 ---
 
-<details>
+#### `.POOL` and `.MIXED` Removed (ADR-065)
 
-<summary><b><code>.POOL</code> and <code>.MIXED</code> Removed (ADR-065)</b></summary>
-
-- DispatchModel now: `ASYNC = 0`, `EPOLL = 1`, `URING = 2`
-- Off Linux, `.EPOLL`/`.URING` return `error.ZixDispatchModelUnsupported`
-- `pool_size` removed `workers` used instead
-- 16 dispatch files deleted, 34 examples -> 7 unified
-
-</details>
+- DispatchModel now: `ASYNC = 0`, `EPOLL = 1`, `URING = 2`.
+- Off Linux, `.EPOLL`/`.URING` return `error.ZixDispatchModelUnsupported`.
+- `pool_size` removed `workers` used instead.
+- 16 dispatch files deleted, 34 examples -> 7 unified.
 
 <br>
+
+---
 
 ### __**Performance Optimizations:**__
 
-<details>
+#### Memory
 
-<summary><b>Memory</b></summary>
-
-- **Http1 EPOLL recv-slab compaction**: packed to live connections, peak ~704->281 MiB
-- **Http1 URING idle-pool bound**: warm reconnect pool LRU eviction bounded by config knobs
-- **Http2/gRPC stream-slot pools**: `connections * max_streams` -> concurrent streams only
-  - Http2: 6× memory cut, 8–20% throughput lift
-  - gRPC: 12× memory cut (916->77 MiB), 8–11% throughput lift
-- **TLS seal-in-place**: gather-encrypt two plaintext slices into one record without staging copy
-
-</details>
+- **Http1 EPOLL recv-slab compaction**: packed to live connections, peak ~704->281 MiB.
+- **Http1 URING idle-pool bound**: warm reconnect pool LRU eviction bounded by config knobs.
+- **Http2/gRPC stream-slot pools**:
+  - `connections * max_streams` -> concurrent streams only.
+  - Http2: 6× memory cut, 8–20% throughput lift.
+  - gRPC: 12× memory cut (916->77 MiB), 8–11% throughput lift.
+- **TLS seal-in-place**: gather-encrypt two plaintext slices into one record without staging copy.
 
 ---
 
-<details>
+#### Throughput
 
-<summary><b>Throughput</b></summary>
-
-- **`.URING` intra-batch submit**: SQEs pushed every 16 completions (not only after full batch): 4–5% lift
-- **`.URING` adaptive wakeup coalescing**: 32 completions per enter with 20µs stall guard
-- **`.URING` accept fast path**: SQE submitted immediately inside accept handler: ~30% p99 drop
-- **HPACK response-header prefix cache**: 18–26% lift on small-body cells
-- **Fast gzip encoder**: 4–5× faster than std at similar ratio
-
-</details>
+- **`.URING` intra-batch submit**: SQEs pushed every 16 completions (not only after full batch): 4–5% lift.
+- **`.URING` adaptive wakeup coalescing**: 32 completions per enter with 20us stall guard.
+- **`.URING` accept fast path**: SQE submitted immediately inside accept handler: ~30% p99 drop.
+- **HPACK response-header prefix cache**: 18–26% lift on small-body cells.
+- **Fast gzip encoder**: 4–5x faster than std at similar ratio.
 
 ---
 
-<details>
+#### I/O
 
-<summary><b>I/O</b></summary>
-
-- **`.URING` multishot recv** for UDP/HTTP3 (buffer ring, 256 buffers)
-- **Submission-queue backpressure** (`process_queue_len`): park on full SQ instead of closing
-- **Lost-accept re-arm fix** across all `.URING` dispatches
-
-</details>
+- **`.URING` multishot recv** for UDP/HTTP3 (buffer ring, 256 buffers).
+- **Submission-queue backpressure** (`process_queue_len`): park on full SQ instead of closing.
+- **Lost-accept re-arm fix** across all `.URING` dispatches.
 
 <br>
+
+---
 
 ### __**Client & Transport:**__
 
-<details>
+#### HTTP Client Timeouts
 
-<summary><b>HTTP Client Timeouts</b></summary>
-
-- `response_timeout_ms` and `read_timeout_ms` now enforced
-- Gated by readiness poll (`socket_poll.zig`)
-- HTTP/2 client raw descriptor reads fixed (no Linux syscalls on macOS/BSD)
-- SSE/WebSocket clients gain same fields
-
-</details>
+- `response_timeout_ms` and `read_timeout_ms` now enforced.
+- Gated by readiness poll (`socket_poll.zig`).
+- HTTP/2 client raw descriptor reads fixed (no Linux syscalls on macOS/BSD).
+- SSE/WebSocket clients gain same fields.
 
 ---
 
-<details>
+#### TLS Client
 
-<summary><b>TLS Client</b></summary>
-
-- Native verifying client (`zix.Tls.Client` 1.3, `zix.Tls.Client12`)
-- ALPN, X.509 chain + hostname verification (RFC 5280/6125)
-
-</details>
+- Native verifying client (`zix.Tls.Client` 1.3, `zix.Tls.Client12`).
+- ALPN, X.509 chain + hostname verification (RFC 5280/6125).
 
 ---
 
-<details>
+#### WebSocket over TLS
 
-<summary><b>WebSocket over TLS</b></summary>
-
-- WSS on thread-per-connection path (`.ASYNC`/`.POOL`/`.MIXED`)
-- `WebSocket.serveTls(fd, key, on_frame)` encrypts through stream sink
-- Auto-pong, auto-echo close, mux path added via ADR-060
-
-</details>
+- WSS on thread-per-connection path.
+- `WebSocket.serveTls(fd, key, on_frame)` encrypts through stream sink.
+- Auto-pong, auto-echo close, mux path added via ADR-060.
 
 ---
 
-<details>
+#### SSE over TLS
 
-<summary><b>SSE over TLS</b></summary>
-
-- `res.stream()` over TLS `zix.Http1.beginStream()` (no-op in cleartext)
-
-</details>
+- `res.stream()` over TLS `zix.Http1.beginStream()` (no-op in cleartext).
 
 <br>
+
+---
 
 ### __**Diagnostic & Logging:**__
 
-<details>
+#### Logger Overhaul
 
-<summary><b>Logger Overhaul</b></summary>
-
-- `logSystem` shim takes `Logger.Level`
-- Without logger: calls `std.log` at matching level
-- `.ERROR`/`.WARN` survive release builds
-- Failed writes retry `.INTR`/`.AGAIN` keep console
-- Per-peer/per-packet at `.WARN` or lower, bind/accept/config at `.ERROR`
-
-</details>
+- `logSystem` shim takes `Logger.Level`.
+- Without logger: calls `std.log` at matching level.
+- `.ERROR`/`.WARN` survive release builds.
+- Failed writes retry `.INTR`/`.AGAIN` keep console.
+- Per-peer/per-packet at `.WARN` or lower, bind/accept/config at `.ERROR`.
 
 ---
 
-<details>
+##### Error Reporting
 
-<summary><b>Error Reporting</b></summary>
-
-- **All 21 bind sites** now answer with `error.Zix<Engine>ListenFailed` + one line naming address, cause, worker count
-- **Error names prefixed by product**: `Zix`, `Zixer`, `Jzon`, `Postgrez`, `Rediz`, `Prometheuz`
-- **jzon** gains `lastFailure()` with field name and byte position
-- **Split collapsed errors**: certificate/key not-found, is-a-directory, too-large, unreadable
-- **`reuseport_cbpf` no longer silent**: kernel refusal reported once per process
-
-</details>
+- **All 21 bind sites** now answer with `error.Zix<Engine>ListenFailed` + one line naming address, cause, worker count.
+- **Error names prefixed by product**: `Zix`, `Zixer`, `Jzon`, `Postgrez`, `Rediz`, `Prometheuz`.
+- **jzon** gains `lastFailure()` with field name and byte position.
+- **Split collapsed errors**: certificate/key not-found, is-a-directory, too-large, unreadable.
+- **`reuseport_cbpf` no longer silent**: kernel refusal reported once per process.
 
 ---
 
-<details>
+#### Zixer Logging
 
-<summary><b>Zixer Logging</b></summary>
-
-- **All 21 bind sites** now answer with `error.Zix<Engine>ListenFailed` + one line naming address, cause, worker count
-- **Error names prefixed by product**: `Zix`, `Zixer`, `Jzon`, `Postgrez`, `Rediz`, `Prometheuz`
-- **jzon** gains `lastFailure()` with field name and byte position
-- **Split collapsed errors**: certificate/key not-found, is-a-directory, too-large, unreadable
-- **`reuseport_cbpf` no longer silent**: kernel refusal reported once per process
-
-</details>
+- **All 21 bind sites** now answer with `error.Zix<Engine>ListenFailed` + one line naming address, cause, worker count.
+- **Error names prefixed by product**: `Zix`, `Zixer`, `Jzon`, `Postgrez`, `Rediz`, `Prometheuz`.
+- **jzon** gains `lastFailure()` with field name and byte position.
+- **Split collapsed errors**: certificate/key not-found, is-a-directory, too-large, unreadable.
+- **`reuseport_cbpf` no longer silent**: kernel refusal reported once per process.
 
 ---
 
-<details>
+##### Windows
 
-<summary><b>Windows</b></summary>
-
-- **Monotonic clock overflow fixed**: divide-first math (was multiply-first, overflow at ~31 min uptime)
-- **UDP `recv_timeout_ms` enforced**: AFD-based readiness poll (was blocking, no timeout)
-
-</details>
+- **Monotonic clock overflow fixed**: divide-first math (was multiply-first, overflow at ~31 min uptime).
+- **UDP `recv_timeout_ms` enforced**: AFD-based readiness poll (was blocking, no timeout).
 
 <br>
+
+---
 
 ### __**API Breaking Changes:**__
 
-<details>
+#### Dispatch Model
 
-<summary><b>Dispatch Model</b></summary>
-
-- **Required config field** (no default): `dispatch_model` must be set explicitly
-- `.POOL` and `.MIXED` removed -> use `.ASYNC`, `.EPOLL`, or `.URING`
-
-</details>
+- **Required config field** (no default): `dispatch_model` must be set explicitly.
+- `.POOL` and `.MIXED` removed -> use `.ASYNC`, `.EPOLL`, or `.URING`.
 
 ---
 
-<details>
+#### Server Init
 
-<summary><b>Server Init</b></summary>
-
-- All `Server.init` now infallible, config stored, validation moved to `run()`
-- `zix.Http.Server.init` drops comptime `stack_threshold` argument
-- `zix.Http3.Http3(handler)` generic -> `zix.Http3.Server.init(handler, config)`
-
-</details>
+- All `Server.init` now infallible, config stored, validation moved to `run()`.
+- `zix.Http.Server.init` drops comptime `stack_threshold` argument.
+- `zix.Http3.Http3(handler)` generic -> `zix.Http3.Server.init(handler, config)`.
 
 ---
 
-<details>
+#### Handler Signature
 
-<summary><b>Handler Signature</b></summary>
-
-- All engines: `HandlerFn(req: *Request, res: *Response, ctx: *Context) anyerror!void`
-- `zix.Http1`: raw `fn(head, body, fd)` removedm `initRaw` removed, middleware deleted
-
-</details>
+- All engines: `HandlerFn(req: *Request, res: *Response, ctx: *Context) anyerror!void`.
+- `zix.Http1`: raw `fn(head, body, fd)` removedm `initRaw` removed, middleware deleted.
 
 ---
 
-<details>
+#### Response Helpers Renamed (ADR-059)
 
-<summary><b>Response Helpers Renamed (ADR-059)</b></summary>
-
-- `fdWriteAll` -> `writeAllFD`
-- `writeSimple` -> `sendSimpleFD`
-- `writeJson` -> `sendJsonFD`
-- `writeGzip` -> `sendGzipFD`
-- `writeNegotiated` -> `sendNegotiateFD`
-- `writeChunkedStart` -> `sendChunkedStartFD`
-- And all other `write*` -> `send*` / `*FD` per taxonomy
-
-</details>
+- `fdWriteAll` -> `writeAllFD`.
+- `writeSimple` -> `sendSimpleFD`.
+- `writeJson` -> `sendJsonFD`.
+- `writeGzip` -> `sendGzipFD`.
+- `writeNegotiated` -> `sendNegotiateFD`.
+- `writeChunkedStart` -> `sendChunkedStartFD`.
+- And all other `write*` -> `send*` / `*FD` per taxonomy.
 
 ---
 
-<details>
+#### HTTP Method Handling (RFC 10008)
 
-<summary><b>HTTP Method Handling (RFC 10008)</b></summary>
-
-- **QUERY method** supported (RFC 10008)
-- `Method.codeFromString` is **exact match** (case-sensitive, RFC 9110)
-- Unsupported method -> `501 Not Implemented`
-- `zix.Http1` no longer accepts lowercase methods (`get`/`Post`/`delete`)
-
-</details>
+- **QUERY method** supported (RFC 10008).
+- `Method.codeFromString` is **exact match** (case-sensitive, RFC 9110).
+- Unsupported method -> `501 Not Implemented`.
+- `zix.Http1` no longer accepts lowercase methods (`get`/`Post`/`delete`).
 
 ---
 
-<details>
+#### Content Type
 
-<summary><b>Content Type</b></summary>
-
-- `Content.Type.NA` removed, lookups return `?Type`
-- `enumFromString` -> `typeFromString`, both return null on no match
-
-</details>
+- `Content.Type.NA` removed, lookups return `?Type`.
+- `enumFromString` -> `typeFromString`, both return null on no match.
 
 ---
 
-<details>
-
-<summary><b>Error Names</b></summary>
+#### Error Names
 
 - All public error names prefixed with product: `ZixPortNotConfigured`, `ZixTlsCertFileNotFound`, etc.
-- std errors keep std names (OutOfMemory, WriteFailed, etc.)
-
-</details>
+- std errors keep std names (OutOfMemory, WriteFailed, etc.).
 
 ---
 
-<details>
+#### Config Fields Removed/Renamed
 
-<summary><b>Config Fields Removed/Renamed</b></summary>
-
-- `pool_size` removed from all configs
-- `pool_stack_size_bytes` removed from `zix.Fix`
-- `max_client_response` removed from `HttpServerConfig`
-- `max_gzip_out` -> `compression_max_out`
-- `connection_timeout_ms` -> `conn_timeout_ms` (docs correction)
-
-</details>
+- `pool_size` removed from all configs.
+- `pool_stack_size_bytes` removed from `zix.Fix`.
+- `max_client_response` removed from `HttpServerConfig`.
+- `max_gzip_out` -> `compression_max_out`.
+- `connection_timeout_ms` -> `conn_timeout_ms` (docs correction).
 
 ---
 
-<details>
+#### QUERY-Specific Breaking
 
-<summary><b>QUERY-Specific Breaking</b></summary>
-
-- **No caching for QUERY responses** (cache key hashes method+path+query, no body)
-- **Media types added**: `application/x-www-form-urlencoded`, `application/jsonpath`, `application/sql`, `multipart/form-data`
-- **`zix.Http.Client`** cannot send QUERY over TCP (std.http.Method closed set)
-- **`requestUds`** can carry QUERY, HTTP/2 client now sends body with QUERY
-
-</details>
+- **No caching for QUERY responses** (cache key hashes method+path+query, no body).
+- **Media types added**: `application/x-www-form-urlencoded`, `application/jsonpath`, `application/sql`, `multipart/form-data`.
+- **`zix.Http.Client`** cannot send QUERY over TCP (std.http.Method closed set).
+- **`requestUds`** can carry QUERY, HTTP/2 client now sends body with QUERY.
 
 <br>
+
+---
 
 ### __**Test & Validation:**__
 
-<details>
+#### Runner Expansion
 
-<summary><b>Runner Expansion</b></summary>
-
-- **55 protocols** (was 34) across all engines and dispatch models
-- **Platform-aware execution**: foreign targets compile and skip with warning
-- **Named test-run build steps** for `--summary all` diagnostics
-- **52 scenarios pass on every platform** (linux_only_labels empty)
-
-</details>
+- **55 protocols** (was 34) across all engines and dispatch models.
+- **Platform-aware execution**: foreign targets compile and skip with warning.
+- **Named test-run build steps** for `--summary all` diagnostics.
+- **52 scenarios pass on every platform** (linux_only_labels empty).
 
 ---
 
-<details>
+#### Docker-Free Driver Tests
 
-<summary><b>Docker-Free Driver Tests</b></summary>
-
-- `test-behaviour` and `test-edge` for `postgrez`, `rediz`, `prometheuz`
-- In-process servers speak real protocol, no container/daemon needed
-- All 7 manual CI legs run them (previously only Linux leg could)
-- `test-integration` and `test-runner` remain container-only (local steps)
-
-</details>
+- `test-behaviour` and `test-edge` for `postgrez`, `rediz`, `prometheuz`.
+- In-process servers speak real protocol, no container/daemon needed.
+- All 7 manual CI legs run them (previously only Linux leg could).
+- `test-integration` and `test-runner` remain container-only (local steps).
 
 ---
 
-<details>
+#### Coverage
 
-<summary><b>Coverage</b></summary>
-
-- **86 new unit/behaviour/edge tests** for QUERY method
-- **~80 new unit/edge tests** for request body handling
-- **Full test suite** across all 55 runner protocols and 13 zixer proxy demos
-
-</details>
+- **86 new unit/behaviour/edge tests** for QUERY method.
+- **~80 new unit/edge tests** for request body handling.
+- **Full test suite** across all 55 runner protocols and 13 zixer proxy demos.
 
 <br>
+
+---
 
 ### __**Examples & Demos:**__
 
-<details>
+#### New Examples (Ports)
 
-<summary><b>New Examples (Ports)</b></summary>
-
-- `http1_query.zig` (9079), `http_query.zig` (9080)
-- `http1_compression.zig` (9058), `http_compression.zig` (9059)
-- `udp_server_raw.zig` (9064), `udp_server_tickrate.zig`, `udp_client_tickrate.zig`
-- `tls/tls_http1_basic.zig` (9060), `tls/tls_http2_basic.zig` (9061)
-- `tls/tls_http1_ed25519.zig` (9062)
-- `tls/tls_http1_sse.zig` (9073), `tls/tls_http1_ws.zig` (9074), `tls/tls_http_ws.zig` (9075)
-- `tls/tls_http1_dual.zig` (9076 cleartext/9077 TLS)
-- `tls/tls_http_basic.zig` (9071), `tls/tls_http_sse.zig` (9072)
-- `http3_basic.zig` (9063)
-- `http2_basic_{async,pool,mixed,epoll,uring}.zig` (9065-9069)
-- **8 WebRTC examples** (9081-9088): signalling relay, STUN binding, data echo, zix-to-zix pair, room chat, file transfer, media broadcast, mesh video call
-
-</details>
+- `http1_query.zig` (9079), `http_query.zig` (9080).
+- `http1_compression.zig` (9058), `http_compression.zig` (9059).
+- `udp_server_raw.zig` (9064), `udp_server_tickrate.zig`, `udp_client_tickrate.zig`.
+- `tls/tls_http1_basic.zig` (9060), `tls/tls_http2_basic.zig` (9061).
+- `tls/tls_http1_ed25519.zig` (9062).
+- `tls/tls_http1_sse.zig` (9073), `tls/tls_http1_ws.zig` (9074), `tls/tls_http_ws.zig` (9075).
+- `tls/tls_http1_dual.zig` (9076 cleartext/9077 TLS).
+- `tls/tls_http_basic.zig` (9071), `tls/tls_http_sse.zig` (9072).
+- `http3_basic.zig` (9063).
+- `http2_basic_{async,pool,mixed,epoll,uring}.zig` (9065-9069).
+- **8 WebRTC examples** (9081-9088): signalling relay, STUN binding, data echo, zix-to-zix pair, room chat, file transfer, media broadcast, mesh video call.
 
 ---
 
-<details>
+#### Static File Examples
 
-<summary><b>Static File Examples</b></summary>
-
-- All `public_dir`-using examples now use the new caching/serving paths
-- Precompressed `.br` and `.gz` siblings automatically picked up
-
-</details>
+- All `public_dir`-using examples now use the new caching/serving paths.
+- Precompressed `.br` and `.gz` siblings automatically picked up.
 
 <br>
+
+---
 
 ### __**Documentation:**__
 
-<details>
+#### New Docs
 
-<summary><b>New Docs</b></summary>
-
-- **`docs/zixer/`**: README, how-to-use, config, HLD, LLD (English + Indonesian)
-- **`docs/driver/postgrez/`**: README, HLD, LLD, config ref (EN + ID)
-- **`docs/driver/rediz/`**: README, HLD, LLD, config ref (EN + ID)
-- **`docs/driver/prometheuz/`**: README, HLD, LLD, config ref (EN + ID)
-- **`docs/hld-http3-en.md`**, **`lld-http3-en.md`** (and -id)
-- **`docs/hld-tls-en.md`**, **`lld-tls-en.md`** (and -id)
-- **`docs/hld-grpc-en.md`**, **`hld-grpc-proxy-en.md`** (and -id) updated for native TLS
-
-</details>
+- **`docs/zixer/`**: README, how-to-use, config, HLD, LLD (English + Indonesian).
+- **`docs/driver/postgrez/`**: README, HLD, LLD, config ref (EN + ID).
+- **`docs/driver/rediz/`**: README, HLD, LLD, config ref (EN + ID).
+- **`docs/driver/prometheuz/`**: README, HLD, LLD, config ref (EN + ID).
+- **`docs/hld-http3-en.md`**, **`lld-http3-en.md`** (and -id).
+- **`docs/hld-tls-en.md`**, **`lld-tls-en.md`** (and -id).
+- **`docs/hld-grpc-en.md`**, **`hld-grpc-proxy-en.md`** (and -id) updated for native TLS.
 
 ---
 
-<details>
+#### Corrections
 
-<summary><b>Corrections</b></summary>
-
-- `zix.Http` docs: TLS supported (was "proxy-terminated by design")
-- `zix.Grpc` docs: response cache and TLS dual listener noted
-- `zix.Uds`/`zix.Tcp`: frame encoding is big-endian (was little-endian)
-- `zix.Fix`: `connection_timeout_ms` -> `conn_timeout_ms`
-- `zix.Tcp`: `max_msg_len` -> `max_recv_buf`
-
-</details>
+- `zix.Http` docs: TLS supported (was "proxy-terminated by design").
+- `zix.Grpc` docs: response cache and TLS dual listener noted.
+- `zix.Uds`/`zix.Tcp`: frame encoding is big-endian (was little-endian).
+- `zix.Fix`: `connection_timeout_ms` -> `conn_timeout_ms`.
+- `zix.Tcp`: `max_msg_len` -> `max_recv_buf`.
 
 <br>
+
+----
 
 ### __**Version History:**__
 
