@@ -203,17 +203,17 @@ __*Maintained Platforms:*__
 
 <br>
 
-[Coding Guideline.](docs/coding-guideline-en.md)
+### Contribution Extra Notes
 
-[System Thinking Guideline.](docs/systems-thinking-en.md)
+- [Milestones.](https://codeberg.org/prothegee/zix/milestones)
 
-<br>
+- [Open an issue.](https://codeberg.org/prothegee/zix/issues/new)
 
-[Milestones.](https://codeberg.org/prothegee/zix/milestones)
+- [Coding Guideline.](docs/coding-guideline-en.md)
 
-[Open an issue.](https://codeberg.org/prothegee/zix/issues/new)
+- [System Thinking Guideline.](docs/systems-thinking-en.md)
 
-[Announcment & Breaking Changes](https://codeberg.org/prothegee/zix/issues/238)
+- [Announcment & Breaking Changes.](https://codeberg.org/prothegee/zix/issues/238)
 
 <br>
 
