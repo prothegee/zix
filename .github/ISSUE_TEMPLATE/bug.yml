@@ -1,0 +1,78 @@
+name: Bug Report
+description: Something is not working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Remember to search before filing a new report
+        Please search for this bug in the issue tracker to avoid duplicates.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of zix is affected?
+      options:
+        - http
+        - http1
+        - http2
+        - http3
+        - grpc
+        - udp
+        - uds
+        - tcp
+        - fix
+        - tls
+        - zixer
+        - channel
+        - logger
+        - driver
+        - server
+        - client
+        - other
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: "What platform are you on?"
+      options:
+        - x86_64-linux
+        - x86_64-windows
+        - x86_64-netbsd
+        - x86_64-freebsd
+        - x86_64-openbsd
+        - aarch64-linux
+        - aarch64-macos
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Zix Version
+      description: "The version or commit hash you are using"
+      placeholder: "MAJOR.MINOR.PATCH"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce
+      description: "What exactly can someone else do to observe the problem?"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: "What did you expect to happen?"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: "What actually happened?"
+    validations:
+      required: true
