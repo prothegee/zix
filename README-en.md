@@ -86,6 +86,7 @@
     - [JSON (jzon)](./README-en.md#json-jzon)
 - [Drivers](./README-en.md#drivers)
 - [zixer](./README-en.md#zixer)
+- [AI Policies](./README-en.md#ai-policies)
 
 <br>
 
