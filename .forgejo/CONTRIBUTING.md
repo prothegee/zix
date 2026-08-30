@@ -38,6 +38,10 @@ This document outlines the workflow, coding standards, and expectations for cont
 - Discuss the approach before writing code.
 - For bug fixes, include a test that reproduces the issue.
 
+### Languages Documentations
+
+- Documentaion for another languages beside English and Bahasa are very welcome.
+
 ### Areas Needing Help
 
 The project seeks maintainers and contributors for these platforms:
