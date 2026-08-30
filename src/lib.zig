@@ -57,6 +57,10 @@ pub const jzon = @import("jzon/src/lib.zig");
 
 // --------------------------------------------------------- //
 
+pub const charsets = @import("charsets.zig");
+
+// --------------------------------------------------------- //
+
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
@@ -449,6 +453,9 @@ test "zix: unit test" {
 
     // # zix.Channel
     std.testing.refAllDecls(@import("channel/channel.zig"));
+
+    // # zix.charsets
+    std.testing.refAllDecls(@import("charsets.zig"));
 
     // jzon is a standalone package under src/jzon with its own build files, so
     // its in-file tests belong to `jzon-test-unit` the way each driver's do.

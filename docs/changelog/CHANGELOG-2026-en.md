@@ -45,6 +45,16 @@ __**Fix:**__
 
 <br>
 
+## X.Y.Z (YYYY-MM-DD)
+
+__**Update:**__
+- Introduce `zix.charsets` from `src/charsets.zig`:
+    - Covered from `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, and `ALPHANUMERIC_PUNCTUATION`.
+    - User/caller can use this whenever they need it.
+    - For contributor/maintainer, all repeatable must be use and call from there.
+
+<br>
+
 ## 0.5.0 (2026-08-26)
 
 ### __**New Features:**__

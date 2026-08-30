@@ -45,6 +45,16 @@ __*Fix:*__
 
 <br>
 
+## X.Y.Z (YYYY-MM-DD)
+
+__**Update:**__
+- Memperkenalkan `zix.charsets` dari `src/charsets.zig`:
+    - Mengkover mulai dari `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, dan `ALPHANUMERIC_PUNCTUATION`.
+    - User/caller bisa menggunakan ini ketika mereka membutuhkan.
+    - Untuk kontributor/maintainer, semua repeatable charset harus digunakan atau dipanggil dari sini.
+
+<br>
+
 ## 0.5.0 (2026-08-26)
 
 ### __**Fitur Baru:**__
