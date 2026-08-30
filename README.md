@@ -21,6 +21,18 @@
 <hr>
 
 <h4 align="center">
+    <b><i>License:</i></b>
+</h4>
+
+<div align="center">
+
+[BSD-3-Clause](LICENSE-BSD)
+
+</div>
+
+<br>
+
+<h4 align="center">
     <b><i>Repositories:</i></b>
 </h4>
 
@@ -33,24 +45,24 @@
 <br>
 
 <h4 align="center">
-    <b><i>License:</i></b>
+    <b><i>Documentations:</i></b>
 </h4>
 
 <div align="center">
 
-[BSD-3-Clause License](LICENSE-BSD)
+[Bahasa - id](README-id.md) | [English - en](README-en.md)
 
 </div>
 
 <br>
 
 <h4 align="center">
-    <b><i>Languages Documentation:</i></b>
+    <b><i>Important Informations:</i></b>
 </h4>
 
 <div align="center">
 
-[Bahasa - id](README-id.md) | [English - en](README-en.md)
+[Announcement & Breaking Changes](https://codeberg.org/prothegee/zix/issues/238)
 
 </div>
 
