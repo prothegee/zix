@@ -53,6 +53,8 @@ __**Update:**__
     - User/caller bisa menggunakan ini ketika mereka membutuhkan.
     - Untuk kontributor/maintainer, semua repeatable charset harus digunakan atau dipanggil dari sini.
 
+- Menambahkan utils generator dalam `src/utils/generator.zig`.
+
 <br>
 
 ## 0.5.0 (2026-08-26)

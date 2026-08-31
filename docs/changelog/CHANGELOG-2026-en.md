@@ -53,6 +53,8 @@ __**Update:**__
     - User/caller can use this whenever they need it.
     - For contributor/maintainer, all repeatable must be use and call from there.
 
+- Add utils generator in `src/utils/generator.zig`.
+
 <br>
 
 ## 0.5.0 (2026-08-26)
