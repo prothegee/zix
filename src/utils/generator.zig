@@ -85,13 +85,21 @@ test "zix utils: generator strings" {
 test "zix utils: generator numbers" {
     const io = std.testing.io;
 
-    _ = numbers(u8, 1, 10, io);
-    _ = numbers(u16, 10, 100, io);
-    _ = numbers(u32, 100, 1000, io);
-    _ = numbers(u64, 1000, 10000, io);
-    _ = numbers(u128, 10000, 100000, io);
+    const case1 = numbers(u8, 1, 10, io);
+    const case2 = numbers(u16, 10, 100, io);
+    const case3 = numbers(u32, 100, 1000, io);
+    const case4 = numbers(u64, 1000, 10000, io);
+    const case5 = numbers(u128, 10000, 100000, io);
+
+    try std.testing.expect(case1 >= 1 or case1 <= 10);
+    try std.testing.expect(case2 >= 10 or case2 <= 100);
+    try std.testing.expect(case3 >= 100 or case3 <= 1000);
+    try std.testing.expect(case4 >= 1000 or case4 <= 10000);
+    try std.testing.expect(case5 >= 10000 or case5 <= 100000);
 
     for (0..1_000) |i| {
-        _ = numbers(usize, 1, i+1, io);
+        const case = numbers(usize, 1, i+1, io);
+
+        try std.testing.expect(case >= 1 or case <= i+1);
     }
 }
