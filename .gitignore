@@ -79,7 +79,10 @@ orders.jsonl
 ##
 ## file: include
 ##
+common_check
 common_check.*
+common_test
+common_test.*
 
 ##
 ## file: exclude
