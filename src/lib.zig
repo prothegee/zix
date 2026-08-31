@@ -86,6 +86,8 @@ pub const utils = struct {
     pub const socket_path = @import("utils/socket_path.zig");
 
     pub const compression = @import("utils/compression/compression.zig");
+
+    pub const generator = @import("utils/generator.zig");
 };
 
 // --------------------------------------------------------- //
@@ -299,6 +301,7 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/compression/flate_fast.zig"));
     std.testing.refAllDecls(@import("utils/compression/brotli.zig"));
     std.testing.refAllDecls(@import("utils/compression/compression.zig"));
+    std.testing.refAllDecls(@import("utils/generator.zig"));
 
     // # zix.Udp
     std.testing.refAllDecls(@import("udp/config.zig"));
