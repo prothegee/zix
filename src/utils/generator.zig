@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const charsets = @import("../charsets.zig");
+const charsets = @import("charsets.zig");
 
 // --------------------------------------------------------- //
 
