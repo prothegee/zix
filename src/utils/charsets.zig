@@ -7,6 +7,9 @@ const std = @import("std");
 
 // --------------------------------------------------------- //
 
+/// 0123456789abcdef
+pub const hex = "0123456789abcdef";
+
 /// Alphabet set lower case
 pub const alphabet = "abcdefghijklmnopqrs";
 
