@@ -48,7 +48,7 @@ __**Fix:**__
 ## X.Y.Z (YYYY-MM-DD)
 
 __**Update:**__
-- Introduce `zix.charsets` from `src/charsets.zig`:
+- Introduce `zix.utils.charsets` from `src/utils/charsets.zig`:
     - Covered from `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, and `ALPHANUMERIC_PUNCTUATION`.
     - User/caller can use this whenever they need it.
     - For contributor/maintainer, all repeatable must be use and call from there.
