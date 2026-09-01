@@ -28,6 +28,12 @@ pub const punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 /// abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~
 pub const ALPHANUMERIC_PUNCTUATION = ALPHANUMERIC ++ punctuation;
 
+/// ABCDEFGHIJKLMNOPQRSTUVWXYZ234567
+pub const base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+/// ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/
+pub const base64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
