@@ -37,6 +37,14 @@ pub const base64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
+// hex: check correctness and correct length
+test "zix charsets: hex" {
+    const compare = "0123456789abcdef";
+
+    try std.testing.expectEqual(@as(usize, compare.len), hex.len);
+    try std.testing.expectEqualStrings(compare, hex);
+}
+
 // alphabet: check correctness and correct length
 test "zix charsets: alphabet check" {
     const compare = "abcdefghijklmnopqrs";
@@ -90,4 +98,20 @@ test "zix charsets: ALPHANUMERIC_PUNCTUATION check" {
 
     try std.testing.expectEqual(@as(usize, compare.len), ALPHANUMERIC_PUNCTUATION.len);
     try std.testing.expectEqualStrings(compare, ALPHANUMERIC_PUNCTUATION);
+}
+
+// base32: check correctness and correct length
+test "zix charsets: base32" {
+    const compare = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+    try std.testing.expectEqual(@as(usize, compare.len), base32.len);
+    try std.testing.expectEqualStrings(compare, base32);
+}
+
+// base64: check correctness and correct length
+test "zix charsets: base64" {
+    const compare = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    try std.testing.expectEqual(@as(usize, compare.len), base64.len);
+    try std.testing.expectEqualStrings(compare, base64);
 }

@@ -49,7 +49,7 @@ __*Fix:*__
 
 __**Update:**__
 - Memperkenalkan `zix.utils.charsets` dari `src/utils/charsets.zig`:
-    - Mengkover mulai dari `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, dan `ALPHANUMERIC_PUNCTUATION`.
+    - Mengkover mulai dari `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, dan `base64`.
     - User/caller bisa menggunakan ini ketika mereka membutuhkan.
     - Untuk kontributor/maintainer, semua repeatable charset harus digunakan atau dipanggil dari sini.
 

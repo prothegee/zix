@@ -49,7 +49,7 @@ __**Fix:**__
 
 __**Update:**__
 - Introduce `zix.utils.charsets` from `src/utils/charsets.zig`:
-    - Covered from `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, and `ALPHANUMERIC_PUNCTUATION`.
+    - Covered from `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, and `base64`.
     - User/caller can use this whenever they need it.
     - For contributor/maintainer, all repeatable must be use and call from there.
 
