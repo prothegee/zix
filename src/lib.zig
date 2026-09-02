@@ -80,12 +80,11 @@ pub const utils = struct {
     pub const secure_random = @import("utils/secure_random.zig");
     pub const async_cache = @import("utils/async_cache.zig");
     pub const socket_path = @import("utils/socket_path.zig");
+    pub const charsets = @import("utils/charsets.zig");
+    pub const generator = @import("utils/generator.zig");
+    pub const check = @import("utils/Check.zig");
 
     pub const compression = @import("utils/compression/compression.zig");
-
-    pub const charsets = @import("utils/charsets.zig");
-
-    pub const generator = @import("utils/generator.zig");
 };
 
 // --------------------------------------------------------- //
@@ -301,6 +300,8 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/compression/compression.zig"));
     std.testing.refAllDecls(@import("utils/charsets.zig"));
     std.testing.refAllDecls(@import("utils/generator.zig"));
+    std.testing.refAllDecls(@import("utils/Check.zig"));
+    std.testing.refAllDecls(@import("utils/check/string.zig"));
 
     // # zix.Udp
     std.testing.refAllDecls(@import("udp/config.zig"));
