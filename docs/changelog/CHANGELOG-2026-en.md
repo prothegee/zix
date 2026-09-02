@@ -55,6 +55,12 @@ __**Update:**__
 
 - Add utils generator in `src/utils/generator.zig`.
 
+- Add utils check `src/utils/Check.zig`:
+    - `string`:
+        - `isNumericSigned` to check string is signed number.
+        - `isNumericUnsigned` to check string is unsigned number.
+        - `isDecimal` to check string is decimal number.
+
 <br>
 
 ## 0.5.0 (2026-08-26)

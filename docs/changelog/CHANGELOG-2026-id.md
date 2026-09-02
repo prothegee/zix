@@ -55,6 +55,12 @@ __**Update:**__
 
 - Menambahkan utils generator dalam `src/utils/generator.zig`.
 
+- Menambahkan utils check `src/utils/Check.zig`:
+    - `string`:
+        - `isNumericSigned` untuk mengecek string adalah signed number.
+        - `isNumericUnsigned` untuk mengecek string adalah unsigned number.
+        - `isDecimal` untuk mengecek string adalah decimal number.
+
 <br>
 
 ## 0.5.0 (2026-08-26)
