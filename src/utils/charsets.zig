@@ -1,4 +1,4 @@
-//! Zix charsets for utility and their of truth.
+//! Zix charsets for utils and as source of truth.
 //!
 //! Note:
 //! - Any repeatable charsets or strings will use from here.
