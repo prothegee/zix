@@ -13,6 +13,23 @@ const READ_SUCCEEDS_ON_DIRECTORY: bool = builtin.os.tag == .netbsd;
 
 // --------------------------------------------------------- //
 
+/// Get file if exists or nor
+///
+/// Param:
+/// io - std.Io
+/// file_path - []const u8
+///
+/// Return:
+/// - !bool
+pub fn exists(io: std.Io, file_path: []const u8) !bool {
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{ .mode = .read_only }) catch {
+        return false;
+    }; 
+    defer file.close(io);
+
+    return true;
+}
+
 /// Get file extension from file path
 ///
 /// Note:
@@ -116,6 +133,21 @@ pub fn save(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, filename:
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
+
+test "zix utils: file exists" {
+    const io = std.testing.io;
+    const content = "abcdefg";
+    const file_save = "exists.txt";
+    const file_error = "not-exists.txt";
+
+    const file = try std.Io.Dir.cwd().createFile(io, file_save, .{ .read = true });
+    defer file.close(io);
+    defer std.Io.Dir.cwd().deleteFile(io, file_save) catch {};
+    _ = try file.writePositionalAll(io, content, 0);
+
+    try std.testing.expect(try exists(io, file_save));
+    try std.testing.expect(!try exists(io, file_error));
+}
 
 test "zix utils: file extension" {
     try std.testing.expectEqualStrings("txt", extension("file.txt"));
