@@ -61,6 +61,16 @@ __**Update:**__
         - `isNumericUnsigned` untuk mengecek string adalah unsigned number.
         - `isDecimal` untuk mengecek string adalah decimal number.
 
+- Menambahkan utils base32 `src/utils/base32.zig`, mengkover:
+    - Encode.
+    - Decode.
+    - RFC 4648 test vectors + roundtrip.
+
+- Menambahkan utils base64 `src/utils/base64.zig`, mengkover:
+    - Encode.
+    - Decode.
+    - RFC 4648 test vectors + roundtrip.
+
 <br>
 
 ## 0.5.0 (2026-08-26)

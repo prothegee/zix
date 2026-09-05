@@ -61,6 +61,16 @@ __**Update:**__
         - `isNumericUnsigned` to check string is unsigned number.
         - `isDecimal` to check string is decimal number.
 
+- Add utils base32 `src/utils/base32.zig`, covered:
+    - Encode.
+    - Decode.
+    - RFC 4648 test vectors + roundtrip.
+
+- Add utils base64 `src/utils/base64.zig`, covered:
+    - Encode.
+    - Decode.
+    - RFC 4648 test vectors + roundtrip.
+
 <br>
 
 ## 0.5.0 (2026-08-26)
