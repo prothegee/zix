@@ -83,6 +83,8 @@ pub const utils = struct {
     pub const charsets = @import("utils/charsets.zig");
     pub const generator = @import("utils/generator.zig");
     pub const check = @import("utils/Check.zig");
+    pub const base32 = @import("utils/base32.zig");
+    pub const base64 = @import("utils/base64.zig");
 
     pub const compression = @import("utils/compression/compression.zig");
 };
@@ -302,6 +304,8 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/generator.zig"));
     std.testing.refAllDecls(@import("utils/Check.zig"));
     std.testing.refAllDecls(@import("utils/check/string.zig"));
+    std.testing.refAllDecls(@import("utils/base32.zig"));
+    std.testing.refAllDecls(@import("utils/base64.zig"));
 
     // # zix.Udp
     std.testing.refAllDecls(@import("udp/config.zig"));
