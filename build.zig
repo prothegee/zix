@@ -277,4 +277,21 @@ pub fn build(b: *std.Build) void {
         const prometheuz_edge_step = b.step("prometheuz-test-edge", "Run the prometheuz driver edge tests against its in-process server (no container)");
         prometheuz_edge_step.dependOn(&prometheuz_edge.step);
     }
+
+    // --------------------------------------------------------- //
+
+    // uuidz is a standalone package (src/uuidz, won build.zig):
+    // these steps delegate into it with the same compiler
+
+    if (dirExists(b, "src/uuidz")) {
+        const uuidz_unit = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build",
+            "test-unit",
+            "--test-timeout", package_test_timeout
+        });
+        uuidz_unit.setCwd(b.path("src/uuidz"));
+        const uuidz_unit_step = b.step("uuidz-test-unit", "Run the uuidz unit test");
+        uuidz_unit_step.dependOn(&uuidz_unit.step);
+    }
 }
