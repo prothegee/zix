@@ -366,7 +366,7 @@ const Connected = struct {
 /// Run the QUIC + TLS 1.3 handshake on a bound socket: send Initial(ClientHello), receive ServerHello
 /// then the server Handshake flight, and derive the handshake then 1-RTT keys.
 fn connect(io: std.Io, sock: anytype, server: *const std.Io.net.IpAddress, dcid: []const u8, scid: []const u8, client_random: [32]u8, ephemeral: [32]u8) !Connected {
-    const x25519_pub = X25519.recoverPublicKey(ephemeral) catch return error.X25519;
+    const x25519_pub = X25519.recoverPublicKey(ephemeral);
 
     const secrets = crypto.initialSecrets(dcid);
     const initial_client = crypto.AesKeys.fromSecret(secrets.client);

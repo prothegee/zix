@@ -129,7 +129,7 @@ pub const ClientConnection = struct {
 /// Phase 1: build the ClientHello (offering x25519 + the mandatory extensions) and start the
 /// transcript. The caller sends `client_hello`, then feeds the server flight to `finish`.
 pub fn start(opts: HandshakeOptions, out: []u8) !StartResult {
-    const client_public = try X25519.recoverPublicKey(opts.ephemeral_secret);
+    const client_public = X25519.recoverPublicKey(opts.ephemeral_secret);
     const client_hello = buildClientHello(out, opts.client_random, client_public, opts.alpn);
 
     var state = State{ .ephemeral_secret = opts.ephemeral_secret, .transcript = key_schedule.Transcript.init() };
