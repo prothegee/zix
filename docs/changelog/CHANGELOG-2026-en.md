@@ -49,6 +49,20 @@ __**Fix:**__
 
 __**Update:**__
 
+- **`zwte`**:
+    - JWT HS256 in a standalone package under `src/zwte`.
+    - Compact serialization sign and verify with a constant HS256 header,
+      fixed-size buffers, and no allocator in the crypto path.
+    - `jwt.verifyClaims` composes signature verification with RFC 7519 claim checks.
+    - Claim checks: `iss`, `sub`, `aud` (single string or array), `exp`, `nbf`, `iat`,
+      `jti`, and the header `typ`.
+    - `claims.Options` takes an explicit `now_s` and `leeway_s`, so validation stays
+      deterministic and testable.
+    - Base64url (RFC 4648 section 5, unpadded) and HMAC-SHA256 live in separate files.
+    - Root build steps: `zwte-test-unit` and `zwte-test-all`.
+
+    ---
+
 - **`uuidz`**:
     - One package, three UUID versions: v1 (time-based), v4 (random), v7 (time-ordered).
     - Every version exposes the same surface: `init`, `initFromString`, `asString`, `asReffID`.

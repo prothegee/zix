@@ -49,6 +49,20 @@ __*Fix:*__
 
 __**Update:**__
 
+- **`zwte`**:
+    - JWT HS256 dalam paket mandiri di `src/zwte`.
+    - Sign dan verify serialisasi compact dengan header HS256 konstan,
+      buffer berukuran tetap, dan tanpa allocator di jalur crypto.
+    - `jwt.verifyClaims` menyusun verifikasi signature dengan pemeriksaan claim RFC 7519.
+    - Pemeriksaan claim: `iss`, `sub`, `aud` (string tunggal atau array), `exp`, `nbf`, `iat`,
+      `jti`, dan `typ` pada header.
+    - `claims.Options` menerima `now_s` dan `leeway_s` secara eksplisit, sehingga validasi tetap
+      deterministik dan mudah diuji.
+    - Base64url (RFC 4648 section 5, unpadded) dan HMAC-SHA256 berada di file terpisah.
+    - Step build root: `zwte-test-unit` dan `zwte-test-all`.
+
+    ---
+
 - **`uuidz`**:
     - Satu paket, tiga versi UUID: v1 (berbasis waktu), v4 (acak), v7 (terurut waktu).
     - Setiap versi mengekspos antarmuka yang sama:
