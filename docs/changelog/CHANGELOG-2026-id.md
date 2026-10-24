@@ -48,10 +48,23 @@ __*Fix:*__
 ## X.Y.Z (YYYY-MM-DD)
 
 __**Update:**__
-- Memperkenalkan `zix.utils.charsets` dari `src/utils/charsets.zig`:
-    - Mengkover mulai dari `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, dan `base64`.
-    - User/caller bisa menggunakan ini ketika mereka membutuhkan.
-    - Untuk kontributor/maintainer, semua repeatable charset harus digunakan atau dipanggil dari sini.
+
+- **`uuidz`**:
+    - Satu paket, tiga versi UUID: v1 (berbasis waktu), v4 (acak), v7 (terurut waktu).
+    - Setiap versi mengekspos antarmuka yang sama:
+      `init`, `initFromString`, `asString`, `asReffID`.
+    - Pembuatan dan parsing tidak mengalokasikan apa pun. Pemanggil memiliki setiap buffer.
+    - `initFromString` menerima baik bentuk 36 karakter dengan tanda hubung
+      maupun bentuk referensi 32 karakter.
+    - Validasi versi dan varian yang ketat saat parsing,
+      sehingga string yang bukan versi yang diminta merupakan error,
+      bukan nilai yang diterima secara diam-diam.
+
+- Menambahkan utils pwhash, mengkover:
+    - Argon2.
+    - Bcrypt.
+    - PBKDF2.
+    - Scrypt.
 
 - Menambahkan utils generator dalam `src/utils/generator.zig`.
 
@@ -70,6 +83,12 @@ __**Update:**__
     - Encode.
     - Decode.
     - RFC 4648 test vectors + roundtrip.
+
+- Memperkenalkan `zix.utils.charsets` dari `src/utils/charsets.zig`:
+    - Mengkover mulai dari `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`,
+      `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, dan `base64`.
+    - User/caller bisa menggunakan ini ketika mereka membutuhkan.
+    - Untuk kontributor/maintainer, semua repeatable charset harus digunakan atau dipanggil dari sini.
 
 <br>
 
