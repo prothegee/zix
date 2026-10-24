@@ -53,6 +53,8 @@ __**Update:**__
     - JWT HS256 in a standalone package under `src/zwte`.
     - Compact serialization sign and verify with a constant HS256 header,
       fixed-size buffers, and no allocator in the crypto path.
+    - `jwt.KeyPolicy` sets `min_key_length` per call (bytes of the HMAC shared secret),
+      defaulting to the 32-byte RFC minimum.
     - `jwt.verifyClaims` composes signature verification with RFC 7519 claim checks.
     - Claim checks: `iss`, `sub`, `aud` (single string or array), `exp`, `nbf`, `iat`,
       `jti`, and the header `typ`.
