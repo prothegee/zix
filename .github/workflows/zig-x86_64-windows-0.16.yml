@@ -104,6 +104,14 @@ jobs:
         shell: pwsh
         run: zig build jzon-examples --summary failures
 
+      # uuidz is a standalone package under src/uuidz with its own build.zig,
+      # so its in-file tests do not ride the zix unit-test step above.
+      - name: uuidz tests
+        if: always()
+        timeout-minutes: 6
+        shell: pwsh
+        run: zig build uuidz-test-unit -Ddriver-test-timeout=360s --summary failures
+
       # examples is compile-plus-install only (no execution). test-runner-all then drives
       # every zix protocol end to end over real sockets, so unlike the cross-build matrix
       # (which only COMPILES runners for a foreign target) this leg actually executes them.

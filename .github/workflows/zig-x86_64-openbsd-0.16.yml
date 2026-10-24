@@ -154,6 +154,7 @@ jobs:
             run_suite edge-test 6m --test-timeout $per_test
             run_suite jzon-test-all 6m -Ddriver-test-timeout=$per_test
             run_suite jzon-examples 6m
+            run_suite uuidz-test-unit 6m -Ddriver-test-timeout=$per_test
 
             # examples is compile-plus-install only. test-runner-all drives every zix protocol
             # end to end over real sockets inside this VM, so both get more than the 5 minutes a
