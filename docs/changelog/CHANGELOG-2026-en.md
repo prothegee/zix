@@ -48,10 +48,20 @@ __**Fix:**__
 ## X.Y.Z (YYYY-MM-DD)
 
 __**Update:**__
-- Introduce `zix.utils.charsets` from `src/utils/charsets.zig`:
-    - Covered from `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`, `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, and `base64`.
-    - User/caller can use this whenever they need it.
-    - For contributor/maintainer, all repeatable must be use and call from there.
+
+- **`uuidz`**:
+    - One package, three UUID versions: v1 (time-based), v4 (random), v7 (time-ordered).
+    - Every version exposes the same surface: `init`, `initFromString`, `asString`, `asReffID`.
+    - Generation and parsing allocate nothing. The caller owns every buffer.
+    - `initFromString` accepts both the 36-char hyphenated form and the 32-char reference form.
+    - Strict version and variant validation on parse,
+      so a string that is not the requested version is an error, not a silently accepted value.
+
+- Add utils pwhash, covered:
+    - Argon2.
+    - Bcrypt.
+    - PBKDF2.
+    - Scrypt.
 
 - Add utils generator in `src/utils/generator.zig`.
 
@@ -70,6 +80,12 @@ __**Update:**__
     - Encode.
     - Decode.
     - RFC 4648 test vectors + roundtrip.
+
+- Introduce `zix.utils.charsets` from `src/utils/charsets.zig`:
+    - Covered from `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`,
+      `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, and `base64`.
+    - User/caller can use this whenever they need it.
+    - For contributor/maintainer, all repeatable must be use and call from there.
 
 <br>
 
