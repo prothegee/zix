@@ -86,6 +86,13 @@ pub const utils = struct {
     pub const base32 = @import("utils/base32.zig");
     pub const base64 = @import("utils/base64.zig");
 
+    pub const pwhash = struct {
+        pub const argon2 = @import("utils/pwhash/argon2.zig");
+        pub const bcrypt = @import("utils/pwhash/bcrypt.zig");
+        pub const pbkdf2 = @import("utils/pwhash/pbkdf2.zig");
+        pub const scrypt = @import("utils/pwhash/scrypt.zig");
+    };
+
     pub const compression = @import("utils/compression/compression.zig");
 };
 
@@ -306,6 +313,10 @@ test "zix: unit test" {
     std.testing.refAllDecls(@import("utils/check/string.zig"));
     std.testing.refAllDecls(@import("utils/base32.zig"));
     std.testing.refAllDecls(@import("utils/base64.zig"));
+    std.testing.refAllDecls(@import("utils/pwhash/argon2.zig"));
+    std.testing.refAllDecls(@import("utils/pwhash/bcrypt.zig"));
+    std.testing.refAllDecls(@import("utils/pwhash/pbkdf2.zig"));
+    std.testing.refAllDecls(@import("utils/pwhash/scrypt.zig"));
 
     // # zix.Udp
     std.testing.refAllDecls(@import("udp/config.zig"));
