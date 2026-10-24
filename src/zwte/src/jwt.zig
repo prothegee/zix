@@ -14,8 +14,17 @@ pub const HEADER_JSON = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
 /// base64url of `HEADER_JSON`, 36 chars.
 pub const HEADER_B64: []const u8 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
-/// HS256 requires a key at least as large as the hash output (RFC 7518 section 3.2).
+/// Recommended HS256 key minimum (RFC 7518 section 3.2).
 pub const MIN_KEY_LENGTH: usize = hmac.SIGNATURE_LENGTH;
+
+/// Per-call key policy.
+///
+/// Note:
+/// - `min_key_length` is the HMAC shared-secret minimum in bytes.
+/// - The default follows RFC 7518 section 3.2 (256 bits for HS256).
+pub const KeyPolicy = struct {
+    min_key_length: usize = MIN_KEY_LENGTH,
+};
 
 /// base64url length of the 32-byte HS256 signature.
 pub const SIGNATURE_B64_LENGTH: usize = base64url.encodedLength(hmac.SIGNATURE_LENGTH);
@@ -35,9 +44,10 @@ pub fn tokenLength(payload_b64_len: usize) usize {
 /// Note:
 /// - `payload_b64` is the base64url payload part, already encoded.
 /// - `out` must hold at least `tokenLength(payload_b64.len)` bytes.
+/// - `policy` sets the key minimum, pass `.{}` for the RFC default.
 /// - Returns the written token slice.
-pub fn sign(key: []const u8, payload_b64: []const u8, out: []u8) ![]const u8 {
-    if (key.len < MIN_KEY_LENGTH) return error.KeyTooShort;
+pub fn sign(key: []const u8, payload_b64: []const u8, out: []u8, policy: KeyPolicy) ![]const u8 {
+    if (key.len < policy.min_key_length) return error.KeyTooShort;
 
     const token_len = tokenLength(payload_b64.len);
     if (out.len < token_len) return error.NoSpaceLeft;
@@ -69,11 +79,12 @@ pub fn sign(key: []const u8, payload_b64: []const u8, out: []u8) ![]const u8 {
 /// Note:
 /// - Checks the signature first, then the header `alg` field.
 /// - `payload_out` receives the decoded payload bytes.
+/// - `policy` sets the key minimum, pass `.{}` for the RFC default.
 /// - Returns the written payload slice.
-pub fn verify(key: []const u8, token: []const u8, payload_out: []u8) ![]const u8 {
+pub fn verify(key: []const u8, token: []const u8, payload_out: []u8, policy: KeyPolicy) ![]const u8 {
     var header_buf: [MAX_HEADER_LENGTH]u8 = undefined;
 
-    const verified = try verifyInternal(key, token, payload_out, &header_buf);
+    const verified = try verifyInternal(key, token, payload_out, &header_buf, policy);
 
     return verified.payload;
 }
@@ -83,11 +94,12 @@ pub fn verify(key: []const u8, token: []const u8, payload_out: []u8) ![]const u8
 /// Note:
 /// - Composes `verify` with `claims.validate`.
 /// - `payload_out` receives the decoded payload bytes.
+/// - `policy` sets the key minimum, pass `.{}` for the RFC default.
 /// - Returns the written payload slice.
-pub fn verifyClaims(key: []const u8, token: []const u8, payload_out: []u8, options: claims.Options) ![]const u8 {
+pub fn verifyClaims(key: []const u8, token: []const u8, payload_out: []u8, policy: KeyPolicy, options: claims.Options) ![]const u8 {
     var header_buf: [MAX_HEADER_LENGTH]u8 = undefined;
 
-    const verified = try verifyInternal(key, token, payload_out, &header_buf);
+    const verified = try verifyInternal(key, token, payload_out, &header_buf, policy);
 
     try claims.validate(verified.payload, verified.header, options);
 
@@ -99,8 +111,8 @@ const Verified = struct {
     header: []const u8,
 };
 
-fn verifyInternal(key: []const u8, token: []const u8, payload_out: []u8, header_out: []u8) !Verified {
-    if (key.len < MIN_KEY_LENGTH) return error.KeyTooShort;
+fn verifyInternal(key: []const u8, token: []const u8, payload_out: []u8, header_out: []u8, policy: KeyPolicy) !Verified {
+    if (key.len < policy.min_key_length) return error.KeyTooShort;
 
     const first_dot = std.mem.indexOfScalar(u8, token, '.') orelse return error.MalformedToken;
     const rest = token[first_dot + 1 ..];
@@ -202,13 +214,13 @@ test "zwte jwt: sign full token byte-exact" {
     const expected_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.FO08B83KharVEIjci1WakjzVdRNtQsmpsC7B7L8IkIU";
 
     var token_buf: [256]u8 = undefined;
-    const token = try sign(key, payload_b64, &token_buf);
+    const token = try sign(key, payload_b64, &token_buf, .{});
 
     try std.testing.expectEqualSlices(u8, expected_token, token);
     try std.testing.expectEqual(tokenLength(payload_b64.len), token.len);
 
     var payload_buf: [128]u8 = undefined;
-    const payload = try verify(key, token, &payload_buf);
+    const payload = try verify(key, token, &payload_buf, .{});
 
     try std.testing.expectEqualSlices(u8, "{\"sub\":\"1234567890\",\"name\":\"John Doe\",\"iat\":1516239022}", payload);
 }
@@ -223,7 +235,7 @@ test "zwte jwt: verify accepts RFC 7515 A.1 token" {
     _ = try std.fmt.hexToBytes(&key, key_hex);
 
     var payload_buf: [128]u8 = undefined;
-    const payload = try verify(&key, token, &payload_buf);
+    const payload = try verify(&key, token, &payload_buf, .{});
 
     try std.testing.expectEqualSlices(u8, expected_payload, payload);
 }
@@ -233,36 +245,36 @@ test "zwte jwt: reject wrong key and tampered token" {
     const payload_b64 = "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ";
 
     var token_buf: [256]u8 = undefined;
-    const token = try sign(key, payload_b64, &token_buf);
+    const token = try sign(key, payload_b64, &token_buf, .{});
 
     var payload_buf: [128]u8 = undefined;
-    _ = try verify(key, token, &payload_buf);
+    _ = try verify(key, token, &payload_buf, .{});
 
-    try std.testing.expectError(error.InvalidSignature, verify("ffffffffffffffffffffffffffffffff", token, &payload_buf));
+    try std.testing.expectError(error.InvalidSignature, verify("ffffffffffffffffffffffffffffffff", token, &payload_buf, .{}));
 
     var tampered_payload: [256]u8 = undefined;
     @memcpy(tampered_payload[0..token.len], token);
     tampered_payload[40] = if (tampered_payload[40] == 'A') 'B' else 'A';
 
-    try std.testing.expectError(error.InvalidSignature, verify(key, tampered_payload[0..token.len], &payload_buf));
+    try std.testing.expectError(error.InvalidSignature, verify(key, tampered_payload[0..token.len], &payload_buf, .{}));
 
     var tampered_signature: [256]u8 = undefined;
     @memcpy(tampered_signature[0..token.len], token);
     tampered_signature[token.len - 20] = if (tampered_signature[token.len - 20] == 'A') 'B' else 'A';
 
-    try std.testing.expectError(error.InvalidSignature, verify(key, tampered_signature[0..token.len], &payload_buf));
+    try std.testing.expectError(error.InvalidSignature, verify(key, tampered_signature[0..token.len], &payload_buf, .{}));
 }
 
 test "zwte jwt: reject malformed tokens" {
     const key = "0123456789abcdef0123456789abcdef";
     var payload_buf: [128]u8 = undefined;
 
-    try std.testing.expectError(error.MalformedToken, verify(key, "", &payload_buf));
-    try std.testing.expectError(error.MalformedToken, verify(key, "a.b", &payload_buf));
-    try std.testing.expectError(error.MalformedToken, verify(key, "a.b.c.d", &payload_buf));
-    try std.testing.expectError(error.MalformedToken, verify(key, ".b.c", &payload_buf));
-    try std.testing.expectError(error.MalformedToken, verify(key, "a..c", &payload_buf));
-    try std.testing.expectError(error.MalformedToken, verify(key, "a.b.", &payload_buf));
+    try std.testing.expectError(error.MalformedToken, verify(key, "", &payload_buf, .{}));
+    try std.testing.expectError(error.MalformedToken, verify(key, "a.b", &payload_buf, .{}));
+    try std.testing.expectError(error.MalformedToken, verify(key, "a.b.c.d", &payload_buf, .{}));
+    try std.testing.expectError(error.MalformedToken, verify(key, ".b.c", &payload_buf, .{}));
+    try std.testing.expectError(error.MalformedToken, verify(key, "a..c", &payload_buf, .{}));
+    try std.testing.expectError(error.MalformedToken, verify(key, "a.b.", &payload_buf, .{}));
 }
 
 test "zwte jwt: reject non-HS256 headers" {
@@ -273,16 +285,16 @@ test "zwte jwt: reject non-HS256 headers" {
     var payload_buf: [128]u8 = undefined;
 
     const none_token = try buildTestToken("{\"alg\":\"none\",\"typ\":\"JWT\"}", payload_b64, key, &token_buf);
-    try std.testing.expectError(error.UnsupportedAlgorithm, verify(key, none_token, &payload_buf));
+    try std.testing.expectError(error.UnsupportedAlgorithm, verify(key, none_token, &payload_buf, .{}));
 
     const rsa_token = try buildTestToken("{\"alg\":\"RS256\",\"typ\":\"JWT\"}", payload_b64, key, &token_buf);
-    try std.testing.expectError(error.UnsupportedAlgorithm, verify(key, rsa_token, &payload_buf));
+    try std.testing.expectError(error.UnsupportedAlgorithm, verify(key, rsa_token, &payload_buf, .{}));
 
     const missing_token = try buildTestToken("{\"typ\":\"JWT\"}", payload_b64, key, &token_buf);
-    try std.testing.expectError(error.MalformedToken, verify(key, missing_token, &payload_buf));
+    try std.testing.expectError(error.MalformedToken, verify(key, missing_token, &payload_buf, .{}));
 
     const spaced_token = try buildTestToken("{\"typ\":\"JWT\", \"alg\" : \"HS256\"}", payload_b64, key, &token_buf);
-    _ = try verify(key, spaced_token, &payload_buf);
+    _ = try verify(key, spaced_token, &payload_buf, .{});
 }
 
 test "zwte jwt: reject short keys and small buffers" {
@@ -292,16 +304,36 @@ test "zwte jwt: reject short keys and small buffers" {
     var token_buf: [256]u8 = undefined;
     var payload_buf: [128]u8 = undefined;
 
-    try std.testing.expectError(error.KeyTooShort, sign("short", payload_b64, &token_buf));
+    try std.testing.expectError(error.KeyTooShort, sign("short", payload_b64, &token_buf, .{}));
 
-    const token = try sign(key, payload_b64, &token_buf);
-    try std.testing.expectError(error.KeyTooShort, verify("short", token, &payload_buf));
+    const token = try sign(key, payload_b64, &token_buf, .{});
+    try std.testing.expectError(error.KeyTooShort, verify("short", token, &payload_buf, .{}));
 
     var small_token_buf: [10]u8 = undefined;
-    try std.testing.expectError(error.NoSpaceLeft, sign(key, payload_b64, &small_token_buf));
+    try std.testing.expectError(error.NoSpaceLeft, sign(key, payload_b64, &small_token_buf, .{}));
 
     var small_payload_buf: [4]u8 = undefined;
-    try std.testing.expectError(error.NoSpaceLeft, verify(key, token, &small_payload_buf));
+    try std.testing.expectError(error.NoSpaceLeft, verify(key, token, &small_payload_buf, .{}));
+}
+
+test "zwte jwt: caller adjusts the key minimum" {
+    const key = "0123456789abcdef0123456789"; // 26 bytes
+    const payload_b64 = "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ";
+
+    try std.testing.expectEqual(@as(usize, 26), key.len);
+
+    var token_buf: [256]u8 = undefined;
+
+    try std.testing.expectError(error.KeyTooShort, sign(key, payload_b64, &token_buf, .{}));
+
+    const token = try sign(key, payload_b64, &token_buf, .{ .min_key_length = 26 });
+
+    var payload_buf: [128]u8 = undefined;
+    const payload = try verify(key, token, &payload_buf, .{ .min_key_length = 26 });
+
+    try std.testing.expectEqualSlices(u8, "{\"sub\":\"1234567890\",\"name\":\"John Doe\",\"iat\":1516239022}", payload);
+
+    try std.testing.expectError(error.KeyTooShort, verify(key, token, &payload_buf, .{ .min_key_length = 27 }));
 }
 
 test "zwte jwt: verifyClaims validates registered claims" {
@@ -309,14 +341,14 @@ test "zwte jwt: verifyClaims validates registered claims" {
     const payload_b64 = "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ";
 
     var token_buf: [256]u8 = undefined;
-    const token = try sign(key, payload_b64, &token_buf);
+    const token = try sign(key, payload_b64, &token_buf, .{});
 
     var payload_buf: [128]u8 = undefined;
 
-    _ = try verifyClaims(key, token, &payload_buf, .{ .now_s = 1_700_000_000 });
-    _ = try verifyClaims(key, token, &payload_buf, .{ .sub = "1234567890", .typ = "JWT", .now_s = 1_700_000_000 });
+    _ = try verifyClaims(key, token, &payload_buf, .{}, .{ .now_s = 1_700_000_000 });
+    _ = try verifyClaims(key, token, &payload_buf, .{}, .{ .sub = "1234567890", .typ = "JWT", .now_s = 1_700_000_000 });
 
-    try std.testing.expectError(error.IssuedInFuture, verifyClaims(key, token, &payload_buf, .{ .now_s = 1_500_000_000 }));
-    try std.testing.expectError(error.InvalidSubject, verifyClaims(key, token, &payload_buf, .{ .sub = "other", .now_s = 1_700_000_000 }));
-    try std.testing.expectError(error.InvalidType, verifyClaims(key, token, &payload_buf, .{ .typ = "JWS", .now_s = 1_700_000_000 }));
+    try std.testing.expectError(error.IssuedInFuture, verifyClaims(key, token, &payload_buf, .{}, .{ .now_s = 1_500_000_000 }));
+    try std.testing.expectError(error.InvalidSubject, verifyClaims(key, token, &payload_buf, .{}, .{ .sub = "other", .now_s = 1_700_000_000 }));
+    try std.testing.expectError(error.InvalidType, verifyClaims(key, token, &payload_buf, .{}, .{ .typ = "JWS", .now_s = 1_700_000_000 }));
 }
