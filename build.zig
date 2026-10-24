@@ -294,4 +294,33 @@ pub fn build(b: *std.Build) void {
         const uuidz_unit_step = b.step("uuidz-test-unit", "Run the uuidz unit test");
         uuidz_unit_step.dependOn(&uuidz_unit.step);
     }
+
+    // --------------------------------------------------------- //
+
+    // zwte is a standalone package (src/zwte, own build.zig):
+    // these steps delegate into it with the same compiler.
+
+    if (dirExists(b, "src/zwte")) {
+        const zwte_unit = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build",
+            "test-unit",
+            "--test-timeout", package_test_timeout
+        });
+        zwte_unit.setCwd(b.path("src/zwte"));
+
+        const zwte_unit_step = b.step("zwte-test-unit", "Run the zwte in-file unit tests");
+        zwte_unit_step.dependOn(&zwte_unit.step);
+
+        const zwte_all = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build",
+            "test-all",
+            "--test-timeout", package_test_timeout
+        });
+        zwte_all.setCwd(b.path("src/zwte"));
+
+        const zwte_all_step = b.step("zwte-test-all", "Run every zwte test: in-file unit tests");
+        zwte_all_step.dependOn(&zwte_all.step);
+    }
 }
