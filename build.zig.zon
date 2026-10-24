@@ -1,7 +1,7 @@
 .{
     .name = .zix,
-    .version = "0.5.0",
-    .user_agent = "zix/0.5.0",
+    .version = "0.6.0-rc0",
+    .user_agent = "zix/0.6.0-rc0",
     .date_release = "20260817",
     // Changing this has security and trust implications.
     .fingerprint = 0x4cc61d74dc93a20b,
