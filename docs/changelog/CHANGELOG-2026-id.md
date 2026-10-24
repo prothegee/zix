@@ -53,6 +53,8 @@ __**Update:**__
     - JWT HS256 dalam paket mandiri di `src/zwte`.
     - Sign dan verify serialisasi compact dengan header HS256 konstan,
       buffer berukuran tetap, dan tanpa allocator di jalur crypto.
+    - `jwt.KeyPolicy` mengatur `min_key_length` per pemanggilan (byte dari shared secret HMAC),
+      dengan default minimum 32 byte sesuai RFC.
     - `jwt.verifyClaims` menyusun verifikasi signature dengan pemeriksaan claim RFC 7519.
     - Pemeriksaan claim: `iss`, `sub`, `aud` (string tunggal atau array), `exp`, `nbf`, `iat`,
       `jti`, dan `typ` pada header.
