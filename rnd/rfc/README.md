@@ -63,8 +63,26 @@ graph TD
 | | 4055 | RSASSA-PSS / OAEP algorithm identifiers in X.509 |
 | | 5756 | Updates to 4055 (RSA-PSS / OAEP parameters) |
 | | 3279 | RSA key and signature identifiers in X.509 |
-| JOSE | 7518 | JWA (RS256 / PS256 / ES256 signature algorithms) |
+| JOSE | 7515 | JWS (sign, verify) |
+| | 7516 | JWE |
 | | 7517 | JWK key representation |
+| | 7518 | JWA (HS / RS / ES / PS identifiers) |
+| | 7519 | JWT claims (iss, sub, aud, exp, nbf, iat, jti, typ) |
+| | 7520 | JOSE worked examples |
+| | 7638 | JWK thumbprint |
+| | 7800 | JWT confirmation claim |
+| | 8037 | EdDSA, Ed25519, Ed448 |
+| | 8725 | JWT best current practices |
+| | 8812 | ES256K |
+| | 9068 | JWT access token profile (at+jwt) |
+| | 9964 | ML-DSA for JOSE and COSE |
+| JOSE deps | 2104 | HMAC |
+| | 4648 | Base64url |
+| | 5480 | EC public key in X.509 |
+| | 6234 | SHA-2 and HMAC-SHA-2 |
+| | 6979 | Deterministic ECDSA |
+| | 8259 | JSON |
+| | 9881 | ML-DSA X.509 identifiers |
 | Compression | 1951 | DEFLATE Compressed Data Format |
 | | 7932 | Brotli Compressed Data Format (format + static dictionary in Appendix A) |
 | Proxy / gateway | 7239 | Forwarded HTTP Extension (standard form of X-Forwarded-*) |
@@ -90,3 +108,4 @@ graph TD
 - TLS version policy: zix offers TLS 1.3 (RFC 8446, default) and optionally TLS 1.2 (RFC 5246) only. TLS 1.0 and 1.1 are deprecated by RFC 8996 (March 2021, "MUST NOT be used"), SSL 3.0 by RFC 7568, SSL 2.0 by RFC 6176. These deprecation memos are policy authorities, not implementation specs, so they are not vendored as .txt here. Offering TLS 1.0 / 1.1 caps an SSL Labs grade at B, so they are never put on the wire (the A+ target).
 - Compression rows are reference for the gzip / deflate / brotli response compression item. gzip and deflate ride `std.compress.flate` (the DEFLATE algorithm is RFC 1951, here for grounding), so RFC 1951 is informational, not authored. The container framing RFCs are NOT vendored because std handles them: zlib (RFC 1950, the on-the-wire `deflate` token wrapper) and gzip (RFC 1952). RFC 7932 IS the one that matters: brotli is a std-gap, so it is authored from this spec, dictionary and all (Appendix A).
 - The Crypto / RSA and JOSE rows are reference material, not a conformance checklist target. They ground the RSA signing roadmap item: std verifies RSA but cannot sign with an RSA private key, so PKCS#1 v2.2 (8017) is the spec to author from if an RSA certificate or RS256 issuance is ever required. RFC 8017 is the canonical one. 4055 / 5756 / 3279 cover the X.509 identifiers, 7518 / 7517 the JWS / JWK use.
+- The JWT / JWE group is indexed in jwt-jwe.md, which maps each sign, verify, claim check, and algorithm item to the RFC section that defines it.
