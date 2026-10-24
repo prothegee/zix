@@ -89,6 +89,13 @@ jobs:
         timeout-minutes: 4
         run: zig build jzon-examples --summary failures
 
+      # uuidz is a standalone package under src/uuidz with its own build.zig,
+      # so its in-file tests do not ride the zix unit-test step above.
+      - name: uuidz tests
+        if: always()
+        timeout-minutes: 4
+        run: zig build uuidz-test-unit -Ddriver-test-timeout=240s --summary failures
+
       # examples is compile-plus-install only (no execution), so it gates the whole
       # example set against this target's toolchain. test-runner-all then drives every
       # zix protocol end to end: it spawns each example server as a child process and

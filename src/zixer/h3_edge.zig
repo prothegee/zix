@@ -1467,7 +1467,7 @@ const H3Client = struct {
     }
 
     fn handshake(client: *H3Client, dcid: []const u8, scid_bytes: []const u8, client_random: [32]u8, ephemeral: [32]u8) !void {
-        const public_key = try X25519.recoverPublicKey(ephemeral);
+        const public_key = X25519.recoverPublicKey(ephemeral);
 
         const secrets = crypto.initialSecrets(dcid);
         const initial_client = crypto.AesKeys.fromSecret(secrets.client);

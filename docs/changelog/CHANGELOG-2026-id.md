@@ -60,6 +60,10 @@ __**Update:**__
       sehingga string yang bukan versi yang diminta merupakan error,
       bukan nilai yang diterima secara diam-diam.
 
+    ---
+
+- Menambahkan `uuidz` untuk build semua target matrix.
+
 - Menambahkan utils pwhash, mengkover:
     - Argon2.
     - Bcrypt.
@@ -89,6 +93,12 @@ __**Update:**__
       `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, dan `base64`.
     - User/caller bisa menggunakan ini ketika mereka membutuhkan.
     - Untuk kontributor/maintainer, semua repeatable charset harus digunakan atau dipanggil dari sini.
+
+<br>
+
+__**Fix:**__
+
+- In zig 0.17.x, `recoverPublicKey` is treat as infallible.
 
 <br>
 

@@ -576,8 +576,8 @@ Untuk detail memori lengkap lihat [`docs/hld-http-id.md`](docs/hld-http-id.md) d
 - [Zig](https://ziglang.org/):
     - [x] 0.16.x:
         - 0.16.0
-    - [x] 0.17.x (Experimental):
-        - 0.17.0-dev.1933+e19a73c2d
+    - [x] 0.17.x:
+        - 0.17.0
 
 <br>
 

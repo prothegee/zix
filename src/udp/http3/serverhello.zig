@@ -68,7 +68,7 @@ pub fn buildServerHelloInitial(
     var client_pub: [32]u8 = undefined;
     @memcpy(&client_pub, client_share);
 
-    const server_public = X25519.recoverPublicKey(ephemeral_secret) catch return null;
+    const server_public = X25519.recoverPublicKey(ephemeral_secret);
     const shared = X25519.scalarmult(ephemeral_secret, client_pub) catch return null;
 
     const params = switch (handshake.negotiate(hello, &server_public, &.{.X25519})) {

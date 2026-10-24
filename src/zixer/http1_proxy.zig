@@ -1681,14 +1681,18 @@ test "zix zixer: http1 proxy, an upstream that never answers its handshake gets 
     defer threaded.deinit();
     const io = threaded.io();
 
-    // The rfc 5737 documentation range: a SYN aimed there is dropped rather
-    // than refused, which is the one shape a connect budget exists for.
+    const connect_budget_ms: u32 = 300;
+
     const upstreams = [_]site_cfg.Upstream{.{ .host = "192.0.2.1", .port = 80 }};
     var pool = try upstream_pool.Pool.init(std.testing.allocator, &upstreams, upstream_pool.DEFAULT_COOLDOWN_MS);
     defer pool.deinit(std.testing.allocator);
     var idle = try upstream_conn.IdleCache.init(std.testing.allocator, 1);
     defer idle.deinit(std.testing.allocator, io);
-    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .upstream_connect_timeout_ms = 300 };
+
+    // The response budget is only here to end the other environment shape fast:
+    // a path that answers the handshake and then stays silent would otherwise
+    // park the edge on the default thirty seconds before the test could skip.
+    const proxy = Proxy{ .logger = &quiet_logger, .io = io, .pool = &pool, .idle = &idle, .upstream_connect_timeout_ms = connect_budget_ms, .upstream_timeout_ms = 200 };
 
     var fds: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(usize, 0), std.os.linux.socketpair(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM, 0, &fds));
@@ -1712,17 +1716,20 @@ test "zix zixer: http1 proxy, an upstream that never answers its handshake gets 
 
     edge_thread.join();
 
-    // A box with no route to that range never starts a handshake at all, and
-    // answers far inside the budget. The elapsed time is what tells that apart
-    // from the case under test, because the status alone cannot: a wrong answer
-    // and an unroutable box both read as 502.
-    if (spent_ms < 200) {
-        std.log.info("no route to the documentation range on this box, so no handshake started, test skipped", .{});
+    const connect_timed_out = std.mem.startsWith(u8, reply, "HTTP/1.1 504 upstream connect timeout\r\n");
+    const handshake_answered = std.mem.startsWith(u8, reply, "HTTP/1.1 504 upstream timeout\r\n");
+
+    // The rfc 5737 documentation range is not a guaranteed black hole. A path
+    // with no route answers inside the budget, and a path that answers the
+    // handshake leaves nothing to bound. Only the dropped SYN is the case under
+    // test, the other two skip instead of failing on an environment shape.
+    if (!connect_timed_out and (handshake_answered or spent_ms < 200)) {
+        std.log.info("the documentation range is not a black hole on this box, so no connect budget applies, test skipped", .{});
 
         return;
     }
 
-    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 504 upstream connect timeout\r\n"));
+    try std.testing.expect(connect_timed_out);
     try std.testing.expect(std.mem.indexOf(u8, reply, "Proxy-Status: zixer; error=\"connection_timeout\"") != null);
 
     // Answered on its own budget rather than the operating system's retry

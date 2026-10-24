@@ -175,7 +175,7 @@ pub fn handshake(
     // the server ephemeral share, fresh per connection
     var server_secret: [32]u8 = undefined;
     io.randomSecure(&server_secret) catch io.random(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
+    const server_public = X25519.recoverPublicKey(server_secret);
 
     var server_random: [32]u8 = undefined;
     io.randomSecure(&server_random) catch io.random(&server_random);
@@ -551,7 +551,7 @@ test "rediz inproc: tls parses a client hello built by the driver" {
 
     const parsed = try parseClientHello(started.client_hello);
 
-    const expected_public = try X25519.recoverPublicKey(@splat(0x33));
+    const expected_public = X25519.recoverPublicKey(@splat(0x33));
     try testing.expectEqualSlices(u8, &expected_public, &parsed.client_public);
 }
 
