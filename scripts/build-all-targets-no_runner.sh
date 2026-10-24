@@ -41,4 +41,8 @@ matrix "prometheuz" src/driver/prometheuz test-unit examples
 
 # --------------------------------------------------------- #
 
+matrix "uuidz" src/uuidz test-unit
+
+# --------------------------------------------------------- #
+
 report_failures

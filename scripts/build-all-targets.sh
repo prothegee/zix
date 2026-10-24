@@ -43,4 +43,8 @@ matrix "prometheuz" src/driver/prometheuz test-unit test-behaviour test-edge exa
 
 # --------------------------------------------------------- #
 
+matrix "uuidz" src/uuidz test-unit
+
+# --------------------------------------------------------- #
+
 report_failures
