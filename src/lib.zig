@@ -57,6 +57,11 @@ pub const jzon = @import("jzon/src/lib.zig");
 
 // --------------------------------------------------------- //
 
+// zix jwt & jwe under src/zwte
+pub const zwte = @import("zwte/src/lib.zig");
+
+// --------------------------------------------------------- //
+
 pub const utils = struct {
     pub const file = @import("utils/file.zig");
     pub const multipart = @import("utils/multipart.zig");
