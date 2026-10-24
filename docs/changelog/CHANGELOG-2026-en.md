@@ -57,6 +57,10 @@ __**Update:**__
     - Strict version and variant validation on parse,
       so a string that is not the requested version is an error, not a silently accepted value.
 
+    ---
+
+- Menambahkan `uuidz` untuk build semua target matrix.
+
 - Add utils pwhash, covered:
     - Argon2.
     - Bcrypt.
@@ -86,6 +90,12 @@ __**Update:**__
       `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, and `base64`.
     - User/caller can use this whenever they need it.
     - For contributor/maintainer, all repeatable must be use and call from there.
+
+<br>
+
+__**Fix:**__
+
+- In zig 0.17.x, `recoverPublicKey` is treat as infallible.
 
 <br>
 
