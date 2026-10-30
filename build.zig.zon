@@ -1,0 +1,22 @@
+.{
+    .name = .zix,
+    .version = "0.6.0-rc1",
+    .semver = .{
+        .major = 0,
+        .minor = 6,
+        .patch = 0,
+        .release_candidate = 1,
+    },
+    .user_agent = "zix/0.6.0-rc1",
+    .date_release = "20261028",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x4cc61d74dc93a20b,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "scripts",
+        "tests/unit",
+        "tests/edge",
+    },
+}
