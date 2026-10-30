@@ -1,3 +1,31 @@
+//! ZIX script build tools
+//!
+//! ### file: scripts/build.tools.zig
+//! 
+//! ### author: Prana Ron
+//! 
+//! ---------------------------------------------------------
+//! 
+//! ### brief:
+//! n/a
+//! 
+//! ### note:
+//! n/a
+//! 
+//! ---------------------------------------------------------
+//! 
+//! ### licenses:
+//! - BSD-3-Clause
+//! 
+//! ### copyright:
+//! 
+//! - (c) Prana Ron // @prothegee // prothegee@protonmail.com
+//! 
+//! ### contributors:
+//! 
+//! - Prana Ron // @prothegee // prothegee@protonmail.com
+//!
+
 const std = @import("std");
 const builtin = @import("builtin");
 
