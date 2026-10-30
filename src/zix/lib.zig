@@ -9,16 +9,22 @@
 //! ---------------------------------------------------------
 //! 
 //! ### brief:
+//! 
 //! n/a
 //! 
 //! ### note:
+//! 
 //! n/a
 //! 
 //! ---------------------------------------------------------
 //! 
+//! ### licenses:
+//! 
+//! - BSD-3-Clause
+//! 
 //! ### copyright:
 //! 
-//! - (c) 2026 Prana Ron // @prothegee // prothegee@protonmail.com
+//! - (c) Prana Ron // @prothegee // prothegee@protonmail.com
 //! 
 //! ### contributors:
 //! 
