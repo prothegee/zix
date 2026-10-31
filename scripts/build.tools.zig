@@ -19,11 +19,11 @@
 //! 
 //! ### copyright:
 //! 
-//! - (c) Prana Ron // @prothegee // prothegee@protonmail.com
+//! - (c) Prana Ron // @prothegee // prothegee@pm.me
 //! 
 //! ### contributors:
 //! 
-//! - Prana Ron // @prothegee // prothegee@protonmail.com
+//! - Prana Ron // @prothegee // prothegee@pm.me
 //!
 
 const std = @import("std");
