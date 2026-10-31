@@ -24,11 +24,11 @@
 //! 
 //! ### copyright:
 //! 
-//! - (c) Prana Ron // @prothegee // prothegee@protonmail.com
+//! - (c) Prana Ron // @prothegee // prothegee@pm.me
 //! 
 //! ### contributors:
 //! 
-//! - Prana Ron // @prothegee // prothegee@protonmail.com
+//! - Prana Ron // @prothegee // prothegee@pm.me
 //!
 
 const std = @import("std");
@@ -82,3 +82,7 @@ pub const VERSION = struct {
 pub const VERSION_STRING = getVersionString();
 
 // --------------------------------------------------------- //
+
+// ZIX Http1
+pub const Http1 = @import("tcp/http1/Http1.zig");
+
