@@ -1,6 +1,6 @@
 //! ZIX example http1 basic
 //!
-//! ### file: /home/pr/repo/zix/examples/http1_basic.zig
+//! ### file: examples/http1_basic.zig
 //! 
 //! ### author: Prana Ron
 //! 
@@ -74,7 +74,7 @@ const Routes = zix.Http1.Router(&[_]zix.Http1.Route{
 pub fn main(init: std.process.Init) !void {
     var server = zix.Http1.Server.init(Routes.dispatch, .{
         .io = init.io,
-        .ip = "",
+        .ip = IP,
         .port = PORT,
         .workers = WORKERS,
         // Checked:
