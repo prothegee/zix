@@ -35,6 +35,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 // --------------------------------------------------------- //
+// Private:
 
 fn getVersionString() []const u8 {
     return std.fmt.comptimePrint("{d}.{d}.{d}{s}", .{
@@ -49,6 +50,7 @@ fn getVersionString() []const u8 {
 }
 
 // --------------------------------------------------------- //
+// Public:
 
 /// THE ONLY SOURCE OF TRUTH for Zig SEMVER for zix source code.
 ///
