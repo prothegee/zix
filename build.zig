@@ -71,26 +71,33 @@ pub fn build(b: *std.Build) void {
     const clean_step = b.step("cleanup", "ZIX: Cleanup artifacts.");
     clean_step.dependOn(&clean_cmd.step);
 
-    // Zix unit test
-    const zix_unit_test_mod = b.createModule(.{
+    // Zix unit & edge test
+    const zix_unit_and_edge_test_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path("tests/unit/zix_unit_test.zig"),
+        .root_source_file = b.path("src/zix/test.zig"),
     });
-    zix_unit_test_mod.addImport("zix", zix);
+    zix_unit_and_edge_test_mod.addImport("zix", zix);
 
-    const zix_unit_test = b.addTest(.{
-        .root_module = zix_unit_test_mod
+    const zix_unit_and_edge_test = b.addTest(.{
+        .root_module = zix_unit_and_edge_test_mod
     });
 
-    const zix_unit_test_artifact = b.addRunArtifact(zix_unit_test);
-    const zix_unit_test_step = b.step("zix-unit-test", "ZIX: Run unit tests.");
-    zix_unit_test_step.dependOn(&zix_unit_test_artifact.step);
+    const zix_unit_and_edge_test_artifact = b.addRunArtifact(zix_unit_and_edge_test);
 
-    // Zix edge test
-    // TODO
+    // Tests declared inside src/zix. A dependency module's tests are not part
+    // of the root module's test run, so the module is its own test root.
+    const zix_module_test = b.addTest(.{
+        .root_module = zix,
+    });
+    const zix_module_test_artifact = b.addRunArtifact(zix_module_test);
 
-    // If no args, run zix-unit-test & zix-edge-test
+    const zix_unit_and_edge_test_step =
+        b.step("zix-unit_edge-test", "ZIX: Run unit & edge tests.");
+    zix_unit_and_edge_test_step.dependOn(&zix_unit_and_edge_test_artifact.step);
+    zix_unit_and_edge_test_step.dependOn(&zix_module_test_artifact.step);
+
+    // If no args, run zix-unit_edge-test
     // mean it only run `zig build`
     // TODO
 
@@ -111,3 +118,4 @@ pub fn build(b: *std.Build) void {
     // --------------------------------------------------------- //
     // RESERVED
 }
+
