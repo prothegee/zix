@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Accept-Encoding negotiation and the compression facade.
 //! 
 //! ### note:
 //! 
@@ -182,4 +182,28 @@ pub fn negotiate(accept_encoding: ?[]const u8, supported: []const Encoding) ?Enc
 // Test:
 
 // TODO: zix.utils.compression unit test
+
+test "zix utils: compression, picks the best coding" {
+    const supported = [_]Encoding{ .GZIP, .BR };
+
+    try std.testing.expectEqual(Encoding.IDENTITY, negotiate(null, &supported).?);
+    try std.testing.expectEqual(Encoding.IDENTITY, negotiate("", &supported).?);
+    try std.testing.expectEqual(Encoding.GZIP, negotiate("gzip", &supported).?);
+    try std.testing.expectEqual(Encoding.BR, negotiate("gzip;q=0.5, br;q=0.9", &supported).?);
+    try std.testing.expectEqual(
+        Encoding.IDENTITY,
+        negotiate("gzip;q=0.5, identity;q=0.9", &supported).?,
+    );
+}
+
+test "zix utils: compression, negotiation edges" {
+    const supported = [_]Encoding{ .GZIP, .BR };
+
+    // q=0 forbids a coding, so identity wins.
+    try std.testing.expectEqual(Encoding.IDENTITY, negotiate("gzip;q=0", &supported).?);
+    // identity forbidden and nothing else acceptable -> null (406).
+    try std.testing.expect(negotiate("gzip;q=0, br;q=0, identity;q=0", &supported) == null);
+    // Wildcard applies when nothing is named.
+    try std.testing.expectEqual(Encoding.GZIP, negotiate("*;q=0.5", &supported).?);
+}
 
