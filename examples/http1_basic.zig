@@ -77,13 +77,10 @@ pub fn main(init: std.process.Init) !void {
         .ip = IP,
         .port = PORT,
         .workers = WORKERS,
-        // Checked:
-        // - [ ] ASYNC
-        // - [ ] EPOLL
-        // - [ ] URING
-        .dispatch_model = .ASYNC,
+        .dispatch_model = DISPATCH_MODEL,
     });
     defer server.deinit();
 
     try server.run();
 }
+
