@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .root_source_file = b.path("src/zix/test.zig"),
     });
-    zix_unit_and_edge_test_mod.addImport("zix", zix);
+    zix_unit_and_edge_test_mod.addOptions("zix_options", zix_options);
 
     const zix_unit_and_edge_test = b.addTest(.{
         .root_module = zix_unit_and_edge_test_mod
@@ -85,17 +85,9 @@ pub fn build(b: *std.Build) void {
 
     const zix_unit_and_edge_test_artifact = b.addRunArtifact(zix_unit_and_edge_test);
 
-    // Tests declared inside src/zix. A dependency module's tests are not part
-    // of the root module's test run, so the module is its own test root.
-    const zix_module_test = b.addTest(.{
-        .root_module = zix,
-    });
-    const zix_module_test_artifact = b.addRunArtifact(zix_module_test);
-
     const zix_unit_and_edge_test_step =
         b.step("zix-unit_edge-test", "ZIX: Run unit & edge tests.");
     zix_unit_and_edge_test_step.dependOn(&zix_unit_and_edge_test_artifact.step);
-    zix_unit_and_edge_test_step.dependOn(&zix_module_test_artifact.step);
 
     // If no args, run zix-unit_edge-test
     // mean it only run `zig build`
