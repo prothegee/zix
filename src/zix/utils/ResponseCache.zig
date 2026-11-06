@@ -93,7 +93,13 @@ pub const Meta = struct {
 ///
 /// Return:
 /// - !ResponseCache
-pub fn init(backing: std.mem.Allocator, config: Config) !Self {
+/// ZIX utils response cache error
+pub const Error = error {
+    ZixUtils_ResponseCache_OutOfMemory,
+    ZixUtils_ResponseCache_MapFailed,
+};
+
+pub fn init(backing: std.mem.Allocator, config: Config) Error!Self {
     const entries: usize = std.math.floorPowerOfTwo(u32, @max(1, config.max_entries));
     const value_bytes: usize = @max(1, config.max_value_bytes);
 
@@ -101,17 +107,26 @@ pub fn init(backing: std.mem.Allocator, config: Config) !Self {
     errdefer arena.deinit();
     const allocator = arena.allocator();
 
-    const keys = try allocator.alloc(u64, entries);
+    const keys = allocator.alloc(u64, entries) catch |err| switch (err) {
+        error.OutOfMemory => return Error.ZixUtils_ResponseCache_OutOfMemory,
+    };
     @memset(keys, 0);
 
-    const meta = try allocator.alloc(Meta, entries);
-    const pins = try allocator.alloc(u32, entries);
+    const meta = allocator.alloc(Meta, entries) catch |err| switch (err) {
+        error.OutOfMemory => return Error.ZixUtils_ResponseCache_OutOfMemory,
+    };
+    const pins = allocator.alloc(u32, entries) catch |err| switch (err) {
+        error.OutOfMemory => return Error.ZixUtils_ResponseCache_OutOfMemory,
+    };
     @memset(pins, 0);
 
     // THP opted out: under an "always" policy the first store would
     // materialize a whole 2 MiB extent of this compact slab, holding far
     // more resident than the packed values need.
-    const slab = try slab_mem.mapZeroedSlots(u8, entries * value_bytes);
+    const slab = slab_mem.mapZeroedSlots(u8, entries * value_bytes) catch |err| switch (err) {
+        error.ZixUtils_Slab_OutOfMemory => return Error.ZixUtils_ResponseCache_OutOfMemory,
+        error.ZixUtils_Slab_MapFailed => return Error.ZixUtils_ResponseCache_MapFailed,
+    };
     slab_mem.adviseNoHugePages(slab);
     slab_mem.pretouch(slab[0..@min(slab.len, PRETOUCH_BYTES)]);
 
@@ -189,7 +204,9 @@ pub fn store(self: *Self, key: u64, bytes: []const u8, ttl_ms: u32, now_ms: u64)
     var probes: usize = 0;
     while (probes <= self.mask) : (probes += 1) {
         const slot_key = self.keys[index];
-        const expired = slot_key != 0 and now_ms >= self.meta[index].insert_tick_ms + self.meta[index].ttl_ms;
+        const expired
+            = slot_key != 0 and
+            now_ms >= self.meta[index].insert_tick_ms + self.meta[index].ttl_ms;
 
         if (slot_key == 0 or slot_key == key or expired) {
             // A pinned slot backs an in-flight zero-copy send: its bytes
@@ -264,4 +281,70 @@ pub fn unpin(self: *Self, slot: u32) void {
 // Test:
 
 // TODO: zix.utils.ResponseCache.zig unit test
+
+test "zix utils: response cache, stores and expires" {
+    const config: Config = .{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 0,
+        .dispatch_model = .ASYNC,
+        .max_entries = 4,
+        .max_value_bytes = 64,
+    };
+
+    var cache = try Self.init(std.testing.allocator, config);
+    defer cache.deinit();
+
+    try std.testing.expect(cache.store(7, "hello", 1000, 10));
+
+    const hit = cache.lookup(7, 20).?;
+    try std.testing.expectEqualStrings("hello", hit);
+
+    const slot = cache.hitSlot(hit).?;
+    cache.pin(slot);
+    cache.unpin(slot);
+
+    try std.testing.expect(cache.lookup(7, 1010) == null);
+    try std.testing.expect(cache.lookup(8, 20) == null);
+}
+
+test "zix utils: response cache, rejects a value past the slot cap" {
+    const config: Config = .{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 0,
+        .dispatch_model = .ASYNC,
+        .max_entries = 4,
+        .max_value_bytes = 64,
+    };
+
+    var cache = try Self.init(std.testing.allocator, config);
+    defer cache.deinit();
+
+    const big: [65]u8 = @splat('x');
+
+    try std.testing.expect(!cache.store(9, &big, 1000, 10));
+    try std.testing.expect(cache.lookup(9, 10) == null);
+}
+
+test "zix utils: response cache, hitSlot rejects a foreign slice" {
+    const config: Config = .{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 0,
+        .dispatch_model = .ASYNC,
+        .max_entries = 4,
+        .max_value_bytes = 64,
+    };
+
+    var cache = try Self.init(std.testing.allocator, config);
+    defer cache.deinit();
+
+    try std.testing.expect(cache.store(7, "hello", 1000, 10));
+    _ = cache.lookup(7, 20).?;
+
+    const copy = "hello";
+
+    try std.testing.expect(cache.hitSlot(copy) == null);
+}
 
