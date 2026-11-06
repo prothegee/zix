@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! HTTP media type table and Content-Type helpers.
 //! 
 //! ### note:
 //! 
@@ -410,10 +410,13 @@ pub fn typeFromHeader(header_value: []const u8) ?Type {
 /// Return:
 /// - Type
 pub fn typeFromExtension(ext: []const u8) Type {
-    if (std.ascii.eqlIgnoreCase(ext, "html") or std.ascii.eqlIgnoreCase(ext, "htm")) return .TEXT_HTML;
+    if (std.ascii.eqlIgnoreCase(ext, "html")) return .TEXT_HTML;
+    if (std.ascii.eqlIgnoreCase(ext, "htm")) return .TEXT_HTML;
     if (std.ascii.eqlIgnoreCase(ext, "css")) return .TEXT_CSS;
-    if (std.ascii.eqlIgnoreCase(ext, "js") or std.ascii.eqlIgnoreCase(ext, "min.js")) return .APPLICATION_JAVASCRIPT;
-    if (std.ascii.eqlIgnoreCase(ext, "json") or std.ascii.eqlIgnoreCase(ext, "map")) return .APPLICATION_JSON;
+    if (std.ascii.eqlIgnoreCase(ext, "js")) return .APPLICATION_JAVASCRIPT;
+    if (std.ascii.eqlIgnoreCase(ext, "min.js")) return .APPLICATION_JAVASCRIPT;
+    if (std.ascii.eqlIgnoreCase(ext, "json")) return .APPLICATION_JSON;
+    if (std.ascii.eqlIgnoreCase(ext, "map")) return .APPLICATION_JSON;
     if (std.ascii.eqlIgnoreCase(ext, "txt")) return .TEXT_PLAIN;
     if (std.ascii.eqlIgnoreCase(ext, "csv")) return .TEXT_CSV;
     if (std.ascii.eqlIgnoreCase(ext, "xml")) return .APPLICATION_XML;
@@ -426,7 +429,8 @@ pub fn typeFromExtension(ext: []const u8) Type {
     if (std.ascii.eqlIgnoreCase(ext, "7z")) return .APPLICATION_7Z_COMPRESSED;
     if (std.ascii.eqlIgnoreCase(ext, "rar")) return .APPLICATION_VND_RAR;
     if (std.ascii.eqlIgnoreCase(ext, "png")) return .IMAGE_PNG;
-    if (std.ascii.eqlIgnoreCase(ext, "jpg") or std.ascii.eqlIgnoreCase(ext, "jpeg")) return .IMAGE_JPEG;
+    if (std.ascii.eqlIgnoreCase(ext, "jpg")) return .IMAGE_JPEG;
+    if (std.ascii.eqlIgnoreCase(ext, "jpeg")) return .IMAGE_JPEG;
     if (std.ascii.eqlIgnoreCase(ext, "gif")) return .IMAGE_GIF;
     if (std.ascii.eqlIgnoreCase(ext, "svg")) return .IMAGE_SVG_XML;
     if (std.ascii.eqlIgnoreCase(ext, "webp")) return .IMAGE_WEBP;
@@ -443,7 +447,8 @@ pub fn typeFromExtension(ext: []const u8) Type {
     if (std.ascii.eqlIgnoreCase(ext, "mp3")) return .AUDIO_MPEG;
     if (std.ascii.eqlIgnoreCase(ext, "wav")) return .AUDIO_WAV;
     if (std.ascii.eqlIgnoreCase(ext, "flac")) return .AUDIO_FLAC;
-    if (std.ascii.eqlIgnoreCase(ext, "mid") or std.ascii.eqlIgnoreCase(ext, "midi")) return .AUDIO_MIDI;
+    if (std.ascii.eqlIgnoreCase(ext, "mid")) return .AUDIO_MIDI;
+    if (std.ascii.eqlIgnoreCase(ext, "midi")) return .AUDIO_MIDI;
     if (std.ascii.eqlIgnoreCase(ext, "woff")) return .FONT_WOFF;
     if (std.ascii.eqlIgnoreCase(ext, "woff2")) return .FONT_WOFF2;
     if (std.ascii.eqlIgnoreCase(ext, "ttf")) return .FONT_TTF;
@@ -471,7 +476,7 @@ pub fn fromExtension(ext: []const u8) []const u8 {
 // --------------------------------------------------------- //
 // Test:
 
-test "zix utils http: content every type round-trips through its string" {
+test "zix utils http: content, every type round-trips" {
     const all_types = [_]Type{
         Type.TEXT_PLAIN,
         Type.TEXT_HTML,
@@ -539,28 +544,40 @@ test "zix utils http: content every type round-trips through its string" {
     }
 }
 
-test "zix utils http: content the RFC 10008 query types resolve from their strings" {
+test "zix utils http: content, the RFC 10008 query types resolve" {
     try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromString("application/sql").?);
-    try std.testing.expectEqual(Type.APPLICATION_JSONPATH, typeFromString("application/jsonpath").?);
-    try std.testing.expectEqual(Type.APPLICATION_GRAPHQL, typeFromString("application/graphql").?);
-    try std.testing.expectEqual(Type.MULTIPART_FORM_DATA, typeFromString("multipart/form-data").?);
+    try std.testing.expectEqual(
+        Type.APPLICATION_JSONPATH,
+        typeFromString("application/jsonpath").?,
+    );
+    try std.testing.expectEqual(
+        Type.APPLICATION_GRAPHQL,
+        typeFromString("application/graphql").?,
+    );
+    try std.testing.expectEqual(
+        Type.MULTIPART_FORM_DATA,
+        typeFromString("multipart/form-data").?,
+    );
     try std.testing.expectEqual(
         Type.APPLICATION_X_WWW_FORM_URLENCODED,
         typeFromString("application/x-www-form-urlencoded").?,
     );
 }
 
-test "zix utils http: content the longest media type string fits the lowercase buffer" {
+test "zix utils http: content, the longest type fits the buffer" {
     // 33 bytes, one past the buffer this table used to declare. A safe build
     // panicked here and a release build wrote past the end.
     const longest = "application/x-www-form-urlencoded";
 
     try std.testing.expectEqual(@as(usize, 33), longest.len);
     try std.testing.expect(longest.len <= MAX_TYPE_LEN);
-    try std.testing.expectEqual(Type.APPLICATION_X_WWW_FORM_URLENCODED, typeFromString(longest).?);
+    try std.testing.expectEqual(
+        Type.APPLICATION_X_WWW_FORM_URLENCODED,
+        typeFromString(longest).?,
+    );
 }
 
-test "zix utils http: content a value past MAX_TYPE_LEN reports no match instead of panicking" {
+test "zix utils http: content, a value past MAX_TYPE_LEN reports no match" {
     // A peer controls this header, so an absurd value must be refused, not copied.
     const prefix = "application/";
     var oversized: [prefix.len + 200]u8 = @splat('x');
@@ -569,28 +586,37 @@ test "zix utils http: content a value past MAX_TYPE_LEN reports no match instead
     try std.testing.expect(typeFromString(&oversized) == null);
 }
 
-test "zix utils http: content typeFromHeader drops parameters before matching" {
-    try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("application/sql; charset=utf-8").?);
-    try std.testing.expectEqual(Type.APPLICATION_JSON, typeFromHeader("application/json;charset=utf-8").?);
+test "zix utils http: content, typeFromHeader drops parameters" {
+    try std.testing.expectEqual(
+        Type.APPLICATION_SQL,
+        typeFromHeader("application/sql; charset=utf-8").?,
+    );
+    try std.testing.expectEqual(
+        Type.APPLICATION_JSON,
+        typeFromHeader("application/json;charset=utf-8").?,
+    );
     try std.testing.expectEqual(
         Type.MULTIPART_FORM_DATA,
         typeFromHeader("multipart/form-data; boundary=----zixBoundary").?,
     );
 }
 
-test "zix utils http: content typeFromHeader matches a bare value unchanged" {
+test "zix utils http: content, typeFromHeader matches a bare value" {
     try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("application/sql").?);
 }
 
-test "zix utils http: content typeFromHeader reports no match for an unknown type" {
+test "zix utils http: content, typeFromHeader reports an unknown type" {
     // RFC 10008 section 2.1 forbids sniffing the body, so an unrecognised
     // declared type stays unrecognised and the handler answers 415.
     try std.testing.expect(typeFromHeader("application/vnd.zix.not-real") == null);
     try std.testing.expect(typeFromHeader("") == null);
 }
 
-test "zix utils http: content typeFromHeader is case-insensitive on the type" {
+test "zix utils http: content, typeFromHeader ignores case" {
     try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("APPLICATION/SQL").?);
-    try std.testing.expectEqual(Type.APPLICATION_SQL, typeFromHeader("Application/SQL; charset=UTF-8").?);
+    try std.testing.expectEqual(
+        Type.APPLICATION_SQL,
+        typeFromHeader("Application/SQL; charset=UTF-8").?,
+    );
 }
 
