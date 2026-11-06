@@ -34,7 +34,8 @@ const Config = @import("../Config.zig");
 const HandlerFn = @import("../handler.zig").HandlerFn;
 const conn = @import("../connection.zig");
 const ConnArgs = @import("../ConnArgs.zig");
-const connEntry = @import("common.zig").connEntry;
+const common = @import("common.zig");
+const connEntry = common.connEntry;
 
 // --------------------------------------------------------- //
 // Public:
@@ -68,11 +69,11 @@ pub fn run(config: Config, handler: HandlerFn) Error!void {
 
     std.log.info("TODO: connection timeout sweep, timer, & detach", .{});
 
-    std.log.info(
-        \\TODO: log debug info for ip:port dispatch model.
-        \\listening on {s}:{d} (io.async)
-        ,
-        .{ config.ip, config.port }
+    common.logSystem(
+        config,
+        .INFO,
+        "listening on {s}:{d} (io.async)",
+        .{ config.ip, config.port },
     );
 
     while (true) {
@@ -83,6 +84,7 @@ pub fn run(config: Config, handler: HandlerFn) Error!void {
             .io = io,
             .stream = stream,
             .handler = handler,
+            .logger = config.logger,
         }});
     }
 }
