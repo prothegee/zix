@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! HTTP status codes, reason phrases, and prebuilt status lines.
 //! 
 //! ### note:
 //! 
@@ -515,7 +515,7 @@ pub fn statusLine(code: Code) []const u8 {
 // --------------------------------------------------------- //
 // Test:
 
-test "zix utils http: statusLine pre-built lines" {
+test "zix utils http: status, statusLine has pre-built lines" {
     // statusLine() is exhaustive: every Code must yield a verbatim
     // "HTTP/1.1 NNN Reason\r\n" line matching bufPrint + stringFromEnum.
     var buf: [64]u8 = undefined;
@@ -534,14 +534,26 @@ test "zix utils http: statusLine pre-built lines" {
     // Spot-check a few lines verbatim so a coincident typo in both
     // statusLine() and stringFromEnum() is still caught against the spec.
     try std.testing.expectEqualStrings("HTTP/1.1 200 Ok\r\n", statusLine(.OK));
-    try std.testing.expectEqualStrings("HTTP/1.1 207 Multi-Status\r\n", statusLine(.MULTI_STATUS));
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 207 Multi-Status\r\n",
+        statusLine(.MULTI_STATUS),
+    );
     try std.testing.expectEqualStrings("HTTP/1.1 404 Not Found\r\n", statusLine(.NOT_FOUND));
-    try std.testing.expectEqualStrings("HTTP/1.1 418 I'm a teapot\r\n", statusLine(.IM_A_TEAPOT));
-    try std.testing.expectEqualStrings("HTTP/1.1 500 Internal Server Error\r\n", statusLine(.INTERNAL_SERVER_ERROR));
-    try std.testing.expectEqualStrings("HTTP/1.1 511 Network Authentication Required\r\n", statusLine(.NETWORK_AUTHENTICATION_REQUIRED));
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 418 I'm a teapot\r\n",
+        statusLine(.IM_A_TEAPOT),
+    );
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 500 Internal Server Error\r\n",
+        statusLine(.INTERNAL_SERVER_ERROR),
+    );
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 511 Network Authentication Required\r\n",
+        statusLine(.NETWORK_AUTHENTICATION_REQUIRED),
+    );
 }
 
-test "zix http1: status every code round-trips through its string" {
+test "zix utils http: status, every code round-trips" {
     const all_codes = [_]Code{
         // 1xx : informational
         Code.CONTINUE,
