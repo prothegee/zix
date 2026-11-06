@@ -9,9 +9,10 @@
 //! ### brief:
 //! 
 //! The peer address of a connected socket, as text.
-//! - One place that answers "who is on the other end of this descriptor". The connection records
-//!   want it with its port (`endpoint`), an access record wants the address alone (`host`), and an
-//!   access record behind a proxy wants the proxy headers consulted first (`clientIp`).
+//! - One place that answers "who is on the other end of this descriptor". The connection
+//!   records want it with its port (`endpoint`), an access record wants the address alone
+//!   (`host`), and an access record behind a proxy wants the proxy headers consulted first
+//!   (`clientIp`).
 //! 
 //! ### note:
 //! 
@@ -41,10 +42,11 @@ const socket_pair = @import("socket/pair.zig");
 /// Read the peer address off a connected socket.
 ///
 /// Note:
-/// - The raw syscall is used rather than std.posix.getpeername, which answers `unreachable` for
-///   EBADF on the grounds that a bad descriptor is always a race. That is a fair contract for a
-///   caller that owns the socket, but not for a log record: the TLS path hands this a buffer-sink
-///   sentinel rather than a socket, and a logger must never be the thing that aborts a server.
+/// - The raw syscall is used rather than std.posix.getpeername, which answers `unreachable`
+///   for EBADF on the grounds that a bad descriptor is always a race. That is a fair contract
+///   for a caller that owns the socket, but not for a log record: the TLS path hands this a
+///   buffer-sink sentinel rather than a socket, and a logger must never be the thing that
+///   aborts a server.
 /// - A descriptor that is not a socket, has no peer, or is not an IP family all answer null, and
 ///   every one of those becomes "-" in the record.
 ///
@@ -87,7 +89,9 @@ fn read(fd: std.posix.fd_t) ?std.Io.net.IpAddress {
 fn isIp4Mapped(bytes: [16]u8) bool {
     const zero_prefix: [10]u8 = @splat(0);
 
-    return std.mem.eql(u8, bytes[0..10], &zero_prefix) and bytes[10] == 0xff and bytes[11] == 0xff;
+    return std.mem.eql(u8, bytes[0..10], &zero_prefix) and
+        bytes[10] == 0xff and
+        bytes[11] == 0xff;
 }
 
 // --------------------------------------------------------- //
@@ -111,7 +115,7 @@ pub const MAX_LEN: usize = 64;
 pub fn endpoint(fd: std.posix.fd_t, buf: []u8) []const u8 {
     const address = read(fd) orelse return UNKNOWN;
 
-    return std.fmt.bufPrint(buf, "{f}", .{address}) catch UNKNOWN;
+    return std.fmt.bufPrint(buf, "{f}", .{address}) catch |err| switch (err) { else => UNKNOWN };
 }
 
 /// The peer address without its port: "1.2.3.4", "::1", or "-".
@@ -135,12 +139,14 @@ pub fn host(fd: std.posix.fd_t, buf: []u8) []const u8 {
             ip4.bytes[1],
             ip4.bytes[2],
             ip4.bytes[3],
-        }) catch UNKNOWN,
+        }) catch |err| switch (err) { else => UNKNOWN },
         .ip6 => |ip6| blk: {
             const bare: std.Io.net.Ip6Address.Unresolved =
                 .{ .bytes = ip6.bytes, .interface_name = null };
 
-            break :blk std.fmt.bufPrint(buf, "{f}", .{bare}) catch UNKNOWN;
+            break :blk std.fmt.bufPrint(buf, "{f}", .{bare}) catch |err| switch (err) {
+                else => UNKNOWN,
+            };
         },
     };
 }
@@ -150,8 +156,9 @@ pub fn host(fd: std.posix.fd_t, buf: []u8) []const u8 {
 /// Note:
 /// - For engines that never see a socket descriptor. QUIC keeps its peer on the connection, so
 ///   HTTP/3 names its client from this rather than from getpeername.
-/// - An IPv4 client on a dual-stack socket arrives as ::ffff:a.b.c.d, and is written as the plain
-///   dotted quad, because that is the address an operator recognises and what a proxy would send.
+/// - An IPv4 client on a dual-stack socket arrives as ::ffff:a.b.c.d, and is written as the
+///   plain dotted quad, because that is the address an operator recognises and what a proxy
+///   would send.
 ///
 /// Param:
 /// sock_in6 - std.posix.sockaddr.in6 (the peer as the engine stored it)
@@ -172,12 +179,12 @@ pub fn hostFromIn6(sock_in6: std.posix.sockaddr.in6, buf: []u8) []const u8 {
             bytes[13],
             bytes[14],
             bytes[15],
-        }) catch UNKNOWN;
+        }) catch |err| switch (err) { else => UNKNOWN };
     }
 
     const bare: std.Io.net.Ip6Address.Unresolved = .{ .bytes = bytes, .interface_name = null };
 
-    return std.fmt.bufPrint(buf, "{f}", .{bare}) catch UNKNOWN;
+    return std.fmt.bufPrint(buf, "{f}", .{bare}) catch |err| switch (err) { else => UNKNOWN };
 }
 
 /// The first entry of an X-Forwarded-For value, trimmed.
@@ -197,9 +204,9 @@ pub fn firstForwarded(forwarded_for: []const u8) []const u8 {
 /// Who the client is, for an access record.
 ///
 /// Note:
-/// - Order is X-Forwarded-For, then X-Real-IP, then the socket peer. A proxy header wins because
-///   behind a proxy the socket peer is the proxy, not the client. The socket peer is the fallback
-///   that makes a direct request name a real address rather than "-".
+/// - Order is X-Forwarded-For, then X-Real-IP, then the socket peer. A proxy header wins
+///   because behind a proxy the socket peer is the proxy, not the client. The socket peer is
+///   the fallback that makes a direct request name a real address rather than "-".
 /// - The caller passes empty strings for headers it does not have, so a plain engine with no
 ///   header parsing can call this with two empty slices and still get the peer.
 ///
@@ -233,7 +240,7 @@ pub fn clientIp(
 /// Loopback port for the connected-peer test below, unique across the tree.
 const TEST_PORT: u16 = 18601;
 
-test "zix utils: peer address hostFromIn6 writes a mapped IPv4 client as a dotted quad" {
+test "zix utils: peer address, hostFromIn6 writes a mapped IPv4" {
     var sock_in6 = std.mem.zeroes(std.posix.sockaddr.in6);
     sock_in6.addr = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 203, 0, 113, 7 };
 
@@ -241,7 +248,7 @@ test "zix utils: peer address hostFromIn6 writes a mapped IPv4 client as a dotte
     try std.testing.expectEqualStrings("203.0.113.7", hostFromIn6(sock_in6, &buf));
 }
 
-test "zix utils: peer address hostFromIn6 writes a real IPv6 client in its own form" {
+test "zix utils: peer address, hostFromIn6 writes a real IPv6" {
     var sock_in6 = std.mem.zeroes(std.posix.sockaddr.in6);
     sock_in6.addr = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 
@@ -252,21 +259,27 @@ test "zix utils: peer address hostFromIn6 writes a real IPv6 client in its own f
     try std.testing.expectEqualStrings("::1", named);
 }
 
-test "zix utils: peer address hostFromIn6 answers UNKNOWN for an address that was never set" {
+test "zix utils: peer address, hostFromIn6 answers UNKNOWN for an unset address" {
     const sock_in6 = std.mem.zeroes(std.posix.sockaddr.in6);
 
     var buf: [MAX_LEN]u8 = undefined;
     try std.testing.expectEqualStrings(UNKNOWN, hostFromIn6(sock_in6, &buf));
 }
 
-test "zix utils: peer address firstForwarded takes the client and leaves the proxies" {
-    try std.testing.expectEqualStrings("203.0.113.7", firstForwarded("203.0.113.7, 198.51.100.2, 198.51.100.3"));
-    try std.testing.expectEqualStrings("203.0.113.7", firstForwarded("  203.0.113.7  ,198.51.100.2"));
+test "zix utils: peer address, firstForwarded takes the client" {
+    try std.testing.expectEqualStrings(
+        "203.0.113.7",
+        firstForwarded("203.0.113.7, 198.51.100.2, 198.51.100.3"),
+    );
+    try std.testing.expectEqualStrings(
+        "203.0.113.7",
+        firstForwarded("  203.0.113.7  ,198.51.100.2"),
+    );
     try std.testing.expectEqualStrings("203.0.113.7", firstForwarded("203.0.113.7"));
     try std.testing.expectEqualStrings("", firstForwarded(""));
 }
 
-test "zix utils: peer address clientIp prefers the forwarded header over everything else" {
+test "zix utils: peer address, clientIp prefers the forwarded header" {
     var buf: [MAX_LEN]u8 = undefined;
 
     try std.testing.expectEqualStrings(
@@ -275,39 +288,46 @@ test "zix utils: peer address clientIp prefers the forwarded header over everyth
     );
 }
 
-test "zix utils: peer address clientIp falls back to the real-ip header when there is no forwarded chain" {
+test "zix utils: peer address, clientIp falls back to real-ip" {
     var buf: [MAX_LEN]u8 = undefined;
 
     try std.testing.expectEqualStrings("198.51.100.9", clientIp("", "198.51.100.9", null, &buf));
-    try std.testing.expectEqualStrings("198.51.100.9", clientIp("   ", " 198.51.100.9 ", null, &buf));
+    try std.testing.expectEqualStrings(
+        "198.51.100.9",
+        clientIp("   ", " 198.51.100.9 ", null, &buf),
+    );
 }
 
-test "zix utils: peer address clientIp answers UNKNOWN when nothing can name the client" {
+test "zix utils: peer address, clientIp answers UNKNOWN" {
     var buf: [MAX_LEN]u8 = undefined;
 
     try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", null, &buf));
 }
 
-test "zix utils: peer address a socket with no IP peer answers UNKNOWN rather than failing" {
-    // A unix socketpair is connected but has no IP family, which is the non-IP branch. The helper
-    // reaches the same syscall through libc off linux, so this runs on every POSIX target.
-    var pair = try socket_pair.Pair.open(std.testing.allocator);
-    defer pair.deinit();
+test "zix utils: peer address, a non-IP socket answers UNKNOWN" {
+    // A unix socketpair is connected but has no IP family, which is the non-IP branch. The
+    // helper reaches the same syscall through libc off linux, so this runs on every POSIX
+    // target.
+    var fds: [2]std.posix.fd_t = undefined;
+    try socket_pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
 
     var buf: [MAX_LEN]u8 = undefined;
-    try std.testing.expectEqualStrings(UNKNOWN, host(pair.fds[0], &buf));
-    try std.testing.expectEqualStrings(UNKNOWN, endpoint(pair.fds[0], &buf));
-    try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", pair.fds[0], &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, host(fds[0], &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, endpoint(fds[0], &buf));
+    try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", fds[0], &buf));
 }
 
-test "zix utils: peer address a socket with no peer answers UNKNOWN rather than failing" {
+test "zix utils: peer address, an unconnected socket answers UNKNOWN" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    // A listening socket is a real socket that was never connected. getpeername answers ENOTCONN,
-    // which is the branch a record hits when the connection went away before it was written. Port
-    // 0 takes whatever the kernel hands out, so this fixture can never collide with another test.
+    // A listening socket is a real socket that was never connected. getpeername answers
+    // ENOTCONN, which is the branch a record hits when the connection went away before it was
+    // written. Port 0 takes whatever the kernel hands out, so this fixture can never collide
+    // with another test.
     const addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
     var server = try addr.listen(io, .{ .kernel_backlog = 1 });
     defer server.deinit(io);
@@ -318,11 +338,11 @@ test "zix utils: peer address a socket with no peer answers UNKNOWN rather than 
     try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", server.socket.handle, &buf));
 }
 
-test "zix utils: peer address a sink sentinel and a stale descriptor answer UNKNOWN instead of aborting" {
+test "zix utils: peer address, a sink sentinel answers UNKNOWN" {
     var buf: [MAX_LEN]u8 = undefined;
 
-    // The TLS path serves into a buffer and hands -1 where a socket would go. Reaching for a peer
-    // there used to abort the process through std's EBADF unreachable.
+    // The TLS path serves into a buffer and hands -1 where a socket would go. Reaching for a
+    // peer there used to abort the process through std's EBADF unreachable.
     try std.testing.expectEqualStrings(UNKNOWN, host(@as(std.posix.fd_t, -1), &buf));
     try std.testing.expectEqualStrings(UNKNOWN, endpoint(@as(std.posix.fd_t, -1), &buf));
     try std.testing.expectEqualStrings(UNKNOWN, clientIp("", "", @as(std.posix.fd_t, -1), &buf));
@@ -334,7 +354,7 @@ test "zix utils: peer address a sink sentinel and a stale descriptor answer UNKN
     std.log.info(".PEER: sentinel and stale descriptors answer UNKNOWN without aborting", .{});
 }
 
-test "zix utils: peer address a real IPv4 peer is named with and without its port" {
+test "zix utils: peer address, an IPv4 peer is named with its port" {
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
