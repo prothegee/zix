@@ -16,7 +16,6 @@
         "build.zig.zon",
         "src",
         "scripts",
-        "tests/unit",
-        "tests/edge",
     },
 }
+
