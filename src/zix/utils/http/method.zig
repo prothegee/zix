@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! HTTP method token table.
 //! 
 //! ### note:
 //! 
@@ -94,11 +94,33 @@ pub const MAX_TOKEN_LEN: usize = 7;
 /// - null when the token matches no known method
 pub fn codeFromString(method_string: []const u8) ?Code {
     return switch (method_string.len) {
-        3 => if (std.mem.eql(u8, method_string, "GET")) Code.GET else if (std.mem.eql(u8, method_string, "PUT")) Code.PUT else null,
-        4 => if (std.mem.eql(u8, method_string, "HEAD")) Code.HEAD else if (std.mem.eql(u8, method_string, "POST")) Code.POST else null,
-        5 => if (std.mem.eql(u8, method_string, "PATCH")) Code.PATCH else if (std.mem.eql(u8, method_string, "TRACE")) Code.TRACE else if (std.mem.eql(u8, method_string, "QUERY")) Code.QUERY else null,
+        3 => if (std.mem.eql(u8, method_string, "GET"))
+            Code.GET
+        else if (std.mem.eql(u8, method_string, "PUT"))
+            Code.PUT
+        else
+            null,
+        4 => if (std.mem.eql(u8, method_string, "HEAD"))
+            Code.HEAD
+        else if (std.mem.eql(u8, method_string, "POST"))
+            Code.POST
+        else
+            null,
+        5 => if (std.mem.eql(u8, method_string, "PATCH"))
+            Code.PATCH
+        else if (std.mem.eql(u8, method_string, "TRACE"))
+            Code.TRACE
+        else if (std.mem.eql(u8, method_string, "QUERY"))
+            Code.QUERY
+        else
+            null,
         6 => if (std.mem.eql(u8, method_string, "DELETE")) Code.DELETE else null,
-        7 => if (std.mem.eql(u8, method_string, "OPTIONS")) Code.OPTIONS else if (std.mem.eql(u8, method_string, "CONNECT")) Code.CONNECT else null,
+        7 => if (std.mem.eql(u8, method_string, "OPTIONS"))
+            Code.OPTIONS
+        else if (std.mem.eql(u8, method_string, "CONNECT"))
+            Code.CONNECT
+        else
+            null,
         else => null,
     };
 }
@@ -149,7 +171,7 @@ pub fn stringFromEnum(method_enum: Code) []const u8 {
 // --------------------------------------------------------- //
 // Test:
 
-test "zix utils http: method every code round-trips through its string" {
+test "zix utils http: method, every code round-trips" {
     const all_codes = [_]Code{
         Code.GET,
         Code.HEAD,
@@ -171,18 +193,18 @@ test "zix utils http: method every code round-trips through its string" {
     }
 }
 
-test "zix utils http: method QUERY resolves from its wire token" {
+test "zix utils http: method, QUERY resolves from its token" {
     try std.testing.expectEqual(Code.QUERY, enumFromString("QUERY"));
     try std.testing.expectEqual(Code.QUERY, codeFromString("QUERY").?);
 }
 
-test "zix utils http: method QUERY is not reported as GET" {
+test "zix utils http: method, QUERY is not GET" {
     // The pre-RFC-10008 behaviour answered GET for every unknown token, which
     // made a QUERY request indistinguishable from a GET to every handler.
     try std.testing.expect(enumFromString("QUERY") != Code.GET);
 }
 
-test "zix utils http: method token matching is case-sensitive" {
+test "zix utils http: method, token matching is case-sensitive" {
     // RFC 9110 section 9.1 makes method names case-sensitive, so a lowercase
     // token names no method. Both HTTP/1 engines read this one table, so a
     // fold here would put them back out of step with each other.
@@ -192,19 +214,19 @@ test "zix utils http: method token matching is case-sensitive" {
     try std.testing.expect(codeFromString("Post") == null);
 }
 
-test "zix utils http: method codeFromString reports an unknown token as null" {
+test "zix utils http: method, codeFromString reports unknown as null" {
     try std.testing.expect(codeFromString("BREW") == null);
     try std.testing.expect(codeFromString("") == null);
 }
 
-test "zix utils http: method codeFromString rejects a token past MAX_TOKEN_LEN" {
+test "zix utils http: method, codeFromString rejects a long token" {
     // Longer than any known method, so the length switch refuses it before any
     // compare rather than reading past the tokens it knows.
     try std.testing.expect(codeFromString("PROPPATCH") == null);
     try std.testing.expect(codeFromString("QUERYQUERYQUERY") == null);
 }
 
-test "zix utils http: method enumFromString keeps its GET fallback for unknown tokens" {
+test "zix utils http: method, enumFromString keeps the GET fallback" {
     try std.testing.expectEqual(Code.GET, enumFromString("BREW"));
     try std.testing.expectEqual(Code.GET, enumFromString("PROPPATCH"));
 }
