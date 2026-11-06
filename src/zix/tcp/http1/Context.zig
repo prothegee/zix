@@ -37,7 +37,7 @@ const std = @import("std");
 io: std.Io,
 fd: std.posix.fd_t,
 allocator: std.mem.Allocator,
-// logger: ?*Logger = null,
+// TODO: logger: ?*Logger = null,
 deadline: ?std.Io.Clock.Timestamp = null,
 
 const Self = @This();
