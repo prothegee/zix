@@ -30,9 +30,12 @@
 //!
 
 const std = @import("std");
+const Config = @import("../Config.zig");
 const compress = @import("../compress.zig");
 const head = @import("../head.zig");
 const header = @import("../header.zig");
+const handler = @import("../handler.zig");
+const Logger = @import("../../../logger/Logger.zig");
 const serve = @import("../serve.zig");
 const ConnArgs = @import("../ConnArgs.zig");
 const ConnEntry = @import("../ConnEntry.zig");
@@ -55,6 +58,31 @@ const ConnEntry = @import("../ConnEntry.zig");
 // --------------------------------------------------------- //
 // Public:
 
+/// Emit a server line at the given level.
+///
+/// Note:
+/// - Without a logger the line still reaches std.log, so a release build never
+///   loses a failure.
+pub fn logSystem(
+    config: Config,
+    level: Logger.Level,
+    comptime fmt: []const u8,
+    args: anytype,
+) void {
+    if (config.logger) |logger| {
+        logger.system(level, "http1", fmt, args);
+
+        return;
+    }
+
+    switch (level) {
+        .ERROR => std.log.err(fmt, args),
+        .WARN => std.log.warn(fmt, args),
+        .INFO => std.log.info(fmt, args),
+        .DEBUG => std.log.debug(fmt, args),
+    }
+}
+
 /// The wall-clock deadline for a connection accepted now.
 pub fn connDeadline(io: std.Io, timeout_ms: u32) std.Io.Clock.Timestamp {
     return std.Io.Clock.Timestamp.fromNow(
@@ -70,7 +98,7 @@ pub fn connEntry(args: ConnArgs) void {
     // TODO: install the static-serve root from args.public_dir when the
     // static module is ported.
     header.setMaxResponseHeaders(args.max_response_headers);
-    std.log.info("TODO: handler.setAccessLogger", .{});
+    handler.setAccessLogger(args.logger);
     compress.setCompression(args.compress, args.compression_min_size, args.compression_max_out);
 
     std.log.info("TODO: args.response_cache", .{});
