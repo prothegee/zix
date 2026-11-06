@@ -7,7 +7,7 @@
 //! ---------------------------------------------------------
 //! 
 //! ### brief:
-//! n/a
+//! Build helpers: Zig version gate, required paths, and version info.
 //! 
 //! ### note:
 //! n/a
@@ -39,14 +39,12 @@ const ALLOWED_ZIG = struct {
 
 const REQUIRED_DIRS = [_][]const u8{
     "src",
-    "tests/unit",
-    "tests/edge",
+    "tests",
 };
 
 const REQUIRED_FILES = [_][]const u8{
     "src/zix/lib.zig",
-    "tests/unit/zix_unit_test.zig",
-    "tests/edge/zix_edge_test.zig",
+    "src/zix/test.zig",
 };
 
 pub const VersionInfo = struct {
