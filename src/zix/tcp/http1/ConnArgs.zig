@@ -33,6 +33,7 @@ const std = @import("std");
 const HandlerFn = @import("handler.zig").HandlerFn;
 const ConnRegistry = @import("ConnRegistry.zig");
 const BUF_SIZE = @import("ServeOpts.zig").BUF_SIZE;
+const Logger = @import("../../logger/Logger.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -49,7 +50,7 @@ max_recv_buf: usize = BUF_SIZE,
 max_request_body: usize = 0,
 max_response_headers: usize = 16, // TODO: check max header config
 public_dir: []const u8 = "",
-// logger: ?*Logger = null, // TODO: ConnArgs logger
+logger: ?*Logger = null,
 compress: bool = false,
 compression_min_size: usize = 256,
 compression_max_out: usize = 256 * 1024,
@@ -84,6 +85,7 @@ test "zix http1: ConnArgs, applies defaults" {
     try std.testing.expect(args.send_date_header);
     try std.testing.expect(!args.compress);
     try std.testing.expect(!args.cache_response);
+    try std.testing.expectEqual(@as(?*Logger, null), args.logger);
 }
 
 test "zix http1: ConnArgs, keeps explicit knobs" {
