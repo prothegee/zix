@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Deletes the build artifact directories.
 //! 
 //! ### note:
 //! 
