@@ -160,9 +160,10 @@ pub fn init(comptime handler: HandlerFn, config: Config) Self {
     };
 }
 
-pub fn deinit(_: *Self) void {
-    std.log.info("TODO: ZIX Http1 server deinit", .{});
-    // If logger not null write the exit log first
+pub fn deinit(self: *Self) void {
+    if (self.config.logger) |logger| {
+        logger.system(.INFO, "http1", "server stopped", .{});
+    }
 }
 
 pub fn run(self: *const Self) Error!void {
@@ -176,7 +177,6 @@ pub fn run(self: *const Self) Error!void {
 
     return switch (self.config.dispatch_model) {
         .ASYNC => {
-            std.log.info("TODO: ZIX Http1 server run .ASYNC", .{});
             dispatch_async.run(self.config, self.handler) catch |err| switch (err) {
                 else => return dispatchError(err),
             };
