@@ -35,6 +35,7 @@ const HandlerFn = @import("handler.zig").HandlerFn;
 const OS = @import("builtin").target.os.tag;
 const dispatch_async = @import("dispatch/async.zig");
 const dispatch_epoll = @import("dispatch/epoll.zig");
+const dispatch_uring = @import("dispatch/uring.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -78,7 +79,22 @@ fn dispatchEpollError(err: dispatch_epoll.Error) Error {
         error.ZixHttp1_Epoll_SpawnFailed,
         error.ZixHttp1_Epoll_SetupFailed,
         error.ZixHttp1_Epoll_Unsupported,
-        => Error.ZixHttp1_Server_EpollSetupFailed,
+            => Error.ZixHttp1_Server_EpollSetupFailed,
+    };
+}
+
+fn dispatchUringError(err: dispatch_uring.Error) Error {
+    return switch (err) {
+        error.ZixHttp1_Uring_ResolveFailed
+            => Error.ZixHttp1_Server_ResolveFailed,
+        error.ZixHttp1_Uring_ListenFailed
+            => Error.ZixHttp1_Server_ListenFailed,
+        error.ZixHttp1_Uring_OutOfMemory,
+        error.ZixHttp1_Uring_SpawnFailed,
+        error.ZixHttp1_Uring_SetupFailed,
+        error.ZixHttp1_Uring_WaitFailed,
+        error.ZixHttp1_Uring_Unsupported,
+            => Error.ZixHttp1_Server_UringSetupFailed,
     };
 }
 
@@ -131,6 +147,8 @@ pub const Error = error {
     ZixHttp1_Server_AcceptFailed,
     /// E.Q.: error.ZixHttp1_Epoll_SetupFailed
     ZixHttp1_Server_EpollSetupFailed,
+    /// E.Q.: error.ZixHttp1_Uring_SetupFailed
+    ZixHttp1_Server_UringSetupFailed,
 };
 
 pub fn init(comptime handler: HandlerFn, config: Config) Self {
@@ -173,7 +191,13 @@ pub fn run(self: *const Self) Error!void {
             }
         },
         .URING => {
-            @panic("TODO: ZIX Http1 server run .URING");
+            if (comptime OS == .linux) {
+                dispatch_uring.run(self.config, self.handler) catch |err| switch (err) {
+                    else => return dispatchUringError(err),
+                };
+            } else {
+                return Error.ZixHttp1_Server_DispatchModel_NotSupported;
+            }
         },
         else => Error.ZixHttp1_Server_DispatchModel_NotSupported,
     };
@@ -215,5 +239,24 @@ test "zix http1: Server, init keeps the dispatch model" {
 
     try std.testing.expectEqual(.EPOLL, server.config.dispatch_model);
     try std.testing.expectEqual(@as(usize, 2), server.config.workers);
+}
+
+test "zix http1: Server, maps uring setup failures" {
+    try std.testing.expectEqual(
+        Error.ZixHttp1_Server_UringSetupFailed,
+        dispatchUringError(error.ZixHttp1_Uring_SetupFailed),
+    );
+    try std.testing.expectEqual(
+        Error.ZixHttp1_Server_UringSetupFailed,
+        dispatchUringError(error.ZixHttp1_Uring_SpawnFailed),
+    );
+    try std.testing.expectEqual(
+        Error.ZixHttp1_Server_ResolveFailed,
+        dispatchUringError(error.ZixHttp1_Uring_ResolveFailed),
+    );
+    try std.testing.expectEqual(
+        Error.ZixHttp1_Server_ListenFailed,
+        dispatchUringError(error.ZixHttp1_Uring_ListenFailed),
+    );
 }
 
