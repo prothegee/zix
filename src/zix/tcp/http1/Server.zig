@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Configured Http1 server: init, deinit, and model startup.
 //! 
 //! ### note:
 //! 
@@ -30,9 +30,8 @@
 //!
 
 const std = @import("std");
-const core = @import("core.zig");
 const Config = @import("Config.zig");
-const HandlerFn = core.HandlerFn;
+const HandlerFn = @import("handler.zig").HandlerFn;
 const OS = @import("builtin").target.os.tag;
 const dispatch_async = @import("dispatch/async.zig");
 
@@ -57,44 +56,14 @@ fn gateConfig(config: Config) void {
     }
 }
 
-fn dispatchError(err: anyerror) Error {
+fn dispatchError(err: dispatch_async.Error) Error {
     return switch (err) {
-        error.Canceled
-            => Error.ZixHttp1_Server_Canceled,
-        error.SystemResources
-            => Error.ZixHttp1_Server_SystemResources,
-        error.AccessDenied
-            => Error.ZixHttp1_Server_AccessDenied,
-        error.Unexpected
-            => Error.ZixHttp1_Server_Unexpected,
-        error.ProcessFdQuotaExceeded
-            => Error.ZixHttp1_Server_ProcessFdQuotaExceeded,
-        error.SystemFdQuotaExceeded
-            => Error.ZixHttp1_Server_SystemFdQuotaExceeded,
-        error.NetworkDown
-            => Error.ZixHttp1_Server_NetworkDown,
-        error.AddressFamilyUnsupported
-            => Error.ZixHttp1_Server_AddressFamilyUnsupported,
-        error.NameTooLong
-            => Error.ZixHttp1_Server_NameTooLong,
-        error.AddressInUse
-            => Error.ZixHttp1_Server_AddressInUse,
-        error.AddressUnavailable
-            => Error.ZixHttp1_Server_AddressUnavailable,
-        error.ProtocolUnsupportedBySystem
-            => Error.ZixHttp1_Server_ProtocolUnsupported_BySystem,
-        error.ProtocolUnsupportedByAddressFamily
-            => Error.ZixHttp1_Server_ProtocolUnsupported_ByAddressFamily,
-        error.SocketModeUnsupported
-            => Error.ZixHttp1_Server_SocketModeUnsupported,
-        error.OptionUnsupported
-            => Error.ZixHttp1_Server_OptionUnsupported,
-        error.InterfaceNotFound
-            => Error.ZixHttp1_Server_InterfaceNotFound,
-        error.ParseFailed
-            => Error.ZixHttp1_Server_ParseFailed,
-        else
-            => Error.ZixHttp1_Server_UnknownError,
+        error.ZixHttp1_Async_ResolveFailed
+            => Error.ZixHttp1_Server_ResolveFailed,
+        error.ZixHttp1_Async_ListenFailed
+            => Error.ZixHttp1_Server_ListenFailed,
+        error.ZixHttp1_Async_AcceptFailed
+            => Error.ZixHttp1_Server_AcceptFailed,
     };
 }
 
@@ -139,11 +108,15 @@ pub const Error = error {
     ZixHttp1_Server_InterfaceNotFound,
     /// E.Q.: error.ParseFailed
     ZixHttp1_Server_ParseFailed,
+    /// E.Q.: error.ZixHttp1_Async_ResolveFailed
+    ZixHttp1_Server_ResolveFailed,
+    /// E.Q.: error.ZixHttp1_Async_ListenFailed
+    ZixHttp1_Server_ListenFailed,
+    /// E.Q.: error.ZixHttp1_Async_AcceptFailed
+    ZixHttp1_Server_AcceptFailed,
 };
 
 pub fn init(comptime handler: HandlerFn, config: Config) Self {
-    core.initialize(config.io);
-
     gateConfig(config);
 
     return .{
@@ -169,8 +142,8 @@ pub fn run(self: *const Self) Error!void {
     return switch (self.config.dispatch_model) {
         .ASYNC => {
             std.log.info("TODO: ZIX Http1 server run .ASYNC", .{});
-            dispatch_async.run(self.config, self.handler) catch |err| {
-                return dispatchError(err);
+            dispatch_async.run(self.config, self.handler) catch |err| switch (err) {
+                else => return dispatchError(err),
             };
         },
         .EPOLL => {
@@ -181,5 +154,43 @@ pub fn run(self: *const Self) Error!void {
         },
         else => Error.ZixHttp1_Server_DispatchModel_NotSupported,
     };
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+const Request = @import("Request.zig");
+const Response = @import("Response.zig");
+const Context = @import("Context.zig");
+
+fn mockHandler(_: *Request, _: *Response, _: *Context) anyerror!void {}
+
+test "zix http1: Server, init stores its inputs" {
+    const config: Config = .{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 8080,
+        .dispatch_model = .ASYNC,
+    };
+    const server = Self.init(mockHandler, config);
+
+    try std.testing.expectEqualStrings("127.0.0.1", server.config.ip);
+    try std.testing.expectEqual(@as(u16, 8080), server.config.port);
+    try std.testing.expect(server.handler == mockHandler);
+}
+
+test "zix http1: Server, init keeps the dispatch model" {
+    const config: Config = .{
+        .io = std.testing.io,
+        .ip = "0.0.0.0",
+        .port = 9000,
+        .dispatch_model = .EPOLL,
+        .workers = 2,
+    };
+    const server = Self.init(mockHandler, config);
+
+    try std.testing.expectEqual(.EPOLL, server.config.dispatch_model);
+    try std.testing.expectEqual(@as(usize, 2), server.config.workers);
 }
 
