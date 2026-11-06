@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! HTTP content coding enum and its wire tokens.
 //! 
 //! ### note:
 //! 
@@ -63,4 +63,21 @@ pub const Encoding = enum(u8) {
         return if (self == .IDENTITY) null else self.token();
     }
 };
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix utils http: encoding, tokens are the wire tokens" {
+    try std.testing.expectEqualStrings("identity", Encoding.IDENTITY.token());
+    try std.testing.expectEqualStrings("gzip", Encoding.GZIP.token());
+    try std.testing.expectEqualStrings("deflate", Encoding.DEFLATE.token());
+    try std.testing.expectEqualStrings("br", Encoding.BR.token());
+}
+
+test "zix utils http: encoding, identity emits no Content-Encoding" {
+    try std.testing.expect(Encoding.IDENTITY.contentEncoding() == null);
+    try std.testing.expectEqualStrings("gzip", Encoding.GZIP.contentEncoding().?);
+    try std.testing.expectEqualStrings("br", Encoding.BR.contentEncoding().?);
+}
 
