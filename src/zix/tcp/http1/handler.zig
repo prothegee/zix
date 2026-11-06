@@ -31,6 +31,9 @@
 
 const std = @import("std");
 const Status = @import("../../utils/http/status.zig");
+const Method = @import("../../utils/http/method.zig");
+const peer_addr = @import("../../utils/peer_address.zig");
+const Logger = @import("../../logger/Logger.zig");
 const BodyInfo = @import("BodyInfo.zig");
 const Context = @import("Context.zig");
 const ParsedHead = @import("ParsedHead.zig");
@@ -59,14 +62,38 @@ fn wallClockNs(io: std.Io) u64 {
 ///   attached, which is what keeps a raw engine paying nothing for a feature it
 ///   did not ask for.
 fn writeAccessRecord(req: *const Request, res: *const Response, fd: std.posix.fd_t) void {
-    std.log.info("TODO: handler writeAccessRecord logger.access", .{});
-    _ = req;
-    _ = res;
-    _ = fd;
+    const logger = tl_access_logger orelse return;
+
+    var peer_buf: [peer_addr.MAX_LEN]u8 = undefined;
+    const client_ip = peer_addr.clientIp(
+        req.header("x-forwarded-for") orelse "",
+        req.header("x-real-ip") orelse "",
+        fd,
+        &peer_buf,
+    );
+
+    logger.access(
+        "http1",
+        Method.stringFromEnum(req.method()),
+        req.path(),
+        @intFromEnum(res.status),
+        res.bytes_written,
+        client_ip,
+        req.header("user-agent") orelse "",
+        req.header("origin") orelse "",
+    );
 }
 
 // --------------------------------------------------------- //
 // Public:
+
+/// The logger this worker writes access records to, or null.
+pub threadlocal var tl_access_logger: ?*Logger = null;
+
+/// Attach the access logger for this worker or connection.
+pub fn setAccessLogger(logger: ?*Logger) void {
+    tl_access_logger = logger;
+}
 
 /// Handler signature: the ergonomic request, response, context trio.
 ///
@@ -139,6 +166,7 @@ pub inline fn invokeHandler(
     var req = Request.init(head, body, fd);
     var res = Response.init(fd, io, allocator);
     var ctx = Context.init(io, allocator, fd);
+    ctx.logger = tl_access_logger;
 
     if (tl_body_info) |info| {
         req.body_received = info.received;
@@ -270,5 +298,94 @@ test "zix http1: handler, answered then failed gets no second response" {
         "HTTP/1.1 200 Ok\r\nContent-Length: 2\r\n\r\nok",
         buf[0..n],
     );
+}
+
+fn accessProbeHandler(_: *Request, res: *Response, _: *Context) anyerror!void {
+    res.setStatus(.CREATED);
+
+    try res.send("hello");
+}
+
+test "zix http1: handler, access record names the engine" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(
+        &root_buf,
+        ".zig-cache/tmp/{s}",
+        .{tmp.sub_path},
+    );
+
+    var logger = try Logger.init(std.testing.allocator, .{
+        .console = .OFF,
+        .save_path = root,
+        .save_min_level = .DEBUG,
+    });
+    defer logger.deinit();
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    setAccessLogger(&logger);
+    defer setAccessLogger(null);
+
+    const parsed = ParsedHead{
+        .path = "/orders/42",
+        .query = "",
+        .method = "GET",
+        .keep_alive = true,
+        .raw_headers = "x-forwarded-for: 203.0.113.7\r\n" ++
+            "user-agent: curl/8.5.0\r\n",
+        .version_minor = 1,
+        .content_length = 0,
+        .chunked_request = false,
+        .expect_continue = false,
+    };
+
+    invokeHandler(
+        accessProbeHandler,
+        &parsed,
+        "",
+        fds[0],
+        std.testing.io,
+        std.testing.allocator,
+    );
+    logger.flush();
+
+    const line = try readLoggedLine(tmp.dir, std.testing.allocator);
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        line,
+        "[http1:access] GET /orders/42 201 5 " ++
+            "\"203.0.113.7\" \"curl/8.5.0\" \"-\"",
+    ) != null);
+}
+
+fn readLoggedLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
+    var days = root.iterate();
+
+    while (try days.next(std.testing.io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        var day = try root.openDir(std.testing.io, entry.name, .{});
+        defer day.close(std.testing.io);
+
+        const bytes = day.readFileAlloc(
+            std.testing.io,
+            "log-000000.log",
+            allocator,
+            .limited(64 * 1024),
+        ) catch continue;
+        if (bytes.len > 0) return bytes;
+
+        allocator.free(bytes);
+    }
+
+    return error.ZixNoLogLine;
 }
 
