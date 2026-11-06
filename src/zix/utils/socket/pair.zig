@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Opens two connected stream descriptors.
 //! 
 //! ### note:
 //! 
@@ -55,5 +55,53 @@ pub fn open(io: std.Io, fds: *[2]std.posix.fd_t) Error!void {
     const rc = std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, fds);
 
     if (std.posix.errno(rc) != .SUCCESS) return Error.ZixUtils_SocketPair_Failed;
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+fn testWriteAll(fd: std.posix.fd_t, data: []const u8) !void {
+    var written: usize = 0;
+    while (written < data.len) {
+        const rc = std.posix.system.write(fd, data[written..].ptr, data.len - written);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.TestWriteClosed;
+                written += n;
+            },
+            .INTR => continue,
+            else => return error.TestWriteFailed,
+        }
+    }
+}
+
+test "zix utils: socket pair, carries bytes both ways" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try testWriteAll(fds[0], "ping");
+
+    var buf: [4]u8 = undefined;
+    const n = try std.posix.read(fds[1], &buf);
+
+    try std.testing.expectEqualStrings("ping", buf[0..n]);
+}
+
+test "zix utils: socket pair, is bidirectional" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try testWriteAll(fds[1], "pong");
+
+    var buf: [4]u8 = undefined;
+    const n = try std.posix.read(fds[0], &buf);
+
+    try std.testing.expectEqualStrings("pong", buf[0..n]);
 }
 
