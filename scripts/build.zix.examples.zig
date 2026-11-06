@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Build steps for the example binaries.
 //! 
 //! ### note:
 //! 
@@ -36,7 +36,7 @@ const std = @import("std");
 const EXAMPLES = .{
     // http1
     .{
-        "example-http1_basic",
+        "zix-example-http1_basic",
         "examples/http1_basic.zig",
         "http1",
     },
@@ -68,17 +68,17 @@ pub fn addSteps(
 
     const step = b.step("zix-examples", "ZIX: Build all examples.");
 
-    // const group_tcp = b.step("example-tcp", "ZIX: Build all tcp examples");
+    // const group_tcp = b.step("zix-example-tcp", "ZIX: Build all tcp examples");
     // const group_fix = b.step("example-fix", "ZIX: Build all fix examples");
-    const group_http1 = b.step("example-http1", "ZIX: Build all http1 examples");
-    // const group_http2 = b.step("example-http2", "ZIX: Build all http2 examples");
-    // const group_grpc = b.step("example-grpc", "ZIX: Build all grpc examples");
-    // const group_udp = b.step("example-udp", "ZIX: Build all udp examples");
-    // const group_http3 = b.step("example-http3", "ZIX: Build all http3 examples");
-    // const group_webrtc = b.step("example-webrtc", "ZIX: Build all webrtc examples");
-    // const group_uds = b.step("example-uds", "ZIX: Build all uds examples");
-    // const group_tls = b.step("example-tls", "ZIX: Build all tls examples");
-    // const group_channel = b.step("example-channel", "ZIX: Build all channel examples");
+    const group_http1 = b.step("zix-example-http1", "ZIX: Build all http1 examples");
+    // const group_http2 = b.step("zix-example-http2", "ZIX: Build all http2 examples");
+    // const group_grpc = b.step("zix-example-grpc", "ZIX: Build all grpc examples");
+    // const group_udp = b.step("zix-example-udp", "ZIX: Build all udp examples");
+    // const group_http3 = b.step("zix-example-http3", "ZIX: Build all http3 examples");
+    // const group_webrtc = b.step("zix-example-webrtc", "ZIX: Build all webrtc examples");
+    // const group_uds = b.step("zix-example-uds", "ZIX: Build all uds examples");
+    // const group_tls = b.step("zix-example-tls", "ZIX: Build all tls examples");
+    // const group_channel = b.step("zix-example-channel", "ZIX: Build all channel examples");
 
     // step.dependOn(group_tcp);
     // step.dependOn(group_fix);
@@ -102,7 +102,7 @@ pub fn addSteps(
 
         const exec = b.addExecutable(.{
             .name = b.fmt(
-                "zix-{s}-{s}-{s}",
+                "{s}-{s}-{s}",
                 .{ pair[0], triplet, mode },
             ),
             .root_module = exec_module,
