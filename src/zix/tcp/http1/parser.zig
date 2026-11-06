@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Parses an HTTP/1 request head into a zero-copy ParsedHead.
 //! 
 //! ### note:
 //! 
@@ -33,6 +33,7 @@ const std = @import("std");
 const ParseResult = @import("ParseResult.zig");
 const Method = @import("../../utils/http/method.zig");
 const HeaderSpan = @import("HeaderSpan.zig");
+const ParsedHead = @import("ParsedHead.zig");
 
 // --------------------------------------------------------- //
 // Private:
@@ -61,7 +62,7 @@ fn methodImplemented(method: []const u8) bool {
 // Public:
 
 pub const Error = error {
-    ZixHttp1_Parser_IncompleHeader,
+    ZixHttp1_Parser_IncompleteHeader,
     ZixHttp1_Parser_InvalidRequest,
     ZixHttp1_Parser_UnknownMethod,
 };
@@ -82,7 +83,7 @@ pub const Error = error {
 /// - Error.ZixHttp1_Parser_InvalidRequest on a malformed request line
 /// - Error.ZixHttp1_Parser_UnknownMethod when the request line is well formed but names a
 ///   method this engine does not implement (the caller answers 501)
-pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
+pub fn parseHeadAt(buf: []const u8, header_end: usize) Error!ParseResult {
     const body_offset = header_end + 4;
 
     const first_crlf = std.mem.indexOf(u8, buf[0..header_end], "\r\n") orelse header_end;
@@ -150,7 +151,9 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
         const value = line[value_off..];
 
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            content_length = std.fmt.parseInt(u64, value, 10) catch 0;
+            content_length = std.fmt.parseInt(u64, value, 10) catch |err| switch (err) {
+                else => 0,
+            };
         } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
             if (std.ascii.eqlIgnoreCase(value, "close")) keep_alive = false;
             if (std.ascii.eqlIgnoreCase(value, "keep-alive")) keep_alive = true;
@@ -192,7 +195,159 @@ pub fn parseHeadAt(buf: []const u8, header_end: usize) !ParseResult {
 /// - Error.ZixHttp1_Parser_UnknownMethod when the method is not one this engine implements
 pub fn parseHead(buf: []const u8) Error!ParseResult {
     const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse
-        return Error.ZixHttp1_Parser_IncompleHeader;
+        return Error.ZixHttp1_Parser_IncompleteHeader;
     return parseHeadAt(buf, header_end);
+}
+
+/// One request header value by name (case-insensitive), or null.
+///
+/// Note:
+/// - Scans the raw header block. The producing parse pass only captured the
+///   framing headers, so every other name costs this linear walk.
+///
+/// Param:
+/// head - *const ParsedHead (borrows the receive buffer)
+/// name - []const u8 (the header name, matched case-insensitively)
+///
+/// Return:
+/// - ?[]const u8 (the field value with leading spaces trimmed, or null)
+pub fn getHeader(head: *const ParsedHead, name: []const u8) ?[]const u8 {
+    var pos: usize = 0;
+    while (pos < head.raw_headers.len) {
+        const line_end = std.mem.indexOfPos(
+            u8, head.raw_headers, pos, "\r\n",
+        ) orelse head.raw_headers.len;
+        const line = head.raw_headers[pos..line_end];
+        pos = line_end + 2;
+        if (line.len == 0) break;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(line[0..colon], name)) continue;
+
+        var value_off: usize = colon + 1;
+        while (value_off < line.len and line[value_off] == ' ') value_off += 1;
+
+        return line[value_off..];
+    }
+
+    return null;
+}
+
+/// The Accept-Encoding value for this request. O(1) when the producing parse
+/// pass captured (or ruled out) the header, one getHeader scan otherwise.
+///
+/// Param:
+/// head - *const ParsedHead (borrows the receive buffer)
+///
+/// Return:
+/// - ?[]const u8 (the raw field value, or null when the header is absent)
+pub fn acceptEncoding(head: *const ParsedHead) ?[]const u8 {
+    return switch (head.accept_encoding.off) {
+        HeaderSpan.SPAN_UNSCANNED => getHeader(head, "accept-encoding"),
+        HeaderSpan.SPAN_ABSENT => null,
+        else => head.raw_headers[head.accept_encoding.off..][0..head.accept_encoding.len],
+    };
+}
+
+/// Linear scan for a single query parameter by exact name.
+/// Does not percent-decode keys or values.
+///
+/// Param:
+/// head - *const ParsedHead (source of the query string)
+/// name - []const u8 (the parameter name)
+///
+/// Return:
+/// - ?[]const u8 (raw value slice, or null if not found)
+pub fn queryParam(head: *const ParsedHead, name: []const u8) ?[]const u8 {
+    if (head.query.len == 0) return null;
+
+    var iter = std.mem.splitScalar(u8, head.query, '&');
+    while (iter.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
+    }
+
+    return null;
+}
+
+/// Response to answer a failed request-line parse with.
+///
+/// Note:
+/// - A method the engine does not implement is 501, not 400: the request line
+///   was well formed and only the method is unsupported (RFC 9110 section
+///   15.6.2). Answering 400 told a client the request was broken when it was
+///   merely unhandled.
+/// - Every other parse failure is a malformed request line, which stays 400.
+/// - Reached only on the error path, so no request that parses pays for it.
+///
+/// Param:
+/// err - Error (from parseHead or parseHeadAt)
+///
+/// Return:
+/// - []const u8 (a complete response, ready to write)
+pub fn parseErrorResponse(err: Error) []const u8 {
+    return switch (err) {
+        error.ZixHttp1_Parser_UnknownMethod =>
+            "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
+        else => "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
+    };
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix http1: parser, exposes request lookups" {
+    const buf =
+        "GET /path?q=1&name=zix HTTP/1.1\r\n" ++
+        "Host: zix\r\n" ++
+        "Accept-Encoding: gzip, br\r\n\r\n";
+    const result = try parseHead(buf);
+    const head = result.head;
+
+    try std.testing.expectEqualStrings("zix", getHeader(&head, "host").?);
+    try std.testing.expect(getHeader(&head, "missing") == null);
+    try std.testing.expectEqualStrings("zix", queryParam(&head, "name").?);
+    try std.testing.expect(queryParam(&head, "none") == null);
+    try std.testing.expectEqualStrings("gzip, br", acceptEncoding(&head).?);
+}
+
+test "zix http1: parser, maps an error to a response" {
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
+        parseErrorResponse(error.ZixHttp1_Parser_UnknownMethod),
+    );
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
+        parseErrorResponse(error.ZixHttp1_Parser_InvalidRequest),
+    );
+}
+
+test "zix http1: parser, rejects an incomplete head" {
+    try std.testing.expectError(
+        Error.ZixHttp1_Parser_IncompleteHeader,
+        parseHead("GET / HTTP/1.1\r\n"),
+    );
+}
+
+test "zix http1: parser, captures framing headers" {
+    const buf =
+        "POST /x HTTP/1.1\r\n" ++
+        "Content-Length: 7\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "Expect: 100-continue\r\n" ++
+        "Connection: close\r\n\r\n";
+    const result = try parseHead(buf);
+
+    try std.testing.expectEqual(@as(u64, 7), result.head.content_length);
+    try std.testing.expect(result.head.chunked_request);
+    try std.testing.expect(result.head.expect_continue);
+    try std.testing.expect(!result.head.keep_alive);
+}
+
+test "zix http1: parser, defaults HTTP/1.0 to close" {
+    const result = try parseHead("GET / HTTP/1.0\r\n\r\n");
+
+    try std.testing.expect(!result.head.keep_alive);
 }
 
