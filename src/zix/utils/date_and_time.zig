@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Date and time formatting on the worker io clock.
 //! 
 //! ### note:
 //! 
@@ -81,7 +81,9 @@ fn formatTimestamp(
                     buffer,
                     "{d:0>4}-{d:0>2}-{d:0>2}{c}{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z",
                     .{ year, month, day, seperator, hour, minute, second, ms },
-                ) catch return Error.ZixUtils_DateAndTime_NoSpaceLeft;
+                ) catch |err| switch (err) {
+                    else => return Error.ZixUtils_DateAndTime_NoSpaceLeft,
+                };
             } else {
                 const sign: u8 = if (offset_hours > 0) '+' else '-';
                 const abs_offset: u8 =
@@ -91,7 +93,9 @@ fn formatTimestamp(
                     buffer,
                     "{d:0>4}-{d:0>2}-{d:0>2}{c}{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}{c}{d:0>2}:00",
                     .{ year, month, day, seperator, hour, minute, second, ms, sign, abs_offset },
-                ) catch return Error.ZixUtils_DateAndTime_NoSpaceLeft;
+                ) catch |err| switch (err) {
+                    else => return Error.ZixUtils_DateAndTime_NoSpaceLeft,
+                };
             }
         },
         .RFC7231 => {
@@ -115,13 +119,13 @@ fn formatTimestamp(
                     month_names[month_idx],
                     year, hour, minute, second,
                 },
-            ) catch return Error.ZixUtils_DateAndTime_NoSpaceLeft;
+            ) catch |err| switch (err) { else => return Error.ZixUtils_DateAndTime_NoSpaceLeft };
         },
         .ISO8601 => std.fmt.bufPrint(
             buffer,
             "{d:0>4}-{d:0>2}-{d:0>2}{c}{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}",
             .{ year, month, day, seperator, hour, minute, second, ms },
-        ) catch return Error.ZixUtils_DateAndTime_NoSpaceLeft,
+        ) catch |err| switch (err) { else => return Error.ZixUtils_DateAndTime_NoSpaceLeft },
     };
 }
 
@@ -178,7 +182,7 @@ pub fn nowUs(io: std.Io) i96 {
 // --------------------------------------------------------- //
 // Test:
 
-test "zix utils: date and time RFC3339" {
+test "zix utils: date and time, formats RFC3339" {
     var buffer: [OUT_BUFFER_SIZE_RFC3339]u8 = undefined;
     const out = try now(std.testing.io, &buffer, .RFC3339, 7, true);
 
@@ -189,7 +193,7 @@ test "zix utils: date and time RFC3339" {
     try std.testing.expectError(Error.ZixUtils_DateAndTime_ErrorTimezoneOffset, err);
 }
 
-test "zix utils: date and time RFC7231" {
+test "zix utils: date and time, formats RFC7231" {
     var buffer: [OUT_BUFFER_SIZE_RFC7231]u8 = undefined;
     const out = try now(std.testing.io, &buffer, .RFC7231, 7, false);
 
@@ -212,7 +216,7 @@ test "zix utils: date and time RFC7231" {
     try std.testing.expectError(Error.ZixUtils_DateAndTime_ErrorTimezoneOffset, err_lo);
 }
 
-test "zix utils: date and time RFC7231 deterministic" {
+test "zix utils: date and time, formats RFC7231 deterministically" {
     var buffer: [OUT_BUFFER_SIZE_RFC7231]u8 = undefined;
 
     // RFC 7231 7.1.1.1 canonical example.
@@ -274,7 +278,7 @@ test "zix utils: date and time RFC7231 deterministic" {
     );
 }
 
-test "zix utils: date and time ISO8601" {
+test "zix utils: date and time, formats ISO8601" {
     var buffer: [OUT_BUFFER_SIZE_ISO8601]u8 = undefined;
     const out = try now(std.testing.io, &buffer, .ISO8601, 7, false);
 
