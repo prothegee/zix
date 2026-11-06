@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const DispatchModel = @import("../../shared/dispatch.zig").Model;
+const Logger = @import("../../logger/Logger.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -41,7 +42,7 @@ port: u16,
 // TODO: tls: ?Tls = null,
 // TODO: tls_port: u16,
 // TODO: tls_redirect: bool = false,
-// TODO: logger: ?*Logger = null,
+logger: ?*Logger = null,
 dispatch_model: DispatchModel,
 workers: usize = 0,
 worker_stack_size_bytes: usize = 1 * 1024,
@@ -67,6 +68,7 @@ test "zix http1: Config, applies defaults" {
     try std.testing.expectEqual(@as(usize, 0), config.workers);
     try std.testing.expectEqual(@as(usize, 1024), config.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(u31, 1024), config.kernel_backlog);
+    try std.testing.expectEqual(@as(?*Logger, null), config.logger);
     try std.testing.expectEqual(
         @as(usize, 2 * 1024 * 1024),
         config.compress_worker_stack_size_bytes,
