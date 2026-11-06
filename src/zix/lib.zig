@@ -83,7 +83,8 @@ pub const VERSION = struct {
 /// - Do not create in other place
 pub const VERSION_STRING = getVersionString();
 
-// --------------------------------------------------------- //
+// ZIX Logger
+pub const Logger = @import("logger/Logger.zig");
 
 // ZIX Http1
 pub const Http1 = @import("tcp/http1/Http1.zig");
