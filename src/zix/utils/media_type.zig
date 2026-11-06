@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Media type parsing: type, subtype, and parameters.
 //! 
 //! ### note:
 //! 
@@ -74,46 +74,57 @@ pub fn equalIgnoreParameters(header_value: []const u8, media_type: []const u8) b
 // --------------------------------------------------------- //
 // Test:
 
-test "zix utils: media type strips a charset parameter" {
-    try std.testing.expectEqualStrings("application/sql", stripParameters("application/sql; charset=utf-8"));
+test "zix utils: media type, strips a charset parameter" {
+    try std.testing.expectEqualStrings(
+        "application/sql",
+        stripParameters("application/sql; charset=utf-8"),
+    );
 }
 
-test "zix utils: media type leaves a bare value unchanged" {
+test "zix utils: media type, leaves a bare value unchanged" {
     try std.testing.expectEqualStrings("application/json", stripParameters("application/json"));
 }
 
-test "zix utils: media type trims the space before a parameter" {
-    try std.testing.expectEqualStrings("text/plain", stripParameters("text/plain ; charset=us-ascii"));
+test "zix utils: media type, trims the space before a parameter" {
+    try std.testing.expectEqualStrings(
+        "text/plain",
+        stripParameters("text/plain ; charset=us-ascii"),
+    );
 }
 
-test "zix utils: media type keeps a multipart boundary out of the result" {
+test "zix utils: media type, keeps a multipart boundary out" {
     const header_value = "multipart/form-data; boundary=----zixBoundary1234567890";
 
     try std.testing.expectEqualStrings("multipart/form-data", stripParameters(header_value));
 }
 
-test "zix utils: media type handles more than one parameter" {
-    try std.testing.expectEqualStrings("application/sql", stripParameters("application/sql; charset=utf-8; v=1"));
+test "zix utils: media type, handles more than one parameter" {
+    try std.testing.expectEqualStrings(
+        "application/sql",
+        stripParameters("application/sql; charset=utf-8; v=1"),
+    );
 }
 
-test "zix utils: media type on an empty value yields empty" {
+test "zix utils: media type, on an empty value yields empty" {
     try std.testing.expectEqualStrings("", stripParameters(""));
 }
 
-test "zix utils: media type on a lone semicolon yields empty" {
+test "zix utils: media type, on a lone semicolon yields empty" {
     try std.testing.expectEqualStrings("", stripParameters(";"));
 }
 
-test "zix utils: media type comparison ignores case" {
+test "zix utils: media type, comparison ignores case" {
     try std.testing.expect(equalIgnoreParameters("APPLICATION/SQL", "application/sql"));
-    try std.testing.expect(equalIgnoreParameters("Application/Sql; charset=utf-8", "application/sql"));
+    try std.testing.expect(
+        equalIgnoreParameters("Application/Sql; charset=utf-8", "application/sql"),
+    );
 }
 
-test "zix utils: media type comparison rejects a different subtype" {
+test "zix utils: media type, comparison rejects a different subtype" {
     try std.testing.expect(!equalIgnoreParameters("application/json", "application/sql"));
 }
 
-test "zix utils: media type comparison rejects a prefix that is not the whole type" {
+test "zix utils: media type, comparison rejects a partial type" {
     // "application/sqlite" must not answer to "application/sql".
     try std.testing.expect(!equalIgnoreParameters("application/sqlite", "application/sql"));
 }
