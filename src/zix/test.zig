@@ -68,6 +68,7 @@ test {
     _ = @import("tcp/http1/dispatch/async.zig");
     if (builtin.target.os.tag == .linux) {
         _ = @import("tcp/http1/dispatch/epoll.zig");
+        _ = @import("tcp/http1/dispatch/uring.zig");
     }
     _ = @import("tcp/http1/dispatch/common.zig");
     _ = @import("tcp/http1/handler.zig");
