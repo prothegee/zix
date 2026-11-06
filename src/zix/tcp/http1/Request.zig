@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Handler view of a request: head, body slices, and connection fd.
 //! 
 //! ### note:
 //! 
@@ -33,7 +33,7 @@ const std = @import("std");
 const builtint = @import("builtin");
 const ParsedHead = @import("ParsedHead.zig");
 const Method = @import("../../utils/http/method.zig");
-const core = @import("core.zig");
+const parser = @import("parser.zig");
 const router = @import("router.zig");
 
 // --------------------------------------------------------- //
@@ -50,16 +50,22 @@ const Self = @This();
 // --------------------------------------------------------- //
 // Public:
 
+/// ZIX Http1 request error
+pub const Error = error {
+    ZixHttp1_Request_OutOfMemory,
+    ZixHttp1_Request_InvalidHead,
+};
+
 /// Build a request view over a parsed head, body, and fd.
 ///
 /// Note:
 /// - The defaults describe a body that arrived whole and fits the delivered
 ///   slice, which is every request the engine did not have to measure. A
 ///   dispatch model that drained or cut a body overrides both fields through
-///   core.tl_body_info.
+///   handler.tl_body_info.
 ///
 /// Param:
-/// head - *const core.ParsedHead (borrows the receive buffer)
+/// head - *const ParsedHead (borrows the receive buffer)
 /// body_data - []const u8 (already drained by the engine, empty when none)
 /// fd - std.posix.fd_t (the connection)
 ///
@@ -89,21 +95,18 @@ pub fn query(self: Self) []const u8 {
 
 /// One query parameter value, or null.
 pub fn queryParam(self: Self, name: []const u8) ?[]const u8 {
-    return core.queryParam(self.head, name);
+    return parser.queryParam(self.head, name);
 }
 
 /// One request header value by name (case-insensitive), or null.
 pub fn header(self: Self, name: []const u8) ?[]const u8 {
-    return core.getHeader(self.head, name);
+    return parser.getHeader(self.head, name);
 }
 
-/// A path parameter captured by a PARAM route, or null. Reads the request's
-/// own captured set first (async lane), then falls back to the router
+/// A path parameter captured by a PARAM route, or null. Reads the router
 /// threadlocal (sync path).
 pub fn pathParam(self: Self, name: []const u8) ?[]const u8 {
-    for (self.path_params) |path_param| {
-        if (std.mem.eql(u8, path_param.name, name)) return path_param.value;
-    }
+    _ = self;
 
     return router.pathParam(name);
 }
@@ -122,7 +125,7 @@ pub fn pathParam(self: Self, name: []const u8) ?[]const u8 {
 ///
 /// Return:
 /// - []const u8 (the engine-delivered body slice, empty when none)
-pub fn body(self: *Self) ![]const u8 {
+pub fn body(self: *Self) []const u8 {
     return self.body_bytes;
 }
 
@@ -206,12 +209,16 @@ pub fn keepAlive(self: Self) bool {
 }
 
 /// Split the request path into non-empty segments.
-pub fn pathSegments(self: Self, allocator: std.mem.Allocator) ![][]const u8 {
+pub fn pathSegments(self: Self, allocator: std.mem.Allocator) Error![][]const u8 {
     var list: std.ArrayList([]const u8) = .empty;
 
     var iter = std.mem.splitScalar(u8, self.path(), '/');
     while (iter.next()) |segment| {
-        if (segment.len > 0) try list.append(allocator, segment);
+        if (segment.len > 0) {
+            list.append(allocator, segment) catch |err| switch (err) {
+                error.OutOfMemory => return Error.ZixHttp1_Request_OutOfMemory,
+            };
+        }
     }
 
     return list.items;
@@ -223,7 +230,7 @@ pub const QueryParam = struct {
 };
 
 /// Get all query parameters as a slice of QueryParam.
-pub fn queryParams(self: Self, allocator: std.mem.Allocator) ![]QueryParam {
+pub fn queryParams(self: Self, allocator: std.mem.Allocator) Error![]QueryParam {
     const query_str = self.query();
     if (query_str.len == 0) return &.{};
 
@@ -235,12 +242,19 @@ pub fn queryParams(self: Self, allocator: std.mem.Allocator) ![]QueryParam {
         if (pair.len > 0) {
             if (std.mem.indexOfScalar(u8, pair, '=')) |eq_pos| {
                 const value = pair[eq_pos + 1 ..];
-                try list.append(allocator, .{
+                list.append(allocator, .{
                     .key = pair[0..eq_pos],
                     .value = if (value.len > 0) value else null,
-                });
+                }) catch |err| switch (err) {
+                    error.OutOfMemory => return Error.ZixHttp1_Request_OutOfMemory,
+                };
             } else {
-                try list.append(allocator, .{ .key = pair, .value = null });
+                list.append(allocator, .{
+                    .key = pair,
+                    .value = null,
+                }) catch |err| switch (err) {
+                    error.OutOfMemory => return Error.ZixHttp1_Request_OutOfMemory,
+                };
             }
         }
         if (amp_pos >= query_str.len) break;
@@ -254,18 +268,87 @@ pub fn queryParams(self: Self, allocator: std.mem.Allocator) ![]QueryParam {
 /// Useful for tests and offline parsing. buf must contain a full head
 /// (\r\n\r\n) and must outlive the Request (every slice borrows it). The
 /// parsed head is one small allocation from allocator.
-pub fn fromRaw(buf: []const u8, allocator: std.mem.Allocator) !Self {
-    const result = try core.parseHead(buf);
+pub fn fromRaw(buf: []const u8, allocator: std.mem.Allocator) Error!Self {
+    const result = parser.parseHead(buf) catch |err| switch (err) {
+        error.ZixHttp1_Parser_IncompleteHeader,
+        error.ZixHttp1_Parser_InvalidRequest,
+        error.ZixHttp1_Parser_UnknownMethod,
+        => return Error.ZixHttp1_Request_InvalidHead,
+    };
 
-    const head = try allocator.create(ParsedHead);
+    const head = allocator.create(ParsedHead) catch |err| switch (err) {
+        error.OutOfMemory => return Error.ZixHttp1_Request_OutOfMemory,
+    };
     head.* = result.head;
 
     const body_start = @min(result.body_offset, buf.len);
     return .{
-        .fd = if (builtint.target.os.tag == .windows) std.os.windows.INVALID_HANDLE_VALUE else -1,
+        .fd = if (builtint.target.os.tag == .windows)
+            std.os.windows.INVALID_HANDLE_VALUE
+        else
+            -1,
         .head = head,
         .body_bytes = buf[body_start..],
         .body_received = buf.len - body_start
     };
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix http1: Request, exposes the parsed request" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const raw = "POST /users/7?tab=posts HTTP/1.1\r\nHost: zix\r\nContent-Length: 4\r\n\r\nbody";
+    const req = try Self.fromRaw(raw, arena.allocator());
+
+    try std.testing.expectEqualStrings("/users/7", req.path());
+    try std.testing.expectEqualStrings("tab=posts", req.query());
+    try std.testing.expectEqualStrings("posts", req.queryParam("tab").?);
+    try std.testing.expect(req.queryParam("none") == null);
+    try std.testing.expectEqualStrings("zix", req.header("host").?);
+    try std.testing.expect(req.header("missing") == null);
+    try std.testing.expectEqual(@as(u64, 4), req.bodyReceived());
+    try std.testing.expect(req.bodyComplete());
+    try std.testing.expect(req.keepAlive());
+}
+
+test "zix http1: Request, splits path and query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const raw = "GET /a/b/c?x=1&y=2&flag HTTP/1.1\r\n\r\n";
+    const req = try Self.fromRaw(raw, arena.allocator());
+
+    const segments = try req.pathSegments(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 3), segments.len);
+    try std.testing.expectEqualStrings("b", segments[1]);
+
+    const params = try req.queryParams(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 3), params.len);
+    try std.testing.expectEqualStrings("x", params[0].key);
+    try std.testing.expectEqualStrings("1", params[0].value.?);
+    try std.testing.expect(params[2].value == null);
+}
+
+test "zix http1: Request, falls back to GET for a long method" {
+    const parsed: ParsedHead = .{
+        .path = "/",
+        .query = "",
+        .method = "TOOLONGXX",
+        .keep_alive = true,
+        .raw_headers = "",
+        .version_minor = 1,
+        .content_length = 0,
+        .chunked_request = false,
+        .expect_continue = false,
+    };
+    const req = Self.init(&parsed, "", -1);
+
+    try std.testing.expectEqual(Method.Code.GET, req.method());
+    try std.testing.expectEqual(@as(u64, 0), req.bodyReceived());
+    try std.testing.expectEqual(@as(usize, 0), req.query().len);
 }
 
