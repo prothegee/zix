@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Minimal Http1 server example with three routes.
 //! 
 //! ### note:
 //! 
