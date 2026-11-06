@@ -33,6 +33,8 @@
 //! - Prana Ron // @prothegee // prothegee@pm.me
 //!
 
+const std = @import("std");
+
 // --------------------------------------------------------- //
 // Fields:
 
@@ -42,4 +44,21 @@ received: u64,
 /// Whether those reads reached the end of the body: the declared length, or
 /// the chunked terminator.
 complete: bool,
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix http1: BodyInfo, keeps the received count" {
+    const info: @This() = .{ .received = 4096, .complete = false };
+
+    try std.testing.expectEqual(@as(u64, 4096), info.received);
+    try std.testing.expect(!info.complete);
+}
+
+test "zix http1: BodyInfo, describes a complete body" {
+    const info: @This() = .{ .received = 0, .complete = true };
+
+    try std.testing.expect(info.complete);
+}
 
