@@ -38,10 +38,10 @@ const DispatchModel = @import("../../shared/dispatch.zig").Model;
 io: std.Io,
 ip: []const u8,
 port: u16,
-// tls: ?Tls = null,
-// tls_port: u16,
-// tls_redirect: bool = false,
-// logger: ?*Logger = null,
+// TODO: tls: ?Tls = null,
+// TODO: tls_port: u16,
+// TODO: tls_redirect: bool = false,
+// TODO: logger: ?*Logger = null,
 dispatch_model: DispatchModel,
 workers: usize = 0,
 worker_stack_size_bytes: usize = 1 * 1024,
@@ -51,8 +51,6 @@ kernel_backlog: u31 = 1 * 1024,
 // Response cache sizing, applied when the cache is on.
 max_entries: u32 = 256,
 max_value_bytes: u32 = 16 * 1024,
-
-// --------------------------------------------------------- //
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
