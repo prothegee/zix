@@ -38,6 +38,7 @@ const builtin = @import("builtin");
 const linux = std.os.linux;
 const IoUring = std.os.linux.IoUring;
 const Config = @import("../Config.zig");
+const common = @import("common.zig");
 const chunk = @import("../chunk.zig");
 const handler = @import("../handler.zig");
 const HandlerFn = handler.HandlerFn;
@@ -809,6 +810,8 @@ fn workerMain(ctx: WorkerCtx) void {
     var listener = ctx.listener;
     defer listener.deinit(io);
 
+    handler.setAccessLogger(ctx.config.logger);
+
     const listener_fd = listener.socket.handle;
 
     const slots = slab.mapZeroedSlots(?*Conn, MAX_FD) catch |err| switch (err) {
@@ -952,8 +955,10 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
         };
     }
 
-    std.log.info(
-        "ZIX Http1 uring listening on {s}:{d} ({d} workers)",
+    common.logSystem(
+        config,
+        .INFO,
+        "listening on {s}:{d} (io_uring, {d} workers)",
         .{ config.ip, config.port, workers },
     );
 
@@ -1501,3 +1506,4 @@ test "zix http1: uring, init ring receives one byte from a socket pair" {
     try std.testing.expectEqual(@as(u24, 7), decoded.gen);
     try std.testing.expectEqual(fds[0], decoded.fd);
 }
+
