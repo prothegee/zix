@@ -30,6 +30,7 @@
 //!
 
 const std = @import("std");
+const handler = @import("handler.zig");
 const compress = @import("compress.zig");
 const head = @import("head.zig");
 const header = @import("header.zig");
@@ -67,7 +68,7 @@ pub fn connEntry(args: ConnArgs) void {
     // TODO: install the static-serve root from args.public_dir when the
     // static module is ported.
     header.setMaxResponseHeaders(args.max_response_headers);
-    std.log.info("TODO: handler.setAccessLogger", .{});
+    handler.setAccessLogger(args.logger);
     compress.setCompression(args.compress, args.compression_min_size, args.compression_max_out);
 
     std.log.info("TODO: args.response_cache", .{});
