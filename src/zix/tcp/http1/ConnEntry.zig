@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! One live connection tracked by the timeout registry.
 //! 
 //! ### note:
 //! 
@@ -39,4 +39,28 @@ done: std.atomic.Value(bool) = .init(false),
 deadline: std.Io.Clock.Timestamp,
 
 const Self = @This();
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix http1: ConnEntry, starts not done" {
+    const entry: @This() = .{
+        .fd = 3,
+        .deadline = std.Io.Clock.Timestamp.now(std.testing.io, .real),
+    };
+
+    try std.testing.expect(!entry.done.load(.acquire));
+}
+
+test "zix http1: ConnEntry, done is one way" {
+    var entry: @This() = .{
+        .fd = 4,
+        .deadline = std.Io.Clock.Timestamp.now(std.testing.io, .real),
+    };
+
+    entry.done.store(true, .release);
+
+    try std.testing.expect(entry.done.load(.acquire));
+}
 
