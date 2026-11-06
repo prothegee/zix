@@ -38,6 +38,7 @@ const builtin = @import("builtin");
 const linux = std.os.linux;
 const chunk = @import("../chunk.zig");
 const Config = @import("../Config.zig");
+const common = @import("common.zig");
 const handler = @import("../handler.zig");
 const HandlerFn = handler.HandlerFn;
 const parser = @import("../parser.zig");
@@ -692,6 +693,8 @@ fn workerMain(ctx: WorkerCtx) void {
     const io = worker.config.io;
     defer worker.listener.deinit(io);
 
+    handler.setAccessLogger(worker.config.logger);
+
     const listener_fd = worker.listener.socket.handle;
     if (!setNonBlock(listener_fd)) {
         failSetup(&worker);
@@ -897,8 +900,10 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
         };
     }
 
-    std.log.info(
-        "ZIX Http1 epoll listening on {s}:{d} ({d} workers)",
+    common.logSystem(
+        config,
+        .INFO,
+        "listening on {s}:{d} (epoll, {d} workers)",
         .{ config.ip, config.port, workers },
     );
 
@@ -1485,3 +1490,4 @@ test "zix http1: epoll, drains a body larger than the receive buffer" {
     );
     try std.testing.expect(std.mem.endsWith(u8, response, "ok"));
 }
+
