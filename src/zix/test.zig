@@ -38,6 +38,13 @@ const builtin = @import("builtin");
 
 test {
     _ = @import("lib.zig");
+    _ = @import("logger/FileSink.zig");
+    _ = @import("logger/Flusher.zig");
+    _ = @import("logger/Logger.zig");
+    _ = @import("logger/Sink.zig");
+    _ = @import("logger/Timestamp.zig");
+    _ = @import("logger/format.zig");
+    _ = @import("logger/windows_file.zig");
     _ = @import("multiplexers/slab.zig");
     _ = @import("shared/dispatch.zig");
     _ = @import("tcp/http1/BodyInfo.zig");
