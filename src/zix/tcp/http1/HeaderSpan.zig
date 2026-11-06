@@ -49,3 +49,18 @@ pub const SPAN_UNSCANNED: u32 = std.math.maxInt(u32);
 /// find (a definitive absence, no fallback scan needed).
 pub const SPAN_ABSENT: u32 = std.math.maxInt(u32) - 1;
 
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix http1: HeaderSpan, defaults to unscanned" {
+    const span: @This() = .{};
+
+    try std.testing.expectEqual(SPAN_UNSCANNED, span.off);
+    try std.testing.expectEqual(@as(u32, 0), span.len);
+}
+
+test "zix http1: HeaderSpan, keeps sentinels distinct" {
+    try std.testing.expect(SPAN_UNSCANNED != SPAN_ABSENT);
+}
+
