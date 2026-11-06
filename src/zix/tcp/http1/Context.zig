@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Handler context: worker io, allocator, connection fd, and deadline.
 //! 
 //! ### note:
 //! 
@@ -63,7 +63,10 @@ pub fn withTimeout(self: Self, ms: u64) Self {
     var ctx = self;
     ctx.deadline = std.Io.Clock.Timestamp.fromNow(
         self.io,
-        std.Io.Clock.Duration{ .raw = std.Io.Duration.fromMilliseconds(@intCast(ms)), .clock = .real },
+        std.Io.Clock.Duration{
+            .raw = std.Io.Duration.fromMilliseconds(@intCast(ms)),
+            .clock = .real,
+        },
     );
 
     return ctx;
@@ -81,7 +84,10 @@ pub fn withDeadline(self: Self, ts: std.Io.Clock.Timestamp) Self {
 pub fn setTimeout(self: *Self, ms: u64) void {
     self.deadline = std.Io.Clock.Timestamp.fromNow(
         self.io,
-        std.Io.Clock.Duration{ .raw = std.Io.Duration.fromMilliseconds(@intCast(ms)), .clock = .real },
+        std.Io.Clock.Duration{
+            .raw = std.Io.Duration.fromMilliseconds(@intCast(ms)),
+            .clock = .real,
+        },
     );
 }
 
@@ -96,5 +102,36 @@ pub fn timedOut(self: Self) bool {
     const deadline = self.deadline orelse return false;
 
     return std.Io.Clock.Timestamp.now(self.io, .real).compare(.gte, deadline);
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix http1: Context, starts without a deadline" {
+    const ctx = Self.init(std.testing.io, std.testing.allocator, -1);
+
+    try std.testing.expect(!ctx.timedOut());
+    try std.testing.expect(!ctx.isExpired());
+}
+
+test "zix http1: Context, deadline edges" {
+    const io = std.testing.io;
+
+    const expired = Self.init(io, std.testing.allocator, -1).withTimeout(0);
+    try std.testing.expect(expired.timedOut());
+
+    const fresh = Self.init(io, std.testing.allocator, -1).withTimeout(60_000);
+    try std.testing.expect(!fresh.timedOut());
+}
+
+test "zix http1: Context, setTimeout replaces the deadline" {
+    var ctx = Self.init(std.testing.io, std.testing.allocator, -1);
+
+    ctx.setTimeout(60_000);
+    try std.testing.expect(!ctx.timedOut());
+
+    ctx.setTimeout(0);
+    try std.testing.expect(ctx.timedOut());
 }
 
