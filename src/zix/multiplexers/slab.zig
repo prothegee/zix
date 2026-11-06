@@ -45,6 +45,12 @@ const builtin = @import("builtin");
 // --------------------------------------------------------- //
 // Public:
 
+/// ZIX utils slab error
+pub const Error = error {
+    ZixUtils_Slab_OutOfMemory,
+    ZixUtils_Slab_MapFailed,
+};
+
 /// mmap a zero-filled, demand-paged slots array of `count` elements of T. Works
 /// for an inline-struct slot (zero == empty) or a pointer slot (zero == null).
 ///
@@ -54,25 +60,29 @@ const builtin = @import("builtin");
 ///
 /// Return:
 /// - []T (page-aligned, all zero, demand-paged)
-pub fn mapZeroedSlots(comptime T: type, count: usize) ![]T {
+pub fn mapZeroedSlots(comptime T: type, count: usize) Error![]T {
     if (comptime builtin.os.tag == .windows) {
         // Kernel-zeroed demand-paged pages over ntdll, same contract as the
         // POSIX mmap below.
         const bytes = count * @sizeOf(T);
-        const base = std.heap.PageAllocator.map(bytes, .fromByteUnits(std.heap.page_size_min)) orelse return error.OutOfMemory;
+        const base =
+            std.heap.PageAllocator.map(bytes, .fromByteUnits(std.heap.page_size_min)) orelse
+            return Error.ZixUtils_Slab_OutOfMemory;
         const mapped: [*]align(std.heap.page_size_min) u8 = @alignCast(base);
 
         return std.mem.bytesAsSlice(T, mapped[0..bytes]);
     }
 
-    const mapped = try std.posix.mmap(
+    const mapped = std.posix.mmap(
         null,
         count * @sizeOf(T),
         .{ .READ = true, .WRITE = true },
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,
-    );
+    ) catch |err| switch (err) {
+        else => return Error.ZixUtils_Slab_MapFailed,
+    };
 
     return std.mem.bytesAsSlice(T, mapped);
 }
@@ -116,11 +126,21 @@ pub fn releaseSlabPages(buf: []u8) void {
         // the range stays mapped and refaults zero-filled.
         var reset_addr: ?*anyopaque = ptr;
         var reset_size: std.os.windows.SIZE_T = end - start;
-        _ = std.os.windows.ntdll.NtAllocateVirtualMemory(std.os.windows.GetCurrentProcess(), @ptrCast(&reset_addr), 0, &reset_size, .{ .RESET = true }, .{ .NOACCESS = true });
+        _ = std.os.windows.ntdll.NtAllocateVirtualMemory(
+            std.os.windows.GetCurrentProcess(),
+            @ptrCast(&reset_addr),
+            0,
+            &reset_size,
+            .{ .RESET = true },
+            .{ .NOACCESS = true },
+        );
         return;
     }
 
-    std.posix.madvise(ptr, end - start, std.posix.MADV.DONTNEED) catch {};
+    std.posix.madvise(ptr, end - start, std.posix.MADV.DONTNEED) catch |err| switch (err) {
+        // Best-effort: the slot is reusable even when the advise is ignored.
+        else => {},
+    };
 }
 
 /// Best-effort MADV_NOHUGEPAGE over the pages fully covered by buf, so a slab
@@ -148,7 +168,10 @@ pub fn adviseNoHugePages(buf: []u8) void {
     if (end <= start) return;
 
     const ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(start);
-    std.posix.madvise(ptr, end - start, std.posix.MADV.NOHUGEPAGE) catch {};
+    std.posix.madvise(ptr, end - start, std.posix.MADV.NOHUGEPAGE) catch |err| switch (err) {
+        // Best-effort: a kernel without THP ignores this anyway.
+        else => {},
+    };
 }
 
 /// Fault buf's pages in now (one byte written per page), so a slab's residency
@@ -168,7 +191,7 @@ pub fn pretouch(buf: []u8) void {
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 
-test "zix multiplexers: slab mapZeroedSlots returns zeroed, releaseSlabPages re-zeros" {
+test "zix multiplexers: slab, maps zeroed slots and releases pages" {
     if (@import("builtin").os.tag != .linux) {
         std.log.info("slab slots are mapped through a Linux mmap, test skipped", .{});
         return;
@@ -191,7 +214,7 @@ test "zix multiplexers: slab mapZeroedSlots returns zeroed, releaseSlabPages re-
     try std.testing.expectEqual(@as(u8, 0), mem[page]);
 }
 
-test "zix multiplexers: slab pretouch keeps a fresh mapping zeroed and leaves data intact" {
+test "zix multiplexers: slab, pretouch keeps a fresh mapping zeroed" {
     if (@import("builtin").os.tag != .linux) {
         std.log.info("slab slots are mapped through a Linux mmap, test skipped", .{});
         return;
@@ -212,7 +235,7 @@ test "zix multiplexers: slab pretouch keeps a fresh mapping zeroed and leaves da
     try std.testing.expectEqual(@as(u8, 0xBB), buf[1]);
 }
 
-test "zix multiplexers: slab adviseNoHugePages is a safe no-op on any page-aligned slab" {
+test "zix multiplexers: slab, adviseNoHugePages is a safe no-op" {
     if (@import("builtin").os.tag != .linux) {
         std.log.info("slab slots are mapped through a Linux mmap, test skipped", .{});
         return;
@@ -230,3 +253,4 @@ test "zix multiplexers: slab adviseNoHugePages is a safe no-op on any page-align
     // A sub-page slice covers no full page and must be skipped without error.
     adviseNoHugePages(buf[1 .. page - 1]);
 }
+
