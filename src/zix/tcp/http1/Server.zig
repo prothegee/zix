@@ -34,6 +34,7 @@ const Config = @import("Config.zig");
 const HandlerFn = @import("handler.zig").HandlerFn;
 const OS = @import("builtin").target.os.tag;
 const dispatch_async = @import("dispatch/async.zig");
+const dispatch_epoll = @import("dispatch/epoll.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -64,6 +65,20 @@ fn dispatchError(err: dispatch_async.Error) Error {
             => Error.ZixHttp1_Server_ListenFailed,
         error.ZixHttp1_Async_AcceptFailed
             => Error.ZixHttp1_Server_AcceptFailed,
+    };
+}
+
+fn dispatchEpollError(err: dispatch_epoll.Error) Error {
+    return switch (err) {
+        error.ZixHttp1_Epoll_ResolveFailed
+            => Error.ZixHttp1_Server_ResolveFailed,
+        error.ZixHttp1_Epoll_ListenFailed
+            => Error.ZixHttp1_Server_ListenFailed,
+        error.ZixHttp1_Epoll_OutOfMemory,
+        error.ZixHttp1_Epoll_SpawnFailed,
+        error.ZixHttp1_Epoll_SetupFailed,
+        error.ZixHttp1_Epoll_Unsupported,
+        => Error.ZixHttp1_Server_EpollSetupFailed,
     };
 }
 
@@ -114,6 +129,8 @@ pub const Error = error {
     ZixHttp1_Server_ListenFailed,
     /// E.Q.: error.ZixHttp1_Async_AcceptFailed
     ZixHttp1_Server_AcceptFailed,
+    /// E.Q.: error.ZixHttp1_Epoll_SetupFailed
+    ZixHttp1_Server_EpollSetupFailed,
 };
 
 pub fn init(comptime handler: HandlerFn, config: Config) Self {
@@ -147,7 +164,13 @@ pub fn run(self: *const Self) Error!void {
             };
         },
         .EPOLL => {
-            @panic("TODO: ZIX Http1 server run .EPOLL");
+            if (comptime OS == .linux) {
+                dispatch_epoll.run(self.config, self.handler) catch |err| switch (err) {
+                    else => return dispatchEpollError(err),
+                };
+            } else {
+                return Error.ZixHttp1_Server_DispatchModel_NotSupported;
+            }
         },
         .URING => {
             @panic("TODO: ZIX Http1 server run .URING");
