@@ -30,6 +30,7 @@
 //!
 
 const std = @import("std");
+const Logger = @import("../../logger/Logger.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -37,7 +38,7 @@ const std = @import("std");
 io: std.Io,
 fd: std.posix.fd_t,
 allocator: std.mem.Allocator,
-// TODO: logger: ?*Logger = null,
+logger: ?*Logger = null,
 deadline: ?std.Io.Clock.Timestamp = null,
 
 const Self = @This();
@@ -113,6 +114,7 @@ test "zix http1: Context, starts without a deadline" {
 
     try std.testing.expect(!ctx.timedOut());
     try std.testing.expect(!ctx.isExpired());
+    try std.testing.expectEqual(@as(?*Logger, null), ctx.logger);
 }
 
 test "zix http1: Context, deadline edges" {
