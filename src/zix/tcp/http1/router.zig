@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Compile-time route table and request dispatch.
 //! 
 //! ### note:
 //! 
@@ -30,8 +30,7 @@
 //!
 
 const std = @import("std");
-const core = @import("core.zig");
-const HandlerFn = core.HandlerFn;
+const HandlerFn = @import("handler.zig").HandlerFn;
 const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 const Context = @import("Context.zig");
@@ -41,7 +40,7 @@ const PathParam = @import("PathParam.zig");
 // Private:
 
 /// Per-request param store. Thread-local because each worker serves one request
-/// at a time, the same model as core.zig's per-handler deadline. Values are
+/// at a time, the same model as handler.zig's per-handler deadline. Values are
 /// slices into the request path and stay valid only for the dispatch call.
 threadlocal var tl_params: [MAX_PATH_PARAMS]PathParam = undefined;
 threadlocal var tl_param_count: usize = 0;
@@ -146,8 +145,8 @@ pub fn Router(comptime routes: []const Route) type {
         break :blk n;
     };
 
-    const exact_pairs: [exact_count]struct { []const u8, core.HandlerFn } = blk: {
-        var arr: [exact_count]struct { []const u8, core.HandlerFn } = undefined;
+    const exact_pairs: [exact_count]struct { []const u8, HandlerFn } = blk: {
+        var arr: [exact_count]struct { []const u8, HandlerFn } = undefined;
         var i: usize = 0;
         for (routes) |r| {
             if (r.kind == .EXACT) {
@@ -182,7 +181,7 @@ pub fn Router(comptime routes: []const Route) type {
         break :blk arr;
     };
 
-    const exact_map = std.StaticStringMap(core.HandlerFn).initComptime(exact_pairs);
+    const exact_map = std.StaticStringMap(HandlerFn).initComptime(exact_pairs);
 
     return struct {
         /// Dispatch the request to the best matching route. Usable as a HandlerFn.
@@ -215,10 +214,12 @@ pub fn Router(comptime routes: []const Route) type {
 
             // Pass 3: prefix (longest match wins)
             var best_len: usize = 0;
-            var best_handler: ?core.HandlerFn = null;
+            var best_handler: ?HandlerFn = null;
             inline for (prefix_routes) |route| {
                 if (std.mem.startsWith(u8, path, route.path)) {
-                    const at_boundary = path.len == route.path.len or path[route.path.len] == '/';
+                    const at_boundary =
+                        path.len == route.path.len or
+                        path[route.path.len] == '/';
                     if (at_boundary and route.path.len > best_len) {
                         best_len = route.path.len;
                         best_handler = route.handler;
@@ -230,18 +231,8 @@ pub fn Router(comptime routes: []const Route) type {
                 return handler(req, res, ctx);
             }
 
+            // TODO: static file fallback from public_dir before the 404.
             std.log.info("TODO: static.serve", .{});
-            // // Static file fallback: when public_dir is configured, try to serve the request path
-            // // as a file before returning 404. Disabled when public_dir is empty (tl_static_dir = "").
-            // if (core.tl_static_dir.len > 0) {
-            //     if (core.tl_static_io) |io| {
-            //         const stripped = if (path.len > 0 and path[0] == '/') path[1..] else path;
-            //         if (stripped.len > 0) {
-            //             const served = static.serve(req.head, req.fd, stripped, core.tl_static_dir, io) catch false;
-            //             if (served) return;
-            //         }
-            //     }
-            // }
 
             res.setStatus(.NOT_FOUND);
 
@@ -273,7 +264,7 @@ pub fn pathParam(name: []const u8) ?[]const u8 {
 // --------------------------------------------------------- //
 // Test:
 
-test "zix http1: router matchParam" {
+test "zix http1: router, matches a parameter" {
     try std.testing.expect(matchParam("/users/:id", "/users/alice"));
     try std.testing.expectEqualStrings("id", tl_params[0].name);
     try std.testing.expectEqualStrings("alice", tl_params[0].value);
@@ -293,12 +284,49 @@ fn mockHandler(req: *Request, res: *Response, ctx: *Context) anyerror!void {
     _ = ctx;
 }
 
-test "zix http1: router comptime" {
+test "zix http1: router, builds at comptime" {
     const TestRouter = Router(&[_]Route{
         .{ .path = "/about", .handler = mockHandler },
         .{ .path = "/api", .handler = mockHandler, .kind = .PREFIX },
         .{ .path = "/users/:id", .handler = mockHandler, .kind = .PARAM },
     });
     _ = TestRouter;
+}
+
+const pair = @import("../../utils/socket/pair.zig");
+
+test "zix http1: router, dispatch answers 404" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const head_module = @import("head.zig");
+    head_module.setDateHeader(false);
+    defer head_module.setDateHeader(true);
+
+    const TestRouter = Router(&[_]Route{
+        .{ .path = "/about", .handler = mockHandler },
+    });
+
+    const raw = "GET /missing HTTP/1.1\r\n\r\n";
+    var req = try Request.fromRaw(raw, arena.allocator());
+    var res = Response.init(fds[0], std.testing.io, arena.allocator());
+    var ctx = Context.init(std.testing.io, arena.allocator(), fds[0]);
+
+    try TestRouter.dispatch(&req, &res, &ctx);
+
+    var buf: [256]u8 = undefined;
+    const n = try std.posix.read(fds[1], &buf);
+
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 404 Not Found\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 9\r\n\r\nNot Found",
+        buf[0..n],
+    );
 }
 
