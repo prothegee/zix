@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Response extra-header capacity for one worker.
 //! 
 //! ### note:
 //! 
@@ -29,8 +29,15 @@
 //! - Prana Ron // @prothegee // prothegee@pm.me
 //!
 
+const std = @import("std");
+
 // --------------------------------------------------------- //
 // Public:
+
+/// Response extra-header capacity (Response.addHeader) for this worker, from
+/// config.max_response_headers. The backing buffer is allocated lazily per
+/// request on the first addHeader call, so requests that add none pay nothing.
+pub threadlocal var tl_max_response_headers: usize = 16;
 
 /// Header size
 /// Controls how many custom response headers addHeader() will accept per request.
@@ -65,4 +72,32 @@ pub const Size = union(enum) {
         };
     }
 };
+
+/// Install the Response extra-header capacity for this worker thread. Called
+/// once per worker at startup.
+///
+/// Param:
+/// count - usize (maximum custom response headers per request)
+pub fn setMaxResponseHeaders(count: usize) void {
+    tl_max_response_headers = count;
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+test "zix http1: header, installs the capacity" {
+    setMaxResponseHeaders(64);
+    defer setMaxResponseHeaders(16);
+
+    try std.testing.expectEqual(@as(usize, 64), tl_max_response_headers);
+}
+
+test "zix http1: header, capacity accepts zero" {
+    defer setMaxResponseHeaders(16);
+
+    setMaxResponseHeaders(0);
+
+    try std.testing.expectEqual(@as(usize, 0), tl_max_response_headers);
+}
 
