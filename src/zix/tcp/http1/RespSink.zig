@@ -8,7 +8,7 @@
 //! 
 //! ### brief:
 //! 
-//! n/a
+//! Coalescing buffer for response bytes staged for one connection.
 //! 
 //! ### note:
 //! 
@@ -30,7 +30,10 @@
 //!
 
 const std = @import("std");
-const core = @import("core.zig");
+const Status = @import("../../utils/http/status.zig");
+const head = @import("head.zig");
+const writer = @import("writer.zig");
+const cache = @import("cache.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -53,6 +56,32 @@ const Self = @This();
 // --------------------------------------------------------- //
 // Public:
 
+/// ZIX Http1 response sink error
+pub const Error = error {
+    ZixHttp1_RespSink_HeadBuild,
+};
+
+// --------------------------------------------------------- //
+// Private:
+
+/// Send bytes that are not staying in buf: through the spill sink when one is installed (https,
+/// where the fd is a sentinel and every write has to become a TLS record), straight to the
+/// descriptor otherwise. A write that does not land marks the sink failed, which the caller
+/// reads as a broken peer.
+fn writeOut(self: *Self, bytes: []const u8) void {
+    std.log.info("TODO: self.spill as sink and write", .{});
+    // if write the bytes failed, set failed to true
+
+    writer.writeAllDirectFD(self.fd, bytes) catch |err| switch (err) {
+        error.ZixHttp1_Writer_BrokenPipe,
+        error.ZixHttp1_Writer_HeadBuild,
+        => self.failed = true,
+    };
+}
+
+// --------------------------------------------------------- //
+// Public:
+
 /// Fold a captured zero-copy replay back into the staged batch: a later
 /// response in the same batch means the send must carry both in order, so
 /// the borrowed bytes are copied after all and the pin drops. The copy
@@ -63,22 +92,9 @@ pub fn materializeDirect(self: *Self) void {
 
     const bytes = self.direct;
     self.direct = &.{};
-    if (core.tl_cache) |c| c.unpin(self.direct_slot);
+    if (cache.tl_cache) |c| c.unpin(self.direct_slot);
 
     self.append(bytes);
-}
-
-/// Send bytes that are not staying in buf: through the spill sink when one is installed (https,
-/// where the fd is a sentinel and every write has to become a TLS record), straight to the
-/// descriptor otherwise. A write that does not land marks the sink failed, which the caller
-/// reads as a broken peer.
-fn writeOut(self: *Self, bytes: []const u8) void {
-    std.log.info("TODO: self.spill as sink and write", .{});
-    // if write the bytes failed, set failed to true
-
-    core.writeAllDirectFD(self.fd, bytes) catch {
-        self.failed = true;
-    };
 }
 
 pub fn append(self: *Self, bytes: []const u8) void {
@@ -135,25 +151,150 @@ pub fn flush(self: *Self) void {
 /// - null when unavailable, the caller uses the writeAllFD path
 pub fn reserve(self: *Self, max_body: usize) ?[]u8 {
     if (self.len != 0 or self.direct.len != 0 or self.failed) return null;
-    if (core.HEADER_BUF_SIZE + max_body > self.buf.len) {
-        if (!self.grow(core.HEADER_BUF_SIZE + max_body)) return null;
+    if (head.HEADER_BUF_SIZE + max_body > self.buf.len) {
+        if (!self.grow(head.HEADER_BUF_SIZE + max_body)) return null;
     }
 
-    return self.buf[core.HEADER_BUF_SIZE..][0..max_body];
+    return self.buf[head.HEADER_BUF_SIZE..][0..max_body];
 }
 
 /// Commit a reserved render: build the simple header right-aligned so it
 /// ends exactly where the body starts, and stage header + body as one
 /// contiguous region (off marks the dead prefix before the header).
-pub fn commitSimple(self: *Self, status: u16, content_type: []const u8, body_len: usize) void {
+pub fn commitSimple(
+    self: *Self,
+    io: std.Io,
+    status: Status.Code,
+    content_type: []const u8,
+    body_len: usize,
+) Error!void {
     std.debug.assert(self.len == 0 and self.direct.len == 0);
 
-    var hdr_buf: [core.HEADER_BUF_SIZE]u8 = undefined;
-    const hdr = core.buildSimpleHeader(&hdr_buf, status, content_type, body_len);
-    const start = core.HEADER_BUF_SIZE - hdr.len;
-    @memcpy(self.buf[start..core.HEADER_BUF_SIZE], hdr);
+    var hdr_buf: [head.HEADER_BUF_SIZE]u8 = undefined;
+    const hdr = head.buildSimpleHeader(
+        io, &hdr_buf, status, content_type, body_len,
+    ) catch |err| switch (err) {
+        error.ZixHttp1_Head_DateFormat => return Error.ZixHttp1_RespSink_HeadBuild,
+    };
+    const start = head.HEADER_BUF_SIZE - hdr.len;
+    @memcpy(self.buf[start..head.HEADER_BUF_SIZE], hdr);
 
     self.off = start;
-    self.len = core.HEADER_BUF_SIZE + body_len;
+    self.len = head.HEADER_BUF_SIZE + body_len;
+}
+
+/// Grow buf to hold at least need bytes when backed by a growable allocator.
+/// Returns false when growth is unavailable (no allocator) or would exceed
+/// grow_cap, so the caller falls back to a direct flush. Never shrinks, so a
+/// grown per-connection buffer is reused by later requests on that fd.
+fn grow(self: *Self, need: usize) bool {
+    const gpa = self.grow_allocator orelse return false;
+    if (need <= self.buf.len) return true;
+    if (need > self.grow_cap) return false;
+
+    var new_len = @max(self.buf.len, 1) * 2;
+    while (new_len < need) new_len *= 2;
+    if (new_len > self.grow_cap) new_len = self.grow_cap;
+
+    if (!self.buf_owned) {
+        const grown = gpa.alloc(u8, new_len) catch |err| switch (err) {
+            error.OutOfMemory => return false,
+        };
+        @memcpy(grown[0..self.len], self.buf[0..self.len]);
+        self.buf = grown;
+        self.buf_owned = true;
+
+        return true;
+    }
+
+    const grown = gpa.realloc(self.buf, new_len) catch |err| switch (err) {
+        error.OutOfMemory => return false,
+    };
+    self.buf = grown;
+
+    return true;
+}
+
+// --------------------------------------------------------- //
+// --------------------------------------------------------- //
+// Test:
+
+const pair = @import("../../utils/socket/pair.zig");
+
+test "zix http1: RespSink, flushes appended bytes" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var buf: [64]u8 = undefined;
+    var sink = Self{ .fd = fds[0], .buf = &buf };
+
+    sink.append("abc");
+    sink.append("def");
+    try std.testing.expectEqual(@as(usize, 6), sink.len);
+
+    sink.flush();
+    try std.testing.expectEqual(@as(usize, 0), sink.len);
+
+    var out: [64]u8 = undefined;
+    const n = try std.posix.read(fds[1], &out);
+
+    try std.testing.expectEqualStrings("abcdef", out[0..n]);
+}
+
+test "zix http1: RespSink, flushes before an oversized append" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var buf: [4]u8 = undefined;
+    var sink = Self{ .fd = fds[0], .buf = &buf };
+
+    sink.append("ab");
+    sink.append("01234567");
+
+    var out: [64]u8 = undefined;
+    const n = try std.posix.read(fds[1], &out);
+
+    try std.testing.expectEqualStrings("ab01234567", out[0..n]);
+}
+
+test "zix http1: RespSink, commits a reserved body" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    head.setDateHeader(false);
+    defer head.setDateHeader(true);
+
+    var buf: [1024]u8 = undefined;
+    var sink = Self{ .fd = fds[0], .buf = &buf };
+
+    const body = sink.reserve(5).?;
+    @memcpy(body[0..2], "hi");
+    try sink.commitSimple(std.testing.io, .OK, "text/plain", 2);
+    sink.flush();
+
+    var out: [256]u8 = undefined;
+    const n = try std.posix.read(fds[1], &out);
+
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nhi",
+        out[0..n],
+    );
+}
+
+test "zix http1: RespSink, materializes a direct replay without a cache" {
+    var buf: [8]u8 = undefined;
+    var sink = Self{ .fd = -1, .buf = &buf };
+
+    sink.direct = "xyz";
+    sink.materializeDirect();
+
+    try std.testing.expectEqual(@as(usize, 0), sink.direct.len);
+    try std.testing.expectEqualStrings("xyz", sink.buf[0..sink.len]);
 }
 
