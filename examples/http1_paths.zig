@@ -68,13 +68,14 @@ fn splitSegments(path: []const u8, out: [][]const u8) usize {
 
 // GET /path
 // GET /path/<seg1>
-// GET /path/<seg1>/<seg2>
+// GET /path/<seg1>/<seg2>/<seg3>
 // ... up to MAX_PATH_SEGMENTS segments after /path
+// Exactly 2 segments after /path go to userHandler or tenantHandler instead.
 // More than MAX_PATH_SEGMENTS -> 404
 //
 // curl usage: curl -X GET "http://localhost:9023/path"
 // curl usage: curl -X GET "http://localhost:9023/path/hello"
-// curl usage: curl -X GET "http://localhost:9023/path/hello/world"
+// curl usage: curl -X GET "http://localhost:9023/path/hello/big/world"
 fn pathsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -198,19 +199,20 @@ fn dispatch(
 ) anyerror!void {
     var segments: [MAX_PATH_SEGMENTS + 2][]const u8 = undefined;
     const count = splitSegments(req.path(), &segments);
+    const under_path = count >= 1 and std.mem.eql(u8, segments[0], "path");
 
     // /path/user/<id>: 3 segments, segments[1] is "user".
-    if (count == 3 and std.mem.eql(u8, segments[1], "user")) {
+    if (under_path and count == 3 and std.mem.eql(u8, segments[1], "user")) {
         return userHandler(req, res, ctx);
     }
 
     // /path/<tenant-id>/<tenant-branch>: 3 segments, segments[1] is not "user".
-    if (count == 3) {
+    if (under_path and count == 3) {
         return tenantHandler(req, res, ctx, segments[0..count]);
     }
 
     // /path prefix, any other segment count.
-    if (count >= 1 and std.mem.eql(u8, segments[0], "path")) {
+    if (under_path) {
         return pathsHandler(req, res, ctx);
     }
 

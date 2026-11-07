@@ -125,6 +125,7 @@ fn greetHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1
 // /calc?a=3&b=4   ->  {"ok":true,"message":"3 + 4 = 7"}
 // /calc?b=4       ->  {"ok":false,"message":"Error: missing required param: a"}
 // /calc?a=foo&b=4 ->  {"ok":false,"message":"Error: a must be a number"}
+// /calc?a=9223372036854775807&b=1 ->  {"ok":false,"message":"Error: a + b is out of range"}
 // curl usage: curl -X GET "http://localhost:9022/calc?a=3&b=4"
 fn calcHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
     if (req.method() != .GET) {
@@ -160,11 +161,18 @@ fn calcHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.
         return;
     };
 
+    const sum = std.math.add(i64, left, right) catch {
+        res.setStatus(.BAD_REQUEST);
+
+        try res.sendJson("{\"ok\":false,\"message\":\"Error: a + b is out of range\"}");
+        return;
+    };
+
     var buf: [128]u8 = undefined;
     const json = try std.fmt.bufPrint(
         &buf,
         "{{\"ok\":true,\"message\":\"{d} + {d} = {d}\"}}",
-        .{ left, right, left + right },
+        .{ left, right, sum },
     );
 
     try res.sendJson(json);
