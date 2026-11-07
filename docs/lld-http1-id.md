@@ -1,0 +1,522 @@
+# LLD: zix.Http1
+
+Detail implementasi internal untuk engine HTTP/1.x ramping. Untuk alasan desain lihat [`docs/hld-http1-id.md`](hld-http1-id.md).
+
+---
+
+## Http1.zig: namespace
+
+Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, trio (`Request`, `Response`, `Context`) dengan namespace bertipenya (`Method`, `Status`, `Content`, `ContentType`, `Header`, `HeaderSize`), tipe-tipe core (`HandlerFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), namespace `WebSocket`, utilitas bersama (`Multipart`, `MultipartField`, `SseWriter`), dan fungsi-fungsi core (deadline, parse termasuk `acceptEncoding`, cache, write helper) menjadi satu permukaan publik (ADR-062).
+
+---
+
+## config.zig: Http1ServerConfig
+
+Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca saat runtime:
+
+| Field | Dibaca oleh |
+| :- | :- |
+| `io`, `ip`, `port`, `kernel_backlog` | semua model (resolve + listen) |
+| `dispatch_model` | switch di `run()` |
+| `workers` | jumlah worker .EPOLL dan .URING, diabaikan oleh .ASYNC |
+| `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
+| `max_recv_buf` | ukuran buffer per-connection pada semua model: slot .EPOLL / .URING (`ConnTable.alloc`), pasangan pool-thread .ASYNC (`threadConnBufs`) |
+| `large_body_rcvbuf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
+| `ws_recv_buf` | ukuran buffer per-connection WebSocket, 0 jatuh ke `max_recv_buf`. .EPOLL menentukan ukuran buffer recv, .URING menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask |
+| `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
+| `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
+| `logger` | baris lifecycle `logSystem` |
+
+`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `res.sendNegotiated` atau `core.sendNegotiateFD`. Helper lama `core.sendGzipFD` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB). `max_response_headers` (kelas kapasitas `addHeader`) dan `conn_timeout_ms` (hanya model blocking) mendarat lewat ADR-062.
+
+---
+
+## core.zig: parsing, penulisan, loop koneksi
+
+### Konstanta
+
+```
+BUF_SIZE      = 16 * 1024   // ukuran scratch bersama (default serveConn langsung, reader chunked, buffer payload TLS)
+GZIP_OUT_SIZE = 256 * 1024  // buffer output sendGzipFD
+```
+
+### parseHead()
+
+```
+1. indexOf "\r\n\r\n"            -> error.ZixIncompleteHeader bila tidak ada
+2. request line: pecah pada ' ' pertama (method), ' ' terakhir (versi)
+      versi harus "HTTP/1.1" (minor 1) atau "HTTP/1.0" (minor 0), selain itu error.ZixInvalidRequest
+      method harus salah satu yang diimplementasikan engine ini, selain itu error.ZixUnknownMethod
+3. target dipecah pada '?'       -> path, query
+4. raw_headers = slice dari setelah CRLF request-line sampai CRLF header terakhir
+      (tanpa batas jumlah, dipindai sesuai kebutuhan oleh getHeader, kosong saat tanpa header)
+5. framing scan melipat header yang dikenali menjadi flag saat menelusuri blok
+      (hanya baris yang huruf pertamanya c, t, atau e yang ditokenisasi, lainnya dilewati):
+      content-length    -> parseInt u64 (gagal parse -> 0)
+      connection        -> "close" mematikan keep_alive, "keep-alive" menyalakannya
+      transfer-encoding -> mengandung "chunked" menyalakan chunked_request
+      expect            -> "100-continue" menyalakan expect_continue
+6. default keep_alive: version_minor == 1
+```
+
+Semua slice di `ParsedHead` yang dikembalikan menunjuk ke `buf` (zero copy). Mengembalikan `.{ head, body_offset }` dengan `body_offset` byte pertama setelah baris kosong. `getHeader(head, name)` melakukan pencarian case-insensitive sesuai kebutuhan atas `raw_headers`, jadi biaya scan per-header hanya dibayar oleh handler yang memang membaca sebuah header.
+
+Gate method berjalan setelah pemeriksaan versi, jadi request line yang memang tidak pernah ter-tokenisasi tetap melaporkan `error.ZixInvalidRequest` (400), bukan menyalahkan method (501). Ia mencocokkan token huruf besar lebih dulu lewat length switch dan satu perbandingan, dan hanya token yang gagal di situ yang membayar percobaan ulang case-folded, dan itulah yang menjaga request normal bebas dari penyalinan. `core.parseErrorResponse(err)` mengubah kedua error itu menjadi response yang ditulis dispatch loop: 501 untuk `error.ZixUnknownMethod`, 400 untuk sisanya.
+
+`parseGetFastPath` (server.zig) adalah fast path keep-alive untuk request `GET` polos: ia memastikan prefix `"GET "` dan versi `"HTTP/1.1"` dengan integer load tunggal (`std.mem.readInt` satu `u32` dan satu `u64`, bukan `mem.eql`), mengekstrak path dan query secara aritmetika, dan hanya jatuh ke `parseHead` penuh bila `Connection: close` mungkin ada. Bentuk `ParsedHead` sama, tanpa scan per-header. Maka `GET` keep-alive tidak pernah menyentuh gate method sama sekali.
+
+### recvHead()
+
+Bulk-read ke `buf` sampai `\r\n\r\n` ditemukan. `pre_filled` byte sisa iterasi keep-alive sebelumnya dipindai lebih dulu. Setiap kali membaca, pemindaian diulang dari `filled - 3` sehingga CRLFCRLF yang terbelah antar read tetap ditemukan. `error.ZixHeaderTooLarge` saat `buf` penuh tanpa baris kosong, `error.ZixClosed` saat EOF atau read gagal.
+
+### chunkedFrame() / decodeChunkedInBuf() / readChunkedBody()
+
+Satu chunked walk yang dipakai semua dispatch model untuk mem-framing body (RFC 9112 7.1), sehingga body chunked berarti hal yang sama di ketiganya.
+
+`chunkedFrame(src, out_cap)` menjalani framing chunk tanpa memindahkan satu byte pun: per chunk ia membaca baris ukuran (ekstensi setelah `;` diabaikan) dan melangkahi data sebesar ukuran yang dideklarasikan, sehingga data yang kebetulan mengeja terminal chunk tidak bisa dikira terminator. Ia mengembalikan `ChunkedFrame` yang `stop`-nya memisahkan hasil: `.COMPLETE` (panjang decode + byte wire yang dikonsumsi), `.NEED_MORE` (berhenti di tengah body, baca lagi), `.MALFORMED` (baris ukuran bukan hex, engine menjawab `400`), `.TOO_LARGE` (body hasil decode tidak muat `out_cap`, engine menjawab `413`). Satu null untuk semuanya adalah yang dulu membuat koneksi menggantung alih-alih dijawab.
+
+`decodeChunkedInBuf(src, out)` men-decode body yang sudah lengkap setelah walk berkata `.COMPLETE`: framing dibuang dengan salinan maju, dan `out` boleh alias `src` karena setiap byte hanya bergerak ke kiri. Body parsial membiarkan `src` tak tersentuh sehingga pemanggil bisa membaca lebih banyak ke dalamnya.
+
+`readChunkedBody(fd, buf, seeded)` menarik body chunked dari socket blocking (`.ASYNC`), di-seed dengan byte body yang datang bersama head, dan men-decode di tempat. Ia melaporkan `received` (byte wire yang diambil dari socket) dan leftover pipelined (`buf[leftover_off..][0..leftover]`) alih-alih membuangnya. Body yang melampaui `buf` berhenti dengan `.TOO_LARGE` alih-alih dipotong seukuran yang muat, karena handler tidak bisa membedakan body terpotong dari yang utuh.
+
+### Deadline handler thread-local
+
+```
+threadlocal tl_deadline_ns: u64 = 0   // 0 = tidak ada deadline terpasang
+
+setTimeout(ms): tl_deadline_ns = (ms == 0) ? 0 : wallClockNs() + ms * 1e6
+isExpired():    tl_deadline_ns != 0 dan wallClockNs() >= tl_deadline_ns
+```
+
+`wallClockNs()` adalah `clock_gettime(REALTIME)` mentah. Engine memanggil `setTimeout(opts.handler_timeout_ms)` sebelum setiap dispatch, sehingga deadline basi tidak pernah bocor ke request berikutnya.
+
+### Handoff WebSocket thread-local
+
+```
+threadlocal tl_ws_pending: ?WsPending = null    // { fd, on_frame }
+
+requestWebSocket(fd, cb): tl_ws_pending = .{ fd, cb }   // dipanggil WebSocket.serve
+takeWebSocket():          baca + bersihkan              // dipanggil engine setelah setiap dispatch
+```
+
+`serveConn` / `serveConnOne` membersihkan handoff dan menutup koneksi (promosi hanya untuk EPOLL). Loop parse EPOLL menyimpan callback ke `conn.ws` dan mengalihkan koneksi ke pemompaan frame.
+
+### RespSink: penggabungan response per-event
+
+```zig
+RespSink = { fd, buf, len, off, failed, grow_allocator, grow_cap }
+threadlocal tl_resp_sink: ?*RespSink = null
+```
+
+Selama terpasang, `writeAllFD(fd, ...)` untuk fd yang cocok menambahkan ke `buf` alih-alih menyentuh socket:
+
+```
+append(bytes):
+  bytes.len > buf.len        -> tumbuhkan agar muat bila growable, selain itu flush + tulis langsung
+  len + bytes.len > buf.len  -> tumbuhkan agar muat bila growable, selain itu flush dulu
+  selain itu                 -> memcpy ke buf
+flush(): satu writeAllDirectFD(buf[off..len]), len = 0, off = 0, failed lengket saat error
+grow(need): realloc buf (power-of-two) hingga grow_cap, tidak pernah menyusut, false bila tak-growable
+reserve(max_body): buf[HEADER_BUF_SIZE..][0..max_body] saat tidak ada yang ter-stage, selain itu null
+commitSimple(status, ct, body_len): header rata-kanan berakhir di HEADER_BUF_SIZE, off = awal header
+```
+
+`reserve` / `commitSimple` (dibuka ke handler sebagai `responseReserve` / `responseCommit`) membuat handler yang membangun body secara dinamis me-render langsung ke buffer sink: byte body ditulis tepat sekali, ke buffer yang dipakai response untuk dikirim, dan engine membangun header sederhana tepat di depannya. `off` menandai prefix mati sebelum header rata-kanan, jadi region ter-stage adalah `buf[off..len]`. Tidak ada yang ter-stage saat reserve ditolak (batch pipelined sedang berjalan, atau region tidak muat), dan caller jatuh kembali ke jalur `writeAllFD`.
+
+Loop request EPOLL (`serveEpollConn`) memasang sink tanpa `grow_allocator`, jadi burst pipelined N response berbiaya satu `write()` dan response oversized mem-flush batch lalu menulis langsung. Loop URING memasang sink di atas `send_buf` per-koneksi dengan `grow_allocator` diset dan `grow_cap = URING_SEND_BUF_MAX` (1 MiB): response yang lebih besar dari buffer ter-stage menumbuhkannya di tempat (realloc power-of-two) sehingga seluruh balasan tetap keluar sebagai satu on-ring send, alih-alih menahan worker di write off-ring yang memblokir (`writeAllDirectFD`). Buffer yang ditumbuhkan tidak pernah menyusut, jadi koneksi yang didaur ulang memakainya ulang untuk request berikutnya. `flushPending(fd)` memungkinkan handler yang melewati helper (sendfile, raw send) mem-flush byte yang tertahan lebih dulu agar urutan di kabel sama dengan urutan request.
+
+### writeAllFD() / writeAllDirectFD()
+
+`writeAllFD` melewati sink yang terpasang saat fd cocok, selain itu memanggil jalur langsung. Loop jalur langsung:
+
+```
+write(fd, rem)
+  SUCCESS -> maju (0 byte tertulis = error.BrokenPipe)
+  INTR    -> ulangi
+  AGAIN   -> poll(POLLOUT, tak terbatas) lalu ulangi   // socket non-blocking, send buffer penuh
+  lainnya -> error.BrokenPipe
+```
+
+Semua error write diringkas menjadi `error.BrokenPipe`: satu-satunya penanganan pemanggil adalah menutup koneksi.
+
+### buildSimpleHeader() dan date cache
+
+Header tetap ditahapkan ke buffer 256 byte milik pemanggil dengan append manual (tanpa `std.fmt` di hot path):
+
+```
+"HTTP/1.1 " + status 3 digit + ' ' + statusPhrase
+["Content-Type: {s}\r\n" saat content_type.len > 0]
+"Content-Length: " + appendDec
+"\r\nDate: " + cachedDate() + "\r\n\r\n"
+```
+
+Untuk status yang dikenal, seluruh baris `"HTTP/1.1 <code> <phrase>\r\n"` ditulis dalam satu `memcpy` dari tabel `statusLine` yang dibaked pada comptime, alih-alih merakitnya dari lima potongan (`"HTTP/1.1 "` + `appendStatusCode` + `' '` + `statusPhrase` + `"\r\n"`) per response. `statusLine` mengembalikan `""` untuk kode tak dikenal, di mana build jatuh ke jalur piecewise di atas, byte-identik dengan baris yang dibaked. `statusPhrase` mencakup kode umum yang sama (selain itu mencetak `Unknown`); `appendStatusCode` dan `appendDec` adalah penulis digit manual untuk fallback itu.
+
+**Date cache per-thread:**
+
+```
+threadlocal tl_date: { secs, buf[40], len }
+threadlocal tl_date_tick: u8
+
+cachedDate():
+  tick +%= 1
+  hanya saat tick wrap (setiap 256 panggilan) atau pemakaian pertama:
+      clock_gettime(REALTIME)
+      format ulang hanya saat detiknya berubah
+```
+
+String IMF-fixdate diformat ulang paling banyak sekali per detik per thread, dan syscall clock-nya sendiri diamortisasi atas 256 response. `formatHttpDate` memakai dekomposisi `std.time.epoch`, hari-dalam-minggu dari `(epoch_day % 7 + 4) % 7`.
+
+### sendSimpleFD()
+
+```
+1. buildSimpleHeader ke buffer stack 256 byte
+2. body.len <= 3840:
+      memcpy header + body ke satu buffer stack 4096 byte
+      satu writeAllFD                          // satu syscall untuk mayoritas response
+3. body lebih besar: loop writev dengan 2 iovec (sisa header, body)
+      melacak sent antar partial write, INTR mengulang, AGAIN melakukan poll POLLOUT
+```
+
+### Write helper lainnya
+
+| Helper | Perilaku di kabel |
+| :- | :- |
+| `sendSimpleNoBodyFD` | `buildSimpleHeader` saja, Content-Length diisi ukuran body seandainya ada (HEAD) |
+| `sendJsonFD` | `sendSimpleFD` dengan `application/json` |
+| `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
+| `sendGzipFD` | body di bawah 64 KiB dikompresi via `compression.flate_fast` (gzip fixed-Huffman greedy in-tree, beberapa kali lebih cepat dari matcher std, tanpa init state per-stream), body lebih besar tetap lewat jalur `std.compress.flate` `.gzip` di atas encode scratch per-worker, lalu header (`Content-Encoding: gzip`) + byte terkompresi |
+| `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, tanpa Content-Length |
+| `sendChunkFD` | `{x}\r\n` + data + `\r\n`, data kosong adalah no-op (akan mengakhiri body) |
+| `sendChunkedEndFD` | `0\r\n\r\n` |
+| `sendRangeFD` | `parseRange` terhadap `full_body.len`: valid menghasilkan `206` + `Content-Range` + slice, tidak valid menghasilkan `416` dengan `Content-Range: bytes */{total}` |
+
+### serveConn(): loop keep-alive blocking
+
+Dipakai .ASYNC. State per-koneksi: pasangan `recv_buf` + `body_buf` milik pool thread (`threadConnBufs`, masing-masing `max_recv_buf` byte, `BUF_SIZE` 16 KB untuk pemanggil langsung yang memberi 0) dan `leftover: usize`.
+
+```
+0. TCP_NODELAY (opts.nodelay, dilewati di Windows)
+loop:
+  1. recvHead(fd, recv_buf, leftover)
+        HeaderTooLarge -> tulis 431, return
+  2. parseHead -> gagal: tulis 400, return
+  3. expect_continue dan ada body -> send100ContinueFD
+  4. body:
+        chunked        -> readChunkedBody(fd, body_buf, peeked):
+                          MALFORMED -> 400, return. TOO_LARGE -> 413, return.
+                          NEED_MORE (peer berhenti di tengah body) -> return
+        content_length -> panjang yang dideklarasikan > max_request_body -> 413, return
+                          salin byte peeked, baca sampai min(content_length, body_buf.len),
+                          drainBody sisanya (terhitung, tidak pernah menyentuh body_buf)
+  5. bodyReceived = setiap byte body yang diberikan socket, bodyComplete = apakah
+        akhir yang dideklarasikan atau ter-framing tercapai, diserahkan sebelum invoke
+  6. setTimeout(handler_timeout_ms), handler(head, body, fd)
+  7. takeWebSocket() != null -> return   // promosi tidak dihormati di sini
+  8. !keep_alive -> return
+  9. pipelining: byte setelah request_end digeser ke depan recv_buf, leftover diperbarui
+        (pembacaan chunked membawa leftover pipelined-nya ke depan dengan cara yang sama)
+```
+
+Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (`max_recv_buf` byte) memberi handler bagian yang muat dan membuang sisanya dari socket sebelum invoke (melebarkan receive window via `large_body_rcvbuf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `req.bodyReceived()` untuk total terhitung dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer, alih-alih mempercayai `head.content_length`.
+
+### serveConnOne(): fallback one-shot EPOLL
+
+Urutan parse + body + dispatch yang sama dengan satu iterasi `serveConn` di atas buffer milik pemanggil, mengembalikan `ConnOutcome` alih-alih melakukan loop. Dipertahankan untuk pemakaian dispatch one-shot, engine EPOLL sendiri memakai jalur `serveEpollConn` yang ter-buffer di server.zig.
+
+---
+
+## router.zig: Router comptime
+
+### Partisi comptime
+
+`Router(routes)` menghitung tiap kind dalam blok comptime, lalu membangun:
+
+```
+exact_pairs   [exact_count]{ path, handler }  -> StaticStringMap.initComptime
+prefix_routes [prefix_count]Route             -> inline for saat dispatch
+param_routes  [param_count]Route              -> inline for saat dispatch
+```
+
+Tipe yang dikembalikan punya satu decl, `dispatch`, dengan signature `HandlerFn` persis, sehingga router dapat dipasang di mana pun handler polos bisa.
+
+### dispatch()
+
+```
+1. tl_param_count = 0
+2. exact_map.get(path)                 -> panggil handler, return
+3. inline for param_routes: matchParam -> panggil handler, return  (cocok pertama menang)
+4. inline for prefix_routes: startsWith + cek batas (karakter berikutnya '/' atau akhir)
+       lacak kecocokan terpanjang      -> panggil handler terbaik
+5. tidak ada yang cocok                -> sendSimpleFD 404 text/plain
+```
+
+### matchParam() dan penyimpanan param
+
+```
+threadlocal tl_params: [8]PathParam
+threadlocal tl_param_count: usize
+```
+
+Memecah pattern dan path pada `/` secara berpasangan. Segmen `:name` menangkap (segmen path kosong ditolak, lebih dari 8 tangkapan ditolak), segmen literal harus cocok persis, jumlah segmen harus sama. Tangkapan ditulis ke `tl_params` saat cocok, tetapi `tl_param_count` baru di-commit saat sukses penuh, sehingga kandidat yang gagal tidak pernah merusak kecocokan berikutnya. `pathParam(name)` adalah pemindaian linear atas entri yang ter-commit. Nilainya slice ke path request dan mati bersama pemanggilan dispatch.
+
+---
+
+## server.zig: model dispatch
+
+### logSystem()
+
+Baris lifecycle dirutekan melalui `config.logger.system(.INFO, "http1", ...)` bila ada. Tanpa logger, baris jatuh ke `std.debug.print` dengan prefix `zix: ` hanya pada Debug build (`builtin.mode == .Debug`), dan diam pada release. Setiap server zix memakai bentuk `logSystem` ter-gate yang sama (http, http2, grpc, fix, tcp, udp, uds), jadi release build tanpa logger tidak mengeluarkan init noise.
+
+### connEntry() (badan task .ASYNC)
+
+```
+defer stream.close(io)
+core.serveConn(stream.socket.handle, handler, .{ .handler_timeout_ms })
+```
+
+### runAsync()
+
+```
+1. resolve + listen (reuse_address = true, kernel_backlog)
+2. accept loop: srv.accept(io) catch continue
+      io.async(connEntry, ...)        // handle dibuang, task memiliki stream
+```
+
+### Engine EPOLL
+
+Hanya Linux (`run()` jatuh kembali ke `runPool` di tempat lain, dengan notice di log). Shared-nothing: setiap worker memiliki listener `SO_REUSEPORT` pribadi, instance epoll pribadi, dan `ConnTable` pribadi, sehingga tidak ada fd atau slot yang pernah disentuh dua thread.
+
+#### Conn dan ConnTable
+
+```zig
+Conn = {
+    fd, buf, filled,                  // buf: max_recv_buf byte, filled: jumlah byte hidup
+    ws: ?WsFrameFn = null,            // diisi saat promosi WebSocket
+    drain: usize = 0,                 // byte body oversize yang masih harus dikonsumsi dari socket
+    drain_received: usize = 0,        // byte body yang sudah terkonsumsi, disajikan sebagai received count
+    pending_head_len: usize = 0,      // byte head diparkir di depan buf untuk invoke yang ditunda
+    continue_sent: bool = false,      // 100 Continue sudah dijawab untuk request yang sedang di-parse
+}
+```
+
+`ConnTable` adalah `[]?*Conn` datar yang diindeks fd, `MAX_FD = 1 << 16` slot. Linux memberikan fd bebas terendah sehingga tabel tetap padat di bagian bawah. `alloc` membuat Conn + buffer (gagal menutup fd), `free` melepas keduanya dan me-null slot. Koneksi dengan fd >= MAX_FD ditolak.
+
+#### epollWorker()
+
+```
+1. listener pribadi (reuse_address) -> setNonBlock(listener_fd)
+2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
+3. scratch per-worker (smp_allocator): body_buf berukuran dari knob slot recv
+   (ws_recv_buf, selain itu max_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
+4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
+      event listener       -> acceptAll
+      HUP/ERR              -> close
+      conn.drain > 0       -> serveEpollDrainThenServe
+      conn.ws != null      -> serveEpollWs
+      selain itu           -> serveEpollConn
+      outcome == .close    -> CTL_DEL + table.free + close(fd)
+```
+
+#### acceptAll()
+
+`accept4(NONBLOCK | CLOEXEC)` dikuras sampai EAGAIN (listener level-triggered, sehingga tidak ada accept yang terlewat). Setiap fd yang diterima: TCP_NODELAY, `table.alloc(fd, max_recv_buf)`, `CTL_ADD` dengan `EPOLLIN | EPOLLRDHUP`. Gagal registrasi menutup fd.
+
+#### serveEpollConn() / serveEpollConnInner()
+
+Fungsi luar memasang `RespSink` di atas `out_buf` di sekeliling pass parse, mem-flush setelahnya, dan langsung menyerahkan koneksi yang baru dipromosikan ke `serveEpollWs` (client bisa mem-pipeline frame pertamanya bersama request handshake, dan flush menjamin 101 mendahului echo pertama).
+
+Pass dalam:
+
+```
+1. read ke conn.buf[filled..]:
+      SUCCESS n=0 -> .close, AGAIN -> lanjut dengan yang ter-buffer, INTR -> ulangi
+      filled == buf.len sebelum read -> 431, .close
+2. loop parse atas conn.buf[consumed..filled]:
+      tanpa "\r\n\r\n" -> break (head parsial, tunggu byte berikutnya)
+      parseHead gagal -> 400, .close
+      Expect: 100-continue dengan body -> 100 Continue, sekali per request (continue_sent)
+      body:
+        chunked        -> decodeChunkedInBuf: COMPLETE -> body = slice hasil decode,
+                          NEED_MORE -> break, MALFORMED -> 400 .close,
+                          TOO_LARGE -> 413 .close
+        panjang yang dideklarasikan > max_request_body -> 413, .close (sebelum
+                          satu byte body pun dibaca)
+        muat di rem    -> body = slice, request_len = need
+        drain selesai  -> request yang ditunda masuk kembali: total terhitung di
+                          bodyReceived, slice body kosong, bodyComplete = true
+        need > buf.len -> oversize: parkir head di depan buf (pending_head_len),
+                          hitung byte body yang sudah ada (drain_received), set
+                          conn.drain ke sisa yang belum terbaca, tunda handler, break
+        selain itu     -> break (body masih berdatangan)
+      setTimeout + handler(head, body, fd)
+      takeWebSocket() -> conn.ws = callback, break  // byte setelah ini adalah frame
+      !keep_alive -> break
+3. geser byte yang belum dikonsumsi ke depan buffer (request parsial pipelined terjaga)
+```
+
+Satu readable event karenanya melayani setiap request pipelined lengkap yang dibawanya, dengan semua response keluar dalam satu write gabungan.
+
+#### decodeChunkedInBuf()
+
+Varian non-streaming dari chunked walk bersama (`core.chunkedFrame`) untuk jalur ter-buffer: mensyaratkan seluruh body chunked (sampai CRLF terakhir trailer) ada di `src`. `stop` yang dikembalikan menggerakkan pass parse: `.COMPLETE` membawa panjang decode dan byte wire yang dikonsumsi, `.NEED_MORE` menunggu readable event berikutnya, dan `.MALFORMED` / `.TOO_LARGE` tidak akan pernah lengkap, sehingga engine menjawab `400` / `413` dan menutup alih-alih menahan koneksi sampai buffer penuh dan peer tampak menggantung.
+
+#### serveEpollWs()
+
+Satu read (level-triggered, byte tersisa memicu ulang event), lalu `ws.pump` atas byte yang ter-buffer, lalu penggeseran standar byte yang belum dikonsumsi. Menutup saat EOF peer, close frame, write gagal, atau frame yang lebih lebar dari seluruh buffer (tidak pernah bisa lengkap, akan berputar tanpa kemajuan).
+
+#### serveEpollDrain() / serveEpollDrainThenServe()
+
+Membuang `conn.drain` byte dengan `recvfrom(MSG_TRUNC)`: kernel menjatuhkan byte di tempat, tanpa salinan ke `conn.buf`, ukuran per panggilan tidak dibatasi buffer (dibatasi 1 GB per panggilan). Membaca sampai EAGAIN, tidak pernah melewati `conn.drain`, sehingga byte request pipelined berikutnya tidak tersentuh. Setiap byte yang dibuang dihitung ke `conn.drain_received`, karena hitungan itulah yang akan diberitahukan ke handler yang menunggu. Saat drain mencapai nol, `serveEpollDrainThenServe` masuk kembali ke pass parse atas byte head yang diparkir (`conn.filled = pending_head_len`) dan menyajikan request yang ditunda dengan total terhitung di `req.bodyReceived()`. Peer yang hangup di tengah drain menutup koneksi tanpa handler pernah berjalan.
+
+### Engine URING
+
+Hanya Linux (`run()` jatuh kembali ke `runPool` di tempat lain). Kembaran berbasis completion dari Engine EPOLL: topologi shared-nothing yang sama (satu `SO_REUSEPORT` listener dan satu ring `io_uring` per worker, tanpa queue bersama, tanpa handoff fd), tetapi digerakkan oleh completion alih-alih readiness, sehingga sebagian besar transisi syscall di-batch ke dalam ring (ADR-037).
+
+#### UringConn dan slot table
+
+```zig
+UringConn = {
+    fd, gen, buf, filled,             // gen: u24 generation tag terhadap reuse fd
+    send_buf, staged, inflight,       // send_buf[0..inflight] dipegang kernel selama send in-flight
+    closing,                          // bebaskan setelah send terakhir mendarat
+    slot: u32 = 0,                    // slot slab buffer kompak yang menopang buf + send_buf
+    send_heap: bool = false,          // send_buf beralih ke buffer heap lewat jalur grow sink
+    scan_from: usize = 0,             // watermark scan split-head (lanjutkan pencarian CRLFCRLF)
+    drain: usize = 0,                 // byte body oversize yang masih harus dibuang (mirror Conn.drain)
+    drain_received: usize = 0,        // byte body yang sudah terkonsumsi, disajikan sebagai received count
+    pending_head_len: usize = 0,      // byte head disimpan di depan buf untuk invoke yang ditunda
+    ws: ?WsFrameFn = null,
+    direct: []const u8 = &.{},        // replay cache zero-copy yang in-flight (byte slab ter-pin)
+    direct_slot: u32 = 0,
+}
+```
+
+`slots` adalah tabel inline `[]UringConn` datar yang diindeks fd (`MAX_FD` entri, di-map zeroed dan demand-paged, slot kosong terbaca sebagai `buf.len == 0`). Buffer recv dan send hidup di satu slab mmap per-worker dengan stride kelipatan page: koneksi menarik slot kompak dari free-list LIFO saat accept (nol pemanggilan allocator), close mengembalikan slot, dan melewati warm cap halaman stride warm tertua dikembalikan ke OS (`MADV_DONTNEED`). Slab secara eksplisit opt-out dari transparent huge page (`MADV_NOHUGEPAGE`), jadi residensi mengikuti halaman yang benar-benar ditulis pada kebijakan THP host mana pun. `user_data` setiap completion mengemas `{ op, gen, fd }`, dan `lookup` menolak CQE yang `gen`-nya tidak lagi cocok dengan slot, yang menutup race close-versus-recv pada fd yang digunakan ulang. Sebuah koneksi bersifat half-duplex (paling banyak satu recv atau satu send in-flight), sehingga flush sink yang blocking tidak pernah bisa menyela send yang sedang in-flight.
+
+#### initUringRing()
+
+`IoUring.init_params` dengan `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` (fast path single-issuer pada loop one-thread-per-ring, plus completion queue yang diperbesar), jatuh kembali ke `IoUring.init` tanpa flag pada kernel yang tidak memilikinya. SQ `URING_ENTRIES = 4096`, CQ `URING_CQ_ENTRIES = 16 K`.
+
+#### run() loop
+
+```
+1. armAccept (multishot)
+2. wait_nr > 1: pasang timer coalesce 20us (penjaga stall)
+3. submit_and_wait(wait_nr), copy_cqes ke array stack 512-entri
+4. wait_nr = clamp(count / 2, 1, 32)
+5. per CQE, switch pada user_data.op:
+      accept -> handleAccept   // re-arm saat !IORING_CQE_F_MORE, alloc conn, armRecv, ring.submit()
+      recv   -> handleRecv
+      send   -> handleSend
+6. tiap 16 CQE dari batch berkedalaman >= 128: ring.submit() saat ada SQE ter-stage
+```
+
+Langkah 6 adalah intra-batch submit: pada batch completion yang dalam, response terakhir kalau tidak begitu harus menunggu dispatch semua request sebelumnya sebelum SQE send-nya sampai ke kernel, yang melipatgandakan biaya dispatch per-request menjadi latency closed-loop. Batch dangkal melewati stride ini (habis dalam hitungan mikrodetik, dan enter ekstra malah membebani jalur high-rate low-concurrency).
+
+Langkah 2 sampai 4 adalah wakeup coalescing adaptif: loop yang panas (reap besar) menunggu hingga 32 completion per enter alih-alih satu, sehingga kedatangan yang tersebar tidak membangunkan worker sekali per completion, dan SQE timeout 20us menjamin completion tunggal tidak pernah tertahan melewati jendela itu. Loop yang mendingin turun kembali ke tunggu satu-completion dalam satu pass. `ring.submit()` di dalam handleAccept mendorong SQE recv koneksi baru segera (accept-to-first-byte adalah yang diukur closed loop dengan churn tinggi), bukan setelah sisa batch selesai di-dispatch.
+
+#### armRecv() / handleRecv() / dispatch()
+
+`armRecv` memposting SQE `recv` biasa ke `conn.buf[filled..]`, sehingga data mendarat di tempat tanpa salinan. `handleRecv` menambahkan `cqe.res` byte, lalu `dispatch` menjalankan loop parse, mencerminkan `serveEpollConnInner` tanpa pembacaan. Body chunked yang sepenuhnya ada di `conn.buf` di-decode di tempat via `decodeChunkedInBuf` ke `body_buf` per-worker, dengan hasil yang sama seperti pass EPOLL: chunk frame yang malformed dijawab `400`, body chunked melewati buffer `413`, Content-Length yang dideklarasikan melewati `max_request_body` `413` sebelum satu byte body pun dikonsumsi, dan `Expect: 100-continue` dengan body tertunda dijawab sekali selagi body masih berdatangan. Body yang lebih besar dari `conn.buf` menunda handler-nya: byte head tetap di depan `conn.buf`, `conn.drain` di-set ke sisa yang belum dibaca, dan drain (di bawah) menghitungnya dari socket sebelum handler berjalan dengan `req.bodyReceived()` berisi total terhitung (slice body tetap kosong). Response di-stage ke `conn.send_buf` melalui `RespSink`, sehingga burst pipelined menyatu menjadi satu `submitSend`. Jendela ter-stage adalah `send_buf[staged_off..][0..staged]`: response hasil reserve-commit mulai di `off` milik sink, dan short send memajukan jendela di tempat alih-alih menggeser sisa ke depan.
+
+#### armDrainRecv()
+
+Kembaran ring dari `serveEpollDrain`. Memposting SQE `recv` dengan `MSG_TRUNC` dan `sqe.len` ditimpa menjadi `min(conn.drain, 1 GB)`: kernel membuang byte body di tempat (tanpa salinan ke `conn.buf`, request tidak dibatasi panjang buffer), sehingga satu recv menguras seluruh sisa body alih-alih satu round-trip per `max_recv_buf`. `handleRecv` menghitung mundur byte yang dikuras (mengakumulasi `conn.drain_received`) dan re-arm sampai `conn.drain` mencapai nol, lalu menyajikan request yang ditunda melalui jalur dispatch normal: byte head selamat di depan `conn.buf` karena `MSG_TRUNC` tidak pernah menulis buffer. Membatasi request pada `conn.drain` membuat byte pipelined setelah body tetap tak tersentuh. Dicakup oleh runner `test-runner-http1-drain`, yang mem-pipeline POST over-large lalu GET lanjutan pada satu koneksi keep-alive. Ia hanya menyisakan leg URING ketika ADR-065 meringkas baris runner per model.
+
+#### watchExternal() / op external
+
+Watch POLLIN multishot untuk fd asing (socket driver) di ring milik worker, di-arm sekali dari konteks handler melalui `core.uringWatchFd` (trampoline yang dipasang `run()` per worker). Setiap CQE dirutekan ke `core.tl_external_cb` yang didaftarkan pemanggil di thread worker, dan jalur completion me-re-arm sendiri multishot yang lapsed selama fd masih hidup (res negatif menjatuhkan watch). Submission queue yang penuh mem-park arm sebagai entri process-queue `.external` (di-re-arm oleh drainParked), sehingga watch tidak pernah hilang selama parking punya ruang. Inilah yang membuat worker bisa memiliki koneksi driver pipelined (`postgrez.dispatch.Line`) di ring-nya sendiri.
+
+#### WebSocket di ring
+
+`IoUring.BufferGroup` per-worker (provided-buffer ring) melayani recv WebSocket (Phase 4b): kernel menyerahkan buffer hanya saat sebuah frame tiba, sehingga koneksi idle tidak mengikat recv buffer apa pun, kemenangan memory-scaling pada jumlah koneksi tinggi. `wsHandleBuf` mem-parse satu batch whole-frame di tempat dari buffer yang dipilih (zero copy) dan hanya menyalin frame parsial yang tertinggal ke `conn.buf`. Kernel tanpa dukungan buffer-ring membiarkan `ws_bufs` null, dan WebSocket jatuh kembali ke jalur plain recv-into-`conn.buf`.
+
+#### finishClose(): teardown ring (ADR-041)
+
+Teardown menutup fd di ring, bukan secara sinkron. `finishClose` membaca fd, mendaur ulang slot koneksi lebih dulu (`destroyConn`, yang membebaskan send buffer hasil grow heap, melepas pin replay cache yang dipinjam, mengembalikan slot slab buffer ke free-list, dan men-zero slot fd), lalu mengirim SQE `prep_close` yang ditag dengan `OpKind.close`. Ia jatuh ke `linux.close` sinkron hanya saat SQ sesaat penuh. State per-koneksi half-duplex menjamin tidak ada op in-flight yang menyasar fd yang sedang ditutup, dan mendaur ulang slot sebelum close selesai aman karena tag generation menolak CQE telat apa pun terhadap fd yang dipakai ulang. Completion `close` adalah no-op (slot sudah bebas). Ini penting di bawah connection churn: `close` sinkron per teardown memblokir worker antar koneksi, jadi di mesin 64-core ring nyaris tidak mengaktifkan core-nya di bawah reconnect storm (limited-conn, json). Menjaga close di ring membuat worker terus memanen completion lintas teardown, sehingga core terisi. Lihat ADR-041 untuk pengukuran 64-core.
+
+`OpKind` bersama (dengan varian `close`) berada di `src/multiplexers/ring.zig` (dipindahkan dari `src/tcp/io_uring`), sehingga setiap engine io_uring membawa arm `.close => {}`. Hanya `zix.Http1` yang meng-arm-nya untuk saat ini.
+
+### Http1ServerImpl / Server
+
+```zig
+fn Http1ServerImpl(comptime handler: HandlerFn) type
+    init(config) -> .{ .config = config }   // tidak ada socket dibuka, tidak ada alokasi
+    deinit()     -> no-op
+    run()        -> switch dispatch_model (.EPOLL dipagari Linux saat comptime)
+
+Server.init(comptime handler, config) -> Http1ServerImpl(handler).init(config)
+```
+
+Handler dibakukan ke dalam tipe sehingga `run()` tidak menerima argumen dan dispatch adalah panggilan langsung, bukan pemuatan function pointer dari config.
+
+---
+
+## websocket.zig: codec RFC 6455 + pump engine
+
+### Konstanta format frame
+
+```
+panjang 7-bit maksimum 125, 126 = extended 16-bit, 127 = extended 64-bit
+mask key 4 byte (frame client selalu masked)
+header frame server maksimum 10 byte
+```
+
+### parseFrame()
+
+```
+1. minimal butuh 2 byte
+2. byte 0: FIN + opcode, byte 1: MASK + panjang 7-bit
+3. panjang extended (2 atau 8 byte) saat ditandai
+4. mask key saat MASK terpasang
+5. payload dibatasi payload_buf.len:
+      masked   -> XOR-unmask ke payload_buf
+      unmasked -> slice zero-copy ke buf
+6. mengembalikan { frame, consumed } atau null saat byte masih kurang
+```
+
+Jalur masked meng-unmask dengan XOR `@Vector(16, u8)` selebar 16 byte terhadap mask 4 byte yang direplikasi empat kali, memproses 16 byte per iterasi, dengan ekor skalar `i % 4` untuk byte sisa. Ini menggantikan loop per-byte dan cocok bit-per-bit dengannya (tercakup oleh tes unmask 32 byte dan 17 byte).
+
+### buildHeader() / buildFrame()
+
+`buildHeader` menulis FIN | opcode lalu bentuk panjang 7-bit / 16-bit / 64-bit ke buffer >= 10 byte, mengembalikan panjang header. `buildFrame` menambahkan payload setelah header (buffer harus memuat payload + 10). Frame server unmasked sesuai RFC 6455 5.1.
+
+### acceptKey() / upgrade()
+
+`acceptKey` menyambung key client dengan GUID RFC 6455, SHA-1, base64 ke `[64]u8` milik pemanggil (`error.ZixKeyTooLong` melewati 128 byte input). `upgrade` menulis blok `101 Switching Protocols` penuh melalui `core.writeAllFD` (sadar sink, sehingga pada EPOLL ditahapkan bersama response lain).
+
+### send() dan SendSink
+
+`SendSink` adalah kembaran WebSocket dari `RespSink` core (aturan append / flush / write-through yang sama), dipasang thread-local oleh `pump` selama satu pass.
+
+```
+send(fd, opcode, payload):
+  sink aktif -> tahapkan header lalu payload       (error.BrokenPipe bila sink gagal)
+  payload + header <= 4096 -> bangun satu buffer, satu writeAllFD
+  lebih besar -> tulis header lalu payload terpisah (menghindari salinan stack besar)
+```
+
+### serve()
+
+`acceptKey` + `upgrade` + `core.requestWebSocket(fd, on_frame)`. Dipanggil dari dalam handler http1. Engine menghormati promosi hanya pada `.EPOLL`.
+
+### pump()
+
+```
+pasang SendSink(out_buf)
+loop atas data:
+  parseFrame orelse break        // frame parsial di ekor disisakan untuk read berikutnya
+  text/binary -> on_frame(fd, opcode, payload)
+  ping        -> kirim pong (payload digema)
+  close       -> kirim close, konsumsi, berhenti dengan close = true
+  pong/continuation/lainnya -> diabaikan
+flush sink
+return { consumed, close: close atau sink.failed }
+```
+
+`consumed` hanya menghitung frame utuh, sehingga penggeseran buffer engine menjaga frame parsial tetap utuh.
+
+---
+
+###### end of lld-http1

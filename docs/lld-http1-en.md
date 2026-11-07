@@ -1,0 +1,522 @@
+# LLD: zix.Http1
+
+Internal implementation details for the lean HTTP/1.x engine. For design rationale see [`docs/hld-http1-en.md`](hld-http1-en.md).
+
+---
+
+## Http1.zig: namespace
+
+Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the trio (`Request`, `Response`, `Context`) with its typed namespaces (`Method`, `Status`, `Content`, `ContentType`, `Header`, `HeaderSize`), the core types (`HandlerFn`, `ParsedHead`, `ParseResult`, `Range`, `ServeOpts`, `ConnOutcome`, `WsFrameFn`), the router (`Route`, `RouteKind`, `Router`, `PathParam`, `pathParam`), the `WebSocket` namespace, shared utilities (`Multipart`, `MultipartField`, `SseWriter`), and the core functions (deadline, parse incl. `acceptEncoding`, cache, write helpers) into one public surface (ADR-062).
+
+---
+
+## config.zig: Http1ServerConfig
+
+Plain struct with defaults, no allocations at construction. Runtime-read fields:
+
+| Field | Read by |
+| :- | :- |
+| `io`, `ip`, `port`, `kernel_backlog` | all models (resolve + listen) |
+| `dispatch_model` | `run()` switch |
+| `workers` | .EPOLL and .URING worker count, ignored by .ASYNC |
+| `handler_timeout_ms` | armed before every dispatch in all models |
+| `max_recv_buf` | per-connection buffer size on every model: .EPOLL / .URING slots (`ConnTable.alloc`), the .ASYNC pool-thread pair (`threadConnBufs`) |
+| `large_body_rcvbuf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
+| `ws_recv_buf` | WebSocket per-connection buffer size, 0 falls back to `max_recv_buf`. .EPOLL sizes the recv buffer, .URING sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch |
+| `send_date_header` | managed write helpers: include or omit the `Date` header |
+| `tls` | selects the TLS serve path when non-null (native https), else cleartext |
+| `logger` | `logSystem` lifecycle lines |
+
+`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `res.sendNegotiated` or `core.sendNegotiateFD`. The legacy `core.sendGzipFD` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB). `max_response_headers` (the `addHeader` capacity class) and `conn_timeout_ms` (blocking models only) landed with ADR-062.
+
+---
+
+## core.zig: parsing, writing, connection loops
+
+### Constants
+
+```
+BUF_SIZE      = 16 * 1024   // shared scratch size (direct serveConn default, chunked reader, TLS payload buffers)
+GZIP_OUT_SIZE = 256 * 1024  // sendGzipFD output buffer
+```
+
+### parseHead()
+
+```
+1. indexOf "\r\n\r\n"            -> error.ZixIncompleteHeader if absent
+2. request line: split on first ' ' (method), last ' ' (version)
+      version must be "HTTP/1.1" (minor 1) or "HTTP/1.0" (minor 0), else error.ZixInvalidRequest
+      method must be one this engine implements, else error.ZixUnknownMethod
+3. target split at '?'           -> path, query
+4. raw_headers = slice from after the request-line CRLF through the final header CRLF
+      (no count cap, looked up lazily by getHeader, empty when there are no headers)
+5. framing scan folds recognized headers into flags while walking the block
+      (only a line whose first letter is c, t, or e is tokenized, others skip):
+      content-length    -> parseInt u64 (unparseable -> 0)
+      connection        -> "close" clears keep_alive, "keep-alive" sets it
+      transfer-encoding -> contains "chunked" sets chunked_request
+      expect            -> "100-continue" sets expect_continue
+6. keep_alive default: version_minor == 1
+```
+
+All slices in the returned `ParsedHead` point into `buf` (zero copy). Returns `.{ head, body_offset }` where `body_offset` is the first byte after the blank line. `getHeader(head, name)` does the case-insensitive on-demand lookup over `raw_headers`, so the per-header scan cost is paid only by a handler that actually reads a header.
+
+The method gate runs after the version check, so a request line that never tokenized still reports `error.ZixInvalidRequest` (400) rather than blaming the method (501). It matches the uppercase token first with a length switch and one compare, and only a token that fails that pays for the case-folded retry, which is what keeps a normal request free of a copy. `core.parseErrorResponse(err)` turns either error into the response the dispatch loops write: 501 for `error.ZixUnknownMethod`, 400 for everything else.
+
+`parseGetFastPath` (server.zig) is the keep-alive fast path for plain `GET` requests: it confirms the `"GET "` prefix and the `"HTTP/1.1"` version with single integer loads (`std.mem.readInt` of one `u32` and one `u64`, not `mem.eql`), extracts path and query by arithmetic, and only falls back to the full `parseHead` when `Connection: close` may be present. Same `ParsedHead` shape, no per-header scan. A keep-alive `GET` therefore never reaches the method gate at all.
+
+### recvHead()
+
+Bulk-read into `buf` until `\r\n\r\n` is found. `pre_filled` bytes carried over from the previous keep-alive iteration are scanned first. On each read the scan restarts at `filled - 3` so a CRLFCRLF split across reads is still found. `error.ZixHeaderTooLarge` when `buf` fills without a blank line, `error.ZixClosed` on EOF or read failure.
+
+### chunkedFrame() / decodeChunkedInBuf() / readChunkedBody()
+
+The one chunked walk every dispatch model frames a body with (RFC 9112 7.1), so a chunked body means the same thing on all three.
+
+`chunkedFrame(src, out_cap)` walks the chunk framing without moving a byte: per chunk it reads the size line (extensions after `;` ignored) and steps over the data by its declared size, so data that happens to spell the terminal chunk cannot be mistaken for it. It returns a `ChunkedFrame` whose `stop` separates the outcomes: `.COMPLETE` (decoded length + wire bytes consumed), `.NEED_MORE` (ends mid-body, read more), `.MALFORMED` (a size line is not hex, the engine answers `400`), `.TOO_LARGE` (the decoded body cannot fit `out_cap`, the engine answers `413`). One null for all of these is what used to stall a connection instead of drawing an answer.
+
+`decodeChunkedInBuf(src, out)` decodes a fully-present body after the walk says `.COMPLETE`: framing is removed with forward copies, and `out` may alias `src` since every byte only moves left. A partial body leaves `src` untouched so the caller can read more into it.
+
+`readChunkedBody(fd, buf, seeded)` pulls a chunked body off the blocking socket (`.ASYNC`), seeded with the body bytes that arrived alongside the head, and decodes in place. It reports `received` (wire bytes taken off the socket) and the pipelined leftover (`buf[leftover_off..][0..leftover]`) instead of discarding it. A body that outgrows `buf` stops with `.TOO_LARGE` rather than being cut to what fits, because a handler cannot tell a cut body from a whole one.
+
+### Thread-local handler deadline
+
+```
+threadlocal tl_deadline_ns: u64 = 0   // 0 = no deadline armed
+
+setTimeout(ms): tl_deadline_ns = (ms == 0) ? 0 : wallClockNs() + ms * 1e6
+isExpired():    tl_deadline_ns != 0 and wallClockNs() >= tl_deadline_ns
+```
+
+`wallClockNs()` is a raw `clock_gettime(REALTIME)`. The engine calls `setTimeout(opts.handler_timeout_ms)` before every dispatch, so a stale deadline can never leak into the next request.
+
+### Thread-local WebSocket handoff
+
+```
+threadlocal tl_ws_pending: ?WsPending = null    // { fd, on_frame }
+
+requestWebSocket(fd, cb): tl_ws_pending = .{ fd, cb }   // called by WebSocket.serve
+takeWebSocket():          read + clear                  // called by the engine after every dispatch
+```
+
+`serveConn` / `serveConnOne` clear the handoff and close the connection (promotion is EPOLL-only). The EPOLL parse loop stores the callback into `conn.ws` and switches the connection to frame pumping.
+
+### RespSink: per-event response coalescing
+
+```zig
+RespSink = { fd, buf, len, off, failed, grow_allocator, grow_cap }
+threadlocal tl_resp_sink: ?*RespSink = null
+```
+
+While installed, `writeAllFD(fd, ...)` for the matching fd appends to `buf` instead of hitting the socket:
+
+```
+append(bytes):
+  bytes.len > buf.len        -> grow to fit when growable, else flush + write through directly
+  len + bytes.len > buf.len  -> grow to fit when growable, else flush first
+  else                       -> memcpy into buf
+flush(): one writeAllDirectFD(buf[off..len]), len = 0, off = 0, failed sticky on error
+grow(need): realloc buf (power-of-two) up to grow_cap, never shrinks, false when ungrowable
+reserve(max_body): buf[HEADER_BUF_SIZE..][0..max_body] when nothing is staged, else null
+commitSimple(status, ct, body_len): header right-aligned ending at HEADER_BUF_SIZE, off = header start
+```
+
+`reserve` / `commitSimple` (surfaced to handlers as `responseReserve` / `responseCommit`) let a handler that builds its body dynamically render straight into the sink buffer: the body bytes are written exactly once, into the buffer the response sends from, and the engine builds the simple header directly in front of them. `off` marks the dead prefix before the right-aligned header, so the staged region is `buf[off..len]`. Nothing is staged on a refused reserve (pipelined batch in progress, or the region does not fit), and the caller falls back to the `writeAllFD` path.
+
+The EPOLL request loop (`serveEpollConn`) installs the sink with no `grow_allocator`, so a pipelined burst of N responses costs one `write()` and an oversized response flushes the batch then writes straight through. The URING loop installs the sink over the per-connection `send_buf` with `grow_allocator` set and `grow_cap = URING_SEND_BUF_MAX` (1 MiB): a response larger than the staged buffer grows it in place (power-of-two realloc) so the whole reply still leaves as one on-ring send, instead of stalling the worker on a blocking off-ring write (`writeAllDirectFD`). The grown buffer never shrinks, so the recycled connection reuses it for later requests. `flushPending(fd)` lets a handler that bypasses the helpers (sendfile, raw send) flush staged bytes first so wire order matches request order.
+
+### writeAllFD() / writeAllDirectFD()
+
+`writeAllFD` routes through the installed sink when the fd matches, otherwise calls the direct path. Direct path loop:
+
+```
+write(fd, rem)
+  SUCCESS -> advance (0 bytes written = error.BrokenPipe)
+  INTR    -> retry
+  AGAIN   -> poll(POLLOUT, infinite) then retry   // non-blocking socket, full send buffer
+  other   -> error.BrokenPipe
+```
+
+All write errors collapse to `error.BrokenPipe`: the caller's only remedy is closing the connection.
+
+### buildSimpleHeader() and the date cache
+
+Fixed headers are staged into a caller-provided 256-byte buffer with hand-rolled appends (no `std.fmt` on the hot path):
+
+```
+"HTTP/1.1 " + 3-digit status + ' ' + statusPhrase
+["Content-Type: {s}\r\n" when content_type.len > 0]
+"Content-Length: " + appendDec
+"\r\nDate: " + cachedDate() + "\r\n\r\n"
+```
+
+For a known status the whole `"HTTP/1.1 <code> <phrase>\r\n"` line is emitted in one `memcpy` from a comptime-baked `statusLine` table, instead of assembling it from five pieces (`"HTTP/1.1 "` + `appendStatusCode` + `' '` + `statusPhrase` + `"\r\n"`) per response. `statusLine` returns `""` for an unknown code, where the build falls back to the piecewise path above, byte-identical to the baked line. `statusPhrase` covers the same common codes (anything else prints `Unknown`); `appendStatusCode` and `appendDec` are the manual digit writers for that fallback.
+
+**Per-thread date cache:**
+
+```
+threadlocal tl_date: { secs, buf[40], len }
+threadlocal tl_date_tick: u8
+
+cachedDate():
+  tick +%= 1
+  only on tick wrap (every 256 calls) or first use:
+      clock_gettime(REALTIME)
+      reformat only when the second changed
+```
+
+The IMF-fixdate string is reformatted at most once per second per thread, and the clock syscall itself is amortized across 256 responses. `formatHttpDate` uses `std.time.epoch` decomposition, day-of-week from `(epoch_day % 7 + 4) % 7`.
+
+### sendSimpleFD()
+
+```
+1. buildSimpleHeader into 256-byte stack buffer
+2. body.len <= 3840:
+      memcpy header + body into one 4096-byte stack buffer
+      single writeAllFD                       // one syscall for most responses
+3. larger body: writev loop with 2 iovecs (header remainder, body)
+      tracks sent across partial writes, INTR retries, AGAIN polls POLLOUT
+```
+
+### Other write helpers
+
+| Helper | Wire behaviour |
+| :- | :- |
+| `sendSimpleNoBodyFD` | `buildSimpleHeader` only, Content-Length set to the would-be body size (HEAD) |
+| `sendJsonFD` | `sendSimpleFD` with `application/json` |
+| `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
+| `sendGzipFD` | a body under 64 KiB compresses via `compression.flate_fast` (in-tree greedy fixed-Huffman gzip, several times faster than the std matcher, no per-stream state init), larger bodies keep the `std.compress.flate` `.gzip` path over the per-worker encode scratch, then header (`Content-Encoding: gzip`) + compressed bytes |
+| `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, no Content-Length |
+| `sendChunkFD` | `{x}\r\n` + data + `\r\n`, zero-length data is a no-op (would terminate the body) |
+| `sendChunkedEndFD` | `0\r\n\r\n` |
+| `sendRangeFD` | `parseRange` against `full_body.len`: valid gives `206` + `Content-Range` + slice, invalid gives `416` with `Content-Range: bytes */{total}` |
+
+### serveConn(): blocking keep-alive loop
+
+Used by .ASYNC. Per-connection state: the pool thread's `recv_buf` + `body_buf` pair (`threadConnBufs`, each `max_recv_buf` bytes, `BUF_SIZE` 16 KB for a direct caller that passes 0) and `leftover: usize`.
+
+```
+0. TCP_NODELAY (opts.nodelay, skipped on Windows)
+loop:
+  1. recvHead(fd, recv_buf, leftover)
+        HeaderTooLarge -> write 431, return
+  2. parseHead -> failure: write 400, return
+  3. expect_continue and body present -> send100ContinueFD
+  4. body:
+        chunked        -> readChunkedBody(fd, body_buf, peeked):
+                          MALFORMED -> 400, return. TOO_LARGE -> 413, return.
+                          NEED_MORE (peer quit mid-body) -> return
+        content_length -> declared length > max_request_body -> 413, return
+                          copy peeked bytes, read until min(content_length, body_buf.len),
+                          drainBody the remainder (counted, never touches body_buf)
+  5. bodyReceived = every body byte the socket gave up, bodyComplete = whether
+        the declared or framed end was reached, handed over before the invoke
+  6. setTimeout(handler_timeout_ms), handler(head, body, fd)
+  7. takeWebSocket() != null -> return   // promotion not honored here
+  8. !keep_alive -> return
+  9. pipelining: bytes past request_end shifted to recv_buf front, leftover updated
+        (a chunked read carries its own leftover to the front the same way)
+```
+
+The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (`max_recv_buf` bytes) hands the handler what fits and drains the remainder off the socket before the invoke (widening the receive window via `large_body_rcvbuf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `req.bodyReceived()` for the counted total and `req.bodyComplete()` to tell a finished upload from one the peer cut short, instead of trusting `head.content_length`.
+
+### serveConnOne(): EPOLL one-shot fallback
+
+Same parse + body + dispatch sequence as one `serveConn` iteration over caller-owned buffers, returns `ConnOutcome` instead of looping. Kept for one-shot dispatch uses, the EPOLL engine itself uses the buffered `serveEpollConn` path in server.zig.
+
+---
+
+## router.zig: comptime Router
+
+### Comptime partition
+
+`Router(routes)` counts each kind in comptime blocks, then builds:
+
+```
+exact_pairs   [exact_count]{ path, handler }  -> StaticStringMap.initComptime
+prefix_routes [prefix_count]Route             -> inline for at dispatch
+param_routes  [param_count]Route              -> inline for at dispatch
+```
+
+The returned type has a single decl, `dispatch`, with the exact `HandlerFn` signature, so a router plugs in anywhere a bare handler does.
+
+### dispatch()
+
+```
+1. tl_param_count = 0
+2. exact_map.get(path)                 -> call handler, return
+3. inline for param_routes: matchParam -> call handler, return  (first match wins)
+4. inline for prefix_routes: startsWith + boundary check (next char '/' or end)
+       track longest match             -> call best handler
+5. nothing matched                     -> sendSimpleFD 404 text/plain
+```
+
+### matchParam() and the param store
+
+```
+threadlocal tl_params: [8]PathParam
+threadlocal tl_param_count: usize
+```
+
+Splits pattern and path on `/` in lockstep. `:name` segments capture (empty path segment rejected, more than 8 captures rejected), literal segments must match exactly, segment counts must be equal. Captures are written into `tl_params` as they match but `tl_param_count` is committed only on full success, so a failed candidate never corrupts a later match. `pathParam(name)` is a linear scan over the committed entries. Values are slices into the request path and die with the dispatch call.
+
+---
+
+## server.zig: dispatch models
+
+### logSystem()
+
+Lifecycle lines route through `config.logger.system(.INFO, "http1", ...)` when present. Without a logger they fall back to `std.debug.print` with a `zix: ` prefix only in Debug builds (`builtin.mode == .Debug`), and are silent in release. Every zix server uses this same gated `logSystem` shape (http, http2, grpc, fix, tcp, udp, uds), so a release build with no logger emits no init noise.
+
+### connEntry() (.ASYNC task body)
+
+```
+defer stream.close(io)
+core.serveConn(stream.socket.handle, handler, .{ .handler_timeout_ms })
+```
+
+### runAsync()
+
+```
+1. resolve + listen (reuse_address = true, kernel_backlog)
+2. accept loop: srv.accept(io) catch continue
+      io.async(connEntry, ...)        // discard handle, task owns the stream
+```
+
+### EPOLL engine
+
+Linux only (`run()` falls back to `runPool` elsewhere, with a logged notice). Shared-nothing: each worker owns a private `SO_REUSEPORT` listener, a private epoll instance, and a private `ConnTable`, so no fd or slot is ever touched by two threads.
+
+#### Conn and ConnTable
+
+```zig
+Conn = {
+    fd, buf, filled,                  // buf: max_recv_buf bytes, filled: live byte count
+    ws: ?WsFrameFn = null,            // set on WebSocket promotion
+    drain: usize = 0,                 // oversize-body bytes still to consume off the socket
+    drain_received: usize = 0,        // body bytes consumed so far, served as the received count
+    pending_head_len: usize = 0,      // head bytes parked at the buf front for the deferred invoke
+    continue_sent: bool = false,      // 100 Continue already answered for the request being parsed
+}
+```
+
+`ConnTable` is a flat `[]?*Conn` indexed by fd, `MAX_FD = 1 << 16` slots. Linux hands out the lowest free fd so the table stays dense at the bottom. `alloc` creates the Conn + buffer (failure closes the fd), `free` releases both and nulls the slot. Connections with fd >= MAX_FD are refused.
+
+#### epollWorker()
+
+```
+1. private listener (reuse_address) -> setNonBlock(listener_fd)
+2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
+3. per-worker scratch (smp_allocator): body_buf sized from the recv-slot knob
+   (ws_recv_buf, else max_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
+4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
+      listener event       -> acceptAll
+      HUP/ERR              -> close
+      conn.drain > 0       -> serveEpollDrainThenServe
+      conn.ws != null      -> serveEpollWs
+      else                 -> serveEpollConn
+      outcome == .close    -> CTL_DEL + table.free + close(fd)
+```
+
+#### acceptAll()
+
+`accept4(NONBLOCK | CLOEXEC)` drained to EAGAIN (level-triggered listener, so nothing is missed). Each accepted fd: TCP_NODELAY, `table.alloc(fd, max_recv_buf)`, `CTL_ADD` with `EPOLLIN | EPOLLRDHUP`. Registration failure closes the fd.
+
+#### serveEpollConn() / serveEpollConnInner()
+
+Outer function installs the `RespSink` over `out_buf` around the parse pass, flushes it after, and hands a just-promoted connection to `serveEpollWs` immediately (a client can pipeline its first frame with the handshake request, and the flush guarantees the 101 precedes the first echo).
+
+Inner pass:
+
+```
+1. read into conn.buf[filled..]:
+      SUCCESS n=0 -> .close, AGAIN -> proceed with what is buffered, INTR -> retry
+      filled == buf.len before read -> 431, .close
+2. parse loop over conn.buf[consumed..filled]:
+      no "\r\n\r\n" -> break (partial head, wait for more)
+      parseHead failure -> 400, .close
+      Expect: 100-continue with a body -> 100 Continue, once per request (continue_sent)
+      body:
+        chunked        -> decodeChunkedInBuf: COMPLETE -> body = decoded slice,
+                          NEED_MORE -> break, MALFORMED -> 400 .close,
+                          TOO_LARGE -> 413 .close
+        declared length > max_request_body -> 413, .close (before reading any body byte)
+        fits in rem    -> body = slice, request_len = need
+        drain finished -> deferred request re-entering: counted total in
+                          bodyReceived, empty body slice, bodyComplete = true
+        need > buf.len -> oversize: park the head at the buf front (pending_head_len),
+                          count the body bytes already here (drain_received), set
+                          conn.drain to the unread remainder, defer the handler, break
+        else           -> break (body still arriving)
+      setTimeout + handler(head, body, fd)
+      takeWebSocket() -> conn.ws = callback, break  // bytes after this are frames
+      !keep_alive -> break
+3. shift unconsumed bytes to buffer front (pipelined partial request preserved)
+```
+
+One readable event therefore serves every complete pipelined request it delivered, with all responses leaving in one coalesced write.
+
+#### decodeChunkedInBuf()
+
+Non-streaming variant of the shared chunked walk (`core.chunkedFrame`) for the buffered path: requires the full chunked body (through the trailer's final CRLF) to be present in `src`. The returned `stop` drives the parse pass: `.COMPLETE` carries the decoded length and consumed wire bytes, `.NEED_MORE` waits for the next readable event, and `.MALFORMED` / `.TOO_LARGE` can never complete, so the engine answers `400` / `413` and closes instead of holding the connection until the buffer fills and the peer looks hung up.
+
+#### serveEpollWs()
+
+One read (level-triggered, remaining bytes re-fire the event), then `ws.pump` over the buffered bytes, then the standard shift of unconsumed bytes. Closes on peer EOF, close frame, write failure, or a frame wider than the whole buffer (can never complete, would spin otherwise).
+
+#### serveEpollDrain() / serveEpollDrainThenServe()
+
+Discards `conn.drain` bytes with `recvfrom(MSG_TRUNC)`: the kernel drops the bytes in place, no copy into `conn.buf`, chunk size not capped by the buffer (capped at 1 GB per call). Reads to EAGAIN, never past `conn.drain`, so the next pipelined request's bytes are untouched. Every discarded byte counts into `conn.drain_received`, because that count is what the waiting handler is told it received. When the drain hits zero, `serveEpollDrainThenServe` re-enters the parse pass over the parked head bytes (`conn.filled = pending_head_len`) and serves the deferred request with the counted total in `req.bodyReceived()`. A peer that hangs up mid-drain closes without the handler ever running.
+
+### URING engine
+
+Linux only (`run()` falls back to `runPool` elsewhere). The completion-based twin of the EPOLL engine: the same shared-nothing topology (one `SO_REUSEPORT` listener and one `io_uring` ring per worker, no shared queue, no fd handoff), but driven by completions instead of readiness, so most syscall transitions are batched into the ring (ADR-037).
+
+#### UringConn and the slot table
+
+```zig
+UringConn = {
+    fd, gen, buf, filled,             // gen: u24 generation tag against fd reuse
+    send_buf, staged, inflight,       // send_buf[0..inflight] held by the kernel while a send is in flight
+    closing,                          // free once the last send lands
+    slot: u32 = 0,                    // compact buffer-slab slot backing buf + send_buf
+    send_heap: bool = false,          // send_buf switched to a heap buffer by the sink's grow path
+    scan_from: usize = 0,             // split-head scan watermark (resume the CRLFCRLF search)
+    drain: usize = 0,                 // oversize-body bytes still to discard (mirrors Conn.drain)
+    drain_received: usize = 0,        // body bytes consumed so far, served as the received count
+    pending_head_len: usize = 0,      // head bytes kept at the buf front for the deferred invoke
+    ws: ?WsFrameFn = null,
+    direct: []const u8 = &.{},        // zero-copy cache replay in flight (pinned slab bytes)
+    direct_slot: u32 = 0,
+}
+```
+
+`slots` is a flat inline `[]UringConn` table indexed by fd (`MAX_FD` entries, mapped zeroed and demand-paged, an empty slot reads as `buf.len == 0`). The recv and send buffers live in one per-worker mmap'd slab of page-multiple strides: a connection draws a compact slot from a LIFO free-list on accept (zero allocator calls), close returns the slot, and past the warm cap the oldest warm stride's pages go back to the OS (`MADV_DONTNEED`). The slab explicitly opts out of transparent huge pages (`MADV_NOHUGEPAGE`), so residency tracks the pages actually written on any host THP policy. Every completion's `user_data` packs `{ op, gen, fd }`, and `lookup` rejects a CQE whose `gen` no longer matches the slot, which closes the close-versus-recv race on a reused fd. A connection is half-duplex (at most one recv or one send in flight), so a blocking sink flush can never interleave with an in-flight send.
+
+#### initUringRing()
+
+`IoUring.init_params` with `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` (single-issuer fast path on a one-thread-per-ring loop, plus an enlarged completion queue), falling back to a flagless `IoUring.init` on a kernel that lacks them. SQ `URING_ENTRIES = 4096`, CQ `URING_CQ_ENTRIES = 16 K`.
+
+#### run() loop
+
+```
+1. armAccept (multishot)
+2. wait_nr > 1: arm the 20us coalesce timer (stall guard)
+3. submit_and_wait(wait_nr), copy_cqes into a 512-entry stack array
+4. wait_nr = clamp(count / 2, 1, 32)
+5. per CQE, switch on user_data.op:
+      accept -> handleAccept   // re-arm on !IORING_CQE_F_MORE, alloc conn, armRecv, ring.submit()
+      recv   -> handleRecv
+      send   -> handleSend
+      close  -> no-op          // teardown completion, slot already recycled
+6. every 16 CQEs of a batch >= 128 deep: ring.submit() when SQEs are staged
+```
+
+Step 6 is the intra-batch submit: in a deep completion batch the last response would otherwise wait for every earlier request's dispatch before its send SQE even reaches the kernel, which multiplies per-request dispatch cost into closed-loop latency. Shallow batches skip the stride (they drain in microseconds, and the extra enters would tax the high-rate low-concurrency path).
+
+Steps 2 to 4 are the adaptive wakeup coalescing: a hot loop (large reaps) waits for up to 32 completions per enter instead of one, so staggered arrivals do not wake the worker once per completion, and the 20us timeout SQE guarantees a lone completion is never held past the window. A cooling loop decays back to single-completion waits within a pass. The `ring.submit()` inside handleAccept pushes the fresh connection's recv SQE immediately (accept-to-first-byte is what a churn-heavy closed loop measures), instead of after the rest of the batch dispatches.
+
+#### armRecv() / handleRecv() / dispatch()
+
+`armRecv` posts a plain `recv` SQE into `conn.buf[filled..]`, so data lands in place with no copy. `handleRecv` adds `cqe.res` bytes, then `dispatch` runs the parse loop, mirroring `serveEpollConnInner` without the read. A chunked body fully present in `conn.buf` decodes in place via `decodeChunkedInBuf` into the per-worker `body_buf`, with the same outcomes as the EPOLL pass: a malformed chunk frame answers `400`, a chunked body past the buffer `413`, a declared Content-Length past `max_request_body` `413` before any body byte is consumed, and `Expect: 100-continue` with a pending body is answered once while the body is still arriving. A body larger than `conn.buf` defers its handler: the head bytes stay at the front of `conn.buf`, `conn.drain` is set to the unread remainder, and the drain (below) counts it off the socket before the handler runs with `req.bodyReceived()` set to the counted total (the body slice stays empty). Responses stage into `conn.send_buf` through the `RespSink`, so a pipelined burst coalesces into one `submitSend`. The staged window is `send_buf[staged_off..][0..staged]`: a reserve-committed response starts at the sink's `off`, and a short send advances the window in place instead of shifting the remainder to the front.
+
+#### armDrainRecv()
+
+The ring twin of `serveEpollDrain`. Posts a `recv` SQE with `MSG_TRUNC` and `sqe.len` overridden to `min(conn.drain, 1 GB)`: the kernel discards the body bytes in place (no copy into `conn.buf`, the request is not capped by the buffer length), so one recv drains the whole remaining body instead of one round-trip per `max_recv_buf`. `handleRecv` counts the drained bytes down (accumulating `conn.drain_received`) and re-arms until `conn.drain` reaches zero, then serves the deferred request through the normal dispatch path: the head bytes survived at the front of `conn.buf` because `MSG_TRUNC` never writes it. Capping the request at `conn.drain` leaves any pipelined bytes after the body untouched. Covered by the `test-runner-http1-drain` runner, which pipelines an over-large POST then a follow-up GET on one keep-alive connection. It kept only its URING leg when ADR-065 collapsed the per-model runner rows.
+
+#### watchExternal() / the external op
+
+Multishot POLLIN watch for a foreign fd (a driver socket) on the worker's ring, armed once from handler context through `core.uringWatchFd` (the trampoline `run()` installs per worker). Each CQE routes to the caller-registered `core.tl_external_cb` on the worker thread, and the completion path re-arms a lapsed multishot itself while the fd stays alive (a negative res drops the watch). A full submission queue parks the arm as an `.external` process-queue entry (re-armed by drainParked), so a watch is never dropped while parking has room. This is what lets a worker own pipelined driver connections (`postgrez.dispatch.Line`) on its own ring.
+
+#### WebSocket on the ring
+
+A per-worker `IoUring.BufferGroup` (provided-buffer ring) serves WebSocket recvs (Phase 4b): the kernel hands a buffer over only when a frame arrives, so an idle connection ties up no recv buffer, the memory-scaling win at high connection counts. `wsHandleBuf` parses a whole-frame batch in place out of the selected buffer (zero copy) and copies only a trailing partial frame into `conn.buf`. A kernel without buffer-ring support leaves `ws_bufs` null, and WebSocket falls back to the plain recv-into-`conn.buf` path.
+
+#### finishClose(): ring teardown (ADR-041)
+
+Teardown closes the fd on the ring, not synchronously. `finishClose` reads the fd, recycles the connection slot first (`destroyConn`, which frees a heap-grown send buffer, unpins a borrowed cache replay, returns the buffer-slab slot to the free-list, and zeroes the fd slot), then submits a `prep_close` SQE tagged with `OpKind.close`. It falls back to a synchronous `linux.close` only when the SQ is momentarily full. The half-duplex per-connection state guarantees no in-flight op targets the closing fd, and recycling the slot before the close completes is safe because the generation tag rejects any late CQE against the reused fd. The `close` completion is a no-op (the slot is already free). This matters under connection churn: a synchronous `close` per teardown blocks the worker between connections, so on the 64-core box the ring barely engaged its cores under reconnect storms (limited-conn, json). Keeping the close on the ring lets the worker keep reaping completions across teardowns, so the cores fill. See ADR-041 for the 64-core measurement.
+
+The shared `OpKind` (with the `close` variant) lives in `src/multiplexers/ring.zig` (relocated from `src/tcp/io_uring`), so every io_uring engine carries a `.close => {}` arm. Only `zix.Http1` arms it for now.
+
+### Http1ServerImpl / Server
+
+```zig
+fn Http1ServerImpl(comptime handler: HandlerFn) type
+    init(config) -> .{ .config = config }   // no socket opened, no allocation
+    deinit()     -> no-op
+    run()        -> switch on dispatch_model (.EPOLL gated on Linux at comptime)
+
+Server.init(comptime handler, config) -> Http1ServerImpl(handler).init(config)
+```
+
+The handler is baked into the type so `run()` takes no argument and dispatch is a direct call, not a function pointer load from config.
+
+---
+
+## websocket.zig: RFC 6455 codec + engine pump
+
+### Frame format constants
+
+```
+7-bit len max 125, 126 = 16-bit extended, 127 = 64-bit extended
+mask key 4 bytes (client frames always masked)
+max server frame header 10 bytes
+```
+
+### parseFrame()
+
+```
+1. need 2 bytes minimum
+2. byte 0: FIN + opcode, byte 1: MASK + 7-bit length
+3. extended length (2 or 8 bytes) when marked
+4. mask key when MASK set
+5. payload capped at payload_buf.len:
+      masked   -> XOR-unmask into payload_buf
+      unmasked -> zero-copy slice into buf
+6. return { frame, consumed } or null when bytes are still missing
+```
+
+The masked path unmasks with a 16-wide `@Vector(16, u8)` XOR against the 4-byte mask replicated four times, processing 16 bytes per iteration, with a scalar `i % 4` tail for the remaining bytes. This replaces the per-byte loop and matches it bit-for-bit (covered by 32-byte and 17-byte unmask tests).
+
+### buildHeader() / buildFrame()
+
+`buildHeader` writes FIN | opcode then the 7-bit / 16-bit / 64-bit length form into a >= 10 byte buffer, returns header length. `buildFrame` appends the payload after the header (buffer must hold payload + 10). Server frames are unmasked per RFC 6455 5.1.
+
+### acceptKey() / upgrade()
+
+`acceptKey` concatenates the client key with the RFC 6455 GUID, SHA-1, base64 into a caller `[64]u8` (`error.ZixKeyTooLong` past 128 input bytes). `upgrade` writes the full `101 Switching Protocols` block through `core.writeAllFD` (sink-aware, so under EPOLL it stages with the other responses).
+
+### send() and SendSink
+
+`SendSink` is the WebSocket twin of core's `RespSink` (same append / flush / write-through rules), installed thread-locally by `pump` for the duration of one pass.
+
+```
+send(fd, opcode, payload):
+  sink active -> stage header then payload         (error.BrokenPipe if sink failed)
+  payload + header <= 4096 -> build one buffer, one writeAllFD
+  larger -> write header then payload separately   (avoids a big stack copy)
+```
+
+### serve()
+
+`acceptKey` + `upgrade` + `core.requestWebSocket(fd, on_frame)`. Called from inside an http1 handler. The engine honors the promotion under `.EPOLL` only.
+
+### pump()
+
+```
+install SendSink(out_buf)
+loop over data:
+  parseFrame orelse break        // trailing partial frame left for the next read
+  text/binary -> on_frame(fd, opcode, payload)
+  ping        -> send pong (payload echoed)
+  close       -> send close, consume, stop with close = true
+  pong/continuation/other -> ignored
+flush sink
+return { consumed, close: close or sink.failed }
+```
+
+`consumed` counts whole frames only, so the engine's buffer shift keeps partial frames intact.
+
+---
+
+###### end of lld-http1
