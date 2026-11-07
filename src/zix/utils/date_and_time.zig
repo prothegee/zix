@@ -72,7 +72,7 @@ fn formatTimestamp(
     const minute = day_seconds.getMinutesIntoHour();
     const second = day_seconds.getSecondsIntoMinute();
 
-    const seperator: u8 = if (use_t) 'T' else ' ';
+    const separator: u8 = if (use_t) 'T' else ' ';
 
     return switch (format) {
         .RFC3339 => {
@@ -80,7 +80,7 @@ fn formatTimestamp(
                 return std.fmt.bufPrint(
                     buffer,
                     "{d:0>4}-{d:0>2}-{d:0>2}{c}{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z",
-                    .{ year, month, day, seperator, hour, minute, second, ms },
+                    .{ year, month, day, separator, hour, minute, second, ms },
                 ) catch |err| switch (err) {
                     else => return Error.ZixUtils_DateAndTime_NoSpaceLeft,
                 };
@@ -88,11 +88,11 @@ fn formatTimestamp(
                 const sign: u8 = if (offset_hours > 0) '+' else '-';
                 const abs_offset: u8 =
                     @intCast(if (offset_hours < 0) -offset_hours else offset_hours);
-                
+
                 return std.fmt.bufPrint(
                     buffer,
                     "{d:0>4}-{d:0>2}-{d:0>2}{c}{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}{c}{d:0>2}:00",
-                    .{ year, month, day, seperator, hour, minute, second, ms, sign, abs_offset },
+                    .{ year, month, day, separator, hour, minute, second, ms, sign, abs_offset },
                 ) catch |err| switch (err) {
                     else => return Error.ZixUtils_DateAndTime_NoSpaceLeft,
                 };
@@ -124,7 +124,7 @@ fn formatTimestamp(
         .ISO8601 => std.fmt.bufPrint(
             buffer,
             "{d:0>4}-{d:0>2}-{d:0>2}{c}{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}",
-            .{ year, month, day, seperator, hour, minute, second, ms },
+            .{ year, month, day, separator, hour, minute, second, ms },
         ) catch |err| switch (err) { else => return Error.ZixUtils_DateAndTime_NoSpaceLeft },
     };
 }
@@ -150,11 +150,12 @@ pub const Format = enum {
 
 /// Param:
 /// io - std.Io
-/// buffer - min for RC3339 and RFC7231 is 30 & for ISO8601 23
+/// buffer - min for RFC3339 and RFC7231 is 30 & for ISO8601 23
 /// offset_hours - min -12 & max 14, error otherwise (check OUT_BUFFER_*)
-/// uset_t - if true, result has `T` seperator, ` ` otherwise
+/// use_t - if true, result has `T` separator, ` ` otherwise
 pub fn now(io: std.Io, buffer: []u8, format: Format, offset_hours: i8, use_t: bool) Error![]u8 {
     const timestamp = std.Io.Clock.Timestamp.now(io, .real);
+
     return formatTimestamp(timestamp.raw.toMilliseconds(), buffer, format, offset_hours, use_t);
 }
 
@@ -170,12 +171,16 @@ pub fn now(io: std.Io, buffer: []u8, format: Format, offset_hours: i8, use_t: bo
 /// Return:
 /// - i64 (milliseconds since an unspecified point, never decreasing between calls)
 pub fn nowMs(io: std.Io) i64 {
-    return std.Io.Clock.Timestamp.now(io, .awake).raw.toMilliseconds();
+    const timestamp = std.Io.Clock.Timestamp.now(io, .awake);
+
+    return timestamp.raw.toMilliseconds();
 }
 
 /// Read the monotonic clock, in nanoseconds.
 pub fn nowUs(io: std.Io) i96 {
-    return std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    const timestamp = std.Io.Clock.Timestamp.now(io, .awake);
+
+    return timestamp.raw.toNanoseconds();
 }
 
 // --------------------------------------------------------- //
@@ -287,5 +292,75 @@ test "zix utils: date and time, formats ISO8601" {
     // Guarantee the offset hours
     const err = now(std.testing.io, &buffer, .ISO8601, -13, false);
     try std.testing.expectError(Error.ZixUtils_DateAndTime_ErrorTimezoneOffset, err);
+}
+
+test "zix utils: date and time, formats deterministic timestamps" {
+    var buffer: [OUT_BUFFER_SIZE_RFC3339]u8 = undefined;
+
+    // 784111777 = 1994-11-06 08:49:37 UTC (Sunday).
+    try std.testing.expectEqualStrings(
+        "1994-11-06T08:49:37.000Z",
+        try formatTimestamp(784_111_777_000, &buffer, .RFC3339, 0, true),
+    );
+    try std.testing.expectEqualStrings(
+        "1994-11-06T15:49:37.000+07:00",
+        try formatTimestamp(784_111_777_000, &buffer, .RFC3339, 7, true),
+    );
+    try std.testing.expectEqualStrings(
+        "1994-11-06T03:49:37.000-05:00",
+        try formatTimestamp(784_111_777_000, &buffer, .RFC3339, -5, true),
+    );
+
+    var iso_buffer: [OUT_BUFFER_SIZE_ISO8601]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "1994-11-06 08:49:37.000",
+        try formatTimestamp(784_111_777_000, &iso_buffer, .ISO8601, 0, false),
+    );
+    try std.testing.expectEqualStrings(
+        "1994-11-06T08:49:37.000",
+        try formatTimestamp(784_111_777_000, &iso_buffer, .ISO8601, 0, true),
+    );
+}
+
+test "zix utils: date and time, rejects a short buffer" {
+    var buffer: [4]u8 = undefined;
+
+    try std.testing.expectError(
+        Error.ZixUtils_DateAndTime_NoSpaceLeft,
+        formatTimestamp(784_111_777_000, &buffer, .RFC3339, 0, true),
+    );
+    try std.testing.expectError(
+        Error.ZixUtils_DateAndTime_NoSpaceLeft,
+        formatTimestamp(784_111_777_000, &buffer, .RFC7231, 0, false),
+    );
+    try std.testing.expectError(
+        Error.ZixUtils_DateAndTime_NoSpaceLeft,
+        formatTimestamp(784_111_777_000, &buffer, .ISO8601, 0, false),
+    );
+}
+
+test "zix utils: date and time, accepts the offset range bounds" {
+    var buffer: [OUT_BUFFER_SIZE_RFC3339]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        "1994-11-06T22:49:37.000+14:00",
+        try formatTimestamp(784_111_777_000, &buffer, .RFC3339, 14, true),
+    );
+    try std.testing.expectEqualStrings(
+        "1994-11-05T20:49:37.000-12:00",
+        try formatTimestamp(784_111_777_000, &buffer, .RFC3339, -12, true),
+    );
+}
+
+test "zix utils: date and time, reads a monotonic clock" {
+    const io = std.testing.io;
+
+    const ms_first = nowMs(io);
+    const ms_second = nowMs(io);
+    try std.testing.expect(ms_second >= ms_first);
+
+    const us_first = nowUs(io);
+    const us_second = nowUs(io);
+    try std.testing.expect(us_second >= us_first);
 }
 
