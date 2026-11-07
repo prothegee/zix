@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package location;
+
+service Location {
+  rpc SendLocationAndSave (LocationReq) returns (LocationResp) {}
+}
+
+message LocationReq {
+  double long = 1;
+  double lat = 2;
+  string message = 3;
+}
+
+message LocationResp {
+  string message = 1;
+  bool ok = 2;
+}
