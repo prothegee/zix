@@ -80,41 +80,47 @@ __**Update:**__
 
 - Menambahkan `uuidz` untuk build semua target matrix.
 
-- Menambahkan utils pwhash, mengkover:
-    - Argon2.
-    - Bcrypt.
-    - PBKDF2.
-    - Scrypt.
+- **`zix.Utils`**:
+    - Diekspor dari `src/zix/utils/Utils.zig` dan `zix.Utils` di `src/zix/lib.zig`.
+    - Modul yang tersedia: `Available`, `Base32`, `Base64`, `Charsets`, `CheckString`,
+      `DateTime`, `File`, `Generator`, dan `Pwhash`.
+    - `Pwhash` mengelompokkan `Argon2`, `Bcrypt`, `Pbkdf2`, dan `Scrypt`.
 
-- Menambahkan utils generator dalam `src/utils/generator.zig`.
+- Porting utils zix ke `src/zix/utils/` dengan gaya saat ini:
+    - `charsets.zig`: set alphabet, numeric, punctuation, base32, dan base64 bersama.
+    - `file.zig`: `exists`, `extension`, `load`, dan `save`,
+      dengan `Error` eksplisit untuk file tidak ditemukan, path adalah directory,
+      file terlalu besar, tidak bisa dibaca, path terlalu panjang,
+      gagal create, gagal write, dan gagal alokasi.
+    - `generator.zig`: `strings` dan `numbers` acak,
+      dengan error length nol, charset kosong, dan alokasi.
+    - `date_and_time.zig`: format RFC3339, RFC7231, dan ISO8601,
+      plus `nowMs` dan `nowUs`.
+    - `available.zig`: `networkPort` untuk memeriksa alamat yang bisa di-bind.
+    - `base32.zig` dan `base64.zig`: encode dan decode RFC 4648,
+      dengan error panjang tidak valid, karakter tidak valid, dan alokasi.
+    - `pwhash/argon2.zig`, `pwhash/bcrypt.zig`, `pwhash/pbkdf2.zig`, dan
+      `pwhash/scrypt.zig`: `hash` dan `verify` dengan satu set `Error` per algoritma.
+    - Setiap file memiliki header saat ini, section `Private`/`Public`/`Test`,
+      pemetaan error std, dan unit plus edge test.
+    - `src/zix/test.zig` mengimpor setiap file baru agar test berjalan.
 
-- Menambahkan utils check `src/utils/Check.zig`:
-    - `string`:
-        - `isNumericSigned` untuk mengecek string adalah signed number.
-        - `isNumericUnsigned` untuk mengecek string adalah unsigned number.
-        - `isDecimal` untuk mengecek string adalah decimal number.
+- `zix.Utils` juga mengekspos `check/string.zig`:
+    - `isNumericSigned`, `isNumericUnsigned`, dan `isDecimal`.
 
-- Menambahkan utils base32 `src/utils/base32.zig`, mengkover:
-    - Encode.
-    - Decode.
-    - RFC 4648 test vectors + roundtrip.
+- Member error utils sekarang mengikuti `ZixUtils_<Module>_<Condition>`,
+  menggantikan nama seperti `ZixFileNotFound` dan `InvalidLength`.
 
-- Menambahkan utils base64 `src/utils/base64.zig`, mengkover:
-    - Encode.
-    - Decode.
-    - RFC 4648 test vectors + roundtrip.
-
-- Memperkenalkan `zix.utils.charsets` dari `src/utils/charsets.zig`:
-    - Mengkover mulai dari `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`,
-      `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, dan `base64`.
-    - User/caller bisa menggunakan ini ketika mereka membutuhkan.
-    - Untuk kontributor/maintainer, semua repeatable charset harus digunakan atau dipanggil dari sini.
+- `zix.Utils.Charsets` adalah sumber untuk string charset yang berulang.
 
 <br>
 
 __**Fix:**__
 
 - In zig 0.17.x, `recoverPublicKey` is treat as infallible.
+
+- Test range `generator` memakai `or`, sehingga assertion batas selalu lolos.
+  Sekarang memakai `and`.
 
 <br>
 
