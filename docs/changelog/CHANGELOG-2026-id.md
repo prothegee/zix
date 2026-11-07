@@ -113,6 +113,41 @@ __**Update:**__
 
 - `zix.Utils.Charsets` adalah sumber untuk string charset yang berulang.
 
+    ---
+
+- **`zix.Http1`**:
+    - Alias publik baru: `HandlerFn`, `PathParam`, `Method`, `Status`, `Content`,
+      `ContentType`, dan `HeaderSize`.
+    - Router menentukan ukuran penyimpanan path param saat compile time dari rute dengan
+      `:param` terbanyak. Batas tetap 8 dihapus.
+    - `Config` mendapat field request, compression, cache, dan static:
+      `handler_timeout_ms`, `max_recv_buf`, `max_request_body`, `large_body_recv_buf`,
+      `send_date_header`, `max_response_headers`, `compress`, `compression_min_size`,
+      `compression_max_out`, `response_cache`, `cache_ttl_ms`, `cache_max_entries`,
+      `cache_max_value_bytes`, `public_dir`, `public_dir_upload`,
+      `public_dir_cache_ttl_ms`, dan `public_dir_cache_max_entries`.
+    - Default `max_request_body` adalah 2 MiB (sebelumnya 8 MiB).
+    - `large_body_rcvbuf` di-rename menjadi `large_body_recv_buf`.
+    - `max_entries` dan `max_value_bytes` diganti dengan `cache_max_entries` dan
+      `cache_max_value_bytes`.
+    - `.ASYNC` menyalin setiap field `Config` ke setiap koneksi.
+    - `.EPOLL` dan `.URING` memasang `send_date_header`, `max_response_headers`,
+      `handler_timeout_ms`, `max_request_body`, dan `large_body_recv_buf` per worker.
+      Buffer per koneksi mengikuti `max_recv_buf` (sebelumnya tetap 16 KiB).
+    - `response_cache` dan `public_dir` sudah diterima tetapi belum aktif.
+
+- Contoh Http1 dengan gaya saat ini, terdaftar di `zig build zix-example-http1`:
+    - `http1_json`, `http1_params`, dan `http1_paths` di-porting.
+    - `http1_logger` baru: `zix.Logger` dipasang ke server dengan output console dan file.
+
+- **`zix.Http` dihapus**, `zix.Http1` adalah engine HTTP/1.1:
+    - README dan docs memakai `zix.Http1` di teks dan contoh kode.
+    - `docs/hld-http-*.md` dan `docs/lld-http-*.md` dihapus.
+    - Bagian docs tanpa padanan `zix.Http1` dihapus: HTTP client,
+      `RequestHeaderSize`, client SSE dan WebSocket, dan referensi `HttpServerConfig`.
+    - Link `examples/http_*.zig` sekarang mengarah ke `examples/http1_*.zig` yang sesuai.
+    - ADR, rilis changelog sebelumnya, dan migration guide tetap menyimpan `zix.Http` sebagai riwayat.
+
 <br>
 
 __**Fix:**__
@@ -121,6 +156,11 @@ __**Fix:**__
 
 - Test range `generator` memakai `or`, sehingga assertion batas selalu lolos.
   Sekarang memakai `and`.
+
+- `.EPOLL` dan `.URING` tidak pernah menjawab 413 untuk body besar, karena batasnya
+  konstanta 0. Sekarang keduanya membaca `max_request_body` dari `Config`.
+
+- Rute PARAM `zix.Http1` dengan lebih dari 8 `:param` tidak pernah cocok dan menjawab 404.
 
 <br>
 

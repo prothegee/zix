@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every HTTP response in zix can carry custom headers added via `res.addHeader(name, value)`. The number of headers a single response is allowed to carry is controlled by `HttpServerConfig.max_response_headers`, which accepts a `zix.Http.HeaderSize` value.
+Every HTTP response in zix can carry custom headers added via `res.addHeader(name, value)`. The number of headers a single response is allowed to carry is controlled by `max_response_headers` in the `zix.Http1` server config, which accepts a `zix.Http1.HeaderSize` value.
 
 The backing buffer is arena-allocated per request to exactly the configured cap: no wasted memory, no false ceiling. `addHeader()` returns `error.ZixTooManyHeaders` once the cap is reached.
 
@@ -18,10 +18,10 @@ The backing buffer is arena-allocated per request to exactly the configured cap:
 | `.EXTRA_LARGE` | 128 | k8s deployments, service mesh (Envoy/Linkerd), heavy header chains |
 | `.{ .CUSTOM = N }` | N | Explicit non-standard cap |
 
-Set it once in `HttpServerConfig`:
+Set it once in the server config:
 
 ```zig
-var server = zix.Http.Server.init(.{
+var server = zix.Http1.Server.init(Routes.dispatch, .{
     // ...
     .max_response_headers = .LARGE,              // 64 headers
     // .max_response_headers = .{ .CUSTOM = 48 }, // explicit cap
@@ -106,7 +106,7 @@ res.addHeader("X-Foo", "bar") catch |err| switch (err) {
 };
 ```
 
-See `examples/http_xtra_headers.zig` and `examples/http1_xtra_headers.zig` for a working demonstration of the cap, the overflow path, and the injection guard.
+See `examples/http1_xtra_headers.zig` for a working demonstration of the cap, the overflow path, and the injection guard.
 
 ---
 

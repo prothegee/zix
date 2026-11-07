@@ -188,7 +188,7 @@ Query string di-strip sebelum matching (matching melihat path sampai `?`), handl
 
 `public_dir` (ADR-064) menyajikan route yang tidak cocok sebagai file sebelum 404, dengan `..` ditolak. Direktori yang tidak ada gagal saat `run()` dengan `error.ZixPublicDirNotFound`.
 
-**Engine ini berbeda dari ketiga lainnya, dan perbedaannya bukan optimisasi.** Pada `zix.Http`, `zix.Http1`, dan `zix.Http2` response ditulis di dalam pemanggilan handler, jadi body bisa datang dari descriptor yang hanya terbuka selama pemanggilan itu. Di sini tidak bisa: `Response` adalah pemegang nilai, dan body yang terlalu besar untuk satu paket diparkir di slot send-stream, difragmentasi pump ke banyak paket, ditahan sampai setiap range di-ack, lalu di-rewind dan dikirim ulang saat loss atau probe timeout. Body harus berupa memori stabil yang bisa dibaca acak dan hidup lebih lama dari handler.
+**Engine ini berbeda dari kedua lainnya, dan perbedaannya bukan optimisasi.** Pada `zix.Http1` dan `zix.Http2` response ditulis di dalam pemanggilan handler, jadi body bisa datang dari descriptor yang hanya terbuka selama pemanggilan itu. Di sini tidak bisa: `Response` adalah pemegang nilai, dan body yang terlalu besar untuk satu paket diparkir di slot send-stream, difragmentasi pump ke banyak paket, ditahan sampai setiap range di-ack, lalu di-rewind dan dikirim ulang saat loss atau probe timeout. Body harus berupa memori stabil yang bisa dibaca acak dan hidup lebih lama dari handler.
 
 Jadi body datang dari snapshot yang dipegang cache, dan pin cache ditahan sepanjang response, bukan sepanjang pemanggilan handler. Dua konsekuensi mengikuti:
 
@@ -261,7 +261,7 @@ Handler mengembalikan `anyerror!void`. `core.invokeHandler` menyelesaikan handle
 
 Penyelesaian di sini adalah pengisian struct, bukan penulisan ke socket, dan itu yang memisahkan engine ini dari tiga lainnya:
 
-- Body auto-500 kosong. `zix.Http`, `zix.Http1`, dan `zix.Http2` menulis body `text/plain` berisi `Internal Server Error`, engine ini hanya mengirim status.
+- Body auto-500 kosong. `zix.Http1` dan `zix.Http2` menulis body `text/plain` berisi `Internal Server Error`, engine ini hanya mengirim status.
 - Tidak ada kasus send yang gagal. `res.send` hanya mengisi struct dan mengembalikan `void`, jadi handler tidak bisa gagal mengirim seperti `try res.send(...)` pada engine TCP, dan setiap error yang sampai ke `invokeHandler` ditentukan murni oleh `res.sent`.
 
 Satu `500` lain datang dari engine sendiri, bukan dari handler yang error: body yang terlalu besar untuk satu paket butuh send-stream slot, dan saat koneksi tidak punya slot bebas, request dijawab `500` dengan body kosong (dipak seperti response kecil). Ada 64 slot per koneksi (`max_send_streams`, tetap, bukan field config), jadi client yang menahan banyak response besar sekaligus bisa menemuinya.

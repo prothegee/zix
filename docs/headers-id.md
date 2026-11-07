@@ -2,7 +2,7 @@
 
 ## Tujuan
 
-Setiap respons HTTP di zix dapat membawa header kustom yang ditambahkan melalui `res.addHeader(name, value)`. Jumlah header yang diizinkan dalam satu respons dikendalikan oleh `HttpServerConfig.max_response_headers`, yang menerima nilai `zix.Http.HeaderSize`.
+Setiap respons HTTP di zix dapat membawa header kustom yang ditambahkan melalui `res.addHeader(name, value)`. Jumlah header yang diizinkan dalam satu respons dikendalikan oleh `max_response_headers` di config server `zix.Http1`, yang menerima nilai `zix.Http1.HeaderSize`.
 
 Backing buffer dialokasikan via arena per request dengan ukuran tepat sesuai cap yang dikonfigurasi: tidak ada memori yang terbuang, tidak ada batas palsu. `addHeader()` mengembalikan `error.ZixTooManyHeaders` begitu cap tercapai.
 
@@ -18,10 +18,10 @@ Backing buffer dialokasikan via arena per request dengan ukuran tepat sesuai cap
 | `.EXTRA_LARGE` | 128 | Deployment k8s, service mesh (Envoy/Linkerd), rantai header yang padat |
 | `.{ .CUSTOM = N }` | N | Cap non-standar yang ditetapkan secara eksplisit |
 
-Atur sekali saja di `HttpServerConfig`:
+Atur sekali saja di config server:
 
 ```zig
-var server = zix.Http.Server.init(.{
+var server = zix.Http1.Server.init(Routes.dispatch, .{
     // ...
     .max_response_headers = .LARGE,              // 64 headers
     // .max_response_headers = .{ .CUSTOM = 48 }, // cap eksplisit
@@ -106,7 +106,7 @@ res.addHeader("X-Foo", "bar") catch |err| switch (err) {
 };
 ```
 
-Lihat `examples/http_xtra_headers.zig` dan `examples/http1_xtra_headers.zig` untuk demonstrasi cap, jalur overflow, dan penjaga injeksi yang berfungsi.
+Lihat `examples/http1_xtra_headers.zig` untuk demonstrasi cap, jalur overflow, dan penjaga injeksi yang berfungsi.
 
 ---
 

@@ -121,7 +121,7 @@ The allocator is chosen by how long the data lives and who touches it, not by ha
 | Lifetime / ownership | Strategy | Where |
 | :- | :- | :- |
 | Shared or long-lived, no single reset point | `std.heap.smp_allocator` (general-purpose, thread-safe), the default | every `dispatch/`, `core.zig` |
-| True scope with one bulk reset, single owner | arena, freed in one reset | `zix.Http` per-connection arena, `utils/response_cache.zig` |
+| True scope with one bulk reset, single owner | arena, freed in one reset | `zix.Http1` per-request arena, `utils/response_cache.zig` |
 | Bounded hot-path table | demand-paged slab, no per-accept heap | `multiplexers/slab.zig` |
 | Warm reuse across connections | idle-conn object pool, allocation-free reuse | `URING_IDLE_POOL_FLOOR` |
 | Borrowed (`io`, `logger`) | never freed by zix, caller owns and must outlive | every config |

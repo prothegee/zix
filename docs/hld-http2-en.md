@@ -245,7 +245,7 @@ flowchart TD
 - Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set. With it set, a repeat request costs a hash lookup instead of an open plus a stat, and `.br` / `.gz` siblings are resolved once at insert instead of probed per request. Every cached variant header carries `Vary: Accept-Encoding`.
 - Zero copy (`sendfile`) is always refused on this engine, cleartext included, because the mux coalescing hook (`frame.write_hook`) is installed on every batch and a direct socket write would put the body ahead of frames already staged. The body is cut from a resident snapshot instead.
 - Static sends use the same unmetered `frame.sendResponseFD` path `Response.send` uses, not the window-paced `mux.sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
-- `public_dir_upload` is not offered here. `zix.Http2` has no upload handler convention, unlike `zix.Http` and `zix.Http1`.
+- `public_dir_upload` is not offered here. `zix.Http2` has no upload handler convention, unlike `zix.Http1`.
 
 ---
 

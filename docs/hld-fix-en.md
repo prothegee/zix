@@ -385,7 +385,7 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Dispatch Models
 
-Same three models as `zix.Http.Server`. The field is required with no default. ASYNC suits long-lived FIX sessions and is the only portable model:
+Same three models as `zix.Http1.Server`. The field is required with no default. ASYNC suits long-lived FIX sessions and is the only portable model:
 
 | Model | Workers | Notes |
 | :- | :- | :- |

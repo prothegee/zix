@@ -21,7 +21,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `workers` | .EPOLL and .URING worker count, ignored by .ASYNC |
 | `handler_timeout_ms` | armed before every dispatch in all models |
 | `max_recv_buf` | per-connection buffer size on every model: .EPOLL / .URING slots (`ConnTable.alloc`), the .ASYNC pool-thread pair (`threadConnBufs`) |
-| `large_body_rcvbuf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
+| `large_body_recv_buf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
 | `ws_recv_buf` | WebSocket per-connection buffer size, 0 falls back to `max_recv_buf`. .EPOLL sizes the recv buffer, .URING sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch |
 | `send_date_header` | managed write helpers: include or omit the `Date` header |
 | `tls` | selects the TLS serve path when non-null (native https), else cleartext |
@@ -218,7 +218,7 @@ loop:
         (a chunked read carries its own leftover to the front the same way)
 ```
 
-The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (`max_recv_buf` bytes) hands the handler what fits and drains the remainder off the socket before the invoke (widening the receive window via `large_body_rcvbuf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `req.bodyReceived()` for the counted total and `req.bodyComplete()` to tell a finished upload from one the peer cut short, instead of trusting `head.content_length`.
+The caller (connEntry / poolEntry) owns closing the fd. A Content-Length body above `body_buf` (`max_recv_buf` bytes) hands the handler what fits and drains the remainder off the socket before the invoke (widening the receive window via `large_body_recv_buf` / SO_RCVBUF) so the keep-alive connection stays usable. Large-body handlers read `req.bodyReceived()` for the counted total and `req.bodyComplete()` to tell a finished upload from one the peer cut short, instead of trusting `head.content_length`.
 
 ### serveConnOne(): EPOLL one-shot fallback
 

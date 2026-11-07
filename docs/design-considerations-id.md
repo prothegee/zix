@@ -24,14 +24,12 @@ Sebagian besar struct (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, 
 <br>
 
 **DoD (Data-Oriented Design):**<br>
-Arah yang akan dituju ketika layout data lebih penting daripada enkapsulasi. Untuk lapisan HTTP, ini dimulai sebagai `zix.Http1`: engine ramping berorientasi data yang dispatch EPOLL / URING-nya mengukir buffer koneksi dari satu contiguous demand-paged slab (`http1/dispatch/`, `multiplexers/slab.zig`). `zix.Http` penuh masih memakai baseline OoP.
-
-> Tinjau ulang DoD core untuk `zix.Http` ketika baseline OoP benar-benar mencapai batasnya.
+Arah yang akan dituju ketika layout data lebih penting daripada enkapsulasi. Untuk lapisan HTTP, ini dimulai sebagai `zix.Http1`: engine ramping berorientasi data yang dispatch EPOLL / URING-nya mengukir buffer koneksi dari satu contiguous demand-paged slab (`http1/dispatch/`, `multiplexers/slab.zig`).
 
 <br>
 
 **Arena (Per-Request Arena Allocation):**<br>
-Setiap koneksi `zix.Http` mendapat sebuah arena (kapasitas awal dapat dikonfigurasi, tumbuh sesuai kebutuhan). Scratch per-request dan buffer body diukir darinya dan dilepaskan dalam satu bulk reset, bukan free per-objek.
+Setiap worker `zix.Http1` menyimpan arena request (`ctx.allocator`). Scratch per-request diukir darinya dan dilepaskan dalam satu bulk reset setelah request selesai, bukan free per-objek.
 
 > Gunakan ketika alokasi hidup persis selama request atau koneksi berlangsung.
 
@@ -49,7 +47,7 @@ Connection table EPOLL / URING `zix.Http1` mengalokasikan satu slab virtual `MAX
 ## Design Patterns
 
 **Type-Per-Domain Methods (Namespace Struct):**<br>
-Setiap protokol adalah namespace file-as-struct Zig tersendiri yang diekspor dari `lib.zig` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), hanya mengekspos method domain tersebut (`Server.init`, `run`, ...).
+Setiap protokol adalah namespace file-as-struct Zig tersendiri yang diekspor dari `lib.zig` (`zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), hanya mengekspos method domain tersebut (`Server.init`, `run`, ...).
 
 > Gunakan ketika sebuah subsistem punya permukaan yang mandiri: beri satu namespace type alih-alih free function yang berserakan.
 

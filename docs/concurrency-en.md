@@ -1,6 +1,6 @@
 # Concurrency Models: zix
 
-Three dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in `HttpServerConfig` or `TcpServerConfig`. Required: set it explicitly (no default).
+Three dispatch models for HTTP and raw TCP. Select via `config.dispatch_model` (`DispatchModel` enum) in the server config (for example `zix.Http1` or `zix.Tcp`). Required: set it explicitly (no default).
 
 ---
 
@@ -14,9 +14,9 @@ pub const DispatchModel = enum(u8) {
 };
 ```
 
-Defined once in `src/tcp/config.zig`. Re-exported by `src/tcp/http/config.zig` (for `zix.Http`) and imported by `src/tcp/http2/grpc/config.zig` (for `zix.Grpc`). All three values are present in every config.
+Defined once in `src/tcp/config.zig` and imported by `src/tcp/http2/grpc/config.zig` (for `zix.Grpc`). All three values are present in every config.
 
-`.EPOLL = 1` is Linux-only. `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. `.URING = 2` is also Linux-only and native in `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, and `zix.Fix`. The `zix.Tcp` per-connection handler folds to `.EPOLL` (the `zix.Tcp` framed callback runs the ring natively). See the Dispatch Model Comparison table below.
+`.EPOLL = 1` is Linux-only. `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement it natively on Linux. `.URING = 2` is also Linux-only and native in `zix.Http1`, `zix.Http2`, `zix.Grpc`, and `zix.Fix`. The `zix.Tcp` per-connection handler folds to `.EPOLL` (the `zix.Tcp` framed callback runs the ring natively). See the Dispatch Model Comparison table below.
 
 Off Linux there is no silent downgrade: `run()` returns `error.ZixDispatchModelUnsupported` when the model is `.EPOLL` or `.URING`, so a caller never believes it got a model it did not (ADR-065). A portable caller picks the model per target at comptime:
 
@@ -52,12 +52,12 @@ Handler tasks (one per active connection):
 - Any non-Linux target: `.EPOLL` and `.URING` are rejected there, so this is the model to pick.
 - SSE and WebSocket: an open stream costs one task, not an event-loop worker slot.
 - You need an explicit `concurrent_limit` (resource-constrained deployments).
-- `dispatch_model = .ASYNC` in `HttpServerConfig`.
+- `dispatch_model = .ASYNC` in the server config.
 - `workers` is ignored (there is always exactly one accept thread).
 
-**Example** (`examples/http_sse.zig`, `examples/http_websocket.zig`):
+**Example** (`examples/http1_sse.zig`, `examples/http1_websocket.zig`):
 ```zig
-var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
+var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/events", .handler = eventsHandler },
 }).dispatch, .{
     .io             = process.io,
@@ -65,14 +65,14 @@ var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
 });
 ```
 
-**Manual concurrency limit** (`examples/http_manual_concurrent.zig`):
+**Manual concurrency limit** (`examples/http1_manual_concurrent.zig`):
 ```zig
 var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
     .concurrent_limit = std.Io.Limit.limited(4),
 });
 defer threaded.deinit();
 
-var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
+var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 }).dispatch, .{
     .io             = threaded.io(),
@@ -124,16 +124,16 @@ Connections stay registered after each request. No explicit re-arm is needed: le
 occupy only one entry in the per-worker epoll set.
 
 **When to use:**
-- Linux production deployments of `zix.Http` or `zix.Http1` under high connection counts.
+- Linux production deployments of `zix.Http1` under high connection counts.
 - Short-lived requests (REST, API) where a request pass finishes quickly and returns the
   worker to `epoll_wait`.
 - You want to avoid `io.async()` fiber scheduler overhead entirely.
-- `dispatch_model = .EPOLL` in `HttpServerConfig` or `Http1ServerConfig`.
+- `dispatch_model = .EPOLL` in the server config.
 - `workers` controls worker count (0 = cpu_count) on every engine.
 
-**Example (`zix.Http`):**
+**Example (`zix.Http1`):**
 ```zig
-var server = zix.Http.Server.init(zix.Http.Router(&[_]zix.Http.Route{
+var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 }).dispatch, .{
     .io             = process.io,
@@ -162,15 +162,15 @@ try server.run();
 | Item | Detail |
 | :- | :- |
 | Platform | Linux only (`epoll_create1`, `epoll_wait`, `epoll_ctl`). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected |
-| Availability | `zix.Http` (HTTP/1), `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux |
-| Accept model (`zix.Http`) | Each worker binds its own `SO_REUSEPORT` listener. The kernel distributes connections across workers: no shared accept queue |
+| Availability | `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`, and `zix.Tcp` implement natively on Linux |
+| Accept model | Each worker binds its own `SO_REUSEPORT` listener. The kernel distributes connections across workers: no shared accept queue |
 | gRPC difference | `zix.Grpc` uses a multiplexed shared-nothing model: one worker drives many non-blocking h2 connections via a resumable state machine. See ADR-031 |
 | `workers` field | Controls the worker count on every engine (0 = cpu_count) |
 | Keep-alive idle cost | Near-zero: idle sockets sit in the epoll set without holding any thread |
 | Debugging | `strace` or `perf` will show `epoll_wait` dominating idle time, this is expected and correct |
 
 **When NOT to use:**
-- SSE or WebSocket via `zix.Http`: connections stay active and data flows continuously, blocking reads will park the worker. Prefer `.ASYNC`.
+- SSE: a long-lived stream keeps the connection busy and parks the worker. Prefer `.ASYNC`.
 - Non-Linux targets: `run()` rejects the model, so pick `.ASYNC` explicitly.
 - When connection count is low (< a few hundred): the simpler `.ASYNC` model will perform the same or better with less complexity.
 
@@ -180,11 +180,11 @@ try server.run();
 
 `.URING` is the completion-based sibling of `.EPOLL`: the same shared-nothing, thread-per-core topology (one `SO_REUSEPORT` listener and one ring per worker, no shared queue, no cross-thread fd handoff), but accepts, reads, and writes are submitted as io_uring SQEs and reaped as CQEs instead of waiting on `epoll_wait` readiness. Most syscall transitions are batched into the ring (ADR-037 Phase 4).
 
-- Native engines: `zix.Http1`, `zix.Http`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. The `zix.Tcp` per-connection handler has no native ring and folds to `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`.
+- Native engines: `zix.Http1`, `zix.Http2`, `zix.Grpc`, `zix.Fix`. The `zix.Tcp` per-connection handler has no native ring and folds to `.EPOLL` (the `zix.Tcp` framed callback does run the ring). Off Linux, `run()` returns `error.ZixDispatchModelUnsupported`.
 - `workers` sizes the worker count on every engine, exactly as `.EPOLL`.
 - On loopback `.URING` matches `.EPOLL` on throughput and total CPU, winning mainly on per-request cache locality. On a many-core box the ring close (`prep_close`, ADR-041) keeps the worker reaping completions through connection churn instead of blocking in a synchronous `close`, so `.URING` reaches parity or better than `.EPOLL` on every measured workload at a fraction of the memory.
 - When io_uring itself is unavailable on the host (an old kernel, a low `RLIMIT_MEMLOCK`, a sandbox), the engine folds to the `.EPOLL` loop with a logged notice. That is a runtime capability gap on a supported platform, not the platform rejection above.
-- Same "when NOT to use" as `.EPOLL`: SSE / WebSocket on `zix.Http`, low connection counts, non-Linux targets.
+- Same "when NOT to use" as `.EPOLL`: SSE, low connection counts, non-Linux targets.
 
 ---
 
@@ -269,7 +269,7 @@ Each model names two things at once: a concurrency shape (single or multi-core) 
 
 `.EPOLL`, `.KQUEUE`, and `.IOCP` are the same multi-core per-core idea, one per operating system. Each lives in its own `dispatch/<model>.zig` file, so the folder is self-documenting: open it, see every model, each header line states its core behavior and OS.
 
-Like `.EPOLL` and `.URING` today, these backends are family-wide: every engine that selects a `DispatchModel` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) gets its platform's backend through the same enum.
+Like `.EPOLL` and `.URING` today, these backends are family-wide: every engine that selects a `DispatchModel` (`zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`) gets its platform's backend through the same enum.
 
 There is no auto-select keyword. Portable code either picks `.ASYNC` outright or names the exact backend with a one-line comptime switch on `builtin.os.tag`. Two mismatches are handled differently:
 

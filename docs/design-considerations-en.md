@@ -24,14 +24,12 @@ Most structs (`Request`, `Response`, `Router`, `Context`, `ConnQueue`, `multipar
 <br>
 
 **DoD (Data-Oriented Design):**<br>
-The direction to move when data layout matters more than encapsulation. For the HTTP layer this began as `zix.Http1`: a lean, data-oriented engine whose EPOLL / URING dispatch carves connection buffers from one contiguous demand-paged slab (`http1/dispatch/`, `multiplexers/slab.zig`). The full `zix.Http` still uses the OoP baseline.
-
-> Revisit a DoD core for `zix.Http` when the OoP baseline hits a real ceiling.
+The direction to move when data layout matters more than encapsulation. For the HTTP layer this began as `zix.Http1`: a lean, data-oriented engine whose EPOLL / URING dispatch carves connection buffers from one contiguous demand-paged slab (`http1/dispatch/`, `multiplexers/slab.zig`).
 
 <br>
 
 **Arena (Per-Request Arena Allocation):**<br>
-Each `zix.Http` connection gets an arena (configurable initial capacity, grows on demand). Per-request scratch and the body buffer are carved from it and released in one bulk reset instead of per-object frees.
+Each `zix.Http1` worker keeps a request arena (`ctx.allocator`). Per-request scratch is carved from it and released in one bulk reset after the request instead of per-object frees.
 
 > Use it when allocations live exactly as long as the request or connection.
 
@@ -49,7 +47,7 @@ The `zix.Http1` EPOLL / URING connection table pre-allocates one `MAX_FD * buf_s
 ## Design Patterns
 
 **Type-Per-Domain Methods (Namespace Struct):**<br>
-Each protocol is its own Zig file-as-struct namespace exported from `lib.zig` (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), exposing only that domain's methods (`Server.init`, `run`, ...).
+Each protocol is its own Zig file-as-struct namespace exported from `lib.zig` (`zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Tcp`, `zix.Fix`, `zix.Udp`, `zix.Uds`, `zix.Channel`, `zix.Logger`), exposing only that domain's methods (`Server.init`, `run`, ...).
 
 > Use it when a subsystem has a self-contained surface: give it one namespace type instead of scattered free functions.
 

@@ -1,6 +1,6 @@
 # Reverse proxy: nginx and haproxy in front of zix
 
-`zix.Http1`, `zix.Http`, and `zix.Grpc` all serve TLS natively (set `tls: ?*Tls.Context`, see [`docs/hld-tls-en.md`](hld-tls-en.md)). Putting nginx or haproxy in front is an option, not a requirement, and it is the right call when you want TLS offload onto the proxy, host or path routing, load balancing across backends, or sharing port 443 with other services. The zix server then runs cleartext behind the proxy: HTTP/1.1 for `zix.Http1` / `zix.Http`, or h2c (HTTP/2 cleartext) for `zix.Grpc`. External clients connect to the proxy over TLS, and the proxy forwards to the backend.
+`zix.Http1` and `zix.Grpc` both serve TLS natively (set `tls: ?*Tls.Context`, see [`docs/hld-tls-en.md`](hld-tls-en.md)). Putting nginx or haproxy in front is an option, not a requirement, and it is the right call when you want TLS offload onto the proxy, host or path routing, load balancing across backends, or sharing port 443 with other services. The zix server then runs cleartext behind the proxy: HTTP/1.1 for `zix.Http1`, or h2c (HTTP/2 cleartext) for `zix.Grpc`. External clients connect to the proxy over TLS, and the proxy forwards to the backend.
 
 ## Architecture
 
@@ -8,13 +8,13 @@
 graph LR
     H[HTTP client<br/>TLS / port 443] -->|http over tls| PN[nginx or haproxy<br/>TLS termination]
     G[gRPC client<br/>TLS / port 443] -->|grpc over tls| PN
-    PN -->|http/1.1 cleartext / port 8080| ZH[zix.Http1 / zix.Http]
+    PN -->|http/1.1 cleartext / port 8080| ZH[zix.Http1]
     PN -->|grpc h2c / port 8083| ZG[zix.Grpc]
 ```
 
 Port numbers below are examples: `8080` for the HTTP backend, `8083` for the gRPC backend. Match them to your `config.port`.
 
-## HTTP/1 (`zix.Http1` and `zix.Http`)
+## HTTP/1 (`zix.Http1`)
 
 The backend runs plain HTTP/1.1 (no `tls`). The proxy terminates TLS and forwards.
 

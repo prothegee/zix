@@ -39,22 +39,6 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `tcp/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.ZixPortNotConfigured`, konfigurasi valid berhasil dan deinit aman, konfigurasi EPOLL valid berhasil dan deinit aman |
 | `tcp/client.zig` | `refAllDecls` |
 
-### zix.Http
-
-| Modul | Cakupan |
-| :- | :- |
-| `tcp/http/method.zig` | `refAllDecls` + round-trip semua code termasuk `QUERY` (RFC 10008), QUERY diselesaikan dari token wire-nya dan tidak pernah dilaporkan sebagai GET, pencocokan case-sensitive, `codeFromString` melaporkan token tak dikenal sebagai null, token melebihi `MAX_TOKEN_LEN` ditolak oleh length switch, `enumFromString` mempertahankan fallback GET |
-| `tcp/http/status.zig` | `refAllDecls` |
-| `tcp/http/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` untuk setiap varian enum, pelepasan parameter `typeFromHeader`, nilai tidak dikenal atau kepanjangan melaporkan tidak ada kecocokan |
-| `tcp/http/parser.zig` | `refAllDecls` + perilaku: input tidak lengkap menghasilkan null, offset GET minimal, pemisahan path+query, offset header, flag keep_alive, semua method, method tidak diimplementasikan melaporkan UnknownMethod (501) terpisah dari request line yang rusak (400), flag chunked aktif/nonaktif, coding list chunked, chunkedEnd lengkap/parsial/resume-watermark/terminator-di-data/trailer/pipelined/hex-tidak-valid, dechunkInPlace di buffer sendiri/pemindahan overlap/urutan chunk |
-| `tcp/http/request.zig` | `refAllDecls` + perilaku: method, path, query string, queryParam (ada / tidak ada / flag), pathSegments, queryParams, pencarian header (case-insensitive), pengantaran body (Content-Length dan chunked yang tiba tersegmen di fd non-blocking, body jauh lebih besar dari read buffer, short read dilaporkan saat peer menutup lebih awal) |
-| `tcp/http/response.zig` | `refAllDecls` + perilaku: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, penjaga injeksi (CR/LF), TooManyHeaders, format wire `SseWriter`, default `Response.streaming` |
-| `tcp/http/router.zig` | `refAllDecls` + perilaku: matchParam, registrasi route (kind + path tersimpan) |
-| `tcp/http/static.zig` | `refAllDecls` + perilaku: mimeType, parseRangeHeader |
-| `tcp/http/websocket.zig` | `refAllDecls` + perilaku: vektor RFC acceptKey, round-trip buildFrame + parseFrame, frame bermasker |
-| `tcp/http/context.zig` | `refAllDecls` + perilaku: `timedOut` dengan deadline null menghasilkan false, `isExpired` dengan deadline null menghasilkan false |
-| `tcp/http/server.zig` | `refAllDecls` + perilaku: siklus hidup alloc / free slab `EpollConnTable`, akuntansi filled-bytes, fd di luar jangkauan menghasilkan null, `getAvailableCpuCount` menghasilkan minimal 1, `effectiveCacheEntries` menghormati plafon memori, EPOLL `processRequest` melayani cache miss lalu hit, hasil body `processRequest` (bodyComplete true untuk body Content-Length atau chunked yang terbaca penuh dan false saat handler tidak pernah membaca, 413 untuk body yang dideklarasikan atau chunked melewati limit, 100 Continue dikirim untuk Expect ber-body dan dilewati tanpanya, tutup saat body biasa atau chunked coding-list tidak dibaca atau peer berhenti lebih awal, body chunked yang tiba setelah head tetap diantar) |
-
 ### zix.Http1
 
 | Modul | Cakupan |
@@ -86,16 +70,6 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | `uds/config.zig` | `refAllDecls` + default: `UdsServerConfig` (kernel_backlog=128, max_recv_buf=4096), `UdsClientConfig` |
 | `uds/server.zig` | `refAllDecls` + perilaku: path kosong menghasilkan `error.ZixPathEmpty`, path valid berhasil dan deinit aman |
 | `uds/client.zig` | `refAllDecls` |
-
-### zix.Http.Client
-
-| Modul | Cakupan |
-| :- | :- |
-| `tcp/http/client_config.zig` | `refAllDecls` + default: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, h2_max_read_rounds=4096, user_agent=`zon_options.user_agent`, version=HTTP_1, tls_verify=true, tls_ca_path=null) |
-| `tcp/http/client.zig` | `refAllDecls` + perilaku: `.HTTP_2` pada URL non-https ditolak sebelum connect, `.HTTP_3` menghasilkan `UnsupportedVersion`, server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, reply lengkap tidak terpotong oleh bound idle, body yang diam di tengah transfer menghasilkan `ReadTimeout` |
-| `tcp/http/h2_client.zig` | `refAllDecls` + perilaku: `methodHasBody` + `skipRequestHeader`, `putFrame` round-trip melalui parser frame, `putWindowUpdate` meng-encode increment big-endian, `headerBlock` melepas prefix PADDED dan PRIORITY, `dataPayload` melepas padding DATA, peer yang menerima koneksi lalu tidak pernah bicara menghasilkan `ResponseTimeout` |
-| `tcp/http/sse_client.zig` | `refAllDecls` + perilaku: `splitField` (data / event / retry / nama field telanjang / nama tidak cocok / tanpa spasi depan dipertahankan), `parseHttpUrl` (dasar, port default 80, https menghasilkan `TlsNotSupported`), server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, stream yang diam menghasilkan `ReadTimeout` (bukan close bersih) |
-| `tcp/http/ws_client.zig` | `refAllDecls` + perilaku: vektor acceptKey RFC 6455, `parseWsUrl` (dasar, tanpa path default ke /, port default 80, wss menghasilkan `TlsNotSupported`, non-ws menghasilkan `InvalidUrl`), server yang tidak pernah menjawab menghasilkan `ResponseTimeout`, peer yang tidak mengirim frame menghasilkan `ReadTimeout` |
 
 ### zix.Channel
 
@@ -219,49 +193,6 @@ Sumber: `tests/integration/`. Setiap berkas adalah executable pengujian mandiri 
 | Pemeriksaan tipe `HandlerFn` | `zix.Tcp.echoHandler` memenuhi `zix.Tcp.HandlerFn` |
 | `TcpClient.connect` port nol | menghasilkan `error.ZixPortNotConfigured` sebelum pemanggilan socket apa pun |
 
-### tests/integration/http/
-
-#### `request_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| `pathParam()` satu param | segmen yang ditangkap dikembalikan berdasarkan nama (nama tidak ada menghasilkan null) |
-| `pathParam()` nama dengan tanda hubung | `:tenant-id`, `:tenant-branch` (pola contoh http_paths) |
-| `body()` chunk tunggal chunked didekode dengan benar | `"5\r\nhello\r\n0\r\n\r\n"` -> `"hello"` |
-| `body()` beberapa chunk chunked dirakit | `"3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n"` -> `"foobarr"` |
-| `body()` body chunked kosong menghasilkan string kosong | hanya chunk terminal -> `""` |
-| `body()` mengembalikan body_cache tanpa menyentuh reader | `body_cache` yang sudah diset mempersingkat pembacaan, panggilan kedua mengembalikan pointer yang sama |
-
-#### `router_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Pencocokan tepat | `dispatch` menghasilkan true, handler yang benar dipanggil |
-| Param mengisi `path_params` | `req.path_params` diset setelah dispatch param. `req.pathParam()` mengembalikan nilainya. |
-| Dua path param keduanya terisi | route multi-param menangkap kedua segmen |
-| Prefix mengarah ke handler | pencocokan prefix menghasilkan true dan memanggil handler |
-
-#### `context_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Penentuan waktu `withTimeout` / `withDeadline` | anggaran 60 detik belum habis. Anggaran 10ms terlampaui setelah sleep 50ms. |
-
-#### `header_index_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Indeks kosong menghasilkan null | tidak ada header yang diindeks (semua pencarian menghasilkan null) |
-| Pencarian case-insensitive | map yang sudah diisi: `Content-Type` ditemukan melalui `content-type` |
-
-#### `sse_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Format wire `SseWriter.writeEvent` | `"data: ping\n\n"` melalui `std.Io.Writer.fixed` buffer |
-| Format wire `SseWriter.writeNamedEvent` | `"event: update\ndata: 99\n\n"` |
-| Format wire `SseWriter.comment` | `": keepalive\n"` |
-
 ### tests/integration/http1/
 
 #### `server_test.zig`
@@ -316,7 +247,6 @@ Menjalankan jalur router sungguhan lewat socketpair, jadi yang diuji adalah byte
 | `parseFrame` opcode pong | opcode |
 | `parseFrame` close dengan payload kosong | opcode, payload panjang nol |
 | Round-trip semua opcode | buildFrame -> parseFrame untuk text, binary, ping, pong, close |
-| Init / deinit `RoomMap` | tanpa koneksi (tanpa crash atau leak) |
 
 ### tests/integration/udp/
 
@@ -335,17 +265,6 @@ Menjalankan jalur router sungguhan lewat socketpair, jadi yang diuji adalah byte
 | Round-trip LITTLE | `toEndian` -> `fromEndian` memulihkan byte asli |
 | Round-trip BIG | sama untuk endian BIG |
 | Nilai `FeedbackResult.packet` | varian `.packet` menyimpan dan mengembalikan packet lengkap |
-
-### tests/integration/http/ (client)
-
-#### `client_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| `HttpClient.init` dan `deinit` | tanpa request: init + deinit aman dengan io Threaded |
-| `ClientResponse.header()` pada byte head tiruan | pencarian berdasarkan nama dan pencarian case-insensitive |
-| `ClientResponse.iterateHeaders()` | menghitung semua header dari byte head mentah |
-| Default `ClientRequestOpts` | `headers` kosong, `body` null, `connect_timeout_ms` null |
 
 ### tests/integration/uds/
 
@@ -495,87 +414,6 @@ Kontrak platform `DispatchModel` lintas-engine (ADR-065), dipastikan sekali untu
 | Ukuran header frame TCP | selalu tepat 4 byte |
 | `DispatchModel.ASYNC` adalah nilai nol | `@intFromEnum(.ASYNC) == 0` |
 
-### tests/behaviour/http/
-
-#### `request_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| `path()` menghapus query string | `"/api/users?limit=10"` -> `"/api/users"` |
-| `path()` mengembalikan target penuh jika tidak ada `?` | `"/api/users/alice"` tidak berubah |
-| `path()` root path | `"/"` mengembalikan `"/"` |
-| `query()` mengembalikan bagian setelah `?` | `"q=hello&lang=zig"` |
-| `query()` mengembalikan kosong jika tidak ada `?` | `""` |
-| `body()` chunked menghasilkan payload sama dengan Content-Length | chunked `"world"` cocok dengan `body_cache = "world"` |
-| `body()` panggilan kedua mengembalikan hasil yang di-cache | `b1.ptr == b2.ptr` setelah dua pemanggilan body() |
-| `method()` menyelesaikan setiap method | DELETE/PATCH/PUT/OPTIONS/HEAD/GET/POST semuanya diselesaikan |
-
-#### `router_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Exact mengalahkan param terlepas dari urutan registrasi | exact yang didaftarkan setelah param tetap menang |
-| Param mengalahkan prefix terlepas dari urutan registrasi | param yang didaftarkan setelah prefix tetap menang |
-| Prefix: pencocokan terpanjang menang | `/api/users` mengalahkan `/api` untuk `/api/users/alice` |
-| Prefix mencocokkan path-nya sendiri secara tepat | `/api` cocok dengan `/api` |
-| Query string transparan untuk dispatch param | `"/users/bob?role=admin"` menangkap `bob` melalui `:id` |
-| Query string transparan untuk dispatch exact | `"/about?ref=menu"` cocok dengan `/about` |
-
-#### `content_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Ekstensi grup teks | html/htm/css/txt/csv |
-| Ekstensi grup aplikasi | json/map/js/min.js/xml/pdf/wasm/zip/gz/tar/7z/rar/rtf |
-| Ekstensi grup gambar | png/jpg/jpeg/gif/svg/webp/ico |
-| Ekstensi grup audio | mp3/wav/flac/mid/midi |
-| Ekstensi grup video | mp4/webm/ogg/mpeg/avi/mov/wmv/flv/mkv |
-| Ekstensi grup font | ttf/otf/woff/woff2 |
-| Pencocokan case-insensitive | HTML, PNG, JS, JSON, JPG, JPEG, CSS, WOFF2 |
-| `fromExtension()` mengembalikan string MIME yang benar | kumpulan representatif |
-| Pasangan alias menghasilkan string MIME identik | jpg==jpeg, mid==midi, html==htm, js==min.js, json==map |
-
-#### `config_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Default ukuran buffer | `kernel_backlog`, `max_recv_buf`, `max_allocator_size` semuanya 4096 |
-| Default timeout dinonaktifkan | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
-| Penyajian static dinonaktifkan secara default | `public_dir == ""`, `public_dir_upload == "u"` |
-| `dispatch_model` wajib (tidak ada default) | pemanggil harus menyetelnya di `HttpServerConfig` |
-| Default `workers` ukuran otomatis | `workers == 0` |
-| `max_request_headers` default ke `.LARGE` | varian enum dan `.value()` == 64 |
-| Nilai tier `RequestHeaderSize` | MINIMAL=16, COMMON=32, LARGE=64 |
-| `RequestHeaderSize.CUSTOM(N)` dibatasi di 64 | nilai di atas 64 diam-diam mengembalikan 64 |
-| `max_response_headers` default ke MINIMAL (16) | nilai enum dan `.value()` |
-| Nilai tier `HeaderSize` | MINIMAL=16, COMMON=32, LARGE=64, EXTRA_LARGE=128 |
-| `HeaderSize.CUSTOM(N)` mengembalikan N | 7 dan 100 |
-| Status `Response` default ke OK | invarian `init()` |
-
-#### `sse_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| `ContentType.TEXT_EVENT_STREAM.asString()` | mengembalikan `"text/event-stream"` |
-| `Response.streaming` default ke false | invarian `init()` |
-
-#### `query_test.zig`
-
-Dukungan QUERY RFC 10008 di engine `zix.Http`, dipegang pada kontrak yang sama dengan raw engine.
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Menerima request line QUERY | parser dulu menolak QUERY mentah-mentah |
-| Request QUERY bisa dibedakan dari GET | kode bertipe-nya berbeda |
-| Request QUERY membawa content-nya seperti POST | pengantaran body chunked |
-| Request QUERY memaparkan Content-Type yang dideklarasikan | section 2 |
-| QUERY tanpa Content-Type melaporkan tidak ada type | kasus 400 |
-| Query content type yang tidak didukung melaporkan tidak ada kecocokan, tidak pernah ditebak | section 2.1 |
-| Semua query content type yang disebut RFC 10008 dikenali | tabelnya sama dengan raw engine |
-| Http dan Http1 sepakat tentang apa itu request QUERY | satu jawaban dari kedua engine |
-| Method yang tidak diimplementasikan menarik 501, bukan 400 | request line ter-tokenisasi, jadi request-nya tidak rusak |
-| Http dan Http1 menjawab method tak terimplementasi secara identik | response byte-identik |
-
 ### tests/behaviour/http1/
 
 #### `config_test.zig`
@@ -655,22 +493,6 @@ Dukungan QUERY RFC 10008 lewat permukaan publik `zix.Http1`.
 | Field array u8 tidak pernah ditukar | `id [4]u8` tidak disentuh oleh LITTLE dan BIG |
 | Non-native menukar field integer | field `i32` di-byte-swap |
 | Non-native menukar elemen float array | elemen `[2]f64` masing-masing ditukar |
-
-### tests/behaviour/http/ (client)
-
-#### `client_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Default timeout connect/response/read `ClientConfig` | semuanya 0 (dinonaktifkan) |
-| Default max_response_body `ClientConfig` | 4 MB (1024 * 1024 * 4) |
-| Default follow_redirects `ClientConfig` | true |
-| Default max_redirects `ClientConfig` | 3 |
-| Default user_agent `ClientConfig` | cocok dengan `zix.Http.default_user_agent` (string versi library dari `build.zig.zon`) |
-| `ClientResponse.status()` | mengembalikan field status_code |
-| `ClientResponse.body()` | mengembalikan slice body_data |
-| `ClientResponse.header()` case-insensitive | cocok terlepas dari casing nama header |
-| `ClientResponse.deinit()` body panjang nol | aman, tanpa crash atau leak |
 
 ### tests/behaviour/uds/
 
@@ -790,64 +612,6 @@ Sumber: `tests/edge/`. Setiap berkas memverifikasi kondisi batas dan jalur error
 | Nama `DispatchModel` yang dilepas hilang | `stringToEnum` mengembalikan null untuk POOL dan MIXED |
 | Panjang frame TCP maksimum u32 | `maxInt(u32)` di-encode dan di-decode dengan benar melalui big-endian |
 
-### tests/edge/http/
-
-#### `request_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| `queryParam` key ada dengan nilai kosong | `"?k="` -> `""` (bukan null) |
-| `queryParam` key tidak ada menghasilkan null | key tidak ada dalam query string |
-| `queryParam` tidak ada query string sama sekali menghasilkan null | target tidak memiliki `?` |
-| `body()` chunked hex tidak valid adalah error, bukan body kosong | ukuran chunk `"zz"` -> `error.ZixInvalidChunkedBody`, `bodyComplete()` false (engine menjawab 400) |
-| `body()` chunked chunk terminal yang hilang mengembalikan data parsial | tidak ada `0\r\n\r\n` -> data parsial dikembalikan |
-| `body()` chunked chunk satu-byte | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
-
-#### `router_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Tidak ada route yang terdaftar menghasilkan false | router kosong, `dispatch` menghasilkan false |
-| Prefix `/api` TIDAK cocok dengan `/apiv2` | karakter berikutnya setelah prefix harus `/` atau akhir-path |
-
-#### `response_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| CR dalam nama header menghasilkan `InvalidHeaderName` | penjaga injeksi |
-| LF dalam nama header menghasilkan `InvalidHeaderName` | penjaga injeksi |
-| CR dalam nilai header menghasilkan `InvalidHeaderValue` | penjaga injeksi |
-| LF dalam nilai header menghasilkan `InvalidHeaderValue` | penjaga injeksi |
-| Buffer tumbuh dari 4 ke 5 pada header ke-5 | kapasitas awal=4, pertumbuhan ke min(8, max_response_headers) |
-| `max_response_headers=1` menolak header kedua | tanpa pertumbuhan: `TooManyHeaders` segera |
-| `HeaderSize.CUSTOM(0).value()` | menghasilkan 0 |
-
-#### `content_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Ekstensi tidak dikenal menghasilkan `APPLICATION_OCTET_STREAM` | xyz, bin, dat, unknown |
-| String kosong menghasilkan `APPLICATION_OCTET_STREAM` | `typeFromExtension("")` |
-| `fromExtension` tidak dikenal menghasilkan `"application/octet-stream"` | bentuk string dari fallback |
-
-#### `query_test.zig`
-
-Kondisi batas QUERY di engine `zix.Http`.
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Mencocokkan token QUERY persis, seperti semua method | RFC 9110 section 9.1, nama method case-sensitive |
-| Token lima byte yang bukan QUERY tetap ditolak | lengan length bukan catch-all |
-| Method tak terimplementasi menjawab 501, request line rusak menjawab 400 | status berasal dari error-nya |
-| QUERY dengan Content-Length nol di-framing tanpa body | framing |
-| Body QUERY chunked menghasilkan byte sama dengan Content-Length | kedua framing sepakat |
-| QUERY menyimpan query string dan content sekaligus | parameter target bertahan |
-| Query content type terpanjang dicocokkan, bukan dipotong | 33 byte |
-| Content-Type absurd melaporkan tidak ada kecocokan alih-alih melampaui buffer | dibatasi |
-| Nilai Content-Type kosong melaporkan tidak ada kecocokan | kosong, titik koma tunggal, spasi |
-| Parameter boundary QUERY multipart tidak menggagalkan pencocokan | parameter dilepas |
-| Kedua engine menjawab sama untuk query type berparameter | dua tabel content tetap sejalan |
-
 ### tests/edge/websocket/
 
 #### `websocket_test.zig`
@@ -875,18 +639,6 @@ Kondisi batas QUERY di engine `zix.Http`.
 | :- | :- |
 | Nilai backing enum `Endianness` stabil | NATIVE=0, LITTLE=1, BIG=2 |
 | `FeedbackResult` ack/nack hanya tag | tag aktif cocok dengan .ack dan .nack |
-
-### tests/edge/http/ (client)
-
-#### `client_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Skema tidak didukung menghasilkan `error.ZixUrlSchemeUnsupported` | skema `ftp://` tidak diterima |
-| Host tidak ada menghasilkan `error.ZixUrlHostMissing` | `http://` tanpa host |
-| URL tidak valid menghasilkan `error.ZixUrlMalformed` | `:::bad` gagal saat parse |
-| `ClientResponse.header()` nama tidak ada | menghasilkan null |
-| Override `RequestOpts.connect_timeout_ms` | null, 0, dan bukan-nol adalah nilai yang berbeda |
 
 ### tests/edge/uds/
 

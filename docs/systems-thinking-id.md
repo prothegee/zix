@@ -121,7 +121,7 @@ Allocator dipilih berdasarkan berapa lama data hidup dan siapa yang menyentuhnya
 | Lifetime / ownership | Strategi | Di mana |
 | :- | :- | :- |
 | Shared atau long-lived, tanpa titik reset tunggal | `std.heap.smp_allocator` (general-purpose, thread-safe), default-nya | setiap `dispatch/`, `core.zig` |
-| Scope sejati dengan satu bulk reset, satu owner | arena, dibebaskan dalam satu reset | arena per-connection `zix.Http`, `utils/response_cache.zig` |
+| Scope sejati dengan satu bulk reset, satu owner | arena, dibebaskan dalam satu reset | arena per-request `zix.Http1`, `utils/response_cache.zig` |
 | Tabel hot-path terbatas | demand-paged slab, tanpa heap per-accept | `multiplexers/slab.zig` |
 | Reuse warm antar koneksi | idle-conn object pool, reuse tanpa alokasi | `URING_IDLE_POOL_FLOOR` |
 | Borrowed (`io`, `logger`) | tidak pernah dibebaskan zix, caller owns dan harus outlive | setiap config |

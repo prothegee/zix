@@ -21,7 +21,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `workers` | jumlah worker .EPOLL dan .URING, diabaikan oleh .ASYNC |
 | `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
 | `max_recv_buf` | ukuran buffer per-connection pada semua model: slot .EPOLL / .URING (`ConnTable.alloc`), pasangan pool-thread .ASYNC (`threadConnBufs`) |
-| `large_body_rcvbuf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
+| `large_body_recv_buf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
 | `ws_recv_buf` | ukuran buffer per-connection WebSocket, 0 jatuh ke `max_recv_buf`. .EPOLL menentukan ukuran buffer recv, .URING menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask |
 | `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
 | `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
@@ -218,7 +218,7 @@ loop:
         (pembacaan chunked membawa leftover pipelined-nya ke depan dengan cara yang sama)
 ```
 
-Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (`max_recv_buf` byte) memberi handler bagian yang muat dan membuang sisanya dari socket sebelum invoke (melebarkan receive window via `large_body_rcvbuf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `req.bodyReceived()` untuk total terhitung dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer, alih-alih mempercayai `head.content_length`.
+Pemanggil (connEntry / poolEntry) yang menutup fd. Body Content-Length di atas `body_buf` (`max_recv_buf` byte) memberi handler bagian yang muat dan membuang sisanya dari socket sebelum invoke (melebarkan receive window via `large_body_recv_buf` / SO_RCVBUF) sehingga koneksi keep-alive tetap dapat dipakai. Handler body besar membaca `req.bodyReceived()` untuk total terhitung dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer, alih-alih mempercayai `head.content_length`.
 
 ### serveConnOne(): fallback one-shot EPOLL
 

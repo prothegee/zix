@@ -30,9 +30,9 @@ File implementasi lowercase membawa logic, file PascalCase adalah pintunya. `lib
 
 ```zig
 test "zix: unit test" {
-    // # zix.Http
-    std.testing.refAllDecls(@import("tcp/http/router.zig"));
-    std.testing.refAllDecls(@import("tcp/http/response.zig"));
+    // # zix.Http1
+    std.testing.refAllDecls(@import("tcp/http1/router.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/Response.zig"));
     // ... satu baris per file yang punya test
 }
 ```
@@ -321,7 +321,7 @@ Tidak ada satu allocator "yang dipilih". Allocator dipilih berdasarkan lifetime 
 | Allocator | Kapan | Di mana di tree |
 | :- | :- | :- |
 | `std.heap.smp_allocator` (general-purpose, thread-safe) | default untuk state long-lived dan shared: map koneksi dan stream, array thread worker, tabel HPACK, state per-connection. Pakai ini kapan pun data tidak punya titik reset tunggal yang bersih atau disentuh dari lebih dari satu thread | setiap `dispatch/` dan `core.zig` |
-| `std.heap.ArenaAllocator` | hanya ketika lifetime-nya scope sejati dengan satu bulk reset dan satu owner: backing response-cache, arena per-connection `zix.Http` | `utils/response_cache.zig`, `tcp/http/server.zig` |
+| `std.heap.ArenaAllocator` | hanya ketika lifetime-nya scope sejati dengan satu bulk reset dan satu owner: backing response-cache, arena per-request `zix.Http1` | `utils/response_cache.zig`, `tcp/http1/dispatch/` |
 | Slab demand-paged (custom contiguous) | tabel koneksi hot-path yang terbatas, satu `mmap` diukir per worker, tanpa heap call per-accept, slot kosong hanyalah `buf.len == 0` | `multiplexers/slab.zig` |
 | `std.heap.page_allocator` | buffer page-granular yang diserahkan ke kernel (provided-buffer ring) | `tcp/http1/dispatch/uring.zig` |
 | `std.testing.allocator` | test saja, sekaligus menangkap leak | setiap blok test |

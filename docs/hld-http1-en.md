@@ -14,26 +14,6 @@ Lean HTTP/1.x server engine on raw fd I/O. Zero-allocation request parsing and r
 
 ---
 
-## Positioning: zix.Http1 vs zix.Http
-
-Both are HTTP/1.1 servers. `zix.Http` is the full-featured layer, `zix.Http1` is the lean engine.
-
-| Aspect | `zix.Http` | `zix.Http1` |
-| :- | :- | :- |
-| Handler signature | `fn(*Request, *Response, *Context) anyerror!void` | `fn(*Request, *Response, *Context) anyerror!void` (same trio, ADR-062) |
-| Request parsing | own parser (`parser.zig`) | own zero-copy `parseHead` (`parser.zig` copy) |
-| Request body | lazy socket read in `body()` | engine-delivered slice (drained + dechunked before invoke) |
-| Per-request allocator | per-connection arena | per-request arena (`ctx.allocator`, reset per dispatch) |
-| Response writing | buffered `Response` object | `Response` builder delegating to direct fd write helpers |
-| Static files / multipart / SSE writer | built in | `public_dir` static fallback with an optional open-file cache (ADR-064), shared `Multipart`, `SseWriter` |
-| Routing | runtime handler via `Router(routes).dispatch` (ADR-063, not baked into the type) | comptime route table (optional, handler can be bare) |
-| WebSocket | handler-owned frame loop | engine-owned frame pump (every model) |
-| Dispatch models | ASYNC, EPOLL, URING | ASYNC, EPOLL, URING |
-
-The trio surface is caller-identical across both engines (a compile-time parity test in `src/lib.zig` enforces it). Use `zix.Http` when handlers need the richer client-facing layer. Use `zix.Http1` when raw throughput and predictable per-request cost matter more: the trio is views plus an arena reset, and the escape hatch (`ctx.fd` plus the `*FD` write helpers) keeps the raw path open.
-
----
-
 ## Runtime Model
 
 Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.ZixDispatchModelUnsupported` rather than silently serving a different model (ADR-065).
@@ -174,8 +154,8 @@ pub const Http1ServerConfig = struct {
     dispatch_model:     DispatchModel,
     kernel_backlog:     u31   = 1024,          // TCP listen() backlog
     max_recv_buf:       usize = 6 * 1024,      // per-connection buffer, every model (see note)
-    large_body_rcvbuf:  usize = 0,             // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
-    max_request_body:   usize = 8 * 1024 * 1024, // declared Content-Length cap, past it the engine answers 413 (0 = no check)
+    large_body_recv_buf: usize = 0,            // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
+    max_request_body:   usize = 2 * 1024 * 1024, // declared Content-Length cap, past it the engine answers 413 (0 = no check)
     ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
     compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via res.sendNegotiated / core.sendNegotiateFD (every model)
     compression_min_size: usize = 256,           // skip bodies under this floor
@@ -192,7 +172,7 @@ pub const Http1ServerConfig = struct {
 
 The listing above is abbreviated: the full field reference (cache, uring tuning, TLS dual listener, steering) lives in [`docs/zix-config-en.md`](zix-config-en.md).
 
-Note: under `.ASYNC` the connection loop borrows the pool thread's receive + body buffer pair (`core.threadConnBufs`), each `max_recv_buf` bytes, reused by every connection that thread serves. `max_recv_buf` therefore sizes the per-connection buffer under every dispatch model (a direct `core.serveConn` caller that leaves `ServeOpts.max_recv_buf` at 0 gets `core.BUF_SIZE` = 16 KB). `large_body_rcvbuf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
+Note: under `.ASYNC` the connection loop borrows the pool thread's receive + body buffer pair (`core.threadConnBufs`), each `max_recv_buf` bytes, reused by every connection that thread serves. `max_recv_buf` therefore sizes the per-connection buffer under every dispatch model (a direct `core.serveConn` caller that leaves `ServeOpts.max_recv_buf` at 0 gets `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
 
 Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
@@ -200,14 +180,14 @@ Note: `send_date_header` defaults to `true` for RFC 7231 compliance. Set `false`
 
 ### Timeouts
 
-`zix.Http1` exposes one timeout, `handler_timeout_ms`, the per-handler execution budget. When non-zero, the server arms a thread-local deadline before each dispatch. The handler opts in by calling `zix.Http1.isExpired()` between expensive steps and responding early, or shortens its own budget with `zix.Http1.setTimeout()`. This is the same Layer B budget as `zix.Http`'s `handler_timeout_ms`.
+`zix.Http1` exposes one timeout, `handler_timeout_ms`, the per-handler execution budget. When non-zero, the server arms a thread-local deadline before each dispatch. The handler opts in by calling `zix.Http1.isExpired()` between expensive steps and responding early, or shortens its own budget with `zix.Http1.setTimeout()`.
 
-`conn_timeout_ms` (ADR-062) is the connection-lifetime guard, a port of `zix.Http`'s Layer D: a `ConnRegistry` plus a background timer thread shuts down connections exceeding the configured lifetime. It is active on the blocking model (`.ASYNC`), where a slow or idle connection parks a task. On `.EPOLL` and `.URING` it is a documented no-op: their event loops own connection lifetime, and an idle keep-alive connection holds no thread, just one slot and its buffer.
+`conn_timeout_ms` (ADR-062) is the connection-lifetime guard: a `ConnRegistry` plus a background timer thread shuts down connections exceeding the configured lifetime. It is active on the blocking model (`.ASYNC`), where a slow or idle connection parks a task. On `.EPOLL` and `.URING` it is a documented no-op: their event loops own connection lifetime, and an idle keep-alive connection holds no thread, just one slot and its buffer.
 
-| Timeout | `zix.Http` | `zix.Http1` | Mechanism |
-| :- | :- | :- | :- |
-| `handler_timeout_ms` | yes | yes | thread-local deadline armed per dispatch, handler-opt-in |
-| `conn_timeout_ms` | yes | yes (`.ASYNC`) | `ConnRegistry` + background timer thread |
+| Timeout | `zix.Http1` | Mechanism |
+| :- | :- | :- |
+| `handler_timeout_ms` | yes | thread-local deadline armed per dispatch, handler-opt-in |
+| `conn_timeout_ms` | yes (`.ASYNC`) | `ConnRegistry` + background timer thread |
 
 If connection-lifetime enforcement under `.EPOLL` / `.URING` is ever needed, the natural fit is an idle-deadline sweep over the per-worker table (no extra thread), not the timer-thread `ConnRegistry`.
 
@@ -285,9 +265,7 @@ Statuses a handler picks from, per section 2.1:
 
 Content types the table names for query content: `application/sql`, `application/jsonpath`, `application/graphql`, `application/x-www-form-urlencoded`, `multipart/form-data`.
 
-`examples/http1_query.zig` (port 9079) and `examples/http_query.zig` (port 9080) carry the handler-side pattern: the status map above, the `Accept-Query` header, and a route that accepts two types and answers one. `tests/runner/checks_query.zig` drives both on the wire.
-
-Client note: `zix.Http.Client` cannot put a QUERY on the wire over TCP, because it wraps `std.http.Client` and `std.http.Method` is a closed set that predates RFC 10008. It reports `error.UnsupportedMethod` before opening a socket. `requestUds` writes its own request line, so that path does carry QUERY. Both engines serve QUERY regardless of which client sent it.
+`examples/http1_query.zig` (port 9079) carries the handler-side pattern: the status map above, the `Accept-Query` header, and a route that accepts two types and answers one. `tests/runner/checks_query.zig` drives it on the wire.
 
 ---
 
@@ -358,7 +336,7 @@ Routes are partitioned by kind at compile time: exact paths into a `StaticString
 
 ### Path params
 
-`pathParam("id")` inside the handler returns the captured segment. Captures live in a thread-local store (max 8 per route) and are valid only for the dispatch call, the same lifetime as the request slices.
+`pathParam("id")` inside the handler returns the captured segment. Captures live in a thread-local store sized at compile time to the router's route with the most `:params` (no fixed limit) and are valid only for the dispatch call, the same lifetime as the request slices.
 
 ---
 
@@ -423,7 +401,7 @@ sequenceDiagram
 - `WebSocket.serve(fd, key, on_frame)` computes the accept key, writes `101 Switching Protocols`, and requests promotion via a thread-local handoff slot that the engine reads right after the handler returns.
 - Ping is auto-ponged and close is auto-echoed by the engine. The callback only ever sees text and binary frames.
 - Frames sent during one pump pass coalesce into a single `write()`.
-- Promotion is honored under `.EPOLL` only. Under `.ASYNC` the handoff is cleared and the connection ends after the handler returns (use `zix.Http` for handler-owned WebSocket loops on that model).
+- Promotion is honored under `.EPOLL` only. Under `.ASYNC` the handoff is cleared and the connection ends after the handler returns.
 - Over TLS (`config.tls`, the thread-per-connection path), call `WebSocket.serveTls(fd, key, on_frame)` instead (ADR-055): the `101` and every frame encrypt through the ADR-054 stream sink, and the https thread runs the frame loop inline over the TLS session. Rooms / broadcast are cleartext-only (per-session encryption), so wss is per-connection.
 
 See `examples/http1_websocket.zig` (cleartext) and `examples/tls/tls_http1_ws.zig` (wss).
@@ -460,15 +438,15 @@ Per-request access logging is the engine's, not the handler's. When `config.logg
 | Header block size | Max `max_recv_buf` bytes on every dispatch model (default 6 KB, a direct `serveConn` caller gets `core.BUF_SIZE` = 16 KB). Exceeding returns `431` and closes |
 | Body under .ASYNC | The handler sees at most `max_recv_buf` bytes of body. A larger Content-Length body has its remainder drained off the socket so the keep-alive connection stays usable: `req.bodyReceived()` reports the counted total, `req.bodyComplete()` whether the peer sent it all |
 | Body under .EPOLL / .URING | Must fit `max_recv_buf` minus the head. A larger body keeps the connection usable by draining the remainder off the socket (`MSG_TRUNC`): both models defer the handler until the drain finishes, then run it with the counted total in `req.bodyReceived()` and an empty body slice |
-| Declared body past `max_request_body` | Refused with `413` before any body byte is read or drained, on every dispatch model (default 8 MiB, 0 disables the check) |
-| Large request body (uploads) | The drain widens the receive window via `large_body_rcvbuf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
+| Declared body past `max_request_body` | Refused with `413` before any body byte is read or drained, on every dispatch model (default 2 MiB, 0 disables the check) |
+| Large request body (uploads) | The drain widens the receive window via `large_body_recv_buf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
 | Chunked request body | Decoded into the body buffer. A frame the decoder cannot walk answers `400`, a chunked body past the buffer answers `413` (chunked declares no length up front, so the buffer stands in for `max_request_body`) |
 | HTTP versions | HTTP/1.0 and HTTP/1.1 only, anything else is `400` |
 | TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` terminates per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
 
 Endpoints that accept large uploads read `req.bodyReceived()` on every dispatch model (the drained bytes are counted, not buffered) and `req.bodyComplete()` to tell a finished upload from one the peer cut short.
 
-For the full-featured HTTP layer see [`docs/hld-http-en.md`](hld-http-en.md). For implementation details see [`docs/lld-http1-en.md`](lld-http1-en.md).
+For implementation details see [`docs/lld-http1-en.md`](lld-http1-en.md).
 
 ---
 

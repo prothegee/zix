@@ -30,9 +30,9 @@ The lowercase implementation files carry the logic, the PascalCase file is the d
 
 ```zig
 test "zix: unit test" {
-    // # zix.Http
-    std.testing.refAllDecls(@import("tcp/http/router.zig"));
-    std.testing.refAllDecls(@import("tcp/http/response.zig"));
+    // # zix.Http1
+    std.testing.refAllDecls(@import("tcp/http1/router.zig"));
+    std.testing.refAllDecls(@import("tcp/http1/Response.zig"));
     // ... one line per file with tests
 }
 ```
@@ -321,7 +321,7 @@ There is no single "preferred" allocator. The allocator is chosen by the data's 
 | Allocator | When | Where in tree |
 | :- | :- | :- |
 | `std.heap.smp_allocator` (general-purpose, thread-safe) | the default for long-lived and shared state: connection and stream maps, worker thread arrays, HPACK tables, per-connection state. Use it whenever the data has no clean single reset point or is touched from more than one thread | every `dispatch/` and `core.zig` |
-| `std.heap.ArenaAllocator` | only when the lifetime is a true scope with one bulk reset and a single owner: the response-cache backing, the `zix.Http` per-connection arena | `utils/response_cache.zig`, `tcp/http/server.zig` |
+| `std.heap.ArenaAllocator` | only when the lifetime is a true scope with one bulk reset and a single owner: the response-cache backing, the `zix.Http1` per-request arena | `utils/response_cache.zig`, `tcp/http1/dispatch/` |
 | Demand-paged slab (custom contiguous) | the bounded hot-path connection table, one `mmap` carved per worker, no per-accept heap call, an empty slot is just `buf.len == 0` | `multiplexers/slab.zig` |
 | `std.heap.page_allocator` | page-granular buffers handed to the kernel (the provided-buffer ring) | `tcp/http1/dispatch/uring.zig` |
 | `std.testing.allocator` | tests only, it also catches leaks | every test block |

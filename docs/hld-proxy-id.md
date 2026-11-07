@@ -1,6 +1,6 @@
 # Reverse proxy: nginx dan haproxy di depan zix
 
-`zix.Http1`, `zix.Http`, dan `zix.Grpc` semua melayani TLS secara native (set `tls: ?*Tls.Context`, lihat [`docs/hld-tls-id.md`](hld-tls-id.md)). Menaruh nginx atau haproxy di depan adalah opsi, bukan keharusan, dan menjadi pilihan tepat saat ingin TLS offload ke proxy, routing per host atau path, load balancing antar backend, atau berbagi port 443 dengan service lain. Server zix lalu berjalan cleartext di belakang proxy: HTTP/1.1 untuk `zix.Http1` / `zix.Http`, atau h2c (HTTP/2 cleartext) untuk `zix.Grpc`. Client eksternal terhubung ke proxy lewat TLS, dan proxy meneruskan ke backend.
+`zix.Http1` dan `zix.Grpc` sama-sama melayani TLS secara native (set `tls: ?*Tls.Context`, lihat [`docs/hld-tls-id.md`](hld-tls-id.md)). Menaruh nginx atau haproxy di depan adalah opsi, bukan keharusan, dan menjadi pilihan tepat saat ingin TLS offload ke proxy, routing per host atau path, load balancing antar backend, atau berbagi port 443 dengan service lain. Server zix lalu berjalan cleartext di belakang proxy: HTTP/1.1 untuk `zix.Http1`, atau h2c (HTTP/2 cleartext) untuk `zix.Grpc`. Client eksternal terhubung ke proxy lewat TLS, dan proxy meneruskan ke backend.
 
 ## Arsitektur
 
@@ -8,13 +8,13 @@
 graph LR
     H[HTTP client<br/>TLS / port 443] -->|http over tls| PN[nginx atau haproxy<br/>TLS termination]
     G[gRPC client<br/>TLS / port 443] -->|grpc over tls| PN
-    PN -->|http/1.1 cleartext / port 8080| ZH[zix.Http1 / zix.Http]
+    PN -->|http/1.1 cleartext / port 8080| ZH[zix.Http1]
     PN -->|grpc h2c / port 8083| ZG[zix.Grpc]
 ```
 
 Nomor port di bawah hanya contoh: `8080` untuk backend HTTP, `8083` untuk backend gRPC. Sesuaikan dengan `config.port` Anda.
 
-## HTTP/1 (`zix.Http1` dan `zix.Http`)
+## HTTP/1 (`zix.Http1`)
 
 Backend berjalan HTTP/1.1 biasa (tanpa `tls`). Proxy melakukan TLS termination lalu meneruskan.
 

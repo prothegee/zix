@@ -188,7 +188,7 @@ The query string is stripped before matching (matching sees the path up to `?`),
 
 `public_dir` (ADR-064) serves an unmatched route as a file before the 404, with `..` rejected. A missing directory fails at `run()` with `error.ZixPublicDirNotFound`.
 
-**This engine differs from the other three, and the difference is not an optimization.** On `zix.Http`, `zix.Http1`, and `zix.Http2` the response is written inside the handler call, so a body can come from a descriptor that is only open for that call. Here it cannot: `Response` is a value holder, and a body too large for one packet is parked in a send-stream slot, fragmented by the pump across many packets, held until every range is acknowledged, and rewound and re-sent on loss or on a probe timeout. The body has to be stable, randomly readable memory that outlives the handler.
+**This engine differs from the other two, and the difference is not an optimization.** On `zix.Http1` and `zix.Http2` the response is written inside the handler call, so a body can come from a descriptor that is only open for that call. Here it cannot: `Response` is a value holder, and a body too large for one packet is parked in a send-stream slot, fragmented by the pump across many packets, held until every range is acknowledged, and rewound and re-sent on loss or on a probe timeout. The body has to be stable, randomly readable memory that outlives the handler.
 
 So the body comes from a snapshot the cache holds, and the cache pin is held for the whole response rather than for the handler call. Two consequences follow:
 
@@ -261,7 +261,7 @@ The handler returns `anyerror!void`. `core.invokeHandler` completes a handler er
 
 The completion here is a struct fill, not a socket write, which is what separates this engine from the other three:
 
-- The auto-500 body is empty. `zix.Http`, `zix.Http1`, and `zix.Http2` write a `text/plain` body reading `Internal Server Error`, this engine sends the status alone.
+- The auto-500 body is empty. `zix.Http1` and `zix.Http2` write a `text/plain` body reading `Internal Server Error`, this engine sends the status alone.
 - There is no failed-send case. `res.send` only fills the struct and returns `void`, so a handler cannot fail to send the way `try res.send(...)` can on a TCP engine, and every error that reaches `invokeHandler` is decided purely by `res.sent`.
 
 One other `500` comes from the engine itself rather than from a handler error: a body too large for one packet needs a send-stream slot, and when the connection has none free the request is answered `500` with an empty body (packed like a small response). There are 64 slots per connection (`max_send_streams`, fixed, not a config field), so a client that keeps many large responses in flight can see it.

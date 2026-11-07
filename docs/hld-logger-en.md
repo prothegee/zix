@@ -67,7 +67,7 @@ pub const Logger = @import("logger/logger.zig").Logger;
 | Method | Auto-called by | Level | Line format |
 | :- | :- | :- | :- |
 | `system(level, component, fmt, args)` | all servers (lifecycle) | caller-set | `DATE TIME LEVEL  [component] message` |
-| `access(component, method, path, status, bytes, client_ip, ua, origin)` | zix.Http, zix.Http1, zix.Http2, zix.Http3 (per-request), zixer (per-exchange) | derived from status | `DATE TIME LEVEL  [component:access] METHOD PATH STATUS BYTES "CLIENT_IP" "UA" "ORIGIN"` |
+| `access(component, method, path, status, bytes, client_ip, ua, origin)` | zix.Http1, zix.Http2, zix.Http3 (per-request), zixer (per-exchange) | derived from status | `DATE TIME LEVEL  [component:access] METHOD PATH STATUS BYTES "CLIENT_IP" "UA" "ORIGIN"` |
 | `conn(peer, dur_ms, err)` | TCP server (per-connection close) | INFO / WARN | `DATE TIME LEVEL  [tcp:conn] PEER dur=NNNms ERR` |
 | `packet(dir, peer, size, err)` | UDP server (per-datagram) | INFO / WARN | `DATE TIME LEVEL  [udp:pkt] DIRECTION PEER size=N ERR` |
 | `frame(dir, sock_path, size, err)` | UDS (manual) | INFO / WARN | `DATE TIME LEVEL  [uds:frame] DIRECTION SOCKPATH size=N ERR` |
@@ -141,7 +141,6 @@ Each server accepts an optional `logger: ?*Logger = null` in its config. When no
 
 | Protocol | Methods called automatically | Config field |
 | :- | :- | :- |
-| HTTP | `access()` per request, `system()` lifecycle | `HttpServerConfig.logger` |
 | HTTP/1.1 | `access()` per request, `system()` lifecycle | `Http1ServerConfig.logger` |
 | HTTP/2 | `access()` per stream, `system()` lifecycle | `Http2ServerConfig.logger` |
 | HTTP/3 | `access()` per request, `system()` lifecycle | `Http3ServerConfig.logger` |
@@ -198,7 +197,7 @@ All network server examples include a commented logger init block at the top tha
 - `examples/fix_server.zig`
 - `examples/udp_server.zig`
 - `examples/uds_server.zig`
-- `examples/http_basic.zig`
+- `examples/http1_logger.zig`
 - `examples/grpc_location_server.zig` (logger wired and active by default)
 - `examples/grpc_multi_server.zig` (logger wired and active by default)
 

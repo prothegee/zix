@@ -39,22 +39,6 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `tcp/server.zig` | `refAllDecls` + behavioral: port zero -> `error.ZixPortNotConfigured`, valid config succeeds and deinit is safe, valid EPOLL config succeeds and deinit is safe |
 | `tcp/client.zig` | `refAllDecls` |
 
-### zix.Http
-
-| Module | Coverage |
-| :- | :- |
-| `tcp/http/method.zig` | `refAllDecls` + round-trip over every code including `QUERY` (RFC 10008), QUERY resolving from its wire token and never reported as GET, case-sensitive matching, `codeFromString` reporting an unknown token as null, a token past `MAX_TOKEN_LEN` refused by the length switch, `enumFromString` keeping its GET fallback |
-| `tcp/http/status.zig` | `refAllDecls` |
-| `tcp/http/content.zig` | `refAllDecls` + round-trip: `typeFromString` / `stringFromEnum` for every enum variant, `typeFromHeader` parameter stripping, an unknown or oversized value reporting no match |
-| `tcp/http/parser.zig` | `refAllDecls` + behavioral: incomplete returns null, minimal GET offsets, path+query split, header offsets, keep_alive flag, all methods, an unimplemented method reporting UnknownMethod (501) apart from a malformed request line (400), chunked flag set/false, chunked coding list, chunkedEnd complete/partial/watermark-resume/terminator-in-data/trailers/pipelined/invalid-hex, dechunkInPlace over its own buffer/overlapping move/chunk order |
-| `tcp/http/request.zig` | `refAllDecls` + behavioral: method, path, query string, queryParam (present / absent / flag), pathSegments, queryParams, header lookup (case-insensitive), body delivery (segmented Content-Length and chunked arrival over a non-blocking fd, a body far larger than the read buffer, short read reported when the peer closes early) |
-| `tcp/http/response.zig` | `refAllDecls` + behavioral: setStatus, setContentType, setKeepAlive, addHeader, `HeaderSize.value()`, injection guard (CR/LF), TooManyHeaders, `SseWriter` wire formats, `Response.streaming` default |
-| `tcp/http/router.zig` | `refAllDecls` + behavioral: matchParam, route registration (kind + path preserved) |
-| `tcp/http/static.zig` | `refAllDecls` + behavioral: mimeType, parseRangeHeader |
-| `tcp/http/websocket.zig` | `refAllDecls` + behavioral: acceptKey RFC vector, buildFrame + parseFrame round-trip, masked frame |
-| `tcp/http/context.zig` | `refAllDecls` + behavioral: `timedOut` null deadline returns false, `isExpired` null deadline returns false |
-| `tcp/http/server.zig` | `refAllDecls` + behavioral: `EpollConnTable` slab alloc / free lifecycle, filled-bytes accounting, out-of-range fd returns null, `getAvailableCpuCount` returns at least 1, `effectiveCacheEntries` honors the memory ceiling, EPOLL `processRequest` serves a cache miss then a hit, `processRequest` body outcomes (bodyComplete true for a fully-read Content-Length or chunked body and false when the handler never reads, 413 for a declared or chunked body past the limit, 100 Continue sent for a body-carrying Expect and skipped without one, close when a plain or coding-list chunked body is left unread or the peer stops early, a chunked body arriving after the head is delivered) |
-
 ### zix.Http1
 
 | Module | Coverage |
@@ -86,16 +70,6 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | `uds/config.zig` | `refAllDecls` + defaults: `UdsServerConfig` (kernel_backlog=128, max_recv_buf=4096), `UdsClientConfig` |
 | `uds/server.zig` | `refAllDecls` + behavioral: empty path -> `error.ZixPathEmpty`, valid path succeeds and deinit is safe |
 | `uds/client.zig` | `refAllDecls` |
-
-### zix.Http.Client
-
-| Module | Coverage |
-| :- | :- |
-| `tcp/http/client_config.zig` | `refAllDecls` + defaults: `HttpClientConfig` (connect_timeout_ms=0, response_timeout_ms=0, read_timeout_ms=0, max_response_body=4MB, follow_redirects=true, max_redirects=3, h2_max_read_rounds=4096, user_agent=`zon_options.user_agent`, version=HTTP_1, tls_verify=true, tls_ca_path=null) |
-| `tcp/http/client.zig` | `refAllDecls` + behavioral: `.HTTP_2` over a non-https URL is rejected before connecting, `.HTTP_3` yields `UnsupportedVersion`, a server that never answers yields `ResponseTimeout`, a complete reply is not cut short by an idle bound, a body that goes quiet mid-transfer yields `ReadTimeout` |
-| `tcp/http/h2_client.zig` | `refAllDecls` + behavioral: `methodHasBody` + `skipRequestHeader`, `putFrame` round-trips through the frame parser, `putWindowUpdate` encodes the increment big-endian, `headerBlock` strips PADDED and PRIORITY prefixes, `dataPayload` strips DATA padding, a peer that accepts and never speaks yields `ResponseTimeout` |
-| `tcp/http/sse_client.zig` | `refAllDecls` + behavioral: `splitField` (data / event / retry / bare field name / name mismatch / no leading space preserved), `parseHttpUrl` (basic, default port 80, https returns `TlsNotSupported`), a server that never answers yields `ResponseTimeout`, a stream that goes quiet yields `ReadTimeout` (not a clean close) |
-| `tcp/http/ws_client.zig` | `refAllDecls` + behavioral: acceptKey RFC 6455 vector, `parseWsUrl` (basic, no path defaults to /, default port 80, wss returns `TlsNotSupported`, non-ws returns `InvalidUrl`), a server that never answers yields `ResponseTimeout`, a peer that sends no frame yields `ReadTimeout` |
 
 ### zix.Channel
 
@@ -219,49 +193,6 @@ Source: `tests/integration/`. Each file is a standalone test executable compiled
 | `HandlerFn` type check | `zix.Tcp.echoHandler` satisfies `zix.Tcp.HandlerFn` |
 | `TcpClient.connect` port zero | returns `error.ZixPortNotConfigured` before any socket call |
 
-### tests/integration/http/
-
-#### `request_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `pathParam()` single param | captured segment returned by name (absent name returns null) |
-| `pathParam()` hyphenated names | `:tenant-id`, `:tenant-branch` (http_paths example pattern) |
-| `body()` chunked single chunk decoded correctly | `"5\r\nhello\r\n0\r\n\r\n"` -> `"hello"` |
-| `body()` chunked multiple chunks assembled | `"3\r\nfoo\r\n4\r\nbarr\r\n0\r\n\r\n"` -> `"foobarr"` |
-| `body()` chunked empty body returns empty string | terminal chunk only -> `""` |
-| `body()` returns body_cache without touching reader | pre-set `body_cache` short-circuits read, second call returns same pointer |
-
-#### `router_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Exact match | `dispatch` returns true, correct handler called |
-| Param populates `path_params` | `req.path_params` set after param dispatch. `req.pathParam()` returns the value. |
-| Two path params both populated | multi-param route captures both segments |
-| Prefix routes to handler | prefix match returns true and calls handler |
-
-#### `context_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `withTimeout` / `withDeadline` timing | 60s budget not expired. 10ms budget exceeded after 50ms sleep. |
-
-#### `header_index_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Empty index returns null | no headers indexed (all lookups return null) |
-| Case-insensitive lookup | pre-populated map: `Content-Type` found via `content-type` |
-
-#### `sse_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `SseWriter.writeEvent` wire format | `"data: ping\n\n"` via `std.Io.Writer.fixed` buffer |
-| `SseWriter.writeNamedEvent` wire format | `"event: update\ndata: 99\n\n"` |
-| `SseWriter.comment` wire format | `": keepalive\n"` |
-
 ### tests/integration/http1/
 
 #### `server_test.zig`
@@ -316,7 +247,6 @@ Drives the real router path over a socketpair, so what is asserted is the bytes 
 | `parseFrame` pong opcode | opcode |
 | `parseFrame` close with empty payload | opcode, zero-length payload |
 | Round-trip all opcodes | buildFrame -> parseFrame for text, binary, ping, pong, close |
-| `RoomMap` init / deinit | no connections (no crash or leak) |
 
 ### tests/integration/udp/
 
@@ -335,17 +265,6 @@ Drives the real router path over a socketpair, so what is asserted is the bytes 
 | Round-trip LITTLE | `toEndian` -> `fromEndian` restores original bytes |
 | Round-trip BIG | same for BIG endian |
 | `FeedbackResult.packet` value | `.packet` variant stores and returns the full packet |
-
-### tests/integration/http/ (client)
-
-#### `client_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `HttpClient.init` and `deinit` | no requests: init + deinit is safe with Threaded io |
-| `ClientResponse.header()` on mock head bytes | lookup by name and case-insensitive lookup |
-| `ClientResponse.iterateHeaders()` | counts all headers from raw head bytes |
-| `ClientRequestOpts` defaults | `headers` empty, `body` null, `connect_timeout_ms` null |
 
 ### tests/integration/uds/
 
@@ -495,87 +414,6 @@ The cross-engine `DispatchModel` platform contract (ADR-065), asserted once for 
 | TCP frame header size | always exactly 4 bytes |
 | `DispatchModel.ASYNC` is zero value | `@intFromEnum(.ASYNC) == 0` |
 
-### tests/behaviour/http/
-
-#### `request_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `path()` strips query string | `"/api/users?limit=10"` -> `"/api/users"` |
-| `path()` returns full target when no `?` | `"/api/users/alice"` unchanged |
-| `path()` root path | `"/"` returns `"/"` |
-| `query()` returns portion after `?` | `"q=hello&lang=zig"` |
-| `query()` returns empty when no `?` | `""` |
-| `body()` chunked produces same payload as Content-Length | chunked `"world"` matches `body_cache = "world"` |
-| `body()` second call returns cached result | `b1.ptr == b2.ptr` after two body() calls |
-| `method()` resolves each method | DELETE/PATCH/PUT/OPTIONS/HEAD/GET/POST all resolved |
-
-#### `router_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Exact beats param regardless of registration order | exact registered after param still wins |
-| Param beats prefix regardless of registration order | param registered after prefix still wins |
-| Prefix: longest match wins | `/api/users` beats `/api` for `/api/users/alice` |
-| Prefix matches its own path exactly | `/api` matches `/api` |
-| Query string transparent for param dispatch | `"/users/bob?role=admin"` captures `bob` via `:id` |
-| Query string transparent for exact dispatch | `"/about?ref=menu"` matches `/about` |
-
-#### `content_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Text group extensions | html/htm/css/txt/csv |
-| Application group extensions | json/map/js/min.js/xml/pdf/wasm/zip/gz/tar/7z/rar/rtf |
-| Image group extensions | png/jpg/jpeg/gif/svg/webp/ico |
-| Audio group extensions | mp3/wav/flac/mid/midi |
-| Video group extensions | mp4/webm/ogg/mpeg/avi/mov/wmv/flv/mkv |
-| Font group extensions | ttf/otf/woff/woff2 |
-| Matching is case-insensitive | HTML, PNG, JS, JSON, JPG, JPEG, CSS, WOFF2 |
-| `fromExtension()` returns correct MIME string | representative set |
-| Alias pairs produce identical MIME strings | jpg==jpeg, mid==midi, html==htm, js==min.js, json==map |
-
-#### `config_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Buffer size defaults | `kernel_backlog`, `max_recv_buf`, `max_allocator_size` all 4096 |
-| Timeout defaults are disabled | `conn_timeout_ms == 0`, `handler_timeout_ms == 0` |
-| Static serving disabled by default | `public_dir == ""`, `public_dir_upload == "u"` |
-| `dispatch_model` is required (no default) | caller must set it in `HttpServerConfig` |
-| `workers` defaults to auto-size | `workers == 0` |
-| `max_request_headers` defaults to `.LARGE` | enum variant and `.value()` == 64 |
-| `RequestHeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64 |
-| `RequestHeaderSize.CUSTOM(N)` capped at 64 | values above 64 silently return 64 |
-| `max_response_headers` defaults to MINIMAL (16) | enum value and `.value()` |
-| `HeaderSize` tier values | MINIMAL=16, COMMON=32, LARGE=64, EXTRA_LARGE=128 |
-| `HeaderSize.CUSTOM(N)` returns N | 7 and 100 |
-| `Response` status defaults to OK | `init()` invariant |
-
-#### `sse_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `ContentType.TEXT_EVENT_STREAM.asString()` | returns `"text/event-stream"` |
-| `Response.streaming` defaults to false | `init()` invariant |
-
-#### `query_test.zig`
-
-RFC 10008 QUERY support on the `zix.Http` engine, held to the same contract as the raw engine.
-
-| Test | What it verifies |
-| :- | :- |
-| Accepts a QUERY request line | the parser rejected QUERY outright before this |
-| A QUERY request is distinguishable from a GET | the typed code differs |
-| A QUERY request carries its content like a POST | chunked body delivery |
-| A QUERY request exposes its declared Content-Type | section 2 |
-| A QUERY without Content-Type reports no type | the 400 case |
-| An unsupported query content type reports no match, never sniffed | section 2.1 |
-| Every query content type RFC 10008 names is recognised | the table matches the raw engine's |
-| Http and Http1 agree on what a QUERY request is | one answer from both engines |
-| A method it does not implement draws 501, not 400 | the line tokenized, so the request was not malformed |
-| Http and Http1 answer an unimplemented method identically | byte-identical response |
-
 ### tests/behaviour/http1/
 
 #### `config_test.zig`
@@ -655,22 +493,6 @@ RFC 10008 QUERY support through the public `zix.Http1` surface.
 | u8 array fields never swapped | `id [4]u8` untouched by LITTLE and BIG |
 | Non-native swaps integer fields | `i32` field byte-swapped |
 | Non-native swaps float array elements | `[2]f64` elements each swapped |
-
-### tests/behaviour/http/ (client)
-
-#### `client_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `ClientConfig` connect/response/read timeout defaults | all 0 (disabled) |
-| `ClientConfig` max_response_body default | 4 MB (1024 * 1024 * 4) |
-| `ClientConfig` follow_redirects default | true |
-| `ClientConfig` max_redirects default | 3 |
-| `ClientConfig` user_agent default | matches `zix.Http.default_user_agent` (library version string from `build.zig.zon`) |
-| `ClientResponse.status()` | returns status_code field |
-| `ClientResponse.body()` | returns body_data slice |
-| `ClientResponse.header()` case-insensitive | matches regardless of header name casing |
-| `ClientResponse.deinit()` zero-length body | safe, no crash or leak |
 
 ### tests/behaviour/uds/
 
@@ -790,64 +612,6 @@ Source: `tests/edge/`. Each file verifies boundary conditions and error paths.
 | `DispatchModel` dropped names gone | `stringToEnum` returns null for POOL and MIXED |
 | TCP frame max u32 length | `maxInt(u32)` encodes and decodes correctly via big-endian |
 
-### tests/edge/http/
-
-#### `request_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `queryParam` key present with empty value | `"?k="` -> `""` (not null) |
-| `queryParam` key absent returns null | key not in query string |
-| `queryParam` no query string at all returns null | target has no `?` |
-| `body()` chunked invalid hex is an error, not an empty body | `"zz"` chunk size -> `error.ZixInvalidChunkedBody`, `bodyComplete()` false (the engine answers 400) |
-| `body()` chunked missing terminal chunk returns partial data | no `0\r\n\r\n` -> partial data returned |
-| `body()` chunked single-byte chunks | `1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n` -> `"abc"` |
-
-#### `router_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| No registered route returns false | empty router, `dispatch` returns false |
-| Prefix `/api` does NOT match `/apiv2` | next char after prefix must be `/` or end-of-path |
-
-#### `response_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| CR in header name -> `InvalidHeaderName` | injection guard |
-| LF in header name -> `InvalidHeaderName` | injection guard |
-| CR in header value -> `InvalidHeaderValue` | injection guard |
-| LF in header value -> `InvalidHeaderValue` | injection guard |
-| Buffer grows from 4 to 5 on 5th header | initial cap=4, growth to min(8, max_response_headers) |
-| `max_response_headers=1` rejects second header | no growth: `TooManyHeaders` immediately |
-| `HeaderSize.CUSTOM(0).value()` | returns 0 |
-
-#### `content_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Unknown extension -> `APPLICATION_OCTET_STREAM` | xyz, bin, dat, unknown |
-| Empty string -> `APPLICATION_OCTET_STREAM` | `typeFromExtension("")` |
-| `fromExtension` unknown -> `"application/octet-stream"` | string form of fallback |
-
-#### `query_test.zig`
-
-QUERY boundary conditions on the `zix.Http` engine.
-
-| Test | What it verifies |
-| :- | :- |
-| Matches the QUERY token exactly, as it does every method | RFC 9110 section 9.1, method names are case-sensitive |
-| A five-byte token that is not QUERY is still refused | the length arm is not a catch-all |
-| An unimplemented method answers 501, a broken line answers 400 | the status comes from the error |
-| A QUERY with zero Content-Length frames as bodyless | framing |
-| A chunked QUERY body decodes to the same bytes as Content-Length | the two framings agree |
-| A QUERY keeps both its query string and its content | target parameters survive |
-| The longest query content type is matched, not truncated | 33 bytes |
-| An absurd Content-Type reports no match instead of overrunning | bounded |
-| An empty Content-Type value reports no match | empty, lone semicolon, whitespace |
-| A multipart QUERY boundary parameter does not defeat the match | parameters stripped |
-| Both engines answer the same for a parameterised query type | the two content tables stay in step |
-
 ### tests/edge/websocket/
 
 #### `websocket_test.zig`
@@ -875,18 +639,6 @@ QUERY boundary conditions on the `zix.Http` engine.
 | :- | :- |
 | `Endianness` enum backing values stable | NATIVE=0, LITTLE=1, BIG=2 |
 | `FeedbackResult` ack/nack are tag-only | active tag matches .ack and .nack |
-
-### tests/edge/http/ (client)
-
-#### `client_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Unsupported scheme -> `error.ZixUrlSchemeUnsupported` | `ftp://` scheme not accepted |
-| Missing host -> `error.ZixUrlHostMissing` | `http://` with no host |
-| Malformed URL -> `error.ZixUrlMalformed` | `:::bad` fails at parse |
-| `ClientResponse.header()` absent name | returns null |
-| `RequestOpts.connect_timeout_ms` override | null, 0, and non-zero are distinct values |
 
 ### tests/edge/uds/
 

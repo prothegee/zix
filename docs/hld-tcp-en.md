@@ -12,7 +12,7 @@ Implemented. See ADR-022 for design rationale.
 
 ## Goals
 
-- Explicit over implicit: same config and dispatch-model pattern as `zix.Http`.
+- Explicit over implicit: same config and dispatch-model pattern as `zix.Http1`.
 - User owns the handler: `HandlerFn = *const fn(stream, io) void`, baked into the server type at `init` (ADR-038), identical in shape to `zix.Uds.HandlerFn`.
 - Length-prefixed framing built into the default echo handler and the client API (big-endian, network byte order).
 - ASYNC and EPOLL dispatch models for the per-connection handler: same semantics as HTTP. EPOLL is Linux-only and `run()` rejects it off Linux with `error.ZixDispatchModelUnsupported` (ADR-065). The per-frame `FrameFn` callback (`initFramed`) adds a native `.URING` ring path (ADR-037, ADR-038).
@@ -68,7 +68,7 @@ pub const Tcp = @import("tcp/Tcp.zig");
 - The handler or callback is baked into the server type at `init` (comptime), and `io` is a config field, so `run()` takes no argument (ADR-038, ADR-039).
 - `initFramed` is a genuinely different contract, not a convenience wrapper. The per-connection `HandlerFn` owns the socket and blocks on synchronous reads, which a single-threaded completion loop cannot drive, so the ring path needs the non-blocking per-frame `FrameFn` instead. For the per-connection handler, `.URING` folds to `.EPOLL`.
 - `initArgs` / `initFramedArgs` only add `--ip` / `--port` parsing, so one built binary can bind a different address or port without a rebuild. The examples use the plain `init` / `initFramed`. Reach for the `Args` variants when you want runtime override.
-- `zix.Udp` has the same `init` / `initArgs` split. The seven engine servers (`zix.Http`, `zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Fix`) have only `init`.
+- `zix.Udp` has the same `init` / `initArgs` split. The six engine servers (`zix.Http1`, `zix.Http2`, `zix.Http3`, `zix.Webrtc`, `zix.Grpc`, `zix.Fix`) have only `init`.
 
 ---
 

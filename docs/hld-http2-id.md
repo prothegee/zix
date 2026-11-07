@@ -245,7 +245,7 @@ flowchart TD
 - Kedua jalur dibangun, yang di-cache maupun yang tidak, jadi `public_dir` berperilaku sama baik `public_dir_cache_ttl_ms` diatur maupun tidak. Bila diatur, request berulang berbiaya satu lookup hash alih-alih open plus stat, dan sibling `.br` / `.gz` di-resolve sekali saat insert alih-alih diprobe per request. Setiap header varian yang di-cache membawa `Vary: Accept-Encoding`.
 - Zero copy (`sendfile`) selalu ditolak di engine ini, termasuk cleartext, karena hook coalescing mux (`frame.write_hook`) terpasang di setiap batch dan write socket langsung akan menaruh body mendahului frame yang sudah di-stage. Body dipotong dari snapshot resident sebagai gantinya.
 - Pengiriman static memakai jalur `frame.sendResponseFD` tanpa metering yang sama seperti `Response.send`, bukan `mux.sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
-- `public_dir_upload` tidak ditawarkan di sini. `zix.Http2` tidak punya konvensi handler upload, tidak seperti `zix.Http` dan `zix.Http1`.
+- `public_dir_upload` tidak ditawarkan di sini. `zix.Http2` tidak punya konvensi handler upload, tidak seperti `zix.Http1`.
 
 ---
 

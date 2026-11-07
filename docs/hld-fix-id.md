@@ -385,7 +385,7 @@ recv_buf:  [complete message][leftover bytes][free]
 
 ## Model Dispatch
 
-Sama seperti tiga model di `zix.Http.Server`. Field-nya wajib tanpa default. ASYNC cocok untuk sesi FIX berumur panjang dan satu-satunya model portabel:
+Sama seperti tiga model di `zix.Http1.Server`. Field-nya wajib tanpa default. ASYNC cocok untuk sesi FIX berumur panjang dan satu-satunya model portabel:
 
 | Model | Accept thread | Catatan |
 | :- | :- | :- |

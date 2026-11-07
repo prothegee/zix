@@ -109,6 +109,41 @@ __**Update:**__
 
 - `zix.Utils.Charsets` is the source for repeatable charset strings.
 
+    ---
+
+- **`zix.Http1`**:
+    - New public aliases: `HandlerFn`, `PathParam`, `Method`, `Status`, `Content`,
+      `ContentType`, and `HeaderSize`.
+    - The router sizes its path param store at compile time from its route with the
+      most `:params`. The fixed limit of 8 is gone.
+    - `Config` gains the request, compression, cache, and static fields:
+      `handler_timeout_ms`, `max_recv_buf`, `max_request_body`, `large_body_recv_buf`,
+      `send_date_header`, `max_response_headers`, `compress`, `compression_min_size`,
+      `compression_max_out`, `response_cache`, `cache_ttl_ms`, `cache_max_entries`,
+      `cache_max_value_bytes`, `public_dir`, `public_dir_upload`,
+      `public_dir_cache_ttl_ms`, and `public_dir_cache_max_entries`.
+    - `max_request_body` defaults to 2 MiB (was 8 MiB).
+    - `large_body_rcvbuf` is renamed to `large_body_recv_buf`.
+    - `max_entries` and `max_value_bytes` are replaced by `cache_max_entries` and
+      `cache_max_value_bytes`.
+    - `.ASYNC` copies every `Config` field onto each connection.
+    - `.EPOLL` and `.URING` install `send_date_header`, `max_response_headers`,
+      `handler_timeout_ms`, `max_request_body`, and `large_body_recv_buf` per worker.
+      The per-connection buffer follows `max_recv_buf` (was a fixed 16 KiB).
+    - `response_cache` and `public_dir` are accepted but not active yet.
+
+- Http1 examples in the current style, registered under `zig build zix-example-http1`:
+    - `http1_json`, `http1_params`, and `http1_paths` are ported.
+    - `http1_logger` is new: `zix.Logger` attached to the server with console and file output.
+
+- **`zix.Http` is removed**, `zix.Http1` is the HTTP/1.1 engine:
+    - README and docs use `zix.Http1` in prose and code examples.
+    - `docs/hld-http-*.md` and `docs/lld-http-*.md` are deleted.
+    - Docs sections with no `zix.Http1` counterpart are removed: the HTTP client,
+      `RequestHeaderSize`, the SSE and WebSocket clients, and the `HttpServerConfig` reference.
+    - `examples/http_*.zig` links now point to the matching `examples/http1_*.zig`.
+    - ADRs, past changelog releases, and migration guides keep `zix.Http` as history.
+
 <br>
 
 __**Fix:**__
@@ -117,6 +152,11 @@ __**Fix:**__
 
 - `generator` range tests used `or`, so the bound assertion always passed.
   They now use `and`.
+
+- `.EPOLL` and `.URING` never answered 413 for a large body, because the limit was a
+  constant 0. They now read `max_request_body` from `Config`.
+
+- A `zix.Http1` PARAM route with more than 8 `:params` never matched and answered 404.
 
 <br>
 
