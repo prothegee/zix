@@ -40,6 +40,26 @@ const EXAMPLES = .{
         "examples/http1_basic.zig",
         "http1",
     },
+    .{
+        "zix-example-http1_json",
+        "examples/http1_json.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_params",
+        "examples/http1_params.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_paths",
+        "examples/http1_paths.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_logger",
+        "examples/http1_logger.zig",
+        "http1",
+    },
 };
 
 // --------------------------------------------------------- //
