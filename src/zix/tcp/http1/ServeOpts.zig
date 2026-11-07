@@ -38,7 +38,7 @@ nodelay: bool = true,
 handler_timeout_ms: u32 = 0,
 large_body_recv_buf: usize = 0,
 max_recv_buf: usize = BUF_SIZE,
-max_request_body: usize = 0,
+max_request_body: usize = 2 * 1024 * 1024,
 
 // --------------------------------------------------------- //
 // Public:
@@ -58,11 +58,14 @@ test "zix http1: ServeOpts, applies defaults" {
     try std.testing.expectEqual(BUF_SIZE, opts.max_recv_buf);
     try std.testing.expectEqual(@as(u32, 0), opts.handler_timeout_ms);
     try std.testing.expectEqual(@as(usize, 0), opts.large_body_recv_buf);
-    try std.testing.expectEqual(@as(usize, 0), opts.max_request_body);
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), opts.max_request_body);
 }
 
 test "zix http1: ServeOpts, accepts an explicit buffer size" {
-    const opts: @This() = .{ .max_recv_buf = 64 * 1024, .max_request_body = 1024 };
+    const opts: @This() = .{
+        .max_recv_buf = 64 * 1024,
+        .max_request_body = 1024,
+    };
 
     try std.testing.expectEqual(@as(usize, 64 * 1024), opts.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 1024), opts.max_request_body);

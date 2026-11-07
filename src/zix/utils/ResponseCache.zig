@@ -81,9 +81,9 @@ pub const Meta = struct {
 /// costs no physical memory.
 ///
 /// Note:
-/// - max_entries is rounded down to a power of two, so the configured entry
+/// - cache_max_entries is rounded down to a power of two, so the configured entry
 ///   count is an upper bound and the slab never exceeds
-///   max_entries * max_value_bytes.
+///   cache_max_entries * cache_max_value_bytes.
 /// - The first PRETOUCH_BYTES of the slab are made resident up front, so
 ///   the hot region is a startup property instead of ramp-time faults.
 ///
@@ -100,8 +100,8 @@ pub const Error = error {
 };
 
 pub fn init(backing: std.mem.Allocator, config: Config) Error!Self {
-    const entries: usize = std.math.floorPowerOfTwo(u32, @max(1, config.max_entries));
-    const value_bytes: usize = @max(1, config.max_value_bytes);
+    const entries: usize = std.math.floorPowerOfTwo(u32, @max(1, config.cache_max_entries));
+    const value_bytes: usize = @max(1, config.cache_max_value_bytes);
 
     var arena = std.heap.ArenaAllocator.init(backing);
     errdefer arena.deinit();
@@ -191,7 +191,7 @@ pub fn lookup(self: *Self, key: u64, now_ms: u64) ?[]const u8 {
 ///   (steady-state TTL refreshes never move or grow the slab). A first
 ///   store, or a larger value, draws a fresh region from the bump cursor.
 ///   The region a larger value abandons is not reclaimed: the slab bounds
-///   the total at max_entries * max_value_bytes and a full slab fails the
+///   the total at cache_max_entries * cache_max_value_bytes and a full slab fails the
 ///   store, which callers already treat as uncached.
 ///
 /// Return:
@@ -288,8 +288,8 @@ test "zix utils: response cache, stores and expires" {
         .ip = "127.0.0.1",
         .port = 0,
         .dispatch_model = .ASYNC,
-        .max_entries = 4,
-        .max_value_bytes = 64,
+        .cache_max_entries = 4,
+        .cache_max_value_bytes = 64,
     };
 
     var cache = try Self.init(std.testing.allocator, config);
@@ -314,8 +314,8 @@ test "zix utils: response cache, rejects a value past the slot cap" {
         .ip = "127.0.0.1",
         .port = 0,
         .dispatch_model = .ASYNC,
-        .max_entries = 4,
-        .max_value_bytes = 64,
+        .cache_max_entries = 4,
+        .cache_max_value_bytes = 64,
     };
 
     var cache = try Self.init(std.testing.allocator, config);
@@ -333,8 +333,8 @@ test "zix utils: response cache, hitSlot rejects a foreign slice" {
         .ip = "127.0.0.1",
         .port = 0,
         .dispatch_model = .ASYNC,
-        .max_entries = 4,
-        .max_value_bytes = 64,
+        .cache_max_entries = 4,
+        .cache_max_value_bytes = 64,
     };
 
     var cache = try Self.init(std.testing.allocator, config);

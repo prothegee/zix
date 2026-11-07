@@ -47,7 +47,7 @@ registry: ?*ConnRegistry = null,
 send_date_header: bool = true,
 large_body_recv_buf: usize = 0,
 max_recv_buf: usize = BUF_SIZE,
-max_request_body: usize = 0,
+max_request_body: usize = 2 * 1024 * 1024,
 max_response_headers: usize = 16, // TODO: check max header config
 public_dir: []const u8 = "",
 logger: ?*Logger = null,
@@ -82,6 +82,7 @@ test "zix http1: ConnArgs, applies defaults" {
 
     try std.testing.expectEqual(BUF_SIZE, args.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 16), args.max_response_headers);
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), args.max_request_body);
     try std.testing.expect(args.send_date_header);
     try std.testing.expect(!args.compress);
     try std.testing.expect(!args.cache_response);

@@ -43,7 +43,9 @@ const chunk = @import("../chunk.zig");
 const handler = @import("../handler.zig");
 const HandlerFn = handler.HandlerFn;
 const head = @import("../head.zig");
+const header = @import("../header.zig");
 const parser = @import("../parser.zig");
+const reader = @import("../reader.zig");
 const RespSink = @import("../RespSink.zig");
 const writer = @import("../writer.zig");
 const slab = @import("../../../multiplexers/slab.zig");
@@ -51,18 +53,11 @@ const slab = @import("../../../multiplexers/slab.zig");
 // --------------------------------------------------------- //
 // Private:
 
-/// Per-connection receive and body scratch size.
-const CONN_BUF: usize = 16 * 1024;
-
 /// Per-connection response staging size.
 const SEND_BUF: usize = 16 * 1024;
 
 /// A response larger than this is flushed directly instead of grown.
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-
-/// Declared request body larger than this is refused with 413.
-/// Zero disables the check.
-const MAX_REQUEST_BODY: usize = 0;
 
 /// Largest fd the worker slot table can name.
 const MAX_FD: usize = 1 << 16;
@@ -158,6 +153,15 @@ const Worker = struct {
     body_buf: []u8,
     arena: *std.heap.ArenaAllocator,
     accept_pending: bool = false,
+    /// Per-connection receive buffer size, from config.max_recv_buf.
+    recv_buf_size: usize,
+    /// Per-handler budget in milliseconds, from config.handler_timeout_ms. 0 disables it.
+    handler_timeout_ms: u32 = 0,
+    /// Declared request body larger than this is refused with 413. 0 disables the check.
+    max_request_body: usize = 0,
+    /// SO_RCVBUF set when a body larger than the receive buffer is drained. 0 keeps
+    /// the kernel default.
+    large_body_recv_buf: usize = 0,
 
     fn getSqe(self: *Worker) ?*linux.io_uring_sqe {
         if (self.ring.get_sqe()) |sqe| return sqe else |_| {}
@@ -251,7 +255,7 @@ const Worker = struct {
 
         setNoDelay(conn_fd);
 
-        const conn = connAlloc(self.allocator, conn_fd) orelse {
+        const conn = connAlloc(self.allocator, conn_fd, self.recv_buf_size) orelse {
             _ = linux.close(conn_fd);
 
             return;
@@ -471,8 +475,8 @@ const Worker = struct {
                 body = self.body_buf[0..decoded.len];
                 request_len = parsed.body_offset + decoded.consumed;
             } else if (req_head.content_length > 0) {
-                if (MAX_REQUEST_BODY != 0 and
-                    req_head.content_length > MAX_REQUEST_BODY)
+                if (self.max_request_body != 0 and
+                    req_head.content_length > self.max_request_body)
                 {
                     _ = stageResponse(conn.fd, RESPONSE_413_CLOSE);
                     keep_alive = false;
@@ -504,6 +508,14 @@ const Worker = struct {
                     conn.drain_received = 0;
                     request_len = parsed.body_offset;
                 } else if (need > conn.buf.len) {
+                    // Best effort: a kernel that rejects SO_RCVBUF still drains the body.
+                    reader.setRecvBuf(
+                        conn.fd,
+                        self.large_body_recv_buf,
+                    ) catch |err| switch (err) {
+                        else => {},
+                    };
+
                     if (consumed > 0) {
                         std.mem.copyForwards(
                             u8,
@@ -524,7 +536,7 @@ const Worker = struct {
                 }
             }
 
-            handler.setTimeout(self.io, 0);
+            handler.setTimeout(self.io, self.handler_timeout_ms);
             _ = self.arena.reset(.retain_capacity);
             handler.invokeHandler(
                 self.handler_fn,
@@ -733,11 +745,11 @@ fn waitOnce(ring: *IoUring) Error!void {
     }
 }
 
-fn connAlloc(allocator: std.mem.Allocator, fd: std.posix.fd_t) ?*Conn {
+fn connAlloc(allocator: std.mem.Allocator, fd: std.posix.fd_t, recv_size: usize) ?*Conn {
     const conn = allocator.create(Conn) catch |err| switch (err) {
         error.OutOfMemory => return null,
     };
-    const recv_buf = allocator.alloc(u8, CONN_BUF) catch |err| switch (err) {
+    const recv_buf = allocator.alloc(u8, recv_size) catch |err| switch (err) {
         error.OutOfMemory => {
             allocator.destroy(conn);
 
@@ -811,7 +823,10 @@ fn workerMain(ctx: WorkerCtx) void {
     defer listener.deinit(io);
 
     handler.setAccessLogger(ctx.config.logger);
+    head.setDateHeader(ctx.config.send_date_header);
+    header.setMaxResponseHeaders(ctx.config.max_response_headers.value());
 
+    const recv_size = ctx.config.recvBufSize();
     const listener_fd = listener.socket.handle;
 
     const slots = slab.mapZeroedSlots(?*Conn, MAX_FD) catch |err| switch (err) {
@@ -823,7 +838,7 @@ fn workerMain(ctx: WorkerCtx) void {
     };
     defer slab.unmapSlots(slots);
 
-    const body_buf = ctx.allocator.alloc(u8, CONN_BUF) catch |err| switch (err) {
+    const body_buf = ctx.allocator.alloc(u8, recv_size) catch |err| switch (err) {
         error.OutOfMemory => {
             failSetup(&ctx);
 
@@ -843,6 +858,10 @@ fn workerMain(ctx: WorkerCtx) void {
         .allocator = ctx.allocator,
         .body_buf = body_buf,
         .arena = &arena,
+        .recv_buf_size = recv_size,
+        .handler_timeout_ms = ctx.config.handler_timeout_ms,
+        .max_request_body = ctx.config.max_request_body,
+        .large_body_recv_buf = ctx.config.large_body_recv_buf,
     };
     worker.ring = initRing() catch |err| switch (err) {
         else => {
@@ -978,6 +997,26 @@ const Request = @import("../Request.zig");
 const Response = @import("../Response.zig");
 const pair = @import("../../../utils/socket/pair.zig");
 
+/// Receive buffer size the tests allocate, the same 16 KiB the worker used before
+/// it read max_recv_buf from Config.
+const TEST_CONN_BUF: usize = 16 * 1024;
+
+/// SO_RCVBUF the kernel reports for fd.
+fn testRecvBufSize(fd: std.posix.fd_t) !usize {
+    var value: c_int = 0;
+    var len: linux.socklen_t = @sizeOf(c_int);
+    const rc = linux.getsockopt(
+        fd,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVBUF,
+        std.mem.asBytes(&value),
+        &len,
+    );
+    if (std.posix.errno(rc) != .SUCCESS) return error.ZixTest_GetSockOptFailed;
+
+    return @intCast(value);
+}
+
 fn okHandler(_: *Request, res: *Response, _: *Context) anyerror!void {
     res.setContentType(.TEXT_PLAIN);
 
@@ -1014,6 +1053,7 @@ fn testWorker(
         .allocator = allocator,
         .body_buf = body_buf,
         .arena = arena,
+        .recv_buf_size = TEST_CONN_BUF,
     };
 }
 
@@ -1505,5 +1545,150 @@ test "zix http1: uring, init ring receives one byte from a socket pair" {
     try std.testing.expectEqual(OpKind.recv, decoded.op);
     try std.testing.expectEqual(@as(u24, 7), decoded.gen);
     try std.testing.expectEqual(fds[0], decoded.fd);
+}
+
+test "zix http1: uring, Worker leaves the request knobs off by default" {
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const worker = testWorker(okHandler, std.testing.allocator, &body_buf, &arena);
+
+    try std.testing.expectEqual(@as(u32, 0), worker.handler_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 0), worker.max_request_body);
+    try std.testing.expectEqual(@as(usize, 0), worker.large_body_recv_buf);
+}
+
+test "zix http1: uring, connAlloc sizes the recv buffer from max_recv_buf" {
+    const conn = connAlloc(std.testing.allocator, -1, 2048).?;
+    defer connFree(std.testing.allocator, conn);
+
+    try std.testing.expectEqual(@as(usize, 2048), conn.buf.len);
+}
+
+test "zix http1: uring, connAlloc fails without memory" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 1,
+    });
+
+    try std.testing.expectEqual(
+        @as(?*Conn, null),
+        connAlloc(failing.allocator(), -1, 2048),
+    );
+}
+
+test "zix http1: uring, refuses a body past max_request_body with 413" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    head.setDateHeader(false);
+    defer head.setDateHeader(true);
+
+    var conn_buf: [1024]u8 = undefined;
+    const req = "POST /u HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+    @memcpy(conn_buf[0..req.len], req);
+
+    var send_buf: [1024]u8 = undefined;
+    var conn = testConn(fds[1], &conn_buf, &send_buf);
+    conn.filled = req.len;
+
+    var body_buf: [4096]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(okHandler, std.testing.allocator, &body_buf, &arena);
+    worker.max_request_body = 4;
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(ConnOutcome.close, outcome);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        send_buf[0..conn.staged],
+        "HTTP/1.1 413 Payload Too Large\r\n",
+    ));
+}
+
+test "zix http1: uring, accepts a body at max_request_body" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    head.setDateHeader(false);
+    defer head.setDateHeader(true);
+
+    var conn_buf: [1024]u8 = undefined;
+    const req = "POST /u HTTP/1.1\r\nContent-Length: 4\r\n\r\nhell";
+    @memcpy(conn_buf[0..req.len], req);
+
+    var send_buf: [1024]u8 = undefined;
+    var conn = testConn(fds[1], &conn_buf, &send_buf);
+    conn.filled = req.len;
+
+    var body_buf: [4096]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(okHandler, std.testing.allocator, &body_buf, &arena);
+    worker.max_request_body = 4;
+
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, outcome);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        send_buf[0..conn.staged],
+        "HTTP/1.1 200 Ok\r\n",
+    ));
+}
+
+test "zix http1: uring, large body drain applies large_body_recv_buf" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    head.setDateHeader(false);
+    defer head.setDateHeader(true);
+
+    const before = try testRecvBufSize(fds[1]);
+
+    var conn_buf: [1024]u8 = undefined;
+    const req = "POST /u HTTP/1.1\r\nContent-Length: 5000\r\n\r\nabc";
+    @memcpy(conn_buf[0..req.len], req);
+
+    var send_buf: [1024]u8 = undefined;
+    var conn = testConn(fds[1], &conn_buf, &send_buf);
+    conn.filled = req.len;
+
+    var body_buf: [4096]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(echoLenHandler, std.testing.allocator, &body_buf, &arena);
+    worker.large_body_recv_buf = 4096;
+
+    _ = worker.dispatch(&conn);
+
+    try std.testing.expect(conn.drain > 0);
+    try std.testing.expect(try testRecvBufSize(fds[1]) != before);
 }
 

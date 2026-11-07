@@ -48,6 +48,7 @@ pub const PathParam = @import("PathParam.zig");
 pub const Request = @import("Request.zig");
 pub const Response = @import("Response.zig");
 pub const Context = @import("Context.zig");
+pub const HeaderSize = @import("header.zig").Size;
 
 pub const Method = @import("../../utils/http/method.zig");
 pub const Status = @import("../../utils/http/status.zig");
@@ -96,6 +97,18 @@ test "zix http1: Http1, Method falls back to GET on an unknown token" {
 test "zix http1: Http1, Status names its code" {
     try std.testing.expectEqualStrings("Not Found", @This().Status.stringFromEnum(.NOT_FOUND));
     try std.testing.expectEqual(@as(u16, 404), @intFromEnum(@This().Status.Code.NOT_FOUND));
+}
+
+test "zix http1: Http1, HeaderSize maps a tier to its cap" {
+    const size: @This().HeaderSize = .MINIMAL;
+
+    try std.testing.expectEqual(@as(usize, 16), size.value());
+}
+
+test "zix http1: Http1, HeaderSize keeps a custom cap" {
+    const size: @This().HeaderSize = .{ .CUSTOM = 40 };
+
+    try std.testing.expectEqual(@as(usize, 40), size.value());
 }
 
 test "zix http1: Http1, ContentType is the Content type enum" {
