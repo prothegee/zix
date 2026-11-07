@@ -87,14 +87,25 @@ test {
     _ = @import("tcp/http1/serve.zig");
     _ = @import("tcp/http1/writer.zig");
     _ = @import("utils/ResponseCache.zig");
+    _ = @import("utils/available.zig");
+    _ = @import("utils/base32.zig");
+    _ = @import("utils/base64.zig");
+    _ = @import("utils/charsets.zig");
     _ = @import("utils/compression/compression.zig");
     _ = @import("utils/date_and_time.zig");
+    _ = @import("utils/file.zig");
+    _ = @import("utils/generator.zig");
     _ = @import("utils/http/content.zig");
     _ = @import("utils/http/encoding.zig");
     _ = @import("utils/http/method.zig");
     _ = @import("utils/http/status.zig");
     _ = @import("utils/media_type.zig");
     _ = @import("utils/peer_address.zig");
+    _ = @import("utils/pwhash/argon2.zig");
+    _ = @import("utils/pwhash/bcrypt.zig");
+    _ = @import("utils/pwhash/pbkdf2.zig");
+    _ = @import("utils/pwhash/scrypt.zig");
     _ = @import("utils/socket/pair.zig");
+    _ = @import("utils/check/string.zig");
 }
 
