@@ -77,41 +77,46 @@ __**Update:**__
 
 - Adding `uuidz` to the build for all matrix targets.
 
-- Add utils pwhash, covered:
-    - Argon2.
-    - Bcrypt.
-    - PBKDF2.
-    - Scrypt.
+- **`zix.Utils`**:
+    - Exported from `src/zix/utils/Utils.zig` and `zix.Utils` in `src/zix/lib.zig`.
+    - Available modules: `Available`, `Base32`, `Base64`, `Charsets`, `CheckString`,
+      `DateTime`, `File`, `Generator`, and `Pwhash`.
+    - `Pwhash` groups `Argon2`, `Bcrypt`, `Pbkdf2`, and `Scrypt`.
 
-- Add utils generator in `src/utils/generator.zig`.
+- Ported the zix utils to `src/zix/utils/` in the current style:
+    - `charsets.zig`: shared alphabet, numeric, punctuation, base32, and base64 sets.
+    - `file.zig`: `exists`, `extension`, `load`, and `save`,
+      with an explicit `Error` set for missing, directory, oversized,
+      unreadable, path-too-long, create, write, and allocation failures.
+    - `generator.zig`: random `strings` and `numbers`,
+      with zero length, empty charset, and allocation errors.
+    - `date_and_time.zig`: RFC3339, RFC7231, and ISO8601 formatting,
+      plus `nowMs` and `nowUs`.
+    - `available.zig`: `networkPort` for checking a bindable address.
+    - `base32.zig` and `base64.zig`: RFC 4648 encode and decode,
+      with invalid length, invalid character, and allocation errors.
+    - `pwhash/argon2.zig`, `pwhash/bcrypt.zig`, `pwhash/pbkdf2.zig`, and
+      `pwhash/scrypt.zig`: `hash` and `verify` with one `Error` set per algorithm.
+    - Every file has the current header, `Private`/`Public`/`Test` sections,
+      mapped std errors, and unit plus edge tests.
+    - `src/zix/test.zig` imports every new file so the tests run.
 
-- Add utils check `src/utils/Check.zig`:
-    - `string`:
-        - `isNumericSigned` to check string is signed number.
-        - `isNumericUnsigned` to check string is unsigned number.
-        - `isDecimal` to check string is decimal number.
+- `zix.Utils` also exposes `check/string.zig`:
+    - `isNumericSigned`, `isNumericUnsigned`, and `isDecimal`.
 
-- Add utils base32 `src/utils/base32.zig`, covered:
-    - Encode.
-    - Decode.
-    - RFC 4648 test vectors + roundtrip.
+- Utils error members now follow `ZixUtils_<Module>_<Condition>`,
+  replacing names such as `ZixFileNotFound` and `InvalidLength`.
 
-- Add utils base64 `src/utils/base64.zig`, covered:
-    - Encode.
-    - Decode.
-    - RFC 4648 test vectors + roundtrip.
-
-- Introduce `zix.utils.charsets` from `src/utils/charsets.zig`:
-    - Covered from `alphabet`, `ALPHABET`, `ALPHANUMERIC`, `NUMERIC_STRING`,
-      `punctuation`, `ALPHANUMERIC_PUNCTUATION`, `base32`, and `base64`.
-    - User/caller can use this whenever they need it.
-    - For contributor/maintainer, all repeatable must be use and call from there.
+- `zix.Utils.Charsets` is the source for repeatable charset strings.
 
 <br>
 
 __**Fix:**__
 
 - In zig 0.17.x, `recoverPublicKey` is treat as infallible.
+
+- `generator` range tests used `or`, so the bound assertion always passed.
+  They now use `and`.
 
 <br>
 
