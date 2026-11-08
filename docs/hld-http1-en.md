@@ -75,7 +75,7 @@ graph TD
 
     Http1 --> core["core.zig\nparseHead + serveConn\nwrite helpers + RespSink"]
     Http1 --> server["server.zig\nServer + 5 dispatch models\nEPOLL + URING engines"]
-    Http1 --> config["config.zig\nHttp1ServerConfig"]
+    Http1 --> config["Config.zig\nzix.Http1 config"]
     Http1 --> router["router.zig\ncomptime Router + pathParam"]
     Http1 --> websocket["websocket.zig\nRFC 6455 codec + pump"]
 
@@ -94,7 +94,7 @@ Access via `const zix = @import("zix");`
 | Symbol | Type | Description |
 | :- | :- | :- |
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` returns the server, then `run()` / `deinit()` (the single entry, ADR-062) |
-| `zix.Http1.ServerConfig` | struct | Server configuration (see Http1ServerConfig section) |
+| `zix.Http1.ServerConfig` | struct | Server configuration (see zix.Http1 config section) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only) |
 | `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (the trio, ADR-062) |
 | `zix.Http1.Request` | struct | Zero-copy request view: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `bodyReceived()`, `bodyComplete()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
@@ -144,33 +144,39 @@ Access via `const zix = @import("zix");`
 
 ---
 
-## Http1ServerConfig
+## zix.Http1 config
 
 ```zig
-pub const Http1ServerConfig = struct {
-    io:                 std.Io,                // from process.io, listen/accept plumbing only
-    ip:                 []const u8,
-    port:               u16,                   // must be non-zero
-    dispatch_model:     DispatchModel,
-    kernel_backlog:     u31   = 1024,          // TCP listen() backlog
-    max_recv_buf:       usize = 6 * 1024,      // per-connection buffer, every model (see note)
-    large_body_recv_buf: usize = 0,            // SO_RCVBUF on the large-body (upload) path only, 0 = kernel default
-    max_request_body:   usize = 2 * 1024 * 1024, // declared Content-Length cap, past it the engine answers 413 (0 = no check)
-    ws_recv_buf:        usize = 0,             // WebSocket buffer (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compress:             bool  = false,        // enable gzip / deflate / brotli negotiation, opt-in via res.sendNegotiated / core.sendNegotiateFD (every model)
-    compression_min_size: usize = 256,           // skip bodies under this floor
-    compression_max_out:  usize = 256 * 1024,    // codec-agnostic compressed-output cap, was max_gzip_out
-    max_response_headers: HeaderSize = .MINIMAL, // addHeader capacity class (ADR-062)
-    conn_timeout_ms:    u32   = 0,             // connection lifetime, .ASYNC only (no-op on .EPOLL/.URING)
-    workers:            usize = 0,             // 0 = cpu_count accept threads, ignored by .ASYNC
-    handler_timeout_ms: u32   = 0,             // per-handler budget, 0 = disabled
-    send_date_header:   bool  = true,          // emit Date header, false saves 37 bytes/response
-    tls:                ?*Tls.Context = null,  // non-null serves HTTP/1.1 over TLS (native https), else cleartext
-    logger:             ?*Logger = null,       // lifecycle lines only, see Logging section
-};
+// src/zix/tcp/http1/Config.zig, fields at file scope
+io:                               std.Io,                  // listen and accept plumbing
+ip:                               []const u8,
+port:                             u16,                     // must be non-zero
+logger:                           ?*Logger = null,         // lifecycle lines, see Logging section
+dispatch_model:                   DispatchModel,
+workers:                          usize = 0,               // 0 = cpu_count, ignored by .ASYNC
+worker_stack_size_bytes:          usize = 1 * 1024,
+compress_worker_stack_size_bytes: usize = 2 * 1024 * 1024, // worker stack when compress is on
+kernel_backlog:                   u31 = 1 * 1024,          // TCP listen() backlog
+handler_timeout_ms:               u32 = 0,                 // per-handler budget, 0 = disabled
+max_recv_buf:                     usize = 4 * 1024,        // per-connection buffer, 0 = ServeOpts.BUF_SIZE
+max_request_body:                 usize = 2 * 1024 * 1024, // declared Content-Length cap, past it 413, 0 = no check
+large_body_recv_buf:              usize = 0,               // SO_RCVBUF on the large-body path only, 0 = kernel default
+send_date_header:                 bool = true,             // false drops the Date header
+max_response_headers:             HeaderSize = .MINIMAL,   // addHeader capacity class
+compress:                         bool = false,            // Accept-Encoding negotiation
+compression_min_size:             usize = 256,             // skip bodies under this size
+compression_max_out:              usize = 256 * 1024,      // larger compressed output is sent uncompressed
+response_cache:                   bool = false,            // per-worker response cache
+cache_ttl_ms:                     u32 = 1000,              // default cache freshness
+cache_max_entries:                u32 = 256,               // rounded down to a power of two
+cache_max_value_bytes:            u32 = 16 * 1024,         // larger responses bypass the cache
+public_dir:                       []const u8 = "",         // static file root, empty = off
+public_dir_upload:                []const u8 = "u",        // upload subdirectory under public_dir
+public_dir_cache_ttl_ms:          u32 = 0,                 // static file cache freshness, 0 = never cache
+public_dir_cache_max_entries:     u32 = 256,               // static file cache slot count
 ```
 
-The listing above is abbreviated: the full field reference (cache, uring tuning, TLS dual listener, steering) lives in [`docs/zix-config-en.md`](zix-config-en.md).
+The full field reference (meaning, trade-offs, when to change) lives in [`docs/zix-config-en.md`](zix-config-en.md).
 
 Note: under `.ASYNC` the connection loop borrows the pool thread's receive + body buffer pair (`core.threadConnBufs`), each `max_recv_buf` bytes, reused by every connection that thread serves. `max_recv_buf` therefore sizes the per-connection buffer under every dispatch model (a direct `core.serveConn` caller that leaves `ServeOpts.max_recv_buf` at 0 gets `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
 
