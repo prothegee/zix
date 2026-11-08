@@ -2318,10 +2318,10 @@ Contoh kelima berupa server, jadi ia tinggal bersama contoh engine, bukan di dal
 
 | Dokumen | Deskripsi |
 | :- | :- |
-| [`docs/jzon/README-id.md`](docs/jzon/README-id.md) | jzon: import, mulai cepat dua arah, strategy, options, cakupan tipe, error, testing |
-| [`docs/jzon/hld-id.md`](docs/jzon/hld-id.md) | jzon: layer, komponen, alur tulis dan alur baca, model alokasi, model error |
-| [`docs/jzon/lld-id.md`](docs/jzon/lld-id.md) | jzon: cursor, aturan escape, vector scan, jalur angka, pembukuan field, perbedaan dari jalur default |
-| [`docs/jzon/benchmark-id.md`](docs/jzon/benchmark-id.md) | jzon: biaya tiap jalur per render dan per parse, dengan metode dan sistem tempat diukurnya |
+| [`src/jzon/README-id.md`](src/jzon/README-id.md) | jzon: import, mulai cepat dua arah, strategy, options, cakupan tipe, error, testing |
+| [`src/jzon/docs/hld-id.md`](src/jzon/docs/hld-id.md) | jzon: layer, komponen, alur tulis dan alur baca, model alokasi, model error |
+| [`src/jzon/docs/lld-id.md`](src/jzon/docs/lld-id.md) | jzon: cursor, aturan escape, vector scan, jalur angka, pembukuan field, perbedaan dari jalur default |
+| [`src/jzon/docs/benchmark-id.md`](src/jzon/docs/benchmark-id.md) | jzon: biaya tiap jalur per render dan per parse, dengan metode dan sistem tempat diukurnya |
 
 **Kapan digunakan:** pakai `.{}` lebih dulu, itu jalur berbasis std dan menerima setiap bentuk yang diterima std. Pindahkan handler yang panas ke `.GENERATED` ketika bentuknya record biasa dan parse atau render-nya ada di jalur permintaan, lalu tambahkan `.strings = .BORROW` ketika nilainya mati bersama buffer tempat ia dibaca.
 
