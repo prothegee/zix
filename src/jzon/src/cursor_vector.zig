@@ -14,7 +14,7 @@
 //! ### note:
 //!
 //! `Cursor` still owns the position, the bounds, and the stop record. Both widths leave
-//! the cursor in the same place, with the same error and the same stop byte. The lane
+//! the cursor in the same place, with the same failure and the same stop byte. The lane
 //! setup only pays on laid-out documents and long strings, which is why the width is a
 //! call-site choice.
 //!
@@ -71,12 +71,50 @@ inline fn firstOther(chunk: Chunk) ?usize {
     return offset;
 }
 
+/// Translate a `Cursor` failure into this module's set.
+///
+/// Param:
+/// err - Cursor.Error (the failure the scalar cursor reported)
+///
+/// Return:
+/// - Error (the same failure under this module's name)
+fn cursorError(err: Cursor.Error) Error {
+    return switch (err) {
+        error.Jzon_Cursor_Truncated => Error.Jzon_CursorVector_Truncated,
+        error.Jzon_Cursor_Unexpected => Error.Jzon_CursorVector_Unexpected,
+    };
+}
+
+/// Record the stop byte through `Cursor.stopAt`, then return the failure under this
+/// module's name.
+///
+/// Note:
+/// - The stop record stays in one place (`Cursor.stopAt`), so both widths note the
+///   same byte the same way.
+///
+/// Param:
+/// cursor - *const Cursor (the cursor that stopped)
+/// err - Cursor.Error (the failure, in the scalar cursor's set)
+///
+/// Return:
+/// - Error (the same failure under this module's name)
+fn recordStop(cursor: *const Cursor, err: Cursor.Error) Error {
+    return cursorError(cursor.stopAt(err));
+}
+
 // --------------------------------------------------------- //
 // Public:
 
-/// How a read can fail. The same set the scalar `Cursor` reports, because both widths
-/// read the same document the same way.
-pub const Error = Cursor.Error;
+/// How a read can fail.
+///
+/// Note:
+/// - Truncated means the document ended early. Unexpected means the byte that is
+///   there cannot start what was asked for. Same meaning as `Cursor.Error`, under this
+///   module's own name.
+pub const Error = error{
+    Jzon_CursorVector_Truncated,
+    Jzon_CursorVector_Unexpected,
+};
 
 /// Step over the insignificant whitespace between tokens.
 ///
@@ -124,11 +162,11 @@ pub fn skipSpace(cursor: *Cursor) void {
 ///
 /// Return:
 /// - StringSpan (the undecoded body, plus whether it holds an escape)
-/// - Error.Jzon_Cursor_Truncated when the closing quote never arrives
-/// - Error.Jzon_Cursor_Unexpected when the token does not open with a quote, or
+/// - Error.Jzon_CursorVector_Truncated when the closing quote never arrives
+/// - Error.Jzon_CursorVector_Unexpected when the token does not open with a quote, or
 ///   carries a raw control byte
 pub fn stringSpan(cursor: *Cursor) Error!StringSpan {
-    try cursor.expect('"');
+    cursor.expect('"') catch |err| return cursorError(err);
 
     const start = cursor.pos;
     var escaped = false;
@@ -146,7 +184,9 @@ pub fn stringSpan(cursor: *Cursor) Error!StringSpan {
             }
         }
 
-        if (cursor.pos == cursor.src.len) return cursor.stopAt(Error.Jzon_Cursor_Truncated);
+        if (cursor.pos == cursor.src.len) {
+            return recordStop(cursor, Cursor.Error.Jzon_Cursor_Truncated);
+        }
 
         const byte = cursor.src[cursor.pos];
 
@@ -160,11 +200,11 @@ pub fn stringSpan(cursor: *Cursor) Error!StringSpan {
             };
         }
 
-        if (byte < 0x20) return cursor.stopAt(Error.Jzon_Cursor_Unexpected);
+        if (byte < 0x20) return recordStop(cursor, Cursor.Error.Jzon_Cursor_Unexpected);
 
         if (byte == '\\') {
             if (cursor.pos + 1 == cursor.src.len) {
-                return cursor.stopAt(Error.Jzon_Cursor_Truncated);
+                return recordStop(cursor, Cursor.Error.Jzon_Cursor_Truncated);
             }
 
             escaped = true;
@@ -259,7 +299,7 @@ test "jzon: cursor_vector, stringSpan reads what the scalar span reads" {
             try std.testing.expectEqual(wanted.escaped, got.escaped);
             try std.testing.expectEqual(theirs.pos, ours.pos);
         } else |failure| {
-            try std.testing.expectError(failure, our_span);
+            try std.testing.expectError(cursorError(failure), our_span);
         }
     }
 }
@@ -319,28 +359,31 @@ test "jzon: cursor_vector, stringSpan reads an escape split across a lane bounda
 
 test "jzon: cursor_vector, stringSpan on a token the document ends inside is truncated" {
     var unterminated: Cursor = .init(FAILING_DOCUMENTS[0]);
-    try std.testing.expectError(Error.Jzon_Cursor_Truncated, stringSpan(&unterminated));
+    try std.testing.expectError(Error.Jzon_CursorVector_Truncated, stringSpan(&unterminated));
 
     var trailing_backslash: Cursor = .init(FAILING_DOCUMENTS[1]);
-    try std.testing.expectError(Error.Jzon_Cursor_Truncated, stringSpan(&trailing_backslash));
+    try std.testing.expectError(
+        Error.Jzon_CursorVector_Truncated,
+        stringSpan(&trailing_backslash),
+    );
 
     var empty: Cursor = .init("");
-    try std.testing.expectError(Error.Jzon_Cursor_Truncated, stringSpan(&empty));
+    try std.testing.expectError(Error.Jzon_CursorVector_Truncated, stringSpan(&empty));
 }
 
 test "jzon: cursor_vector, stringSpan with a raw control byte is unexpected" {
     var short: Cursor = .init(FAILING_DOCUMENTS[3]);
-    try std.testing.expectError(Error.Jzon_Cursor_Unexpected, stringSpan(&short));
+    try std.testing.expectError(Error.Jzon_CursorVector_Unexpected, stringSpan(&short));
 
     // Past the first lane, so the byte is found by the lane scan, not by the tail.
     var long: Cursor = .init(FAILING_DOCUMENTS[2]);
-    try std.testing.expectError(Error.Jzon_Cursor_Unexpected, stringSpan(&long));
+    try std.testing.expectError(Error.Jzon_CursorVector_Unexpected, stringSpan(&long));
 }
 
 test "jzon: cursor_vector, stringSpan on a token without a quote is unexpected" {
     var cursor: Cursor = .init("not a string at all, though long enough for a lane");
 
-    try std.testing.expectError(Error.Jzon_Cursor_Unexpected, stringSpan(&cursor));
+    try std.testing.expectError(Error.Jzon_CursorVector_Unexpected, stringSpan(&cursor));
     try std.testing.expectEqual(@as(usize, 0), cursor.pos);
 }
 
@@ -398,5 +441,30 @@ test "jzon: cursor_vector, skipSpace stops on a control byte outside the whitesp
 
         try std.testing.expectEqual(@as(usize, LANES + 1), cursor.pos);
     }
+}
+
+test "jzon: cursor_vector, cursorError renames truncated to its own name" {
+    const err = cursorError(error.Jzon_Cursor_Truncated);
+
+    try std.testing.expectEqual(Error.Jzon_CursorVector_Truncated, err);
+}
+
+test "jzon: cursor_vector, cursorError renames unexpected to its own name" {
+    const err = cursorError(error.Jzon_Cursor_Unexpected);
+
+    try std.testing.expectEqual(Error.Jzon_CursorVector_Unexpected, err);
+}
+
+test "jzon: cursor_vector, recordStop notes the cursor position" {
+    var cursor: Cursor = .init("abcdef");
+    cursor.pos = 4;
+    Failure.reset();
+
+    const err = recordStop(&cursor, error.Jzon_Cursor_Unexpected);
+    const failure = Failure.lastFailure();
+
+    try std.testing.expectEqual(Error.Jzon_CursorVector_Unexpected, err);
+    try std.testing.expect(failure.filled);
+    try std.testing.expectEqual(@as(usize, 4), failure.offset);
 }
 
