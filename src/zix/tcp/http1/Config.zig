@@ -143,11 +143,11 @@ test "zix http1: Config, keeps an explicit dispatch model" {
     try std.testing.expectEqual(@as(usize, 4), config.workers);
 }
 
-test "zix http1: Config, request knobs default to the old engine values" {
+test "zix http1: Config, request knobs use their defaults" {
     const config = testConfig();
 
     try std.testing.expectEqual(@as(u32, 0), config.handler_timeout_ms);
-    try std.testing.expectEqual(@as(usize, 6 * 1024), config.max_recv_buf);
+    try std.testing.expectEqual(@as(usize, 4 * 1024), config.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 0), config.large_body_recv_buf);
     try std.testing.expect(config.send_date_header);
     try std.testing.expectEqual(HeaderSize.MINIMAL, config.max_response_headers);
