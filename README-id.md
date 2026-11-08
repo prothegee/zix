@@ -568,8 +568,6 @@ Untuk detail memori lengkap lihat [`docs/hld-http1-id.md`](docs/hld-http1-id.md)
 ## Persyaratan
 
 - [Zig](https://ziglang.org/):
-    - [x] 0.16.x:
-        - 0.16.0
     - [x] 0.17.x:
         - 0.17.0
 
