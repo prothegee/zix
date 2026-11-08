@@ -35,8 +35,10 @@ const std = @import("std");
 
 const REQUIRED_DIRS = [_][]const u8 {
     "./.zig-cache",
+    "./src/jzon/.zig-cache",
     //
     "./zig-out",
+    "./src/jzon/zig-out",
 };
 
 // --------------------------------------------------------- //
