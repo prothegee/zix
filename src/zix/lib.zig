@@ -90,7 +90,10 @@ pub const Logger = @import("logger/Logger.zig");
 pub const Http1 = @import("tcp/http1/Http1.zig");
 
 /// ZIX Utils
-pub const Utils = @import("utils/Utils.zig");
+pub const utils = @import("utils/Utils.zig");
+
+/// JZON, the JSON package, the same module as `@import("jzon")`
+pub const jzon = @import("jzon");
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -104,5 +107,13 @@ test "zix: version, semver fields follow the compiler" {
 
 test "zix: version, string is not empty" {
     try std.testing.expect(VERSION_STRING.len > 0);
+}
+
+test "zix: jzon, export carries the package version" {
+    try std.testing.expect(jzon.VERSION_STRING.len > 0);
+}
+
+test "zix: jzon, export has the package semver fields" {
+    try std.testing.expect(@hasDecl(jzon.VERSION, "MAJOR"));
 }
 
