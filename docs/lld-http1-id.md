@@ -10,7 +10,7 @@ Modul re-export murni. Menarik `Server` + `ServerConfig` + `DispatchModel`, trio
 
 ---
 
-## config.zig: Http1ServerConfig
+## Config.zig: zix.Http1 config
 
 Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca saat runtime:
 
