@@ -64,11 +64,76 @@ pub fn build(b: *std.Build) void {
     zix_options.addOption(VersionInfo, "zix_version_info", zix_version_info);
     zix.addOptions("zix_options", zix_options);
 
+    // Jzon module: the same package src/jzon builds on its own, used as `zix.jzon`
+    const jzon_zon = @import("src/jzon/build.zig.zon");
+    const jzon_options = b.addOptions();
+    jzon_options.addOption(usize, "version_major", jzon_zon.semver.major);
+    jzon_options.addOption(usize, "version_minor", jzon_zon.semver.minor);
+    jzon_options.addOption(usize, "version_patch", jzon_zon.semver.patch);
+
+    const jzon = b.addModule("jzon", .{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/jzon/src/lib.zig"),
+    });
+    jzon.addOptions("jzon_options", jzon_options);
+    zix.addImport("jzon", jzon);
+
+    // Jzon unit & edge test, built in this graph like zix-unit_edge-test
+    const jzon_unit_and_edge_test_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/jzon/src/test.zig"),
+    });
+    jzon_unit_and_edge_test_mod.addOptions("jzon_options", jzon_options);
+
+    const jzon_unit_and_edge_test = b.addTest(.{
+        .root_module = jzon_unit_and_edge_test_mod,
+    });
+
+    const jzon_unit_and_edge_test_artifact = b.addRunArtifact(jzon_unit_and_edge_test);
+
+    const jzon_unit_and_edge_test_step =
+        b.step("jzon-unit_edge-test", "JZON: Run unit & edge tests.");
+    jzon_unit_and_edge_test_step.dependOn(&jzon_unit_and_edge_test_artifact.step);
+
+    // Jzon package steps: each one runs `zig build <step>` inside src/jzon
+    const jzon_steps = [_][3][]const u8{
+        .{
+            "jzon-test-behaviour",
+            "test-behaviour",
+            "JZON: Run behaviour tests.",
+        },
+        .{
+            "jzon-test-all",
+            "test-all",
+            "JZON: Run unit, edge, and behaviour tests.",
+        },
+        .{
+            "jzon-examples",
+            "examples",
+            "JZON: Build all examples into src/jzon/zig-out/bin.",
+        },
+    };
+
+    for (jzon_steps) |entry| {
+        const jzon_cmd = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build",
+            entry[1],
+            b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
+        });
+        jzon_cmd.setCwd(b.path("src/jzon"));
+
+        const jzon_step = b.step(entry[0], entry[2]);
+        jzon_step.dependOn(&jzon_cmd.step);
+    }
+
     // Zix cleanup artifacts
     const clean_cmd = b.addSystemCommand(&.{
         "zig", "run", "scripts/cleanup.zig"
     });
-    const clean_step = b.step("cleanup", "ZIX: Cleanup artifacts.");
+    const clean_step = b.step("cleanup", "ZIX: Cleanup artifacts project.");
     clean_step.dependOn(&clean_cmd.step);
 
     // Zix unit & edge test
@@ -78,6 +143,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/zix/test.zig"),
     });
     zix_unit_and_edge_test_mod.addOptions("zix_options", zix_options);
+    zix_unit_and_edge_test_mod.addImport("jzon", jzon);
 
     const zix_unit_and_edge_test = b.addTest(.{
         .root_module = zix_unit_and_edge_test_mod
