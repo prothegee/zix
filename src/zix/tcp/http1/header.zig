@@ -42,9 +42,9 @@ pub threadlocal var tl_max_response_headers: usize = 16;
 /// Header size
 /// Controls how many custom response headers addHeader() will accept per request.
 ///
-/// max_response_headers in Http1ServerConfig sets the cap. The backing buffer is
-/// arena-allocated lazily on the first addHeader() call, requests that add no
-/// custom headers pay zero allocation cost.
+/// max_response_headers in the zix.Http1 config (Config.zig) sets the cap. The backing
+/// buffer is arena-allocated lazily on the first addHeader() call, requests that add
+/// no custom headers pay zero allocation cost.
 /// Any addHeader() call beyond the cap yields error.ZixTooManyHeaders.
 ///
 /// - SMALL (8): small controlled constrained environments
