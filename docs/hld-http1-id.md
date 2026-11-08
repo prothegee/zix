@@ -75,7 +75,7 @@ graph TD
 
     Http1 --> core["core.zig\nparseHead + serveConn\nwrite helpers + RespSink"]
     Http1 --> server["server.zig\nServer + 5 dispatch models\nEPOLL + URING engines"]
-    Http1 --> config["config.zig\nHttp1ServerConfig"]
+    Http1 --> config["Config.zig\nzix.Http1 config"]
     Http1 --> router["router.zig\ncomptime Router + pathParam"]
     Http1 --> websocket["websocket.zig\nRFC 6455 codec + pump"]
 
@@ -94,7 +94,7 @@ Diakses melalui `const zix = @import("zix");`
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
 | `zix.Http1.Server` | struct | `init(comptime handler, config)` mengembalikan server, lalu `run()` / `deinit()` (pintu tunggal, ADR-062) |
-| `zix.Http1.ServerConfig` | struct | Konfigurasi server (lihat bagian Http1ServerConfig) |
+| `zix.Http1.ServerConfig` | struct | Konfigurasi server (lihat bagian zix.Http1 config) |
 | `zix.Http1.DispatchModel` | enum(u8) | `.ASYNC`(0, portabel) `.EPOLL`(1, hanya Linux) `.URING`(2, hanya Linux) |
 | `zix.Http1.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio, ADR-062) |
 | `zix.Http1.Request` | struct | View request zero-copy: `method()`, `path()`, `query()`, `queryParam`, `header`, `pathParam`, `body()`, `bodyReceived()`, `bodyComplete()`, `keepAlive`, `pathSegments`, `queryParams`, `fromRaw` |
@@ -144,33 +144,39 @@ Diakses melalui `const zix = @import("zix");`
 
 ---
 
-## Http1ServerConfig
+## zix.Http1 config
 
 ```zig
-pub const Http1ServerConfig = struct {
-    io:                 std.Io,                // dari process.io, hanya plumbing listen/accept
-    ip:                 []const u8,
-    port:               u16,                   // harus non-zero
-    dispatch_model:     DispatchModel,
-    kernel_backlog:     u31   = 1024,          // backlog listen() TCP
-    max_recv_buf:       usize = 6 * 1024,      // buffer per-connection, semua model (lihat catatan)
-    large_body_recv_buf: usize = 0,            // SO_RCVBUF khusus jalur body besar (upload), 0 = default kernel
-    max_request_body:   usize = 2 * 1024 * 1024, // batas Content-Length yang dideklarasikan, melewatinya engine menjawab 413 (0 = tanpa cek)
-    ws_recv_buf:        usize = 0,             // buffer WebSocket (.EPOLL recv, .URING frame-accumulation), 0 = max_recv_buf
-    compress:             bool  = false,        // enable negosiasi gzip / deflate / brotli, opt-in via res.sendNegotiated / core.sendNegotiateFD (semua model)
-    compression_min_size: usize = 256,           // lewati body di bawah floor ini
-    compression_max_out:  usize = 256 * 1024,    // cap output terkompresi codec-agnostic, dulu max_gzip_out
-    max_response_headers: HeaderSize = .MINIMAL, // kelas kapasitas addHeader (ADR-062)
-    conn_timeout_ms:    u32   = 0,             // masa hidup koneksi, hanya .ASYNC (no-op di .EPOLL/.URING)
-    workers:            usize = 0,             // 0 = cpu_count accept thread, diabaikan .ASYNC
-    handler_timeout_ms: u32   = 0,             // budget per-handler, 0 = nonaktif
-    send_date_header:   bool  = true,          // kirim header Date, false hemat 37 byte/response
-    tls:                ?*Tls.Context = null,  // non-null menyajikan HTTP/1.1 di atas TLS (native https), selain itu cleartext
-    logger:             ?*Logger = null,       // baris lifecycle saja, lihat bagian Logging
-};
+// src/zix/tcp/http1/Config.zig, field di file scope
+io:                               std.Io,                  // plumbing listen dan accept
+ip:                               []const u8,
+port:                             u16,                     // harus non-zero
+logger:                           ?*Logger = null,         // baris lifecycle, lihat bagian Logging
+dispatch_model:                   DispatchModel,
+workers:                          usize = 0,               // 0 = cpu_count, diabaikan .ASYNC
+worker_stack_size_bytes:          usize = 1 * 1024,
+compress_worker_stack_size_bytes: usize = 2 * 1024 * 1024, // stack worker saat compress aktif
+kernel_backlog:                   u31 = 1 * 1024,          // backlog listen() TCP
+handler_timeout_ms:               u32 = 0,                 // budget per-handler, 0 = nonaktif
+max_recv_buf:                     usize = 4 * 1024,        // buffer per-connection, 0 = ServeOpts.BUF_SIZE
+max_request_body:                 usize = 2 * 1024 * 1024, // batas Content-Length yang dideklarasikan, melewatinya 413, 0 = tanpa cek
+large_body_recv_buf:              usize = 0,               // SO_RCVBUF khusus jalur body besar, 0 = default kernel
+send_date_header:                 bool = true,             // false membuang header Date
+max_response_headers:             HeaderSize = .MINIMAL,   // kelas kapasitas addHeader
+compress:                         bool = false,            // negosiasi Accept-Encoding
+compression_min_size:             usize = 256,             // lewati body di bawah ukuran ini
+compression_max_out:              usize = 256 * 1024,      // output terkompresi yang lebih besar dikirim tanpa kompresi
+response_cache:                   bool = false,            // response cache per-worker
+cache_ttl_ms:                     u32 = 1000,              // freshness cache default
+cache_max_entries:                u32 = 256,               // dibulatkan ke bawah ke pangkat dua
+cache_max_value_bytes:            u32 = 16 * 1024,         // response yang lebih besar melewati cache
+public_dir:                       []const u8 = "",         // root static file, kosong = mati
+public_dir_upload:                []const u8 = "u",        // subdirectory upload di bawah public_dir
+public_dir_cache_ttl_ms:          u32 = 0,                 // freshness cache static file, 0 = tidak pernah cache
+public_dir_cache_max_entries:     u32 = 256,               // jumlah slot cache static file
 ```
 
-Listing di atas diringkas: referensi field lengkap (cache, tuning uring, dual listener TLS, steering) ada di [`docs/zix-config-id.md`](zix-config-id.md).
+Referensi field lengkap (arti, trade-off, kapan diubah) ada di [`docs/zix-config-id.md`](zix-config-id.md).
 
 Catatan: pada `.ASYNC` loop koneksi meminjam pasangan buffer receive + body milik pool thread (`core.threadConnBufs`), masing-masing `max_recv_buf` byte, dipakai ulang oleh setiap koneksi yang dilayani thread itu. `max_recv_buf` karenanya menentukan ukuran buffer per-connection pada semua dispatch model (pemanggil `core.serveConn` langsung yang membiarkan `ServeOpts.max_recv_buf` di 0 mendapat `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada semua dispatch model: handler opt-in dengan `res.sendNegotiated` (atau `core.sendNegotiateFD` di jalur raw). Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`. Content-Length yang dideklarasikan melewati `max_request_body` ditolak dengan `413` sebelum body dibaca (0 mematikan cek), dan body chunked dibatasi receive buffer karena tidak mendeklarasikan panjang di muka.
 
