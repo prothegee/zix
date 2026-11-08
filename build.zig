@@ -79,6 +79,51 @@ pub fn build(b: *std.Build) void {
     jzon.addOptions("jzon_options", jzon_options);
     zix.addImport("jzon", jzon);
 
+    // Zix cleanup artifacts
+    const clean_cmd = b.addSystemCommand(&.{
+        "zig", "run", "scripts/cleanup.zig"
+    });
+    const clean_step = b.step("cleanup", "ZIX: Cleanup artifacts project.");
+    clean_step.dependOn(&clean_cmd.step);
+
+    // Zix unit & edge test
+    const zix_unit_and_edge_test_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/zix/test.zig"),
+    });
+    zix_unit_and_edge_test_mod.addOptions("zix_options", zix_options);
+    zix_unit_and_edge_test_mod.addImport("jzon", jzon);
+
+    const zix_unit_and_edge_test = b.addTest(.{
+        .root_module = zix_unit_and_edge_test_mod
+    });
+
+    const zix_unit_and_edge_test_artifact = b.addRunArtifact(zix_unit_and_edge_test);
+
+    const zix_unit_and_edge_test_step =
+        b.step("zix-unit_edge-test", "ZIX: Run unit & edge tests.");
+    zix_unit_and_edge_test_step.dependOn(&zix_unit_and_edge_test_artifact.step);
+
+    // If no args, run zix-unit_edge-test
+    // mean it only run `zig build`
+    // TODO
+
+    // Optional: Zix behaviour test
+    // TODO
+
+    // Optional: Zix integration test
+    // TODO
+
+    // Optional: Examples
+    if (tools.diExists(b, "examples")) {
+        examples
+            .addSteps(b, target, optimize, zix);
+    } else {
+        std.log.info("zix build: examples dir not exists, skipping\n", .{});
+    }
+
+    // Jzon steps come after the zix steps, so `zig build -h` lists zix first.
     // Jzon unit & edge test, built in this graph like zix-unit_edge-test
     const jzon_unit_and_edge_test_mod = b.createModule(.{
         .target = target,
@@ -127,50 +172,6 @@ pub fn build(b: *std.Build) void {
 
         const jzon_step = b.step(entry[0], entry[2]);
         jzon_step.dependOn(&jzon_cmd.step);
-    }
-
-    // Zix cleanup artifacts
-    const clean_cmd = b.addSystemCommand(&.{
-        "zig", "run", "scripts/cleanup.zig"
-    });
-    const clean_step = b.step("cleanup", "ZIX: Cleanup artifacts project.");
-    clean_step.dependOn(&clean_cmd.step);
-
-    // Zix unit & edge test
-    const zix_unit_and_edge_test_mod = b.createModule(.{
-        .target = target,
-        .optimize = optimize,
-        .root_source_file = b.path("src/zix/test.zig"),
-    });
-    zix_unit_and_edge_test_mod.addOptions("zix_options", zix_options);
-    zix_unit_and_edge_test_mod.addImport("jzon", jzon);
-
-    const zix_unit_and_edge_test = b.addTest(.{
-        .root_module = zix_unit_and_edge_test_mod
-    });
-
-    const zix_unit_and_edge_test_artifact = b.addRunArtifact(zix_unit_and_edge_test);
-
-    const zix_unit_and_edge_test_step =
-        b.step("zix-unit_edge-test", "ZIX: Run unit & edge tests.");
-    zix_unit_and_edge_test_step.dependOn(&zix_unit_and_edge_test_artifact.step);
-
-    // If no args, run zix-unit_edge-test
-    // mean it only run `zig build`
-    // TODO
-
-    // Optional: Zix behaviour test
-    // TODO
-
-    // Optional: Zix integration test
-    // TODO
-
-    // Optional: Examples
-    if (tools.diExists(b, "examples")) {
-        examples
-            .addSteps(b, target, optimize, zix);
-    } else {
-        std.log.info("zix build: examples dir not exists, skipping\n", .{});
     }
 
     // --------------------------------------------------------- //
