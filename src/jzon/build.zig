@@ -45,7 +45,29 @@ const ALLOWED_ZIG = struct {
 const EXAMPLES = [_][]const u8{};
 
 /// Behaviour tier suites, one per file under `tests/behaviour/`.
-const BEHAVIOUR_SUITES = [_][]const u8{};
+const BEHAVIOUR_SUITES = [_][]const u8{
+    "tests/behaviour/sink_test.zig",
+    "tests/behaviour/cursor_test.zig",
+    "tests/behaviour/cursor_vector_test.zig",
+    "tests/behaviour/escape_test.zig",
+    "tests/behaviour/escape_vector_test.zig",
+    "tests/behaviour/integer_test.zig",
+    "tests/behaviour/float_test.zig",
+    "tests/behaviour/reflect_test.zig",
+    "tests/behaviour/fields_test.zig",
+    "tests/behaviour/scan_shape_test.zig",
+    "tests/behaviour/skip_test.zig",
+    "tests/behaviour/string_value_test.zig",
+    "tests/behaviour/std_emitter_test.zig",
+    "tests/behaviour/generated_emitter_test.zig",
+    "tests/behaviour/serialize_test.zig",
+    "tests/behaviour/std_parser_test.zig",
+    "tests/behaviour/scanner_parser_test.zig",
+    "tests/behaviour/generated_parser_test.zig",
+    "tests/behaviour/deserialize_test.zig",
+    "tests/behaviour/round_trip_test.zig",
+    "tests/behaviour/strategy_pairs_test.zig",
+};
 
 fn ensureSupportedZig() void {
     const zig = builtin.zig_version;
@@ -198,10 +220,10 @@ pub fn build(b: *std.Build) void {
     unit_edge_step.dependOn(&unit_edge_run.step);
 
     // Behaviour: one test binary per suite file
-    const behaviour_step = b.step("test-behaviour", "JZON: Run behaviour tests.");
+    const behaviour_step = b.step("behaviour-test", "JZON: Run behaviour tests.");
     addSuites(b, target, optimize, jzon, behaviour_step, &BEHAVIOUR_SUITES);
 
-    const all_step = b.step("test-all", "JZON: Run unit, edge, and behaviour tests.");
+    const all_step = b.step("all-test", "JZON: Run unit, edge, and behaviour tests.");
     all_step.dependOn(unit_edge_step);
     all_step.dependOn(behaviour_step);
 
