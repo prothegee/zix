@@ -10,7 +10,7 @@ JSON dua arah, ditulis murni dengan Zig, hanya memakai standard library.
 - Tipe field yang tidak punya bentuk JSON di jalur generated adalah compile error yang menyebut tipenya, bukan kegagalan runtime.
 - Kompatibel dengan Zig 0.16 dan 0.17.
 
-Untuk arsitektur lihat `hld-id.md`, untuk detail internal lihat `lld-id.md`, untuk biaya terukur lihat `benchmark-id.md`.
+Untuk arsitektur lihat `docs/hld-id.md`, untuk detail internal lihat `docs/lld-id.md`, untuk biaya terukur lihat `docs/benchmark-id.md`.
 
 ## Import
 
@@ -111,7 +111,7 @@ Strategy adalah field comptime, jadi hanya jalur yang disebut yang ikut dikompil
 | `.GENERATED` | dibangkitkan dari tipenya, di atas read cursor milik jzon, satu byte sekali jalan |
 | `.GENERATED_VECTOR` | seperti `.GENERATED`, satu vector lane sekaligus |
 
-`.GENERATED_VECTOR` tidak selalu yang tercepat, di kedua sisi. Ia membayar pada string panjang dan menjadi beban pada string pendek, itulah kenapa lebarnya tetap pilihan per call-site, bukan default. Lihat `benchmark-id.md` untuk hasil pengukurannya pada satu record.
+`.GENERATED_VECTOR` tidak selalu yang tercepat, di kedua sisi. Ia membayar pada string panjang dan menjadi beban pada string pendek, itulah kenapa lebarnya tetap pilihan per call-site, bukan default. Lihat `docs/benchmark-id.md` untuk hasil pengukurannya pada satu record.
 
 ## Options
 
@@ -152,7 +152,7 @@ Proses parse melaporkan satu set yang sama, jalur mana pun yang berjalan:
 | `BadEscape` | escape sequence yang tidak dieja aturannya |
 | `OutOfMemory` | allocator kehabisan |
 
-Menukar strategy tidak pernah mengubah apa yang harus ditangani pemanggil. `lld-id.md` menyebut tiga tempat jalur yang dibangun dari tipenya menjawab berbeda dari `.STD`.
+Menukar strategy tidak pernah mengubah apa yang harus ditangani pemanggil. `docs/lld-id.md` menyebut tiga tempat jalur yang dibangun dari tipenya menjawab berbeda dari `.STD`.
 
 ## Contoh
 
