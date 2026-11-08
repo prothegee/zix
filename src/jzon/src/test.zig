@@ -47,5 +47,10 @@ test {
     _ = @import("lane.zig");
     _ = @import("reflect.zig");
     _ = @import("deserialize/Failure.zig");
+    _ = @import("serialize/EmitShape.zig");
+    _ = @import("serialize/SerializeOptions.zig");
+    _ = @import("serialize/generated_emitter.zig");
+    _ = @import("serialize/serialize.zig");
+    _ = @import("serialize/std_emitter.zig");
 }
 
