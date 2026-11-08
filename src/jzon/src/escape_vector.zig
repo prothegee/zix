@@ -52,7 +52,26 @@ const LANES = lane.LANES;
 /// - Error (the same failure under this module's name)
 fn sinkError(err: Sink.Error) Error {
     return switch (err) {
-        error.Jzon_Sink_NoSpaceLeft => Error.Jzon_Escape_NoSpaceLeft,
+        error.Jzon_Sink_NoSpaceLeft => Error.Jzon_EscapeVector_NoSpaceLeft,
+    };
+}
+
+/// Translate an `escape` failure into this module's set.
+///
+/// Note:
+/// - Only `escape.spell` is called from here, and it only writes, so BadEscape is not
+///   expected. It still maps to a real member, so a change in `escape` shows up as an
+///   error, not as undefined behaviour.
+///
+/// Param:
+/// err - escape.Error (the failure the scalar escape reported)
+///
+/// Return:
+/// - Error (the same failure under this module's name)
+fn escapeError(err: escape.Error) Error {
+    return switch (err) {
+        error.Jzon_Escape_NoSpaceLeft => Error.Jzon_EscapeVector_NoSpaceLeft,
+        error.Jzon_Escape_BadEscape => Error.Jzon_EscapeVector_BadEscape,
     };
 }
 
@@ -70,9 +89,16 @@ inline fn anyEscaped(chunk: Chunk) bool {
 // --------------------------------------------------------- //
 // Public:
 
-/// How escaping can fail. The same set the scalar `escape` reports, because both
-/// widths write the same bytes.
-pub const Error = escape.Error;
+/// How escaping can fail: no room for the escaped bytes, or an escape the rules do
+/// not spell.
+///
+/// Note:
+/// - Encoding never reports BadEscape in practice. It is here so the translation from
+///   `escape.Error` covers every member.
+pub const Error = error{
+    Jzon_EscapeVector_NoSpaceLeft,
+    Jzon_EscapeVector_BadEscape,
+};
 
 /// Write `text` as a complete JSON string, quotes included.
 ///
@@ -82,7 +108,7 @@ pub const Error = escape.Error;
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Escape_NoSpaceLeft when the escaped form does not fit
+/// - Error.Jzon_EscapeVector_NoSpaceLeft when the escaped form does not fit
 pub fn encode(sink: *Sink, text: []const u8) Error!void {
     sink.byte('"') catch |err| return sinkError(err);
     try encodeBody(sink, text);
@@ -102,7 +128,7 @@ pub fn encode(sink: *Sink, text: []const u8) Error!void {
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Escape_NoSpaceLeft when the escaped form does not fit
+/// - Error.Jzon_EscapeVector_NoSpaceLeft when the escaped form does not fit
 pub fn encodeBody(sink: *Sink, text: []const u8) Error!void {
     var clean_from: usize = 0;
     var index: usize = 0;
@@ -117,7 +143,7 @@ pub fn encodeBody(sink: *Sink, text: []const u8) Error!void {
             if (!escape.isEscaped(byte)) continue;
 
             sink.bytes(text[clean_from..offset]) catch |err| return sinkError(err);
-            try escape.spell(sink, byte);
+            escape.spell(sink, byte) catch |err| return escapeError(err);
 
             clean_from = offset + 1;
         }
@@ -128,7 +154,7 @@ pub fn encodeBody(sink: *Sink, text: []const u8) Error!void {
         if (!escape.isEscaped(byte)) continue;
 
         sink.bytes(text[clean_from..index]) catch |err| return sinkError(err);
-        try escape.spell(sink, byte);
+        escape.spell(sink, byte) catch |err| return escapeError(err);
 
         clean_from = index + 1;
     }
@@ -207,7 +233,7 @@ test "jzon: escape_vector, encode into a small buffer is no space left" {
     var sink: Sink = .init(&buf);
 
     try std.testing.expectError(
-        Error.Jzon_Escape_NoSpaceLeft,
+        Error.Jzon_EscapeVector_NoSpaceLeft,
         encode(&sink, "a string far longer than four bytes"),
     );
 }
@@ -292,7 +318,7 @@ test "jzon: escape_vector, encode one byte short is no space left" {
     var buf: [8]u8 = undefined;
     var sink: Sink = .init(&buf);
 
-    try std.testing.expectError(Error.Jzon_Escape_NoSpaceLeft, encode(&sink, "a\nbcde"));
+    try std.testing.expectError(Error.Jzon_EscapeVector_NoSpaceLeft, encode(&sink, "a\nbcde"));
 }
 
 test "jzon: escape_vector, buffer that runs out inside a lane is no space left" {
@@ -302,7 +328,7 @@ test "jzon: escape_vector, buffer that runs out inside a lane is no space left" 
     var sink: Sink = .init(&buf);
 
     try std.testing.expectError(
-        Error.Jzon_Escape_NoSpaceLeft,
+        Error.Jzon_EscapeVector_NoSpaceLeft,
         encode(&sink, "a long clean run of bytes then a \" quote"),
     );
 }
@@ -311,6 +337,18 @@ test "jzon: escape_vector, encode into an empty buffer is no space left" {
     var buf: [0]u8 = undefined;
     var sink: Sink = .init(&buf);
 
-    try std.testing.expectError(Error.Jzon_Escape_NoSpaceLeft, encode(&sink, ""));
+    try std.testing.expectError(Error.Jzon_EscapeVector_NoSpaceLeft, encode(&sink, ""));
+}
+
+test "jzon: escape_vector, escapeError renames no space left to its own name" {
+    const err = escapeError(error.Jzon_Escape_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_EscapeVector_NoSpaceLeft, err);
+}
+
+test "jzon: escape_vector, escapeError renames bad escape to its own name" {
+    const err = escapeError(error.Jzon_Escape_BadEscape);
+
+    try std.testing.expectEqual(Error.Jzon_EscapeVector_BadEscape, err);
 }
 
