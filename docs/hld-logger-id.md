@@ -141,7 +141,7 @@ Setiap server menerima `logger: ?*Logger = null` opsional di konfigurasinya. Saa
 
 | Protokol | Metode yang dipanggil otomatis | Field konfigurasi |
 | :- | :- | :- |
-| HTTP/1.1 | `access()` per request, `system()` lifecycle | `Http1ServerConfig.logger` |
+| HTTP/1.1 | `access()` per request, `system()` lifecycle | `logger` in `zix.Http1` config |
 | HTTP/2 | `access()` per stream, `system()` lifecycle | `Http2ServerConfig.logger` |
 | HTTP/3 | `access()` per request, `system()` lifecycle | `Http3ServerConfig.logger` |
 | TCP | `conn()` saat koneksi ditutup, `system()` lifecycle | `TcpServerConfig.logger` |
