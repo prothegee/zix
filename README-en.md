@@ -568,8 +568,6 @@ For full memory details see [`docs/hld-http1-en.md`](docs/hld-http1-en.md) and [
 ## Requirements
 
 - [Zig](https://ziglang.org/):
-    - [x] 0.16.x:
-        - 0.16.0
     - [x] 0.17.x:
         - 0.17.0
 
