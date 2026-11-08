@@ -145,13 +145,13 @@ pub fn build(b: *std.Build) void {
     // Jzon package steps: each one runs `zig build <step>` inside src/jzon
     const jzon_steps = [_][3][]const u8{
         .{
-            "jzon-test-behaviour",
-            "test-behaviour",
+            "jzon-behaviour-test",
+            "behaviour-test",
             "JZON: Run behaviour tests.",
         },
         .{
-            "jzon-test-all",
-            "test-all",
+            "jzon-all-test",
+            "all-test",
             "JZON: Run unit, edge, and behaviour tests.",
         },
         .{
