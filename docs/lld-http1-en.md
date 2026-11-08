@@ -10,7 +10,7 @@ Pure re-export module. Pulls `Server` + `ServerConfig` + `DispatchModel`, the tr
 
 ---
 
-## config.zig: Http1ServerConfig
+## Config.zig: zix.Http1 config
 
 Plain struct with defaults, no allocations at construction. Runtime-read fields:
 
