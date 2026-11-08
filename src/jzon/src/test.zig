@@ -46,7 +46,16 @@ test {
     _ = @import("integer.zig");
     _ = @import("lane.zig");
     _ = @import("reflect.zig");
+    _ = @import("deserialize/DeserializeOptions.zig");
     _ = @import("deserialize/Failure.zig");
+    _ = @import("deserialize/ScanShape.zig");
+    _ = @import("deserialize/deserialize.zig");
+    _ = @import("deserialize/fields.zig");
+    _ = @import("deserialize/generated_parser.zig");
+    _ = @import("deserialize/scanner_parser.zig");
+    _ = @import("deserialize/skip.zig");
+    _ = @import("deserialize/std_parser.zig");
+    _ = @import("deserialize/string_value.zig");
     _ = @import("serialize/EmitShape.zig");
     _ = @import("serialize/SerializeOptions.zig");
     _ = @import("serialize/generated_emitter.zig");
