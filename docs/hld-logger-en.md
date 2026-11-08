@@ -141,7 +141,7 @@ Each server accepts an optional `logger: ?*Logger = null` in its config. When no
 
 | Protocol | Methods called automatically | Config field |
 | :- | :- | :- |
-| HTTP/1.1 | `access()` per request, `system()` lifecycle | `Http1ServerConfig.logger` |
+| HTTP/1.1 | `access()` per request, `system()` lifecycle | `logger` in `zix.Http1` config |
 | HTTP/2 | `access()` per stream, `system()` lifecycle | `Http2ServerConfig.logger` |
 | HTTP/3 | `access()` per request, `system()` lifecycle | `Http3ServerConfig.logger` |
 | TCP | `conn()` on connection close, `system()` lifecycle | `TcpServerConfig.logger` |
