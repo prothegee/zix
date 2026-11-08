@@ -42,7 +42,10 @@ test {
     _ = @import("cursor_vector.zig");
     _ = @import("escape.zig");
     _ = @import("escape_vector.zig");
+    _ = @import("float.zig");
+    _ = @import("integer.zig");
     _ = @import("lane.zig");
+    _ = @import("reflect.zig");
     _ = @import("deserialize/Failure.zig");
 }
 
