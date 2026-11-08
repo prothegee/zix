@@ -2309,10 +2309,10 @@ A fifth example is a server, so it lives with the engine examples rather than in
 
 | Document | Description |
 | :- | :- |
-| [`docs/jzon/README-en.md`](docs/jzon/README-en.md) | jzon: import, quickstart both directions, strategies, options, type coverage, errors, testing |
-| [`docs/jzon/hld-en.md`](docs/jzon/hld-en.md) | jzon: layers, components, the write and read flows, allocation model, error model |
-| [`docs/jzon/lld-en.md`](docs/jzon/lld-en.md) | jzon: cursors, escape rules, the vector scan, number paths, field bookkeeping, the differences from the default path |
-| [`docs/jzon/benchmark-en.md`](docs/jzon/benchmark-en.md) | jzon: what each path costs per render and per parse, with the method and the system it was measured on |
+| [`src/jzon/README-en.md`](src/jzon/README-en.md) | jzon: import, quickstart both directions, strategies, options, type coverage, errors, testing |
+| [`src/jzon/docs/hld-en.md`](src/jzon/docs/hld-en.md) | jzon: layers, components, the write and read flows, allocation model, error model |
+| [`src/jzon/docs/lld-en.md`](src/jzon/docs/lld-en.md) | jzon: cursors, escape rules, the vector scan, number paths, field bookkeeping, the differences from the default path |
+| [`src/jzon/docs/benchmark-en.md`](src/jzon/docs/benchmark-en.md) | jzon: what each path costs per render and per parse, with the method and the system it was measured on |
 
 **When to use:** reach for `.{}` first, which is the std-backed path and takes every shape std takes. Move a hot handler to `.GENERATED` when the shape is a plain record and the parse or the render is on the request path, and add `.strings = .BORROW` when the value dies with the buffer it was read out of.
 
