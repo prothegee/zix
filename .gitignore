@@ -12,7 +12,7 @@
 .target
 .svelte-kit
 .node_modules
-.zig-cache
+.zig-cache*
 .zig-out
 .zig-pkg
 
