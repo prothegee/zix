@@ -10,7 +10,7 @@ JSON in both directions, written in pure Zig, standard library only.
 - A field type a generated path has no JSON form for is a compile error naming the type, never a runtime failure.
 - Builds on Zig 0.16 and 0.17.
 
-For the architecture see `hld-en.md`, for the internals see `lld-en.md`, for measured cost see `benchmark-en.md`.
+For the architecture see `docs/hld-en.md`, for the internals see `docs/lld-en.md`, for measured cost see `docs/benchmark-en.md`.
 
 ## Import
 
@@ -111,7 +111,7 @@ The strategy is a comptime field, so only the path named is compiled into the bi
 | `.GENERATED` | generated from the type, over jzon's own read cursor, one byte at a time |
 | `.GENERATED_VECTOR` | as `.GENERATED`, one vector lane at a time |
 
-`.GENERATED_VECTOR` is not always the quickest, on either side. It pays on long strings and costs on short ones, which is why the width stays a call-site choice rather than a default. See `benchmark-en.md` for what it measures on one record.
+`.GENERATED_VECTOR` is not always the quickest, on either side. It pays on long strings and costs on short ones, which is why the width stays a call-site choice rather than a default. See `docs/benchmark-en.md` for what it measures on one record.
 
 ## Options
 
@@ -152,7 +152,7 @@ A parse reports one set whichever path ran:
 | `BadEscape` | an escape sequence the rules do not spell |
 | `OutOfMemory` | the allocator ran out |
 
-Swapping a strategy never changes what a caller has to handle. `lld-en.md` lists the three places a path built from the type answers differently from `.STD`.
+Swapping a strategy never changes what a caller has to handle. `docs/lld-en.md` lists the three places a path built from the type answers differently from `.STD`.
 
 ## Examples
 
