@@ -182,13 +182,21 @@ fn readInto(
         .int => {
             const text = try numberText(source.cursor, shape);
 
-            out.* = try integer.parse(Target, text);
+            out.* = integer.parse(Target, text) catch |err| {
+                Failure.noteOffset(source.cursor.pos - text.len);
+
+                return err;
+            };
         },
 
         .float => {
             const text = try numberText(source.cursor, shape);
 
-            out.* = try float.parse(Target, text);
+            out.* = float.parse(Target, text) catch |err| {
+                Failure.noteOffset(source.cursor.pos - text.len);
+
+                return err;
+            };
         },
 
         .optional => |info| {
@@ -482,7 +490,7 @@ fn readString(
 /// - UnknownField, MissingField, UnknownEnumValue: the document and the type
 ///   disagree. They also record the field name for `lastFailure`.
 /// - Truncated, Unexpected, BadNumber, BadEscape: the document is not what it claims.
-///   The cursor records the stop byte for Truncated and Unexpected.
+///   The stop byte is recorded for Truncated, Unexpected and BadNumber.
 /// - NoSpaceLeft exists so every member of the inner sets maps to a real member here.
 ///   A read never returns it.
 pub const Error = error{
@@ -536,7 +544,12 @@ pub fn parse(
     readInto(Target, &value, source, options, shape) catch |err| return innerError(err);
 
     shape.skipSpace(&cursor);
-    if (!cursor.atEnd()) return Error.Jzon_GeneratedParser_Unexpected;
+
+    if (!cursor.atEnd()) {
+        Failure.noteOffset(cursor.pos);
+
+        return Error.Jzon_GeneratedParser_Unexpected;
+    }
 
     return value;
 }
@@ -1057,6 +1070,52 @@ test "jzon deserialize: generated_parser, empty allocator is out of memory" {
             Error.Jzon_GeneratedParser_OutOfMemory,
             parse(Pair, failing.allocator(), "{\"id\":1,\"name\":\"x\"}", .{}, shape),
         );
+    }
+}
+
+test "jzon deserialize: generated_parser, bad number records the token start" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const Target = struct { id: u8 };
+
+    inline for (SHAPES) |shape| {
+        Failure.noteField("stale");
+
+        const result = parse(Target, arena.allocator(), "{\"id\":-1}", .{}, shape);
+
+        try std.testing.expectError(Error.Jzon_GeneratedParser_BadNumber, result);
+        try std.testing.expectEqualStrings("", Failure.lastFailure().field);
+        try std.testing.expectEqual(@as(usize, 6), Failure.lastFailure().offset);
+    }
+}
+
+test "jzon deserialize: generated_parser, float bad number records the token start" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    inline for (SHAPES) |shape| {
+        Failure.noteField("stale");
+
+        const result = parse(f64, arena.allocator(), " 01.5", .{}, shape);
+
+        try std.testing.expectError(Error.Jzon_GeneratedParser_BadNumber, result);
+        try std.testing.expectEqual(@as(usize, 1), Failure.lastFailure().offset);
+    }
+}
+
+test "jzon deserialize: generated_parser, trailing bytes record the stop byte" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    inline for (SHAPES) |shape| {
+        Failure.noteField("stale");
+
+        const result = parse(u8, arena.allocator(), "1 2", .{}, shape);
+
+        try std.testing.expectError(Error.Jzon_GeneratedParser_Unexpected, result);
+        try std.testing.expectEqualStrings("", Failure.lastFailure().field);
+        try std.testing.expectEqual(@as(usize, 2), Failure.lastFailure().offset);
     }
 }
 
