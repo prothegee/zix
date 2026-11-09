@@ -61,6 +61,11 @@ const EXAMPLES = .{
         "http1",
     },
     .{
+        "zix-example-http1_upload",
+        "examples/http1_upload.zig",
+        "http1",
+    },
+    .{
         "zix-example-http1_jzon",
         "examples/http1_jzon.zig",
         "http1",
