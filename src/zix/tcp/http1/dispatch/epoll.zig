@@ -13,8 +13,8 @@
 //!
 //! ### note:
 //!
-//! Cleartext HTTP/1.1 only. TLS, WebSocket, SSE, and the response cache are
-//! not part of this model yet. A connection is served on one worker from
+//! Cleartext HTTP/1.1 only. TLS, WebSocket, and SSE are not part of this
+//! model yet. A connection is served on one worker from
 //! accept to close. A response larger than the staging cap falls back to the
 //! blocking writer.
 //!
@@ -37,16 +37,18 @@ const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 const chunk = @import("../chunk.zig");
+const cache = @import("../cache.zig");
 const Config = @import("../Config.zig");
-const common = @import("common.zig");
 const handler = @import("../handler.zig");
 const HandlerFn = handler.HandlerFn;
 const head_module = @import("../head.zig");
 const header = @import("../header.zig");
+const log = @import("../log.zig");
 const parser = @import("../parser.zig");
 const reader = @import("../reader.zig");
 const RespSink = @import("../RespSink.zig");
 const writer = @import("../writer.zig");
+const ResponseCache = @import("../../../utils/cache/ResponseCache.zig");
 
 // --------------------------------------------------------- //
 // Private:
@@ -705,6 +707,12 @@ fn workerMain(ctx: WorkerCtx) void {
     head_module.setDateHeader(worker.config.send_date_header);
     header.setMaxResponseHeaders(worker.config.max_response_headers.value());
 
+    // Per-worker response cache. It lives on the worker stack, so the pointer
+    // installed for this thread stays valid until this worker returns.
+    var resp_cache: ?ResponseCache = null;
+    cache.installWorker(&resp_cache, worker.allocator, worker.config);
+    defer cache.uninstallWorker(&resp_cache);
+
     const recv_size = worker.config.recvBufSize();
     const listener_fd = worker.listener.socket.handle;
     if (!setNonBlock(listener_fd)) {
@@ -914,7 +922,7 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
         };
     }
 
-    common.logSystem(
+    log.logSystem(
         config,
         .INFO,
         "listening on {s}:{d} (epoll, {d} workers)",
@@ -1026,6 +1034,42 @@ fn testPair() ![2]std.posix.fd_t {
     try pair.open(std.testing.io, &fds);
 
     return fds;
+}
+
+/// Slow-path count of cachedHandler. A cache hit returns before it counts.
+var cached_miss_count: usize = 0;
+
+fn cachedHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    if (try res.sendFromCache(req)) return;
+
+    cached_miss_count += 1;
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.sendCached(req, "cached", 60_000);
+}
+
+/// Exact wire bytes cachedHandler answers with, on a miss and on a hit.
+const CACHED_RESPONSE =
+    "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\n" ++
+    "Content-Length: 6\r\n\r\ncached";
+
+/// Two pipelined requests must get two byte-identical cached responses.
+fn expectTwoCachedResponses(bytes: []const u8) !void {
+    try std.testing.expectEqual(CACHED_RESPONSE.len * 2, bytes.len);
+    try std.testing.expectEqualStrings(CACHED_RESPONSE, bytes[0..CACHED_RESPONSE.len]);
+    try std.testing.expectEqualStrings(CACHED_RESPONSE, bytes[CACHED_RESPONSE.len..]);
+}
+
+fn testCacheConfig() Config {
+    return .{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 0,
+        .dispatch_model = .EPOLL,
+        .response_cache = true,
+        .cache_max_entries = 8,
+        .cache_max_value_bytes = 1024,
+    };
 }
 
 test "zix http1: epoll, answers one request" {
@@ -1637,5 +1681,57 @@ test "zix http1: epoll, small body leaves SO_RCVBUF untouched" {
     );
 
     try std.testing.expectEqual(before, try testRecvBufSize(fds[1]));
+}
+
+test "zix http1: epoll, serves a miss then a hit from the response cache" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    head_module.setDateHeader(false);
+    defer head_module.setDateHeader(true);
+
+    var resp_cache: ?ResponseCache = null;
+    cache.installWorker(&resp_cache, std.testing.allocator, testCacheConfig());
+    defer cache.uninstallWorker(&resp_cache);
+
+    cached_miss_count = 0;
+
+    try testWriteAll(
+        fds[0],
+        "GET /cached HTTP/1.1\r\nConnection: keep-alive\r\n\r\n" ++
+            "GET /cached HTTP/1.1\r\nConnection: close\r\n\r\n",
+    );
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const session = Session{
+        .io = std.testing.io,
+        .handler = cachedHandler,
+        .allocator = std.testing.allocator,
+    };
+
+    const outcome = serveReadable(
+        conn,
+        &body_buf,
+        &out_buf,
+        &session,
+        -1,
+        &arena,
+        true,
+    );
+    try std.testing.expectEqual(ConnOutcome.close, outcome);
+
+    var out: [1024]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqual(@as(usize, 1), cached_miss_count);
+    try expectTwoCachedResponses(response);
 }
 
