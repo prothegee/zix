@@ -44,6 +44,14 @@ const LANES = lane.LANES;
 // --------------------------------------------------------- //
 // Private:
 
+/// Bytes of a whitespace run stepped one at a time before the lane loop takes over.
+///
+/// Note:
+/// - Covers the common gaps laid-out JSON puts between tokens: one space after `:` or
+///   `,`, or a newline plus a short indent. Measured over 2, 3, 4, and 8: 4 keeps most
+///   of the laid-out gain without slowing long runs.
+const SHORT_RUN = 4;
+
 /// Where the first byte that is not whitespace sits inside one lane.
 ///
 /// Note:
@@ -71,35 +79,133 @@ inline fn firstOther(chunk: Chunk) ?usize {
     return offset;
 }
 
-/// Translate a `Cursor` failure into this module's set.
+/// Step over a whitespace run longer than SHORT_RUN, a lane at a time.
+///
+/// Note:
+/// - A lane of whitespace advances the cursor by the whole lane. The first lane that
+///   holds anything else lands the cursor exactly on it. A tail shorter than a lane
+///   is finished by the scalar skip.
 ///
 /// Param:
-/// err - Cursor.Error (the failure the scalar cursor reported)
+/// cursor - *Cursor (the cursor to advance, sitting inside a whitespace run)
+///
+/// Return:
+/// - void
+inline fn skipLongRun(cursor: *Cursor) void {
+    const src = cursor.src;
+    var pos = cursor.pos;
+
+    while (pos + LANES <= src.len) {
+        const chunk: Chunk = src[pos..][0..LANES].*;
+
+        if (firstOther(chunk)) |offset| {
+            cursor.pos = pos + offset;
+
+            return;
+        }
+
+        pos += LANES;
+    }
+
+    cursor.pos = pos;
+    cursor.skipSpace();
+}
+
+/// Every failure the private scan can hand back: this module's own set joined with
+/// the scalar cursor's.
+const Inner = Error || Cursor.Error;
+
+/// Translate a failure from the private scan into this module's public set.
+///
+/// Param:
+/// err - Inner (the failure the scan handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn cursorError(err: Cursor.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_CursorVector_Truncated => Error.Jzon_CursorVector_Truncated,
+        error.Jzon_CursorVector_Unexpected => Error.Jzon_CursorVector_Unexpected,
         error.Jzon_Cursor_Truncated => Error.Jzon_CursorVector_Truncated,
         error.Jzon_Cursor_Unexpected => Error.Jzon_CursorVector_Unexpected,
     };
 }
 
-/// Record the stop byte through `Cursor.stopAt`, then return the failure under this
-/// module's name.
+/// The body of `stringSpan`, failing with the scalar cursor's set.
 ///
 /// Note:
-/// - The stop record stays in one place (`Cursor.stopAt`), so both widths note the
-///   same byte the same way.
+/// - Scans on local copies of `src` and `pos` and writes the position back once.
+///   Through the pointer, the compiler has to assume a byte read may change the
+///   position and reloads it on every step (measured).
+/// - A failure goes through `Cursor.stopAt`, so both widths note the same stop byte.
 ///
 /// Param:
-/// cursor - *const Cursor (the cursor that stopped)
-/// err - Cursor.Error (the failure, in the scalar cursor's set)
+/// cursor - *Cursor (positioned at the opening quote)
 ///
 /// Return:
-/// - Error (the same failure under this module's name)
-fn recordStop(cursor: *const Cursor, err: Cursor.Error) Error {
-    return cursorError(cursor.stopAt(err));
+/// - StringSpan (the undecoded body, plus whether it holds an escape)
+/// - Inner (a scalar cursor failure, untranslated)
+fn spanInto(cursor: *Cursor) Inner!StringSpan {
+    try cursor.expect('"');
+
+    const src = cursor.src;
+    const start = cursor.pos;
+    var pos = start;
+    var escaped = false;
+
+    while (true) {
+        if (pos + LANES <= src.len) {
+            const chunk: Chunk = src[pos..][0..LANES].*;
+
+            if (lane.firstEscaped(chunk)) |offset| {
+                pos += offset;
+            } else {
+                pos += LANES;
+
+                continue;
+            }
+        }
+
+        if (pos == src.len) {
+            cursor.pos = pos;
+
+            return cursor.stopAt(Cursor.Error.Jzon_Cursor_Truncated);
+        }
+
+        const byte = src[pos];
+
+        if (byte == '"') {
+            cursor.pos = pos + 1;
+
+            return .{
+                .raw = src[start..pos],
+                .escaped = escaped,
+            };
+        }
+
+        if (byte < 0x20) {
+            cursor.pos = pos;
+
+            return cursor.stopAt(Cursor.Error.Jzon_Cursor_Unexpected);
+        }
+
+        if (byte == '\\') {
+            if (pos + 1 == src.len) {
+                cursor.pos = pos;
+
+                return cursor.stopAt(Cursor.Error.Jzon_Cursor_Truncated);
+            }
+
+            escaped = true;
+            pos += 2;
+
+            continue;
+        }
+
+        pos += 1;
+    }
 }
 
 // --------------------------------------------------------- //
@@ -119,10 +225,12 @@ pub const Error = error{
 /// Step over the insignificant whitespace between tokens.
 ///
 /// Note:
-/// - The byte under the cursor is asked first, before any lane is loaded. A minified
-///   document answers there and never reaches the lane loop.
-/// - A lane of whitespace advances the cursor by the whole lane. The first lane that
-///   holds anything else lands the cursor exactly on it.
+/// - The first byte is checked on its own and, when it is not whitespace, the cursor
+///   is left untouched. A minified document always takes this exit, and returning
+///   before the run setup is what keeps it at the scalar speed (measured).
+/// - The rest of the first SHORT_RUN bytes are stepped one at a time. A laid-out
+///   document almost always stops inside the run, so it never loads a lane.
+/// - A run longer than SHORT_RUN goes to `skipLongRun`, a lane at a time.
 ///
 /// Param:
 /// cursor - *Cursor (the cursor to advance)
@@ -130,21 +238,21 @@ pub const Error = error{
 /// Return:
 /// - void
 pub fn skipSpace(cursor: *Cursor) void {
-    if (cursor.pos == cursor.src.len or !Cursor.isSpace(cursor.src[cursor.pos])) return;
+    const src = cursor.src;
+    var pos = cursor.pos;
 
-    while (cursor.pos + LANES <= cursor.src.len) {
-        const chunk: Chunk = cursor.src[cursor.pos..][0..LANES].*;
+    if (pos >= src.len or !Cursor.isSpace(src[pos])) return;
 
-        if (firstOther(chunk)) |offset| {
-            cursor.pos += offset;
+    const stop = @min(pos + SHORT_RUN, src.len);
 
-            return;
-        }
+    pos += 1;
+    while (pos < stop and Cursor.isSpace(src[pos])) pos += 1;
 
-        cursor.pos += LANES;
-    }
+    cursor.pos = pos;
 
-    cursor.skipSpace();
+    if (pos < stop or pos == src.len) return;
+
+    skipLongRun(cursor);
 }
 
 /// Read a string token, both quotes included, and return the bytes between them
@@ -166,55 +274,7 @@ pub fn skipSpace(cursor: *Cursor) void {
 /// - Error.Jzon_CursorVector_Unexpected when the token does not open with a quote, or
 ///   carries a raw control byte
 pub fn stringSpan(cursor: *Cursor) Error!StringSpan {
-    cursor.expect('"') catch |err| return cursorError(err);
-
-    const start = cursor.pos;
-    var escaped = false;
-
-    while (true) {
-        if (cursor.pos + LANES <= cursor.src.len) {
-            const chunk: Chunk = cursor.src[cursor.pos..][0..LANES].*;
-
-            if (lane.firstEscaped(chunk)) |offset| {
-                cursor.pos += offset;
-            } else {
-                cursor.pos += LANES;
-
-                continue;
-            }
-        }
-
-        if (cursor.pos == cursor.src.len) {
-            return recordStop(cursor, Cursor.Error.Jzon_Cursor_Truncated);
-        }
-
-        const byte = cursor.src[cursor.pos];
-
-        if (byte == '"') {
-            const raw = cursor.src[start..cursor.pos];
-            cursor.pos += 1;
-
-            return .{
-                .raw = raw,
-                .escaped = escaped,
-            };
-        }
-
-        if (byte < 0x20) return recordStop(cursor, Cursor.Error.Jzon_Cursor_Unexpected);
-
-        if (byte == '\\') {
-            if (cursor.pos + 1 == cursor.src.len) {
-                return recordStop(cursor, Cursor.Error.Jzon_Cursor_Truncated);
-            }
-
-            escaped = true;
-            cursor.pos += 2;
-
-            continue;
-        }
-
-        cursor.pos += 1;
-    }
+    return spanInto(cursor) catch |err| innerError(err);
 }
 
 // --------------------------------------------------------- //
@@ -260,6 +320,17 @@ fn expectSameSpan(src: []const u8) !void {
     try std.testing.expectEqual(theirs.pos, ours.pos);
 }
 
+/// Skip whitespace in `src` with both widths and require the same position.
+fn expectSameSkip(src: []const u8) !void {
+    var ours: Cursor = .init(src);
+    skipSpace(&ours);
+
+    var theirs: Cursor = .init(src);
+    theirs.skipSpace();
+
+    try std.testing.expectEqual(theirs.pos, ours.pos);
+}
+
 test "jzon: cursor_vector, skipSpace stops where the scalar skip stops" {
     for (DOCUMENTS) |document| {
         var ours: Cursor = .init(document);
@@ -284,6 +355,39 @@ test "jzon: cursor_vector, skipSpace steps over runs longer than one lane" {
     try std.testing.expectEqual(@as(usize, LANES * 2 + 1), cursor.pos);
 }
 
+test "jzon: cursor_vector, skipSpace agrees with the scalar skip at every run length" {
+    // Each run is tried three ways: ending on a token with less than a lane after it,
+    // ending on a token with more than a lane after it, and ending the document.
+    for (0..LANES * 3) |run| {
+        var document: [LANES * 5]u8 = @splat('x');
+        @memset(document[0..run], ' ');
+
+        try expectSameSkip(document[0 .. run + 1]);
+        try expectSameSkip(document[0 .. run + 1 + LANES]);
+        try expectSameSkip(document[0..run]);
+    }
+}
+
+test "jzon: cursor_vector, skipSpace on a run of exactly SHORT_RUN lands on the token" {
+    var document: [SHORT_RUN + LANES]u8 = @splat('x');
+    @memset(document[0..SHORT_RUN], '\n');
+
+    var cursor: Cursor = .init(&document);
+    skipSpace(&cursor);
+
+    try std.testing.expectEqual(@as(usize, SHORT_RUN), cursor.pos);
+}
+
+test "jzon: cursor_vector, skipSpace on a run one past SHORT_RUN lands on the token" {
+    var document: [SHORT_RUN + 1 + LANES]u8 = @splat('x');
+    @memset(document[0 .. SHORT_RUN + 1], '\t');
+
+    var cursor: Cursor = .init(&document);
+    skipSpace(&cursor);
+
+    try std.testing.expectEqual(@as(usize, SHORT_RUN + 1), cursor.pos);
+}
+
 test "jzon: cursor_vector, stringSpan reads what the scalar span reads" {
     for (DOCUMENTS) |document| {
         var ours: Cursor = .init(document);
@@ -299,7 +403,7 @@ test "jzon: cursor_vector, stringSpan reads what the scalar span reads" {
             try std.testing.expectEqual(wanted.escaped, got.escaped);
             try std.testing.expectEqual(theirs.pos, ours.pos);
         } else |failure| {
-            try std.testing.expectError(cursorError(failure), our_span);
+            try std.testing.expectError(innerError(failure), our_span);
         }
     }
 }
@@ -443,28 +547,61 @@ test "jzon: cursor_vector, skipSpace stops on a control byte outside the whitesp
     }
 }
 
-test "jzon: cursor_vector, cursorError renames truncated to its own name" {
-    const err = cursorError(error.Jzon_Cursor_Truncated);
+test "jzon: cursor_vector, skipSpace on an empty document stays at the start" {
+    var cursor: Cursor = .init("");
+
+    skipSpace(&cursor);
+
+    try std.testing.expectEqual(@as(usize, 0), cursor.pos);
+}
+
+test "jzon: cursor_vector, skipSpace on a token leaves the cursor in place" {
+    var cursor: Cursor = .init("{\"id\": 1}");
+    cursor.pos = 2;
+
+    skipSpace(&cursor);
+
+    try std.testing.expectEqual(@as(usize, 2), cursor.pos);
+}
+
+test "jzon: cursor_vector, skipSpace on a cursor already at the end stays there" {
+    var cursor: Cursor = .init("1 ");
+    cursor.pos = 2;
+
+    skipSpace(&cursor);
+
+    try std.testing.expectEqual(@as(usize, 2), cursor.pos);
+}
+
+test "jzon: cursor_vector, skipSpace on a run of one lands on the token" {
+    var cursor: Cursor = .init(" x");
+
+    skipSpace(&cursor);
+
+    try std.testing.expectEqual(@as(usize, 1), cursor.pos);
+}
+
+test "jzon: cursor_vector, innerError keeps its own truncated" {
+    const err = innerError(error.Jzon_CursorVector_Truncated);
 
     try std.testing.expectEqual(Error.Jzon_CursorVector_Truncated, err);
 }
 
-test "jzon: cursor_vector, cursorError renames unexpected to its own name" {
-    const err = cursorError(error.Jzon_Cursor_Unexpected);
+test "jzon: cursor_vector, innerError keeps its own unexpected" {
+    const err = innerError(error.Jzon_CursorVector_Unexpected);
 
     try std.testing.expectEqual(Error.Jzon_CursorVector_Unexpected, err);
 }
 
-test "jzon: cursor_vector, recordStop notes the cursor position" {
-    var cursor: Cursor = .init("abcdef");
-    cursor.pos = 4;
-    Failure.reset();
+test "jzon: cursor_vector, innerError renames cursor truncated to its own name" {
+    const err = innerError(error.Jzon_Cursor_Truncated);
 
-    const err = recordStop(&cursor, error.Jzon_Cursor_Unexpected);
-    const failure = Failure.lastFailure();
+    try std.testing.expectEqual(Error.Jzon_CursorVector_Truncated, err);
+}
+
+test "jzon: cursor_vector, innerError renames cursor unexpected to its own name" {
+    const err = innerError(error.Jzon_Cursor_Unexpected);
 
     try std.testing.expectEqual(Error.Jzon_CursorVector_Unexpected, err);
-    try std.testing.expect(failure.filled);
-    try std.testing.expectEqual(@as(usize, 4), failure.offset);
 }
 
