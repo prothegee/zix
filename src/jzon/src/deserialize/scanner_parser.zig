@@ -90,7 +90,8 @@ const Source = struct {
 ///
 /// Return:
 /// - Error (the closest failure under this module's name)
-fn scannerError(err: ScannerError) Error {
+inline fn scannerError(err: ScannerError) Error {
+    @branchHint(.cold);
     return switch (err) {
         error.OutOfMemory => Error.Jzon_ScannerParser_OutOfMemory,
         error.UnexpectedEndOfInput => Error.Jzon_ScannerParser_Truncated,
@@ -100,43 +101,37 @@ fn scannerError(err: ScannerError) Error {
     };
 }
 
-/// Translate an `integer` failure into this module's set.
+/// Every failure a private reader here can hand back: this module's own set joined
+/// with the sets of the number readers and the field bookkeeping.
+///
+/// Note:
+/// - The scanner's std set is not joined. It is translated where it is called, by
+///   `scannerError`, because its members are not jzon names.
+const Inner = Error || integer.Error || float.Error || fields.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - integer.Error (the failure the integer reader reported)
+/// err - Inner (the failure a private reader handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn integerError(err: integer.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_ScannerParser_UnknownField => Error.Jzon_ScannerParser_UnknownField,
+        error.Jzon_ScannerParser_MissingField => Error.Jzon_ScannerParser_MissingField,
+        error.Jzon_ScannerParser_UnknownEnumValue => Error.Jzon_ScannerParser_UnknownEnumValue,
+        error.Jzon_ScannerParser_Truncated => Error.Jzon_ScannerParser_Truncated,
+        error.Jzon_ScannerParser_Unexpected => Error.Jzon_ScannerParser_Unexpected,
+        error.Jzon_ScannerParser_BadNumber => Error.Jzon_ScannerParser_BadNumber,
+        error.Jzon_ScannerParser_NoSpaceLeft => Error.Jzon_ScannerParser_NoSpaceLeft,
+        error.Jzon_ScannerParser_OutOfMemory => Error.Jzon_ScannerParser_OutOfMemory,
         error.Jzon_Integer_NoSpaceLeft => Error.Jzon_ScannerParser_NoSpaceLeft,
         error.Jzon_Integer_BadNumber => Error.Jzon_ScannerParser_BadNumber,
-    };
-}
-
-/// Translate a `float` failure into this module's set.
-///
-/// Param:
-/// err - float.Error (the failure the float reader reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn floatError(err: float.Error) Error {
-    return switch (err) {
         error.Jzon_Float_NoSpaceLeft => Error.Jzon_ScannerParser_NoSpaceLeft,
         error.Jzon_Float_BadNumber => Error.Jzon_ScannerParser_BadNumber,
-    };
-}
-
-/// Translate a `fields` failure into this module's set.
-///
-/// Param:
-/// err - fields.Error (the failure the field bookkeeping reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn fieldsError(err: fields.Error) Error {
-    return switch (err) {
         error.Jzon_Fields_Unexpected => Error.Jzon_ScannerParser_Unexpected,
         error.Jzon_Fields_MissingField => Error.Jzon_ScannerParser_MissingField,
     };
@@ -151,25 +146,25 @@ fn fieldsError(err: fields.Error) Error {
 ///
 /// Return:
 /// - Target (the value)
-/// - Error (any failure of the token or the field it lands in)
+/// - Inner (any failure of the token or the field it lands in)
 fn readValue(
     comptime Target: type,
     source: Source,
     comptime options: DeserializeOptions,
-) Error!Target {
+) Inner!Target {
     switch (@typeInfo(Target)) {
         .bool => return readBool(source),
 
         .int => {
             const text = try numberText(source);
 
-            return integer.parse(Target, text) catch |err| integerError(err);
+            return integer.parse(Target, text);
         },
 
         .float => {
             const text = try numberText(source);
 
-            return float.parse(Target, text) catch |err| floatError(err);
+            return float.parse(Target, text);
         },
 
         .optional => |info| {
@@ -262,12 +257,12 @@ fn readEnum(comptime Target: type, source: Source) Error!Target {
 ///
 /// Return:
 /// - Target (the struct)
-/// - Error (a bad key, a bad value, or a field the document owed)
+/// - Inner (a bad key, a bad value, or a field the document owed)
 fn readStruct(
     comptime Target: type,
     source: Source,
     comptime options: DeserializeOptions,
-) Error!Target {
+) Inner!Target {
     if ((try source.next(.alloc_if_needed)) != .object_begin) {
         return Error.Jzon_ScannerParser_Unexpected;
     }
@@ -287,7 +282,7 @@ fn readStruct(
 
         inline for (comptime std.meta.fieldNames(Target), 0..) |name, index| {
             if (!matched and std.mem.eql(u8, name, key)) {
-                seen.mark(index) catch |err| return fieldsError(err);
+                try seen.mark(index);
 
                 @field(result, name) = try readValue(@FieldType(Target, name), source, options);
                 matched = true;
@@ -306,7 +301,7 @@ fn readStruct(
         }
     }
 
-    seen.fill(&result) catch |err| return fieldsError(err);
+    try seen.fill(&result);
 
     return result;
 }
@@ -320,12 +315,12 @@ fn readStruct(
 ///
 /// Return:
 /// - Target (the slice, owned by the allocator)
-/// - Error (a bad element, or Error.Jzon_ScannerParser_OutOfMemory)
+/// - Inner (a bad element, or Error.Jzon_ScannerParser_OutOfMemory)
 fn readSlice(
     comptime Target: type,
     source: Source,
     comptime options: DeserializeOptions,
-) Error!Target {
+) Inner!Target {
     const Element = @typeInfo(Target).pointer.child;
 
     if (Target != []const Element and Target != []Element) @compileError(
@@ -472,7 +467,7 @@ pub fn parse(
         .value_cap = src.len,
     };
 
-    const value = try readValue(Target, source, options);
+    const value = readValue(Target, source, options) catch |err| return innerError(err);
 
     if ((try source.next(.alloc_if_needed)) != .end_of_document) {
         return Error.Jzon_ScannerParser_Unexpected;
@@ -637,25 +632,33 @@ test "jzon deserialize: scanner_parser, scannerError maps every scanner member" 
     }
 }
 
-test "jzon deserialize: scanner_parser, integerError maps every integer member" {
-    const no_space = integerError(error.Jzon_Integer_NoSpaceLeft);
-    const bad_number = integerError(error.Jzon_Integer_BadNumber);
+test "jzon deserialize: scanner_parser, innerError keeps every own member" {
+    inline for (@typeInfo(Error).error_set.error_names.?) |name| {
+        const own = @field(Error, name);
+
+        try std.testing.expectEqual(own, innerError(own));
+    }
+}
+
+test "jzon deserialize: scanner_parser, innerError renames every integer member" {
+    const no_space = innerError(error.Jzon_Integer_NoSpaceLeft);
+    const bad_number = innerError(error.Jzon_Integer_BadNumber);
 
     try std.testing.expectEqual(Error.Jzon_ScannerParser_NoSpaceLeft, no_space);
     try std.testing.expectEqual(Error.Jzon_ScannerParser_BadNumber, bad_number);
 }
 
-test "jzon deserialize: scanner_parser, floatError maps every float member" {
-    const no_space = floatError(error.Jzon_Float_NoSpaceLeft);
-    const bad_number = floatError(error.Jzon_Float_BadNumber);
+test "jzon deserialize: scanner_parser, innerError renames every float member" {
+    const no_space = innerError(error.Jzon_Float_NoSpaceLeft);
+    const bad_number = innerError(error.Jzon_Float_BadNumber);
 
     try std.testing.expectEqual(Error.Jzon_ScannerParser_NoSpaceLeft, no_space);
     try std.testing.expectEqual(Error.Jzon_ScannerParser_BadNumber, bad_number);
 }
 
-test "jzon deserialize: scanner_parser, fieldsError maps every fields member" {
-    const unexpected = fieldsError(error.Jzon_Fields_Unexpected);
-    const missing = fieldsError(error.Jzon_Fields_MissingField);
+test "jzon deserialize: scanner_parser, innerError renames every fields member" {
+    const unexpected = innerError(error.Jzon_Fields_Unexpected);
+    const missing = innerError(error.Jzon_Fields_MissingField);
 
     try std.testing.expectEqual(Error.Jzon_ScannerParser_Unexpected, unexpected);
     try std.testing.expectEqual(Error.Jzon_ScannerParser_MissingField, missing);
