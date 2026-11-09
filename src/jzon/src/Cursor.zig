@@ -130,6 +130,8 @@ pub fn init(src: []const u8) Self {
 /// Return:
 /// - Error (the same error it was given, always)
 pub fn stopAt(self: Self, err: Error) Error {
+    @branchHint(.cold);
+
     Failure.noteOffset(self.pos);
 
     return err;
@@ -232,7 +234,12 @@ pub fn literal(self: *Self, comptime text: []const u8) Error!void {
 /// Return:
 /// - void
 pub fn skipSpace(self: *Self) void {
-    while (self.pos < self.src.len and isSpace(self.src[self.pos])) : (self.pos += 1) {}
+    const src = self.src;
+    var pos = self.pos;
+
+    while (pos < src.len and isSpace(src[pos])) : (pos += 1) {}
+
+    self.pos = pos;
 }
 
 /// Read a string token, both quotes included, and return the bytes between them
@@ -242,6 +249,9 @@ pub fn skipSpace(self: *Self) void {
 /// - A backslash consumes the byte after it, so an escaped quote does not end the
 ///   token. Whether that escape is spelled correctly is the decoder's question.
 /// - A raw control byte below 0x20 is rejected, the rule std.json holds to.
+/// - The scan runs on local copies of `src` and `pos` and writes the position back
+///   once, as `skipSpace` and `numberSpan` do. Through `self`, the compiler has to
+///   assume a byte read may change the position and reloads it every step (measured).
 ///
 /// Return:
 /// - StringSpan (the undecoded body, plus whether it holds an escape)
@@ -251,30 +261,41 @@ pub fn skipSpace(self: *Self) void {
 pub fn stringSpan(self: *Self) Error!StringSpan {
     try self.expect('"');
 
+    const src = self.src;
     const start = self.pos;
+    var pos = start;
     var escaped = false;
 
-    while (self.pos < self.src.len) : (self.pos += 1) {
-        const byte = self.src[self.pos];
+    while (pos < src.len) : (pos += 1) {
+        const byte = src[pos];
         if (byte == '"') {
-            const raw = self.src[start..self.pos];
-            self.pos += 1;
+            self.pos = pos + 1;
 
             return .{
-                .raw = raw,
+                .raw = src[start..pos],
                 .escaped = escaped,
             };
         }
 
-        if (byte < 0x20) return self.stopAt(Error.Jzon_Cursor_Unexpected);
+        if (byte < 0x20) {
+            self.pos = pos;
+
+            return self.stopAt(Error.Jzon_Cursor_Unexpected);
+        }
 
         if (byte == '\\') {
-            if (self.pos + 1 == self.src.len) return self.stopAt(Error.Jzon_Cursor_Truncated);
+            if (pos + 1 == src.len) {
+                self.pos = pos;
+
+                return self.stopAt(Error.Jzon_Cursor_Truncated);
+            }
 
             escaped = true;
-            self.pos += 1;
+            pos += 1;
         }
     }
+
+    self.pos = pos;
 
     return self.stopAt(Error.Jzon_Cursor_Truncated);
 }
@@ -297,15 +318,20 @@ pub fn numberSpan(self: *Self) Error![]const u8 {
         else => return self.stopAt(Error.Jzon_Cursor_Unexpected),
     }
 
+    const src = self.src;
     const start = self.pos;
-    while (self.pos < self.src.len) : (self.pos += 1) {
-        switch (self.src[self.pos]) {
+    var pos = start;
+
+    while (pos < src.len) : (pos += 1) {
+        switch (src[pos]) {
             '-', '+', '.', 'e', 'E', '0'...'9' => {},
             else => break,
         }
     }
 
-    return self.src[start..self.pos];
+    self.pos = pos;
+
+    return src[start..pos];
 }
 
 // --------------------------------------------------------- //
