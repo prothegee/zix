@@ -48,70 +48,37 @@ const reflect = @import("../reflect.zig");
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate a `Sink` failure into this module's set.
+/// Every failure a private function here can hand back: this module's own set joined
+/// with the sets of the modules it writes through.
 ///
-/// Param:
-/// err - Sink.Error (the failure the sink reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn sinkError(err: Sink.Error) Error {
-    return switch (err) {
-        error.Jzon_Sink_NoSpaceLeft => Error.Jzon_GeneratedEmitter_NoSpaceLeft,
-    };
-}
+/// Note:
+/// - Private on purpose. Inside the module every call uses `try`, and `emit`
+///   translates once on the way out. A translation on every call site kept the sink
+///   position out of a register and cost about half the render time (measured).
+const Inner = Error || Sink.Error || integer.Error || float.Error || escape.Error ||
+    escape_vector.Error;
 
-/// Translate an `integer` failure into this module's set.
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - integer.Error (the failure the integer writer reported)
+/// err - Inner (the failure a private function handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn integerError(err: integer.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_GeneratedEmitter_NoSpaceLeft => Error.Jzon_GeneratedEmitter_NoSpaceLeft,
+        error.Jzon_GeneratedEmitter_BadNumber => Error.Jzon_GeneratedEmitter_BadNumber,
+        error.Jzon_GeneratedEmitter_BadEscape => Error.Jzon_GeneratedEmitter_BadEscape,
+        error.Jzon_Sink_NoSpaceLeft => Error.Jzon_GeneratedEmitter_NoSpaceLeft,
         error.Jzon_Integer_NoSpaceLeft => Error.Jzon_GeneratedEmitter_NoSpaceLeft,
         error.Jzon_Integer_BadNumber => Error.Jzon_GeneratedEmitter_BadNumber,
-    };
-}
-
-/// Translate a `float` failure into this module's set.
-///
-/// Param:
-/// err - float.Error (the failure the float writer reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn floatError(err: float.Error) Error {
-    return switch (err) {
         error.Jzon_Float_NoSpaceLeft => Error.Jzon_GeneratedEmitter_NoSpaceLeft,
         error.Jzon_Float_BadNumber => Error.Jzon_GeneratedEmitter_BadNumber,
-    };
-}
-
-/// Translate an `escape` failure into this module's set.
-///
-/// Param:
-/// err - escape.Error (the failure the scalar escape reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn escapeError(err: escape.Error) Error {
-    return switch (err) {
         error.Jzon_Escape_NoSpaceLeft => Error.Jzon_GeneratedEmitter_NoSpaceLeft,
         error.Jzon_Escape_BadEscape => Error.Jzon_GeneratedEmitter_BadEscape,
-    };
-}
-
-/// Translate an `escape_vector` failure into this module's set.
-///
-/// Param:
-/// err - escape_vector.Error (the failure the vector escape reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn escapeVectorError(err: escape_vector.Error) Error {
-    return switch (err) {
         error.Jzon_EscapeVector_NoSpaceLeft => Error.Jzon_GeneratedEmitter_NoSpaceLeft,
         error.Jzon_EscapeVector_BadEscape => Error.Jzon_GeneratedEmitter_BadEscape,
     };
@@ -126,16 +93,16 @@ fn escapeVectorError(err: escape_vector.Error) Error {
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_GeneratedEmitter_NoSpaceLeft when the object does not fit
-fn emitStruct(sink: *Sink, value: anytype, comptime shape: EmitShape) Error!void {
-    sink.byte('{') catch |err| return sinkError(err);
+/// - Inner (a sink or value failure, untranslated) when the object does not fit
+fn emitStruct(sink: *Sink, value: anytype, comptime shape: EmitShape) Inner!void {
+    try sink.byte('{');
 
     inline for (comptime std.meta.fieldNames(@TypeOf(value)), 0..) |name, index| {
-        sink.literal(comptime fieldKey(name, index == 0)) catch |err| return sinkError(err);
-        try emit(sink, @field(value, name), shape);
+        try sink.literal(comptime fieldKey(name, index == 0));
+        try emitValue(sink, @field(value, name), shape);
     }
 
-    sink.byte('}') catch |err| return sinkError(err);
+    try sink.byte('}');
 }
 
 /// Render a slice as a JSON array.
@@ -147,17 +114,17 @@ fn emitStruct(sink: *Sink, value: anytype, comptime shape: EmitShape) Error!void
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_GeneratedEmitter_NoSpaceLeft when the array does not fit
-fn emitSlice(sink: *Sink, values: anytype, comptime shape: EmitShape) Error!void {
-    sink.byte('[') catch |err| return sinkError(err);
+/// - Inner (a sink or value failure, untranslated) when the array does not fit
+fn emitSlice(sink: *Sink, values: anytype, comptime shape: EmitShape) Inner!void {
+    try sink.byte('[');
 
     for (values, 0..) |element, index| {
-        if (index != 0) sink.byte(',') catch |err| return sinkError(err);
+        if (index != 0) try sink.byte(',');
 
-        try emit(sink, element, shape);
+        try emitValue(sink, element, shape);
     }
 
-    sink.byte(']') catch |err| return sinkError(err);
+    try sink.byte(']');
 }
 
 /// Render a string through whichever escape scan the shape asked for.
@@ -169,11 +136,83 @@ fn emitSlice(sink: *Sink, values: anytype, comptime shape: EmitShape) Error!void
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_GeneratedEmitter_NoSpaceLeft when the string does not fit
-fn emitString(sink: *Sink, text: []const u8, comptime shape: EmitShape) Error!void {
+/// - Inner (an escape failure, untranslated) when the string does not fit
+fn emitString(sink: *Sink, text: []const u8, comptime shape: EmitShape) Inner!void {
     switch (shape.escapes) {
-        .SCALAR => escape.encode(sink, text) catch |err| return escapeError(err),
-        .VECTOR => escape_vector.encode(sink, text) catch |err| return escapeVectorError(err),
+        .SCALAR => try escape.encode(sink, text),
+        .VECTOR => try escape_vector.encode(sink, text),
+    }
+}
+
+/// Render `value` as JSON, failing with the inner set `emit` translates.
+///
+/// Note:
+/// - Recursive over the type, not over any runtime shape, so a nested struct or a
+///   slice of them costs nothing at runtime beyond its own bytes.
+///
+/// Param:
+/// sink - *Sink (where the JSON text goes)
+/// value - anytype (bool, any integer or float width, a string, a slice, an
+///   optional, an exhaustive enum, or a struct of those)
+/// shape - EmitShape (comptime, which integer path and which escape scan to run)
+///
+/// Return:
+/// - void
+/// - Inner (a sink, integer, float, or escape failure, untranslated)
+fn emitValue(sink: *Sink, value: anytype, comptime shape: EmitShape) Inner!void {
+    const Value = @TypeOf(value);
+
+    switch (@typeInfo(Value)) {
+        .bool => {
+            if (value) {
+                try sink.literal("true");
+            } else {
+                try sink.literal("false");
+            }
+        },
+
+        .int => switch (shape.numbers) {
+            .FMT => try integer.appendFmt(sink, value),
+            .TABLE => try integer.appendTable(sink, value),
+        },
+
+        .float => try float.append(sink, value),
+
+        .optional => {
+            if (value) |payload| return emitValue(sink, payload, shape);
+
+            try sink.literal("null");
+        },
+
+        .@"enum" => {
+            if (!reflect.isExhaustive(Value)) @compileError(
+                "jzon emitter: " ++ @typeName(Value) ++
+                    " is non-exhaustive, so a value it carries may have no tag name",
+            );
+
+            try emitString(sink, @tagName(value), shape);
+        },
+
+        .@"struct" => |info| {
+            if (info.is_tuple) @compileError(
+                "jzon emitter: " ++ @typeName(Value) ++ " is a tuple, which has no object form",
+            );
+
+            try emitStruct(sink, value, shape);
+        },
+
+        .pointer => |info| {
+            if (info.size != .slice) @compileError(
+                "jzon emitter: " ++ @typeName(Value) ++
+                    " is not a slice, so it has no JSON form",
+            );
+
+            if (info.child == u8) return emitString(sink, value, shape);
+
+            try emitSlice(sink, value, shape);
+        },
+
+        else => @compileError("jzon emitter: " ++ @typeName(Value) ++ " has no JSON form"),
     }
 }
 
@@ -246,60 +285,7 @@ pub const Error = error{
 /// - void
 /// - Error.Jzon_GeneratedEmitter_NoSpaceLeft when the rendered form does not fit
 pub fn emit(sink: *Sink, value: anytype, comptime shape: EmitShape) Error!void {
-    const Value = @TypeOf(value);
-
-    switch (@typeInfo(Value)) {
-        .bool => {
-            if (value) {
-                sink.literal("true") catch |err| return sinkError(err);
-            } else {
-                sink.literal("false") catch |err| return sinkError(err);
-            }
-        },
-
-        .int => switch (shape.numbers) {
-            .FMT => integer.appendFmt(sink, value) catch |err| return integerError(err),
-            .TABLE => integer.appendTable(sink, value) catch |err| return integerError(err),
-        },
-
-        .float => float.append(sink, value) catch |err| return floatError(err),
-
-        .optional => {
-            if (value) |payload| return emit(sink, payload, shape);
-
-            sink.literal("null") catch |err| return sinkError(err);
-        },
-
-        .@"enum" => {
-            if (!reflect.isExhaustive(Value)) @compileError(
-                "jzon emitter: " ++ @typeName(Value) ++
-                    " is non-exhaustive, so a value it carries may have no tag name",
-            );
-
-            try emitString(sink, @tagName(value), shape);
-        },
-
-        .@"struct" => |info| {
-            if (info.is_tuple) @compileError(
-                "jzon emitter: " ++ @typeName(Value) ++ " is a tuple, which has no object form",
-            );
-
-            try emitStruct(sink, value, shape);
-        },
-
-        .pointer => |info| {
-            if (info.size != .slice) @compileError(
-                "jzon emitter: " ++ @typeName(Value) ++
-                    " is not a slice, so it has no JSON form",
-            );
-
-            if (info.child == u8) return emitString(sink, value, shape);
-
-            try emitSlice(sink, value, shape);
-        },
-
-        else => @compileError("jzon emitter: " ++ @typeName(Value) ++ " has no JSON form"),
-    }
+    return emitValue(sink, value, shape) catch |err| innerError(err);
 }
 
 // --------------------------------------------------------- //
@@ -437,56 +423,74 @@ test "jzon serialize: generated_emitter, value that does not fit keeps the prefi
     try std.testing.expectEqualStrings("{\"id\":7", sink.filled());
 }
 
-test "jzon serialize: generated_emitter, sinkError maps no space left" {
-    const err = sinkError(error.Jzon_Sink_NoSpaceLeft);
+test "jzon serialize: generated_emitter, innerError maps own no space left" {
+    const err = innerError(error.Jzon_GeneratedEmitter_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
 }
 
-test "jzon serialize: generated_emitter, integerError maps no space left" {
-    const err = integerError(error.Jzon_Integer_NoSpaceLeft);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
-}
-
-test "jzon serialize: generated_emitter, integerError maps bad number" {
-    const err = integerError(error.Jzon_Integer_BadNumber);
+test "jzon serialize: generated_emitter, innerError maps own bad number" {
+    const err = innerError(error.Jzon_GeneratedEmitter_BadNumber);
 
     try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_BadNumber, err);
 }
 
-test "jzon serialize: generated_emitter, floatError maps no space left" {
-    const err = floatError(error.Jzon_Float_NoSpaceLeft);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
-}
-
-test "jzon serialize: generated_emitter, floatError maps bad number" {
-    const err = floatError(error.Jzon_Float_BadNumber);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_BadNumber, err);
-}
-
-test "jzon serialize: generated_emitter, escapeError maps no space left" {
-    const err = escapeError(error.Jzon_Escape_NoSpaceLeft);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
-}
-
-test "jzon serialize: generated_emitter, escapeError maps bad escape" {
-    const err = escapeError(error.Jzon_Escape_BadEscape);
+test "jzon serialize: generated_emitter, innerError maps own bad escape" {
+    const err = innerError(error.Jzon_GeneratedEmitter_BadEscape);
 
     try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_BadEscape, err);
 }
 
-test "jzon serialize: generated_emitter, escapeVectorError maps no space left" {
-    const err = escapeVectorError(error.Jzon_EscapeVector_NoSpaceLeft);
+test "jzon serialize: generated_emitter, innerError maps sink no space left" {
+    const err = innerError(error.Jzon_Sink_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
 }
 
-test "jzon serialize: generated_emitter, escapeVectorError maps bad escape" {
-    const err = escapeVectorError(error.Jzon_EscapeVector_BadEscape);
+test "jzon serialize: generated_emitter, innerError maps integer no space left" {
+    const err = innerError(error.Jzon_Integer_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
+}
+
+test "jzon serialize: generated_emitter, innerError maps integer bad number" {
+    const err = innerError(error.Jzon_Integer_BadNumber);
+
+    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_BadNumber, err);
+}
+
+test "jzon serialize: generated_emitter, innerError maps float no space left" {
+    const err = innerError(error.Jzon_Float_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
+}
+
+test "jzon serialize: generated_emitter, innerError maps float bad number" {
+    const err = innerError(error.Jzon_Float_BadNumber);
+
+    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_BadNumber, err);
+}
+
+test "jzon serialize: generated_emitter, innerError maps escape no space left" {
+    const err = innerError(error.Jzon_Escape_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
+}
+
+test "jzon serialize: generated_emitter, innerError maps escape bad escape" {
+    const err = innerError(error.Jzon_Escape_BadEscape);
+
+    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_BadEscape, err);
+}
+
+test "jzon serialize: generated_emitter, innerError maps escape_vector no space left" {
+    const err = innerError(error.Jzon_EscapeVector_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_NoSpaceLeft, err);
+}
+
+test "jzon serialize: generated_emitter, innerError maps escape_vector bad escape" {
+    const err = innerError(error.Jzon_EscapeVector_BadEscape);
 
     try std.testing.expectEqual(Error.Jzon_GeneratedEmitter_BadEscape, err);
 }
