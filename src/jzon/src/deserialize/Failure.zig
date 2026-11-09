@@ -95,7 +95,7 @@ pub const FIELD_CAPACITY = 64;
 ///
 /// Usage:
 /// ```zig
-/// const record = jzon.deserialize(Order, allocator, body, .{}) catch |err| {
+/// const record = jzon.json.deserialize(Order, allocator, body, .{}) catch |err| {
 ///     const failure = jzon.lastFailure();
 ///     std.log.err("{s} at byte {d}: {s}", .{
 ///         @errorName(err),
