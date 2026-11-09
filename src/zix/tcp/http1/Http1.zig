@@ -39,6 +39,7 @@ const std = @import("std");
 pub const Server = @import("Server.zig");
 pub const DispatchModel = @import("../../shared/dispatch.zig").Model;
 pub const HandlerFn = @import("handler.zig").HandlerFn;
+pub const isExpired = @import("handler.zig").isExpired;
 
 pub const Route = router.Route;
 pub const Router = router.Router;
@@ -77,6 +78,10 @@ test "zix http1: Http1, HandlerFn takes the request trio" {
     const handler: @This().HandlerFn = probeHandler;
 
     try std.testing.expect(handler == &probeHandler);
+}
+
+test "zix http1: Http1, isExpired is false without a deadline" {
+    try std.testing.expect(!@This().isExpired());
 }
 
 test "zix http1: Http1, PathParam holds a name and value" {
