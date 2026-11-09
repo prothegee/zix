@@ -113,6 +113,10 @@ const parsed = try jzon.json.deserialize(Order, arena.allocator(), body, .{
 });
 
 const compact = try jzon.zon.serialize(&buf, order, .{ .layout = .COMPACT });
+
+const package_text = try jzon.zon.serialize(&buf, package, .{
+    .hex_fields = &.{"fingerprint"},
+});
 ```
 
 Options bersifat comptime, jadi hanya jalur yang disebut yang dikompilasi ke binary.
@@ -161,6 +165,7 @@ Options bersifat comptime, jadi hanya jalur yang disebut yang dikompilasi ke bin
 | `unknown` | `.REJECT` | deserialize | sama dengan JSON |
 | `max_depth` | `256` | deserialize | berapa level `.{}` yang boleh di-nest sebelum dokumen ditolak (pelindung dari input berbahaya, bukan batas ukuran) |
 | `layout` | `.MULTILINE` | serialize | `.MULTILINE` menulis satu entri per baris dengan empat spasi per level, seperti `build.zig.zon`. `.COMPACT` menulis satu baris |
+| `hex_fields` | `&.{}` | serialize | nama field yang ditulis sebagai hex (`.fingerprint = 0x4cc61d74dc93a20b`), di level mana pun. Field lain tetap desimal. Nama yang bukan field, atau field yang bukan integer atau integer optional, menjadi compile error |
 
 ## ZON
 
@@ -253,10 +258,10 @@ Contoh server, juga direncanakan, tinggal bersama contoh engine, bukan di paket 
 
 ## Pengujian
 
-Dua tier, 768 test, tidak ada yang butuh instalasi apa pun:
+Dua tier, 783 test, tidak ada yang butuh instalasi apa pun:
 
 ```
-zig build unit_edge-test     # 624, test unit dan edge di dalam file di bawah src/
+zig build unit_edge-test     # 639, test unit dan edge di dalam file di bawah src/
 zig build behaviour-test     # 144, apa yang dilakukan tiap bagian saat diberi yang ia mau
 zig build all-test           # keduanya
 ```
