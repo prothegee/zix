@@ -113,6 +113,10 @@ const parsed = try jzon.json.deserialize(Order, arena.allocator(), body, .{
 });
 
 const compact = try jzon.zon.serialize(&buf, order, .{ .layout = .COMPACT });
+
+const package_text = try jzon.zon.serialize(&buf, package, .{
+    .hex_fields = &.{"fingerprint"},
+});
 ```
 
 The options are comptime, so only the path named is compiled into the binary.
@@ -161,6 +165,7 @@ The options are comptime, so only the path named is compiled into the binary.
 | `unknown` | `.REJECT` | deserialize | same as JSON |
 | `max_depth` | `256` | deserialize | how many `.{}` levels a document may nest before it is refused (a guard against hostile input, not a size limit) |
 | `layout` | `.MULTILINE` | serialize | `.MULTILINE` writes one entry per line with four spaces per level, like `build.zig.zon`. `.COMPACT` writes one line |
+| `hex_fields` | `&.{}` | serialize | field names written as hex (`.fingerprint = 0x4cc61d74dc93a20b`), at every depth. The others stay decimal. A name that is not a field, or a field that is not an integer or an optional integer, is a compile error |
 
 ## ZON
 
@@ -253,10 +258,10 @@ A server example, also planned, lives with the engine examples rather than in th
 
 ## Testing
 
-Two tiers, 768 tests, none of them needing anything installed:
+Two tiers, 783 tests, none of them needing anything installed:
 
 ```
-zig build unit_edge-test     # 624, the in-file unit and edge tests under src/
+zig build unit_edge-test     # 639, the in-file unit and edge tests under src/
 zig build behaviour-test     # 144, what each piece does when handed what it wants
 zig build all-test           # both
 ```
