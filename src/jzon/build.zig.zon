@@ -5,6 +5,7 @@
         .major = 0,
         .minor = 1,
         .patch = 0,
+        .release_candidate = null,
     },
     .fingerprint = 0x64d61eca0e47a420,
     .minimum_zig_version = "0.17.0",
