@@ -32,10 +32,11 @@
 const std = @import("std");
 const Config = @import("../Config.zig");
 const HandlerFn = @import("../handler.zig").HandlerFn;
+const async_cache = @import("../../../utils/cache/async.zig");
 const conn = @import("../connection.zig");
 const ConnArgs = @import("../ConnArgs.zig");
-const common = @import("common.zig");
-const connEntry = common.connEntry;
+const log = @import("../log.zig");
+const connEntry = conn.connEntry;
 
 // --------------------------------------------------------- //
 // Private:
@@ -98,13 +99,15 @@ pub fn run(config: Config, handler: HandlerFn) Error!void {
     };
     defer server.deinit(io);
 
-    std.log.info("TODO: async dispatch cache reclaim", .{});
+    // Frees the per-thread response caches, now or when the last open
+    // connection ends.
+    defer _ = async_cache.reclaim();
 
     std.log.info("TODO: connection registry & timeout", .{});
 
     std.log.info("TODO: connection timeout sweep, timer, & detach", .{});
 
-    common.logSystem(
+    log.logSystem(
         config,
         .INFO,
         "listening on {s}:{d} (io.async)",
