@@ -2226,7 +2226,12 @@ Wire a logger into any server by setting `logger: &logger` in its config. See [`
 
 ### JSON (jzon)
 
-`zix.jzon` is JSON in both directions, written on the standard library. Two calls carry it: `serialize` turns a typed value into JSON text, `deserialize` turns JSON text back into a typed value. A render allocates nothing, it is handed a buffer and returns how many bytes it used. A parse allocates only what the result points at, out of the allocator handed in, so an arena reset frees a whole parse in one step.
+`zix.jzon` is JSON and ZON in both directions, written on the standard library. Each format has one pair of calls: `serialize` turns a typed value into text, `deserialize` turns text back into a typed value. A render allocates nothing, it is handed a buffer and returns how many bytes it used. A parse allocates only what the result points at, out of the allocator handed in, so an arena reset frees a whole parse in one step.
+
+| Format | Value to text | Text to value |
+| :- | :- | :- |
+| JSON | `zix.jzon.json.serialize(&buf, value, .{})` | `zix.jzon.json.deserialize(T, allocator, text, .{})` |
+| ZON | `zix.jzon.zon.serialize(&buf, value, .{})` | `zix.jzon.zon.deserialize(T, allocator, text, .{})` |
 
 ```zig
 const std = @import("std");
@@ -2240,7 +2245,7 @@ const Order = struct {
 
 // serialize: no allocator, the buffer is the whole budget
 var buf: [256]u8 = undefined;
-const len = try zix.jzon.serialize(&buf, Order{
+const len = try zix.jzon.json.serialize(&buf, Order{
     .id       = 7,
     .customer = "Rekha Nair",
     .tags     = &.{ "priority", "gift" },
@@ -2251,12 +2256,16 @@ const len = try zix.jzon.serialize(&buf, Order{
 var arena: std.heap.ArenaAllocator = .init(std.heap.smp_allocator);
 defer arena.deinit();
 
-const order = try zix.jzon.deserialize(Order, arena.allocator(), buf[0..len], .{});
+const order = try zix.jzon.json.deserialize(Order, arena.allocator(), buf[0..len], .{});
+
+// the same record as ZON, one entry per line like build.zig.zon
+const zon_len = try zix.jzon.zon.serialize(&buf, order, .{});
+const again = try zix.jzon.zon.deserialize(Order, arena.allocator(), buf[0..zon_len], .{});
 ```
 
-Both calls take a comptime options struct naming which path runs. Every write path renders the same bytes and every read path reads back the same value, so a strategy is a cost decision and nothing else, changed at the call site with no other line moving. Because it is comptime, only the path named is compiled into the binary.
+The last parameter is a comptime options struct, and `.{}` means every field at its default. For JSON it names which path runs. Every JSON write path renders the same bytes and every read path reads back the same value, so a strategy is a cost decision and nothing else, changed at the call site with no other line moving. Because it is comptime, only the path named is compiled into the binary.
 
-**Write strategies (`zix.jzon.SerializeStrategy`):**
+**JSON write strategies (`zix.jzon.json.SerializeStrategy`):**
 
 | Strategy | What it runs |
 | :- | :- |
@@ -2265,7 +2274,7 @@ Both calls take a comptime options struct naming which path runs. Every write pa
 | `.GENERATED` | generated from the type, integer digits written straight into the buffer |
 | `.GENERATED_VECTOR` | as `.GENERATED`, with strings scanned one vector lane at a time |
 
-**Read strategies (`zix.jzon.DeserializeStrategy`):**
+**JSON read strategies (`zix.jzon.json.DeserializeStrategy`):**
 
 | Strategy | What it runs |
 | :- | :- |
@@ -2276,7 +2285,7 @@ Both calls take a comptime options struct naming which path runs. Every write pa
 
 `.GENERATED_VECTOR` is not always the quickest. It pays on documents that arrive laid out with whitespace or carry long strings, and costs on minified traffic with short fields, which is why it stays a call-site choice rather than a default.
 
-**Read options (`zix.jzon.DeserializeOptions`):**
+**JSON read options (`zix.jzon.json.DeserializeOptions`):**
 
 | Field | Default | What it decides |
 | :- | :- | :- |
@@ -2284,11 +2293,20 @@ Both calls take a comptime options struct naming which path runs. Every write pa
 | `strings` | `.COPY` | `.COPY` copies every string into the allocator, `.BORROW` points a string with no escape at the document, which then has to outlive the value |
 | `unknown` | `.REJECT` | `.REJECT` fails on a key the type does not declare, `.SKIP` steps over the key and its whole value however deep it nests |
 
-**Errors:** a render reports `error.NoSpaceLeft` and nothing else. A parse reports one set whichever path ran: `UnknownField`, `MissingField`, `UnknownEnumValue`, `Truncated`, `Unexpected`, `BadNumber`, `BadEscape`, `OutOfMemory`.
+**ZON options (`zix.jzon.zon.ZonOptions`):** ZON has one path per direction, so there is no strategy. It covers the shape `build.zig.zon` uses: structs, lists, strings and `\\` multiline strings, integers in any base, floats, booleans, `null`, `.tag` enums, and `//` comments.
 
-A field type a generated path has no JSON form for is a compile error naming the type, never a runtime failure, and `.STD` still takes that shape.
+| Field | Default | What it decides |
+| :- | :- | :- |
+| `strings` | `.COPY` | same as JSON |
+| `unknown` | `.REJECT` | same as JSON |
+| `max_depth` | `256` | how many `.{}` levels a document may nest before it is refused |
+| `layout` | `.MULTILINE` | `.MULTILINE` writes one entry per line, `.COMPACT` writes one line |
 
-**Examples:** six, none of them a server, so each runs and exits. jzon is a standalone package under `src/jzon` with its own `build.zig`, so build them from there with `zig build examples` (or `zig build jzon-examples` from the repo root).
+**Errors:** a render reports `NoSpaceLeft` (`Jzon_Serialize_NoSpaceLeft`, `Jzon_ZonSerialize_NoSpaceLeft`) and nothing else. A parse reports one set whichever path ran: `UnknownField`, `MissingField`, `UnknownEnumValue`, `Truncated`, `Unexpected`, `BadNumber`, `BadEscape`, `OutOfMemory` (as `Jzon_Deserialize_*` or `Jzon_ZonDeserialize_*`). `zix.jzon.lastFailure()` tells which field and which byte a failed parse stopped on, for both formats.
+
+A field type a generated path has no form for is a compile error naming the type, never a runtime failure, and JSON `.STD` still takes that shape.
+
+**Examples:** seven, none of them a server, so each runs and exits. jzon is a standalone package under `src/jzon` with its own `build.zig`, so build them from there with `zig build examples` (or `zig build jzon-examples` from the repo root).
 
 | Example | What it shows |
 | :- | :- |
@@ -2298,10 +2316,11 @@ A field type a generated path has no JSON form for is a compile error naming the
 | [unknown_keys](src/jzon/examples/unknown_keys.zig) | `.REJECT` against `.SKIP` on a document carrying more than the type declares |
 | [bench_serialize](src/jzon/examples/bench_serialize.zig) | what each write strategy costs per render, against the default's rate |
 | [bench_deserialize](src/jzon/examples/bench_deserialize.zig) | what each read strategy costs per parse, on a minified document and a laid-out one |
+| [zon_file](src/jzon/examples/zon_file.zig) | a real `.zon` file read into a typed record and written back |
 
 The two bench examples want `-Doptimize=ReleaseFast`. A Debug build measures the safety checks rather than the paths, and the rows collapse onto each other.
 
-A fifth example is a server, so it lives with the engine examples rather than in the package and is built from the repo root with `zig build example-http1_jzon`.
+A server example, also planned, lives with the engine examples rather than in the package and is built from the repo root with `zig build example-http1_jzon`.
 
 | Example | What it shows |
 | :- | :- |
@@ -2309,12 +2328,12 @@ A fifth example is a server, so it lives with the engine examples rather than in
 
 | Document | Description |
 | :- | :- |
-| [`src/jzon/README-en.md`](src/jzon/README-en.md) | jzon: import, quickstart both directions, strategies, options, type coverage, errors, testing |
-| [`src/jzon/docs/hld-en.md`](src/jzon/docs/hld-en.md) | jzon: layers, components, the write and read flows, allocation model, error model |
-| [`src/jzon/docs/lld-en.md`](src/jzon/docs/lld-en.md) | jzon: cursors, escape rules, the vector scan, number paths, field bookkeeping, the differences from the default path |
+| [`src/jzon/README-en.md`](src/jzon/README-en.md) | jzon: import, quickstart both directions and both formats, strategies, options, ZON coverage, errors, testing |
+| [`src/jzon/docs/hld-en.md`](src/jzon/docs/hld-en.md) | jzon: layers, components, the JSON and ZON flows, allocation model, error model |
+| [`src/jzon/docs/lld-en.md`](src/jzon/docs/lld-en.md) | jzon: cursors, escape rules, the vector scan, number paths, field bookkeeping, `lastFailure`, ZON tokens and values, the differences from the default path |
 | [`src/jzon/docs/benchmark-en.md`](src/jzon/docs/benchmark-en.md) | jzon: what each path costs per render and per parse, with the method and the system it was measured on |
 
-**When to use:** reach for `.{}` first, which is the std-backed path and takes every shape std takes. Move a hot handler to `.GENERATED` when the shape is a plain record and the parse or the render is on the request path, and add `.strings = .BORROW` when the value dies with the buffer it was read out of.
+**When to use:** reach for `.{}` first, which for JSON is the std-backed path and takes every shape std takes. Move a hot handler to `.GENERATED` when the shape is a plain record and the parse or the render is on the request path, and add `.strings = .BORROW` when the value dies with the buffer it was read out of. Use `zix.jzon.zon` for config files written in ZON.
 
 <br>
 
