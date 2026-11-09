@@ -27,7 +27,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
 | `logger` | baris lifecycle `logSystem` |
 
-`compression`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.EPOLL` dan `.URING`, di mana handler opt-in dengan `res.sendNegotiated` atau `core.sendNegotiateFD`. Helper lama `core.sendGzipFD` masih memakai konstanta compile-time `core.GZIP_OUT_SIZE` (256 KB). `max_response_headers` (kelas kapasitas `addHeader`) dan `conn_timeout_ms` (hanya model blocking) mendarat lewat ADR-062.
+`compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada `.ASYNC`, `.EPOLL`, dan `.URING`, di mana handler opt-in dengan `res.sendNegotiated`. `.EPOLL` dan `.URING` memasangnya sekali per worker (`compress.installWorker`), `.ASYNC` sekali per koneksi (`connEntry`). `max_response_headers` (kelas kapasitas `addHeader`) dan `conn_timeout_ms` (hanya model blocking) mendarat lewat ADR-062.
 
 ---
 
@@ -37,7 +37,6 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 
 ```
 BUF_SIZE      = 16 * 1024   // ukuran scratch bersama (default serveConn langsung, reader chunked, buffer payload TLS)
-GZIP_OUT_SIZE = 256 * 1024  // buffer output sendGzipFD
 ```
 
 ### parseHead()
@@ -185,7 +184,7 @@ String IMF-fixdate diformat ulang paling banyak sekali per detik per thread, dan
 | `sendSimpleNoBodyFD` | `buildSimpleHeader` saja, Content-Length diisi ukuran body seandainya ada (HEAD) |
 | `sendJsonFD` | `sendSimpleFD` dengan `application/json` |
 | `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
-| `sendGzipFD` | body di bawah 64 KiB dikompresi via `compression.flate_fast` (gzip fixed-Huffman greedy in-tree, beberapa kali lebih cepat dari matcher std, tanpa init state per-stream), body lebih besar tetap lewat jalur `std.compress.flate` `.gzip` di atas encode scratch per-worker, lalu header (`Content-Encoding: gzip`) + byte terkompresi |
+| `res.sendNegotiated` | menegosiasi `Accept-Encoding` terhadap gzip, deflate, br (`policy.supported_default`), melewati body di bawah `compression_min_size` atau media type yang sudah terkompresi, meng-encode dengan `compression.encode` (gzip di bawah 64 KiB via `flate_fast`, di atasnya via `std.compress.flate`), mengirim identity saat hasilnya tidak lebih kecil atau melewati `compression_max_out`, selain itu menambah `Content-Encoding` dan `Vary: Accept-Encoding`. Bila tidak ada yang diterima, jawabannya `406` |
 | `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, tanpa Content-Length |
 | `sendChunkFD` | `{x}\r\n` + data + `\r\n`, data kosong adalah no-op (akan mengakhiri body) |
 | `sendChunkedEndFD` | `0\r\n\r\n` |
