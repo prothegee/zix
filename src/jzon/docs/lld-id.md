@@ -16,7 +16,7 @@ Dokumen ini membahas detail tingkat byte dan internal. Untuk bentuk library-nya 
 | `commit(len)` | memajukan posisi setelah sesuatu menulis ke `tail()` |
 | `filled()` / `written()` | apa yang sudah mendarat sejauh ini |
 
-Satu panggilan bersifat semua-atau-tidak sama sekali: tulis yang tidak muat melaporkan `error.NoSpaceLeft` dan meninggalkan posisinya utuh, jadi nilai setengah tertulis tidak pernah mendarat. *Rangkaian* panggilan tidak begitu. Ketika tulis keempat dari lima gagal, tiga yang pertama tetap ada di buffer.
+Satu panggilan bersifat semua-atau-tidak sama sekali: tulis yang tidak muat melaporkan `Jzon_Sink_NoSpaceLeft` dan meninggalkan posisinya utuh, jadi nilai setengah tertulis tidak pernah mendarat. *Rangkaian* panggilan tidak begitu. Ketika tulis keempat dari lima gagal, tiga yang pertama tetap ada di buffer.
 
 Itulah kenapa kedua jalur tulis meninggalkan hal berbeda saat gagal. std emitter memformat ke `tail()` dan baru memanggil `commit` setelah seluruh nilai mendarat, jadi nilai yang terlalu besar meninggalkan sink persis seperti saat ditemukan. generated emitter menulis sambil menghasilkan, jadi ia meninggalkan awalan yang muat. Keduanya bukan nilai yang ter-render, jadi pemanggil yang butuh semua-atau-tidak sama sekali memegang tandanya sendiri.
 
@@ -112,19 +112,18 @@ Dua nilai sama sekali tidak punya bentuk JSON. std menulis NaN sebagai string `"
 
 Membaca float kembali memeriksa grammar RFC 8259 bagian 6 di sini alih-alih menyerahkannya ke `std.fmt`, yang lebih longgar dari JSON.
 
-## Refleksi versi
+## Refleksi tipe
 
-Zig 0.16 dan 0.17 menjawab tiga pertanyaan tipe secara berbeda, dan `reflect.zig` adalah satu-satunya file yang tahu:
+`reflect.zig` adalah satu-satunya file yang menanyakan ke Zig 0.17 bagaimana sebuah tipe dibangun:
 
-| Pertanyaan | Zig 0.16 | Zig 0.17 |
-| :- | :- | :- |
-| field sebuah struct | `@typeInfo(T).@"struct".fields` | dipecah jadi `field_names` dan `field_attrs` |
-| exhaustiveness sebuah enum | `is_exhaustive` | `mode` |
-| default yang dideklarasikan sebuah field | dibaca dari record field-nya | dibaca dari record attrs-nya |
+| Pertanyaan | Di mana Zig 0.17 menyimpan jawabannya |
+| :- | :- |
+| apakah sebuah enum exhaustive | `@typeInfo(T).@"enum".mode` |
+| default yang dideklarasikan sebuah field | `@typeInfo(T).@"struct".field_attrs[index]` |
 
-Cabang yang membaca field yang tidak ada tidak pernah sampai ke compiler, karena kondisi yang memilihnya diketahui saat kompilasi. `std.meta.fieldNames` dan `@FieldType` menjawab sama di kedua versi, jadi pemanggil yang menyusuri field memakai keduanya langsung, bukan lewat sini.
+`std.meta.fieldNames` dan `@FieldType` menjawab nama dan tipe field secara langsung, jadi pemanggil yang menelusuri field memakai keduanya, tidak lewat sini.
 
-`defaultOf` mengembalikan tipe field-nya yang dibungkus optional, satu tingkat lebih dalam dari field-nya sendiri. Itulah yang menjaga "tidak mendeklarasikan default" dan "default-nya null" tetap terpisah untuk field yang dieja `note: ?[]const u8 = null`.
+`defaultOf` mengembalikan tipe field yang dibungkus optional, satu level lebih dalam dari field-nya. Itulah yang memisahkan "tidak mendeklarasikan default" dari "default-nya null" untuk field yang ditulis `note: ?[]const u8 = null`.
 
 ## Pembukuan field
 
@@ -134,10 +133,10 @@ Setiap generated parser butuh dua jawaban yang sama, jadi `fields.zig` yang memi
 flowchart TB
     key[sebuah key datang] --> known{apakah T mendeklarasikannya?}
     known -- tidak --> unknown{opsi unknown}
-    unknown -- REJECT --> uf[error.JzonUnknownField]
+    unknown -- REJECT --> uf[UnknownField]
     unknown -- SKIP --> step[langkahi seluruh nilainya]
     known -- ya --> seen{sudah ditandai?}
-    seen -- ya --> dup[error.JzonUnexpected]
+    seen -- ya --> dup[Unexpected]
     seen -- tidak --> read[baca nilainya, tandai field-nya]
     read --> done[dokumen berakhir]
     step --> done
@@ -145,10 +144,10 @@ flowchart TB
     fill -- ya --> ok[nilainya]
     fill -- tidak --> def{field tak bertanda punya default?}
     def -- ya --> apply[terapkan]
-    def -- tidak --> mf[error.JzonMissingField]
+    def -- tidak --> mf[MissingField]
 ```
 
-Key yang sama dua kali adalah `Unexpected`, bukan diam-diam yang terakhir menang.
+Key yang sama dua kali adalah `Unexpected`, bukan diam-diam yang terakhir menang. JSON dan ZON sama-sama menjalankan pembukuan ini.
 
 ## String di sisi baca
 
@@ -200,15 +199,80 @@ Setiap strategy serialize menulis byte yang dibaca kembali oleh setiap strategy 
 
 | Dokumen | `.STD` | `.SCANNER` | `.GENERATED` dan `.GENERATED_VECTOR` |
 | :- | :- | :- | :- |
-| `[104,105]` ke sebuah `[]const u8` | mengisinya, menghasilkan `"hi"` | `error.JzonUnexpected` | `error.JzonUnexpected` |
-| `-0` ke field unsigned | membaca digitnya, menghasilkan `0` | `error.JzonBadNumber` | `error.JzonBadNumber` |
-| `"\q"` | `error.JzonUnexpected`, sebuah syntax error | `error.JzonUnexpected`, sebuah syntax error | `error.JzonBadEscape` |
+| `[104,105]` ke sebuah `[]const u8` | mengisinya, menghasilkan `"hi"` | `Unexpected` | `Unexpected` |
+| `-0` ke field unsigned | membaca digitnya, menghasilkan `0` | `BadNumber` | `BadNumber` |
+| `"\q"` | `Unexpected`, sebuah syntax error | `Unexpected`, sebuah syntax error | `BadEscape` |
 
 Alasannya masing-masing:
 
 - Di jzon slice byte adalah string dan tidak lebih, jadi satu ejaan selalu berarti satu bentuk JSON. Kedua jalur yang dibangun dari tipenya menolaknya.
 - Tanda di depan field unsigned adalah type error apa pun digit setelahnya.
 - Hanya jalur yang mendekode escape sendiri yang bisa menyebut escape yang rusak. `.SCANNER` menyerahkannya ke std, jadi untuk yang satu ini ia menjawab bersama `.STD`.
+
+## Tempat parse berhenti
+
+Nilai error tidak membawa nama field maupun offset, jadi `Failure.zig` menyimpannya di samping, satu record per thread:
+
+| Field | Isinya |
+| :- | :- |
+| `field` | nama field atau tag yang menjadi pokok kegagalan, kosong jika bukan tentang itu |
+| `offset` | byte tempat parse berhenti, 0 jika jalurnya tidak bisa melaporkan |
+| `filled` | false sampai ada parse yang gagal di thread ini |
+
+`jzon.lastFailure()` membacanya. Setiap kegagalan di setiap jalur menulisnya, jadi ia tidak pernah menampilkan field sisa dari parse sebelumnya. Kegagalan berikutnya di thread yang sama menggantinya, jadi baca tepat setelah error.
+
+Yang dicatat tiap jalur:
+
+| Jalur | Kegagalan yang menyebut nama | Kegagalan lainnya |
+| :- | :- | :- |
+| JSON `.STD` | tidak ada nama (std tidak memberitahu) | field kosong, offset 0 |
+| JSON `.SCANNER` | nama field atau tag | field kosong, posisi scanner (tepat setelah token tempat ia berhenti) |
+| JSON `.GENERATED`, `.GENERATED_VECTOR` | nama dan offset-nya | byte tempat berhenti (awal token untuk `BadNumber`) |
+| ZON | nama dan offset-nya | byte tempat berhenti |
+
+Semua ini hanya berjalan di jalur error, jadi parse yang berhasil tidak membayar apa pun untuknya.
+
+Nama disalin ke buffer per thread sebesar `FIELD_CAPACITY` (64) byte, jadi tetap bisa dibaca setelah dokumen atau arena asalnya dibebaskan. Nama yang lebih panjang hanya menyimpan 64 byte pertamanya.
+
+## ZON
+
+### Token
+
+`zon/grammar.zig` hanya menyatakan di mana sebuah token berakhir. Ia tidak menilai isinya:
+
+| Batas | Yang mengakhirinya |
+| :- | :- |
+| whitespace dan komentar | byte pertama yang bukan spasi, tab, line feed, carriage return, atau bagian dari komentar `//` |
+| nama polos | byte pertama yang bukan huruf, digit, atau `_` |
+| angka | byte pertama yang tidak akan diambil tokenizer Zig ke dalam angka (`+` dan `-` hanya diambil tepat setelah `e`, `E`, `p`, `P`) |
+| string berkutip | `"` penutup. Line break atau control byte mentah di dalamnya adalah `Unexpected` |
+| baris multiline | line feed. `\r` sebelumnya dibuang, jadi file CRLF terbaca sama |
+
+### Membaca nilai
+
+`zon/deserialize.zig` menelusuri teks sekali. Dispatch-nya berasal dari tipe saat kompilasi, sama seperti generated parser JSON.
+
+| Nilai | Cara membacanya |
+| :- | :- |
+| angka | dibatasi grammar, dicek `std.zig.parseNumberLiteral`, dikonversi `std.fmt.parseInt` atau `std.fmt.parseFloat`. Literal integer ke float diizinkan, literal float ke integer adalah `BadNumber` |
+| `inf`, `-inf`, `nan` | hanya dibaca ke float. `-nan` adalah `Unexpected` |
+| `"..."` | string tanpa `\` di-borrow atau disalin. Yang membawa escape didekode `std.zig.string_literal` ke allocator |
+| baris `\\` | baris berurutan digabung dengan line feed. Komentar di antara baris diizinkan, seperti di Zig |
+| `.tag` | dicocokkan dengan nama tag enum. Tidak cocok adalah `UnknownEnumValue` dengan namanya dicatat |
+| `.@"..."` | nama dengan ejaan apa pun, escape-nya didekode |
+| `.{ ... }` | struct, array (panjang tepat), atau slice, sesuai tipe tujuan. Koma di akhir diizinkan |
+
+Setiap `.{` menghitung satu level terhadap `max_depth`, termasuk level yang dilompati `unknown = .SKIP`. Melewatinya adalah `Unexpected`, jadi dokumen berbahaya tidak bisa membesarkan stack.
+
+### Menulis nilai
+
+`zon/serialize.zig` menulis ke `Sink`, sama seperti JSON:
+
+- Nama field dan tag dieja saat kompilasi. Nama yang ditolak `std.zig.isValidId` (keyword seperti `error`, atau yang berisi spasi) dieja `.@"..."`. `.name = ` setiap entri struct (dan di `.COMPACT` juga koma dan spasi sebelumnya) adalah satu literal comptime, jadi satu field berbiaya satu salinan ditambah nilainya.
+- Di dalam string, `"`, `\`, line feed, carriage return, dan tab mendapat escape pendeknya. Control byte lainnya menjadi `\xNN`. Byte mulai `0x80` tetap mentah jika seluruh string adalah UTF-8 valid, dan menjadi `\xNN` jika tidak, jadi teksnya selalu Zig yang valid. Cek UTF-8 baru berjalan begitu ada byte mulai `0x80`, jadi teks ASCII tidak pernah membayarnya.
+- Float ditulis `inf`, `-inf`, `nan`, atau bentuk desimal terpendeknya.
+- `.MULTILINE` menaruh satu entri per baris, empat spasi per level, koma setelah setiap entri. Satu line break beserta indent-nya keluar sebagai satu salinan sampai 16 level. `.COMPACT` menaruh semuanya di satu baris dengan koma hanya di antara entri. Container kosong adalah `.{}` di keduanya.
+- Setiap field ditulis, termasuk yang `null`.
 
 ## Satu kejutan bersama
 
