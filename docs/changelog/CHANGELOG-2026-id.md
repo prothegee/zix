@@ -134,7 +134,19 @@ __**Update:**__
     - `.EPOLL` dan `.URING` memasang `send_date_header`, `max_response_headers`,
       `handler_timeout_ms`, `max_request_body`, dan `large_body_recv_buf` per worker.
       Buffer per koneksi mengikuti `max_recv_buf` (sebelumnya tetap 16 KiB).
-    - `response_cache` dan `public_dir` sudah diterima tetapi belum aktif.
+    - `public_dir` sudah diterima tetapi belum aktif.
+    - `response_cache` aktif di `.ASYNC`, `.EPOLL`, dan `.URING`:
+        - `.EPOLL` dan `.URING` membuat satu cache per worker dan membebaskannya
+          saat worker selesai.
+        - `.ASYNC` membuat satu cache per thread io pool (`utils/cache/async.zig`).
+          Cache dibebaskan saat accept loop berhenti, dan cache yang masih dipakai
+          koneksi yang terbuka baru dibebaskan saat koneksi itu selesai.
+        - `cache_max_total_bytes` bukan bagian dari `Config` `zix.Http1`.
+    - `.IOCP` dan `.KQUEUE` mengembalikan `error.ZixHttp1_Server_DispatchModel_NotSupported`
+      dari `run()`. `run()` mencantumkan setiap dispatch model, jadi model baru tidak
+      bisa di-compile sampai ditangani.
+    - `dispatch/common.zig` dihapus, `connection.zig` menjadi satu-satunya entry
+      koneksi. `logSystem` dipindah ke `tcp/http1/log.zig`.
 
 - Contoh Http1 dengan gaya saat ini, terdaftar di `zig build zix-example-http1`:
     - `http1_json`, `http1_params`, dan `http1_paths` di-porting.
