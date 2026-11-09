@@ -804,7 +804,7 @@ const sub = req.path()["/secret/".len..];  // misalnya "file.txt"
 
 **Contoh:**
 - [examples/http1_params.zig](examples/http1_params.zig) - penanganan parameter query
-- [examples/http1_paths.zig](examples/http1_paths.zig) - routing manual dari segmen path
+- [examples/http1_paths.zig](examples/http1_paths.zig) - route `.PARAM` dan `.PREFIX`, dibaca dengan `req.pathParam`
 - [examples/http1_query.zig](examples/http1_query.zig) - method QUERY (RFC 10008)
 - [examples/http1_json.zig](examples/http1_json.zig) - penanganan respons JSON
 - [examples/http1_static.zig](examples/http1_static.zig) - rute prefix yang digunakan
@@ -995,10 +995,10 @@ Untuk menimpa deadline di dalam handler (jendela lebih pendek atau lebih panjang
 ctx.setTimeout(2_000); // timpa ke 2 detik dari sekarang terlepas dari cap global
 ```
 
-`ctx.isExpired()` adalah no-op (selalu mengembalikan `false`) ketika `handler_timeout_ms == 0`. `ctx.timedOut()` adalah alias untuk `ctx.isExpired()`. `conn_timeout_ms` harus >= `handler_timeout_ms` agar koneksi tidak terputus sebelum handler dapat mengirim 408. Lihat `docs/adr-id.md` untuk alasan desain.
+`zix.Http1.isExpired()` membaca deadline yang sama dari server tanpa `ctx`. `ctx.isExpired()` adalah no-op (selalu mengembalikan `false`) ketika `handler_timeout_ms == 0`. `ctx.timedOut()` adalah alias untuk `ctx.isExpired()`. `conn_timeout_ms` harus >= `handler_timeout_ms` agar koneksi tidak terputus sebelum handler dapat mengirim 408. Lihat `docs/adr-id.md` untuk alasan desain.
 
 **Contoh:**
-- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `ctx.isExpired()` plus `ctx.setTimeout()` / `ctx.timedOut()`
+- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `zix.Http1.isExpired()` plus `ctx.setTimeout()` / `ctx.timedOut()`
 
 **Kapan digunakan:** setel `handler_timeout_ms` setiap kali handler bisa berjalan lama (panggilan eksternal, komputasi berat) dan kamu ingin ia keluar secara kooperatif dengan 408 alih-alih menahan thread. Tambahkan `conn_timeout_ms` di bawah `.ASYNC` untuk mengusir client yang stall sebelum menyelesaikan request. Biarkan keduanya 0 untuk trafik internal tepercaya dengan kerja terbatas.
 
