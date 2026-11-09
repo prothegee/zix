@@ -79,6 +79,22 @@ pub fn build(b: *std.Build) void {
     jzon.addOptions("jzon_options", jzon_options);
     zix.addImport("jzon", jzon);
 
+    // Brotli static dictionary (RFC 7932 Appendix A): generated into the build cache
+    // and bound to the `brotli_dictionary.bin` import, so no binary file is tracked.
+    const brotli_dict_gen = b.addExecutable(.{
+        .name = "brotli_dictionary_gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zix/utils/compression/brotli/dictionary_gen.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const brotli_dict_run = b.addRunArtifact(brotli_dict_gen);
+    const brotli_dict = brotli_dict_run.addOutputFileArg("brotli_dictionary.bin");
+    zix.addAnonymousImport("brotli_dictionary.bin", .{
+        .root_source_file = brotli_dict,
+    });
+
     // Zix cleanup artifacts
     const clean_cmd = b.addSystemCommand(&.{
         "zig", "run", "scripts/cleanup.zig"
@@ -94,6 +110,9 @@ pub fn build(b: *std.Build) void {
     });
     zix_unit_and_edge_test_mod.addOptions("zix_options", zix_options);
     zix_unit_and_edge_test_mod.addImport("jzon", jzon);
+    zix_unit_and_edge_test_mod.addAnonymousImport("brotli_dictionary.bin", .{
+        .root_source_file = brotli_dict,
+    });
 
     const zix_unit_and_edge_test = b.addTest(.{
         .root_module = zix_unit_and_edge_test_mod
