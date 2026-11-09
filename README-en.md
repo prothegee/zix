@@ -804,7 +804,7 @@ const sub = req.path()["/secret/".len..];  // e.g. "file.txt"
 
 **Examples:**
 - [examples/http1_params.zig](examples/http1_params.zig) - query parameter handling
-- [examples/http1_paths.zig](examples/http1_paths.zig) - path routing by hand from segments
+- [examples/http1_paths.zig](examples/http1_paths.zig) - `.PARAM` and `.PREFIX` routes, read with `req.pathParam`
 - [examples/http1_query.zig](examples/http1_query.zig) - the QUERY method (RFC 10008)
 - [examples/http1_json.zig](examples/http1_json.zig) - JSON response handling
 - [examples/http1_static.zig](examples/http1_static.zig) - a prefix route in use
@@ -986,10 +986,10 @@ To override the deadline inside a handler (shorter or longer window than the glo
 ctx.setTimeout(2_000); // override to 2s from now regardless of global cap
 ```
 
-`ctx.isExpired()` is a no-op (always returns `false`) when `handler_timeout_ms == 0`. `ctx.timedOut()` is an alias for `ctx.isExpired()`. `conn_timeout_ms` should be >= `handler_timeout_ms` to avoid the connection being cut before the handler can send a 408. See `docs/adr-en.md` for design rationale.
+`zix.Http1.isExpired()` reads the same server-armed deadline without `ctx`. `ctx.isExpired()` is a no-op (always returns `false`) when `handler_timeout_ms == 0`. `ctx.timedOut()` is an alias for `ctx.isExpired()`. `conn_timeout_ms` should be >= `handler_timeout_ms` to avoid the connection being cut before the handler can send a 408. See `docs/adr-en.md` for design rationale.
 
 **Examples:**
-- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `ctx.isExpired()` plus `ctx.setTimeout()` / `ctx.timedOut()`
+- [examples/http1_timeout_resp.zig](examples/http1_timeout_resp.zig) - `zix.Http1.isExpired()` plus `ctx.setTimeout()` / `ctx.timedOut()`
 
 **When to use:** set `handler_timeout_ms` whenever a handler can run long (external calls, heavy compute) and you want it to bail out cooperatively with a 408 instead of holding a thread. Add `conn_timeout_ms` under `.ASYNC` to evict clients that stall before completing a request. Leave both at 0 for trusted internal traffic with bounded work.
 
