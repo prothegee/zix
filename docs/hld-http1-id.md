@@ -135,7 +135,6 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http1.sendSimpleFD` | fn | Response lengkap dengan body Content-Length |
 | `zix.Http1.sendSimpleNoBodyFD` | fn | Response headers saja (method HEAD) |
 | `zix.Http1.sendJsonFD` | fn | Singkatan `sendSimpleFD` dengan `application/json` |
-| `zix.Http1.sendGzipFD` | fn | Response terkompresi gzip (`flate_fast` in-tree untuk body di bawah 64 KiB, `std.compress.flate` di atasnya) |
 | `zix.Http1.sendChunkedStartFD` | fn | Memulai response `Transfer-Encoding: chunked` |
 | `zix.Http1.sendChunkFD` | fn | Menulis satu chunk |
 | `zix.Http1.sendChunkedEndFD` | fn | Mengakhiri body chunked |
@@ -154,7 +153,7 @@ port:                             u16,                     // harus non-zero
 logger:                           ?*Logger = null,         // baris lifecycle, lihat bagian Logging
 dispatch_model:                   DispatchModel,
 workers:                          usize = 0,               // 0 = cpu_count, diabaikan .ASYNC
-worker_stack_size_bytes:          usize = 1 * 1024,
+worker_stack_size_bytes:          usize = 1 * 1024 * 1024,
 compress_worker_stack_size_bytes: usize = 2 * 1024 * 1024, // stack worker saat compress aktif
 kernel_backlog:                   u31 = 1 * 1024,          // backlog listen() TCP
 handler_timeout_ms:               u32 = 0,                 // budget per-handler, 0 = nonaktif
@@ -178,7 +177,7 @@ public_dir_cache_max_entries:     u32 = 256,               // jumlah slot cache 
 
 Referensi field lengkap (arti, trade-off, kapan diubah) ada di [`docs/zix-config-id.md`](zix-config-id.md).
 
-Catatan: pada `.ASYNC` loop koneksi meminjam pasangan buffer receive + body milik pool thread (`core.threadConnBufs`), masing-masing `max_recv_buf` byte, dipakai ulang oleh setiap koneksi yang dilayani thread itu. `max_recv_buf` karenanya menentukan ukuran buffer per-connection pada semua dispatch model (pemanggil `core.serveConn` langsung yang membiarkan `ServeOpts.max_recv_buf` di 0 mendapat `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada semua dispatch model: handler opt-in dengan `res.sendNegotiated` (atau `core.sendNegotiateFD` di jalur raw). Helper `core.sendGzipFD` memakai konstanta compile-time `core.GZIP_OUT_SIZE`. Content-Length yang dideklarasikan melewati `max_request_body` ditolak dengan `413` sebelum body dibaca (0 mematikan cek), dan body chunked dibatasi receive buffer karena tidak mendeklarasikan panjang di muka.
+Catatan: pada `.ASYNC` loop koneksi meminjam pasangan buffer receive + body milik pool thread (`core.threadConnBufs`), masing-masing `max_recv_buf` byte, dipakai ulang oleh setiap koneksi yang dilayani thread itu. `max_recv_buf` karenanya menentukan ukuran buffer per-connection pada semua dispatch model (pemanggil `core.serveConn` langsung yang membiarkan `ServeOpts.max_recv_buf` di 0 mendapat `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada semua dispatch model: handler opt-in dengan `res.sendNegotiated`. Handler yang butuh satu coding secara eksplisit memanggil `zix.utils.compression.encode` dan menyetel `Content-Encoding` sendiri. Content-Length yang dideklarasikan melewati `max_request_body` ditolak dengan `413` sebelum body dibaca (0 mematikan cek), dan body chunked dibatasi receive buffer karena tidak mendeklarasikan panjang di muka.
 
 Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection WebSocket. Pada `.EPOLL` menentukan ukuran buffer recv; pada `.URING` menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask, independen dari `max_recv_buf` request yang kecil. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi burst pipelined yang dalam sebelum engine compact dan re-read saat fill.
 
@@ -431,7 +430,8 @@ Access logging per-request adalah tanggung jawab engine, bukan handler. Saat `co
 | Buffer per-connection (.EPOLL) | slab per-worker, slot kompak page-aligned, `max_recv_buf` byte terpakai | Koneksi |
 | Buffer recv + send per-connection (.URING) | slab stride mmap per-worker, slot kompak, THP di-opt-out | Koneksi |
 | Staging body + output (.EPOLL) | `smp_allocator`, per worker | Worker thread |
-| Scratch kompresi (gzip / negotiate) | satu blok mmap lazy per-worker, dipakai ulang antar pemanggilan | Worker thread |
+| Output kompresi (`sendNegotiated`) | body ter-encode di allocator per-request, dibebaskan setelah `send` | Request |
+| Scratch kompresi | state std flate dan tabel brotli di heap per pemanggilan, tabel hash gzip cepat adalah satu threadlocal 16 KiB | Pemanggilan / worker thread |
 | Arena per-request (`ctx.allocator`) | per worker (event loop) atau per koneksi (model blocking), di-reset per dispatch | Request |
 | Alokasi handler | `ctx.allocator` (arena), atau bawa sendiri | Request |
 
