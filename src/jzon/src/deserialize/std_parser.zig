@@ -17,7 +17,8 @@
 //! reset frees a whole parse in one step. std's error set is wider than this module's
 //! and shaped around std's internals, so every member is mapped here by name. std
 //! reports a broken escape as a syntax error, so it lands on Unexpected, not BadEscape.
-//! std surfaces neither the field nor the byte, so `lastFailure` stays untouched.
+//! std surfaces neither the field nor the byte, so a failure here records an empty
+//! `lastFailure`, which keeps an earlier failure on the thread from being read as this one.
 //!
 //! ---------------------------------------------------------
 //!
@@ -36,6 +37,7 @@
 
 const std = @import("std");
 const DeserializeOptions = @import("DeserializeOptions.zig");
+const Failure = @import("Failure.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -50,6 +52,8 @@ const StdError = std.json.ParseError(std.json.Scanner);
 /// Note:
 /// - Every member is named, so a std that adds one breaks the build here and gets a
 ///   deliberate mapping, not a silent one.
+/// - Records an empty failure (no field, offset 0), so `lastFailure` never shows a
+///   field left over from an earlier parse on this thread.
 ///
 /// Param:
 /// err - StdError (the failure std reported)
@@ -58,6 +62,9 @@ const StdError = std.json.ParseError(std.json.Scanner);
 /// - Error (the closest failure under this module's name)
 inline fn stdError(err: StdError) Error {
     @branchHint(.cold);
+
+    Failure.noteOffset(0);
+
     return switch (err) {
         error.OutOfMemory => Error.Jzon_StdParser_OutOfMemory,
         error.UnknownField => Error.Jzon_StdParser_UnknownField,
@@ -353,5 +360,35 @@ test "jzon deserialize: std_parser, reads the extremes of a width" {
 
 test "jzon deserialize: std_parser, one past the widest value is bad number" {
     try expectFails(u64, "18446744073709551616", Error.Jzon_StdParser_BadNumber);
+}
+
+test "jzon deserialize: std_parser, failure clears a stale field" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const Target = struct { id: u32 };
+
+    Failure.noteField("stale");
+
+    const result = parse(Target, arena.allocator(), "{}", .{});
+
+    try std.testing.expectError(Error.Jzon_StdParser_MissingField, result);
+    try std.testing.expectEqualStrings("", Failure.lastFailure().field);
+}
+
+test "jzon deserialize: std_parser, failure is recorded as filled at offset zero" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    Failure.reset();
+
+    const result = parse(u32, arena.allocator(), "x", .{});
+
+    try std.testing.expectError(Error.Jzon_StdParser_Unexpected, result);
+
+    const failure = Failure.lastFailure();
+
+    try std.testing.expect(failure.filled);
+    try std.testing.expectEqual(@as(usize, 0), failure.offset);
 }
 
