@@ -240,7 +240,7 @@ fn readValue(
         .@"struct" => |info| {
             if (info.is_tuple) @compileError(
                 "jzon zon: " ++ @typeName(Target) ++
-                    " is a tuple, which the parse does not read",
+                    " is a tuple, which jzon zon does not take. Use an array",
             );
 
             return readStruct(Target, options, reader, depth);
