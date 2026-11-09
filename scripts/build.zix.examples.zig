@@ -60,6 +60,11 @@ const EXAMPLES = .{
         "examples/http1_logger.zig",
         "http1",
     },
+    .{
+        "zix-example-http1_jzon",
+        "examples/http1_jzon.zig",
+        "http1",
+    },
 };
 
 // --------------------------------------------------------- //
@@ -162,3 +167,4 @@ pub fn addSteps(
         build.dependOn(&install.step);
     }
 }
+
