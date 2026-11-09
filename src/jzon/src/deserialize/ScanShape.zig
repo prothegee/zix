@@ -50,29 +50,25 @@ const Self = @This();
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate a `Cursor` failure into this module's set.
+/// Every failure a scan here can hand back before translation: this module's own set
+/// joined with the scalar and the vector cursor's.
+const Inner = Error || Cursor.Error || cursor_vector.Error;
+
+/// Translate a failure from either cursor into this module's public set.
 ///
 /// Param:
-/// err - Cursor.Error (the failure the scalar cursor reported)
+/// err - Inner (the failure a cursor or this module handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn cursorError(err: Cursor.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_ScanShape_Truncated => Error.Jzon_ScanShape_Truncated,
+        error.Jzon_ScanShape_Unexpected => Error.Jzon_ScanShape_Unexpected,
         error.Jzon_Cursor_Truncated => Error.Jzon_ScanShape_Truncated,
         error.Jzon_Cursor_Unexpected => Error.Jzon_ScanShape_Unexpected,
-    };
-}
-
-/// Translate a `cursor_vector` failure into this module's set.
-///
-/// Param:
-/// err - cursor_vector.Error (the failure the vector scan reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn cursorVectorError(err: cursor_vector.Error) Error {
-    return switch (err) {
         error.Jzon_CursorVector_Truncated => Error.Jzon_ScanShape_Truncated,
         error.Jzon_CursorVector_Unexpected => Error.Jzon_ScanShape_Unexpected,
     };
@@ -128,8 +124,8 @@ pub inline fn skipSpace(comptime self: Self, cursor: *Cursor) void {
 ///   carries a raw control byte
 pub inline fn stringSpan(comptime self: Self, cursor: *Cursor) Error!StringSpan {
     return switch (self.scan) {
-        .SCALAR => cursor.stringSpan() catch |err| cursorError(err),
-        .VECTOR => cursor_vector.stringSpan(cursor) catch |err| cursorVectorError(err),
+        .SCALAR => cursor.stringSpan() catch |err| innerError(err),
+        .VECTOR => cursor_vector.stringSpan(cursor) catch |err| innerError(err),
     };
 }
 
@@ -207,26 +203,26 @@ test "jzon deserialize: ScanShape, both widths bound the same string token" {
     }
 }
 
-test "jzon deserialize: ScanShape, cursorError maps truncated" {
-    const err = cursorError(error.Jzon_Cursor_Truncated);
+test "jzon deserialize: ScanShape, innerError renames cursor truncated" {
+    const err = innerError(error.Jzon_Cursor_Truncated);
 
     try std.testing.expectEqual(Error.Jzon_ScanShape_Truncated, err);
 }
 
-test "jzon deserialize: ScanShape, cursorError maps unexpected" {
-    const err = cursorError(error.Jzon_Cursor_Unexpected);
+test "jzon deserialize: ScanShape, innerError renames cursor unexpected" {
+    const err = innerError(error.Jzon_Cursor_Unexpected);
 
     try std.testing.expectEqual(Error.Jzon_ScanShape_Unexpected, err);
 }
 
-test "jzon deserialize: ScanShape, cursorVectorError maps truncated" {
-    const err = cursorVectorError(error.Jzon_CursorVector_Truncated);
+test "jzon deserialize: ScanShape, innerError renames cursor_vector truncated" {
+    const err = innerError(error.Jzon_CursorVector_Truncated);
 
     try std.testing.expectEqual(Error.Jzon_ScanShape_Truncated, err);
 }
 
-test "jzon deserialize: ScanShape, cursorVectorError maps unexpected" {
-    const err = cursorVectorError(error.Jzon_CursorVector_Unexpected);
+test "jzon deserialize: ScanShape, innerError renames cursor_vector unexpected" {
+    const err = innerError(error.Jzon_CursorVector_Unexpected);
 
     try std.testing.expectEqual(Error.Jzon_ScanShape_Unexpected, err);
 }
@@ -310,5 +306,17 @@ test "jzon deserialize: ScanShape, escaped quote stays inside the token" {
         try std.testing.expectEqualStrings(document[1 .. document.len - 1], span.raw);
         try std.testing.expect(cursor.atEnd());
     }
+}
+
+test "jzon deserialize: ScanShape, innerError keeps its own truncated" {
+    const err = innerError(error.Jzon_ScanShape_Truncated);
+
+    try std.testing.expectEqual(Error.Jzon_ScanShape_Truncated, err);
+}
+
+test "jzon deserialize: ScanShape, innerError keeps its own unexpected" {
+    const err = innerError(error.Jzon_ScanShape_Unexpected);
+
+    try std.testing.expectEqual(Error.Jzon_ScanShape_Unexpected, err);
 }
 
