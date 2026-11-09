@@ -184,9 +184,9 @@ pub const Error = error{
 /// var arena: std.heap.ArenaAllocator = .init(gpa);
 /// defer arena.deinit();
 ///
-/// const order = try jzon.deserialize(Order, arena.allocator(), body, .{});
+/// const order = try jzon.json.deserialize(Order, arena.allocator(), body, .{});
 ///
-/// const faster = try jzon.deserialize(Order, arena.allocator(), body, .{
+/// const faster = try jzon.json.deserialize(Order, arena.allocator(), body, .{
 ///     .strategy = .GENERATED,
 ///     .strings = .BORROW,
 ///     .unknown = .SKIP,
