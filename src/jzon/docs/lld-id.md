@@ -275,6 +275,17 @@ Setiap `.{` menghitung satu level terhadap `max_depth`, termasuk level yang dilo
 - `.MULTILINE` menaruh satu entri per baris, empat spasi per level, koma setelah setiap entri. Satu line break beserta indent-nya keluar sebagai satu salinan sampai 16 level. `.COMPACT` menaruh semuanya di satu baris dengan koma hanya di antara entri. Container kosong adalah `.{}` di keduanya.
 - Setiap field ditulis, termasuk yang `null`.
 
+### Tipe yang ditolak ZON
+
+Kedua arah menolak tipe yang sama saat compile, dengan menyebut tipenya, jadi apa pun yang ditulis `serialize` terbaca lagi oleh `deserialize`:
+
+| Tipe | Gantinya |
+| :- | :- |
+| tuple (`struct { u8, bool }`) | array (`[2]u8`) atau struct dengan field bernama |
+| pointer selain slice | slice atau nilainya langsung |
+| enum non-exhaustive | enum exhaustive |
+| union | struct dengan field optional |
+
 ## Satu kejutan bersama
 
 Mengeja sebuah field `?T` menyatakan apa yang bisa dimuatnya, bukan bahwa dokumen boleh meninggalkannya. `= null` yang membuatnya boleh dihilangkan.
