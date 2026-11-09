@@ -45,15 +45,24 @@ const Allocator = std.mem.Allocator;
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate an `escape` failure into this module's set.
+/// Every failure a private function here can hand back: this module's own set joined
+/// with the decoder's.
+const Inner = Error || escape.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - escape.Error (the failure the decoder reported)
+/// err - Inner (the failure a private function handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn escapeError(err: escape.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_StringValue_BadEscape => Error.Jzon_StringValue_BadEscape,
+        error.Jzon_StringValue_NoSpaceLeft => Error.Jzon_StringValue_NoSpaceLeft,
+        error.Jzon_StringValue_OutOfMemory => Error.Jzon_StringValue_OutOfMemory,
         error.Jzon_Escape_NoSpaceLeft => Error.Jzon_StringValue_NoSpaceLeft,
         error.Jzon_Escape_BadEscape => Error.Jzon_StringValue_BadEscape,
     };
@@ -72,15 +81,15 @@ fn escapeError(err: escape.Error) Error {
 ///
 /// Return:
 /// - []const u8 (the decoded bytes)
-/// - Error.Jzon_StringValue_BadEscape when an escape is one the rules do not spell
+/// - Error.Jzon_Escape_BadEscape when an escape is one the rules do not spell
 /// - Error.Jzon_StringValue_OutOfMemory when the allocator runs out
-fn decode(allocator: Allocator, raw: []const u8) Error![]const u8 {
+fn decode(allocator: Allocator, raw: []const u8) Inner![]const u8 {
     const room = allocator.alloc(u8, raw.len) catch |err| switch (err) {
         error.OutOfMemory => return Error.Jzon_StringValue_OutOfMemory,
     };
     var sink: Sink = .init(room);
 
-    escape.decode(&sink, raw) catch |err| return escapeError(err);
+    try escape.decode(&sink, raw);
 
     const decoded = sink.written();
 
@@ -106,6 +115,11 @@ pub const Error = error{
 
 /// The value of one string token.
 ///
+/// Note:
+/// - Inline so the slice it hands back stays in registers at the call site. Out of
+///   line, the result went through a stack slot and reading it back stalled on every
+///   string (measured).
+///
 /// Param:
 /// allocator - Allocator (owns any bytes that are not the document's own)
 /// span - StringSpan (the token's undecoded body, as a read cursor bounds it)
@@ -116,12 +130,12 @@ pub const Error = error{
 ///   carried no escape)
 /// - Error.Jzon_StringValue_BadEscape when an escape is one the rules do not spell
 /// - Error.Jzon_StringValue_OutOfMemory when the allocator runs out
-pub fn take(
+pub inline fn take(
     allocator: Allocator,
     span: StringSpan,
     comptime options: DeserializeOptions,
 ) Error![]const u8 {
-    if (span.escaped) return decode(allocator, span.raw);
+    if (span.escaped) return decode(allocator, span.raw) catch |err| innerError(err);
 
     if (options.strings == .BORROW) return span.raw;
 
@@ -208,14 +222,14 @@ test "jzon deserialize: string_value, decoded string is exactly as long as its v
     try std.testing.expectEqual(@as(usize, 4), taken.len);
 }
 
-test "jzon deserialize: string_value, escapeError maps no space left" {
-    const err = escapeError(error.Jzon_Escape_NoSpaceLeft);
+test "jzon deserialize: string_value, innerError renames escape no space left" {
+    const err = innerError(error.Jzon_Escape_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_StringValue_NoSpaceLeft, err);
 }
 
-test "jzon deserialize: string_value, escapeError maps bad escape" {
-    const err = escapeError(error.Jzon_Escape_BadEscape);
+test "jzon deserialize: string_value, innerError renames escape bad escape" {
+    const err = innerError(error.Jzon_Escape_BadEscape);
 
     try std.testing.expectEqual(Error.Jzon_StringValue_BadEscape, err);
 }
@@ -320,5 +334,23 @@ test "jzon deserialize: string_value, escape as long as its value keeps every by
     const taken = try take(arena.allocator(), escapedSpan("\\uffff"), .{});
 
     try std.testing.expectEqualStrings("\xef\xbf\xbf", taken);
+}
+
+test "jzon deserialize: string_value, innerError keeps its own bad escape" {
+    const err = innerError(error.Jzon_StringValue_BadEscape);
+
+    try std.testing.expectEqual(Error.Jzon_StringValue_BadEscape, err);
+}
+
+test "jzon deserialize: string_value, innerError keeps its own no space left" {
+    const err = innerError(error.Jzon_StringValue_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_StringValue_NoSpaceLeft, err);
+}
+
+test "jzon deserialize: string_value, innerError keeps its own out of memory" {
+    const err = innerError(error.Jzon_StringValue_OutOfMemory);
+
+    try std.testing.expectEqual(Error.Jzon_StringValue_OutOfMemory, err);
 }
 
