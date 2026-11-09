@@ -47,8 +47,10 @@ port: u16,
 logger: ?*Logger = null,
 dispatch_model: DispatchModel,
 workers: usize = 0,
-worker_stack_size_bytes: usize = 1 * 1024,
-// worker_stack_compress_bytes: usize = 2 * 1024 * 1024,
+/// Worker thread stack in bytes for .EPOLL and .URING. Demand-paged, so RSS only
+/// grows with the depth a handler uses. Not applied yet: workers still spawn with
+/// the Zig default stack (16 MiB).
+worker_stack_size_bytes: usize = 1 * 1024 * 1024,
 compress_worker_stack_size_bytes: usize = 2 * 1024 * 1024,
 kernel_backlog: u31 = 1 * 1024,
 /// Per-handler budget in milliseconds. 0 disables it. Handlers check it with
@@ -121,7 +123,7 @@ test "zix http1: Config, applies defaults" {
     const config = testConfig();
 
     try std.testing.expectEqual(@as(usize, 0), config.workers);
-    try std.testing.expectEqual(@as(usize, 1024), config.worker_stack_size_bytes);
+    try std.testing.expectEqual(@as(usize, 1024 * 1024), config.worker_stack_size_bytes);
     try std.testing.expectEqual(@as(u31, 1024), config.kernel_backlog);
     try std.testing.expectEqual(@as(?*Logger, null), config.logger);
     try std.testing.expectEqual(
