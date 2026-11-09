@@ -154,8 +154,8 @@ fn expectEveryReadPath(expected: Order, rendered: []const u8) !void {
 
     const allocator = arena.allocator();
 
-    inline for (.{ jzon.Strings.COPY, jzon.Strings.BORROW }) |mode| {
-        const options: jzon.DeserializeOptions = .{ .strings = mode };
+    inline for (.{ jzon.json.Strings.COPY, jzon.json.Strings.BORROW }) |mode| {
+        const options: jzon.json.DeserializeOptions = .{ .strings = mode };
 
         try expectSameOrder(expected, try std_parser.parse(Order, allocator, rendered, options));
         try expectSameOrder(
