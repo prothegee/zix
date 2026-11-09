@@ -135,8 +135,8 @@ pub const Error = error{
 /// ```zig
 /// var buf: [64 * 1024]u8 = undefined;
 ///
-/// const len = try jzon.serialize(&buf, order, .{});
-/// const faster = try jzon.serialize(&buf, order, .{ .strategy = .GENERATED });
+/// const len = try jzon.json.serialize(&buf, order, .{});
+/// const faster = try jzon.json.serialize(&buf, order, .{ .strategy = .GENERATED });
 /// ```
 ///
 /// Return:
