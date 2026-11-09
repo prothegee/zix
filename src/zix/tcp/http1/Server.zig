@@ -199,7 +199,11 @@ pub fn run(self: *const Self) Error!void {
                 return Error.ZixHttp1_Server_DispatchModel_NotSupported;
             }
         },
-        else => Error.ZixHttp1_Server_DispatchModel_NotSupported,
+        // Not implemented yet. Listed one by one, so a new model in the enum
+        // fails to compile here until it is given its own arm.
+        .IOCP,
+        .KQUEUE,
+        => Error.ZixHttp1_Server_DispatchModel_NotSupported,
     };
 }
 
@@ -210,8 +214,19 @@ pub fn run(self: *const Self) Error!void {
 const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 const Context = @import("Context.zig");
+const DispatchModel = @import("../../shared/dispatch.zig").Model;
 
 fn mockHandler(_: *Request, _: *Response, _: *Context) anyerror!void {}
+
+fn testServer(model: DispatchModel) Self {
+    return Self.init(mockHandler, .{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 8080,
+        .dispatch_model = model,
+        .response_cache = true,
+    });
+}
 
 test "zix http1: Server, init stores its inputs" {
     const config: Config = .{
@@ -258,5 +273,33 @@ test "zix http1: Server, maps uring setup failures" {
         Error.ZixHttp1_Server_ListenFailed,
         dispatchUringError(error.ZixHttp1_Uring_ListenFailed),
     );
+}
+
+test "zix http1: Server, IOCP is not supported" {
+    const server = testServer(.IOCP);
+
+    try std.testing.expectError(Error.ZixHttp1_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http1: Server, KQUEUE is not supported" {
+    const server = testServer(.KQUEUE);
+
+    try std.testing.expectError(Error.ZixHttp1_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http1: Server, EPOLL outside Linux is not supported" {
+    if (comptime OS == .linux) return;
+
+    const server = testServer(.EPOLL);
+
+    try std.testing.expectError(Error.ZixHttp1_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http1: Server, URING outside Linux is not supported" {
+    if (comptime OS == .linux) return;
+
+    const server = testServer(.URING);
+
+    try std.testing.expectError(Error.ZixHttp1_Server_DispatchModel_NotSupported, server.run());
 }
 
