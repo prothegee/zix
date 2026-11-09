@@ -167,6 +167,7 @@ sequenceDiagram
 - Angka dicek dengan `std.zig.parseNumberLiteral` dan escape string didekode dengan `std.zig.string_literal`, jadi grammar Zig yang memutuskan angka atau escape yang valid.
 - Sisi tulis menulis ke `Sink`, sama seperti JSON, dengan layout yang disebut `ZonOptions.layout`. Field yang disebut `ZonOptions.hex_fields` ditulis sebagai hex.
 - Pencatatan field (hilang, ganda, default) memakai `fields.zig` yang sama dengan JSON, dan kegagalan dilaporkan lewat `lastFailure` yang sama.
+- Kedua sisi menolak tipe yang sama saat kompilasi (tuple, pointer non-slice, enum non-exhaustive, union), jadi apa pun yang ditulis sisi tulis terbaca lagi oleh sisi baca.
 
 ## Ke mana sebuah strategy mendarat
 
