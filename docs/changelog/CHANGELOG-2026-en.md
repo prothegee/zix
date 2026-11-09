@@ -165,6 +165,13 @@ __**Update:**__
 - Http1 examples in the current style, registered under `zig build zix-example-http1`:
     - `http1_json`, `http1_params`, and `http1_paths` are ported.
     - `http1_logger` is new: `zix.Logger` attached to the server with console and file output.
+    - `http1_xtra_headers`, `http1_middleware`, `http1_query`, and `http1_timeout_resp`
+      are ported.
+    - `http1_paths` routes through `zix.Http1.Router` (`.PARAM` and `.PREFIX`) instead of
+      a manual dispatch. `/path/user/` (empty id) now falls to the prefix route (200).
+
+- `zix.Http1.isExpired()` is exported. It reads the deadline armed from
+  `handler_timeout_ms`, and the same deadline now fills `ctx.deadline`.
 
 - **`zix.Http` is removed**, `zix.Http1` is the HTTP/1.1 engine:
     - README and docs use `zix.Http1` in prose and code examples.
