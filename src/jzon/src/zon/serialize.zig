@@ -122,11 +122,12 @@ fn writeValue(
         },
 
         .@"struct" => |info| {
-            if (info.is_tuple) {
-                try writeList(sink, value, options, level);
-            } else {
-                try writeStruct(sink, value, options, level);
-            }
+            if (info.is_tuple) @compileError(
+                "jzon zon: " ++ @typeName(Value) ++
+                    " is a tuple, which jzon zon does not take. Use an array",
+            );
+
+            try writeStruct(sink, value, options, level);
         },
 
         .array => try writeList(sink, value, options, level),
@@ -504,7 +505,7 @@ fn writeStruct(
     try sink.byte('}');
 }
 
-/// Write a slice, an array or a tuple as `.{ a, b, ... }`.
+/// Write a slice or an array as `.{ a, b, ... }`.
 ///
 /// Param:
 /// sink - *Sink (where the text goes)
@@ -527,18 +528,10 @@ fn writeList(
 
     try sink.literal(".{");
 
-    if (@typeInfo(@TypeOf(items)) == .@"struct") {
-        inline for (items, 0..) |item, index| {
-            try writeBreak(sink, layout, level + 1);
-            try writeValue(sink, item, options, level + 1);
-            try writeSeparator(sink, layout, index + 1 == items.len);
-        }
-    } else {
-        for (items, 0..) |item, index| {
-            try writeBreak(sink, layout, level + 1);
-            try writeValue(sink, item, options, level + 1);
-            try writeSeparator(sink, layout, index + 1 == items.len);
-        }
+    for (items, 0..) |item, index| {
+        try writeBreak(sink, layout, level + 1);
+        try writeValue(sink, item, options, level + 1);
+        try writeSeparator(sink, layout, index + 1 == items.len);
     }
 
     try writeBreak(sink, layout, level);
@@ -699,11 +692,8 @@ test "jzon zon: serialize, empty struct is an empty container" {
     try expectEmits(".{}", struct {}{}, .{ .layout = .COMPACT });
 }
 
-test "jzon zon: serialize, array and tuple are lists" {
-    const tuple: struct { u8, bool } = .{ 1, true };
-
+test "jzon zon: serialize, array is a list" {
     try expectEmits(".{ 1, 2 }", [2]u8{ 1, 2 }, .{ .layout = .COMPACT });
-    try expectEmits(".{ 1, true }", tuple, .{ .layout = .COMPACT });
 }
 
 test "jzon zon: serialize, optional value is written bare" {
