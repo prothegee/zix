@@ -148,6 +148,38 @@ __**Update:**__
     - Link `examples/http_*.zig` sekarang mengarah ke `examples/http1_*.zig` yang sesuai.
     - ADR, rilis changelog sebelumnya, dan migration guide tetap menyimpan `zix.Http` sebagai riwayat.
 
+    ---
+
+- **`jzon` 0.2.0**:
+    - Di-port ke `src/jzon` sebagai package mandiri untuk Zig 0.17,
+      juga diekspor sebagai `zix.jzon`.
+    - Breaking: JSON pindah ke `jzon.json`. `jzon.serialize` sekarang
+      `jzon.json.serialize`, `jzon.deserialize` sekarang `jzon.json.deserialize`, dan
+      options, strategy, serta error set ikut pindah (`jzon.json.SerializeOptions`,
+      `jzon.json.DeserializeStrategy`, `jzon.json.Strings`, `jzon.json.Unknown`, ...).
+    - Breaking: nama error mengikuti `Jzon_<Module>_<Condition>`. `JzonUnknownField` sekarang
+      `Jzon_Deserialize_UnknownField`, `JzonTruncated` sekarang `Jzon_Deserialize_Truncated`.
+    - Codec ZON baru: `jzon.zon.serialize` dan `jzon.zon.deserialize`, dengan
+      `jzon.zon.ZonOptions`. Ia membaca dan menulis bentuk yang dipakai `build.zig.zon`:
+      struct, list, string dan string multiline `\\`, integer di basis apa pun, float,
+      boolean, `null`, enum `.tag`, dan komentar `//`.
+    - `ZonOptions`: `strings` (`.COPY` atau `.BORROW`), `unknown` (`.REJECT` atau `.SKIP`),
+      `max_depth` (default 256), `layout` (`.MULTILINE` atau `.COMPACT`), dan `hex_fields`.
+    - `hex_fields` menulis field integer yang disebut sebagai hex
+      (`.fingerprint = 0x4cc61d74dc93a20b`). Nama yang bukan field, atau field yang bukan
+      integer, menjadi compile error.
+    - ZON menolak tuple (pakai array), union, pointer non-slice, dan enum non-exhaustive
+      saat compile di kedua arah, jadi apa pun yang ditulis bisa dibaca lagi.
+    - `jzon.lastFailure()` juga melaporkan field dan byte untuk ZON.
+    - Contoh di `src/jzon/examples`: `serialize`, `deserialize`, `strings`,
+      `unknown_keys`, `zon_file`, `bench_serialize`, dan `bench_deserialize`.
+    - `examples/http1_jzon.zig`: body JSON masuk dan body JSON keluar di `zix.Http1`,
+      di-build dengan `zig build zix-example-http1_jzon`.
+    - Build step root: `jzon-unit_edge-test`, `jzon-behaviour-test`, `jzon-all-test`,
+      dan `jzon-examples`. Test unit dan edge ada di file sumbernya (639), dan suite
+      behaviour di `src/jzon/tests/behaviour` (183).
+    - Docs: README, HLD, LLD, dan benchmark di `src/jzon` (EN + ID).
+
 <br>
 
 __**Fix:**__
@@ -161,6 +193,10 @@ __**Fix:**__
   konstanta 0. Sekarang keduanya membaca `max_request_body` dari `Config`.
 
 - Rute PARAM `zix.Http1` dengan lebih dari 8 `:param` tidak pernah cocok dan menjawab 404.
+
+- `jzon.lastFailure()` bisa menampilkan field dari kegagalan sebelumnya setelah parse
+  berikutnya gagal tanpa menyebut field. Setiap jalur JSON sekarang mencatat kegagalan
+  yang baru: `.STD` kosong, `.SCANNER` dan `.GENERATED` byte tempat parse berhenti.
 
 <br>
 
