@@ -55,6 +55,9 @@ pub const Status = @import("../../utils/http/status.zig");
 pub const Content = @import("../../utils/http/content.zig");
 pub const ContentType = Content.Type;
 
+pub const Multipart = @import("../../utils/Multipart.zig");
+pub const MultipartField = @import("../../utils/MultipartField.zig");
+
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 // Test:
@@ -131,5 +134,22 @@ test "zix http1: Http1, Content falls back on an unknown media type" {
 
 test "zix http1: Http1, shares the dispatch model" {
     try std.testing.expectEqual(@as(u8, 0), @intFromEnum(@This().DispatchModel.ASYNC));
+}
+
+test "zix http1: Http1, Multipart parses a form field" {
+    const body =
+        "--b\r\n" ++
+        "Content-Disposition: form-data; name=\"one\"\r\n" ++
+        "\r\n" ++
+        "1\r\n" ++
+        "--b--\r\n";
+
+    var parser = @This().Multipart.init(std.testing.allocator, "b");
+    defer parser.deinit();
+
+    try parser.parse(body);
+
+    const field: *@This().MultipartField = parser.getField("one").?;
+    try std.testing.expectEqualStrings("1", field.data);
 }
 
