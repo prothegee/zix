@@ -38,6 +38,7 @@ const builtin = @import("builtin");
 const linux = std.os.linux;
 const chunk = @import("../chunk.zig");
 const cache = @import("../cache.zig");
+const compress = @import("../compress.zig");
 const Config = @import("../Config.zig");
 const handler = @import("../handler.zig");
 const HandlerFn = handler.HandlerFn;
@@ -706,6 +707,7 @@ fn workerMain(ctx: WorkerCtx) void {
     handler.setAccessLogger(worker.config.logger);
     head_module.setDateHeader(worker.config.send_date_header);
     header.setMaxResponseHeaders(worker.config.max_response_headers.value());
+    compress.installWorker(worker.config);
 
     // Per-worker response cache. It lives on the worker stack, so the pointer
     // installed for this thread stays valid until this worker returns.
@@ -1034,6 +1036,49 @@ fn testPair() ![2]std.posix.fd_t {
     try pair.open(std.testing.io, &fds);
 
     return fds;
+}
+
+const compression = @import("../../../utils/compression/compression.zig");
+
+/// Body sendNegotiated compresses in the compression parity test.
+const NEGOTIATED_BODY = blk: {
+    const unit = "zix compression parity body. ";
+    var text: [unit.len * 40]u8 = undefined;
+    for (0..40) |i| @memcpy(text[i * unit.len ..][0..unit.len], unit);
+
+    break :blk text;
+};
+
+fn negotiatedHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.sendNegotiated(req, &NEGOTIATED_BODY);
+}
+
+fn testCompressConfig() Config {
+    return .{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 0,
+        .dispatch_model = .EPOLL,
+        .compress = true,
+    };
+}
+
+/// The response carries gzip, and its body inflates back to NEGOTIATED_BODY.
+fn expectGzipResponse(bytes: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "Content-Encoding: gzip\r\n") != null);
+
+    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n").?;
+    const plain = try compression.decode(
+        std.testing.allocator,
+        .GZIP,
+        bytes[head_end + 4 ..],
+        1 << 16,
+    );
+    defer std.testing.allocator.free(plain);
+
+    try std.testing.expectEqualStrings(&NEGOTIATED_BODY, plain);
 }
 
 /// Slow-path count of cachedHandler. A cache hit returns before it counts.
@@ -1733,5 +1778,52 @@ test "zix http1: epoll, serves a miss then a hit from the response cache" {
 
     try std.testing.expectEqual(@as(usize, 1), cached_miss_count);
     try expectTwoCachedResponses(response);
+}
+
+test "zix http1: epoll, serves gzip through sendNegotiated" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    head_module.setDateHeader(false);
+    defer head_module.setDateHeader(true);
+
+    compress.installWorker(testCompressConfig());
+    defer compress.setCompression(false, 256, 256 * 1024);
+
+    try testWriteAll(
+        fds[0],
+        "GET /gz HTTP/1.1\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n",
+    );
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [4096]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const session = Session{
+        .io = std.testing.io,
+        .handler = negotiatedHandler,
+        .allocator = std.testing.allocator,
+    };
+
+    const outcome = serveReadable(
+        conn,
+        &body_buf,
+        &out_buf,
+        &session,
+        -1,
+        &arena,
+        true,
+    );
+    try std.testing.expectEqual(ConnOutcome.close, outcome);
+
+    var out: [4096]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try expectGzipResponse(response);
 }
 
