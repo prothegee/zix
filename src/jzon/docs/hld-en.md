@@ -165,7 +165,7 @@ sequenceDiagram
 
 - The read side walks the text once, with the dispatch built from `T` at compile time. No `std.zig.Ast` is built.
 - Numbers are checked with `std.zig.parseNumberLiteral` and string escapes decoded with `std.zig.string_literal`, so the Zig grammar decides what a valid number or escape is.
-- The write side writes into a `Sink`, the same as JSON, in the layout `ZonOptions.layout` names.
+- The write side writes into a `Sink`, the same as JSON, in the layout `ZonOptions.layout` names. The fields `ZonOptions.hex_fields` names are written as hex.
 - Field bookkeeping (missing, duplicate, defaults) is the same `fields.zig` JSON uses, and failures report through the same `lastFailure`.
 
 ## Where a strategy lands
