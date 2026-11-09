@@ -275,6 +275,17 @@ Every `.{` counts one level against `max_depth`, including the levels an `unknow
 - `.MULTILINE` puts one entry per line, four spaces per level, a comma after every entry. A line break and its indent go out as one copy for up to 16 levels. `.COMPACT` puts everything on one line with commas only between entries. An empty container is `.{}` in both.
 - Every field is written, `null` ones included.
 
+### Types ZON refuses
+
+Both directions refuse the same types at compile time, naming the type, so whatever `serialize` writes `deserialize` reads back:
+
+| Type | Instead |
+| :- | :- |
+| a tuple (`struct { u8, bool }`) | an array (`[2]u8`) or a struct with named fields |
+| a pointer other than a slice | a slice or the value itself |
+| a non-exhaustive enum | an exhaustive enum |
+| a union | a struct with optional fields |
+
 ## One shared surprise
 
 Spelling a field `?T` says what it can hold, not that a document may leave it out. `= null` is what makes it omissible.
