@@ -179,7 +179,7 @@ What the ZON paths read and write:
 - `//` comments
 - `.@"..."` names, for a name that is not a plain Zig identifier (such as `error`)
 
-Out of scope: pointers other than slices, tuples on the read side, unions, char literals, and `@import`. Numbers are checked against the Zig grammar with `std.zig.parseNumberLiteral`, so `+1`, `012` and `1__0` are refused.
+Out of scope: pointers other than slices, tuples (use an array), unions, char literals, and `@import`. Numbers are checked against the Zig grammar with `std.zig.parseNumberLiteral`, so `+1`, `012` and `1__0` are refused.
 
 `MULTILINE` output for one record:
 
@@ -199,7 +199,7 @@ Out of scope: pointers other than slices, tuples on the read side, unions, char 
 
 The generated JSON paths and both ZON paths take: `bool`, any integer width signed or unsigned, any float width, `[]const u8` as a string, a slice of any covered type, an optional of any covered type, an exhaustive enum, and a struct whose fields are all of those. ZON also takes a fixed-size array.
 
-They refuse at compile time, naming the type: a non-slice pointer and a non-exhaustive enum, and on the read side a tuple. JSON `.STD` still takes any shape std takes, so a field outside the covered set is a strategy choice rather than a wall.
+They refuse at compile time, naming the type: a non-slice pointer, a non-exhaustive enum, and a tuple. JSON `.STD` still takes any shape std takes, so a field outside the covered set is a strategy choice rather than a wall.
 
 ## Errors
 
@@ -254,15 +254,15 @@ Seven, in `examples/`. Each runs and exits, none is a server. Run them from `src
 
 Build them from the package with `zig build examples`, or from the repo root with `zig build jzon-examples`. The two bench examples want `-Doptimize=ReleaseFast`. A Debug build measures the safety checks rather than the paths.
 
-A server example, also planned, lives with the engine examples rather than in this package: `examples/http1_jzon.zig` reads a JSON request body into a record on the per-request arena and answers with a record rendered into a stack buffer. Build it from the repo root with `zig build example-http1_jzon`.
+A server example lives with the engine examples rather than in this package: `examples/http1_jzon.zig` reads a JSON request body into a record on the per-request arena and answers with a record rendered into a stack buffer. Build it from the repo root with `zig build zix-example-http1_jzon`.
 
 ## Testing
 
-Two tiers, 783 tests, none of them needing anything installed:
+Two tiers, 822 tests, none of them needing anything installed:
 
 ```
 zig build unit_edge-test     # 639, the in-file unit and edge tests under src/
-zig build behaviour-test     # 144, what each piece does when handed what it wants
+zig build behaviour-test     # 183, what each piece does when handed what it wants
 zig build all-test           # both
 ```
 
