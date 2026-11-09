@@ -75,6 +75,9 @@ const BEHAVIOUR_SUITES = [_][]const u8{
     "tests/behaviour/deserialize_test.zig",
     "tests/behaviour/round_trip_test.zig",
     "tests/behaviour/strategy_pairs_test.zig",
+    "tests/behaviour/zon_deserialize_test.zig",
+    "tests/behaviour/zon_serialize_test.zig",
+    "tests/behaviour/zon_round_trip_test.zig",
 };
 
 fn ensureSupportedZig() void {
