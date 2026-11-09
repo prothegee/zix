@@ -1298,12 +1298,13 @@ Apa yang menjadi key dan nilai yang di-cache bergantung pada engine:
 | `zix.Http1` | method, path, query | respons HTTP yang sudah di-serialize penuh, ditulis verbatim |
 | `zix.Grpc` (unary) | path, pesan request | pesan respons, di-frame ulang per stream (HPACK dan stream id tetap benar) |
 
-Secara default fitur ini mati. Aktifkan pada dispatch model `.EPOLL` atau `.URING`:
+Secara default fitur ini mati. Pada `zix.Http1` fitur ini bekerja di dispatch model `.ASYNC`, `.EPOLL`, dan `.URING`:
 
 ```zig
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/report", .handler = reportHandler },
 }).dispatch, .{
+    .io = io,
     .ip = "0.0.0.0",
     .port = 8080,
     .dispatch_model = .EPOLL,
@@ -1311,7 +1312,6 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .cache_max_entries = 256,                // slot, dibulatkan turun ke pangkat dua
     .cache_max_value_bytes = 16 * 1024,      // batas respons per-slot
     .cache_ttl_ms = 1000,                    // freshness default
-    // .cache_max_total_bytes = 4 * 1024 * 1024, // batas memori cache per-worker opsional
 });
 ```
 
@@ -1319,7 +1319,7 @@ Sebuah miss membangun dan menyimpan respons, sebuah hit yang fresh disajikan ver
 
 ```zig
 fn reportHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
-    if (res.sendFromCache(req)) return;          // hit fresh: byte cache sudah ditulis
+    if (try res.sendFromCache(req)) return;      // hit fresh: byte cache sudah ditulis
 
     const body = try buildExpensiveReport(req);  // hanya berjalan saat miss
     res.setContentType(.APPLICATION_JSON);
@@ -1352,13 +1352,15 @@ Crossover yang terukur di loopback berkisar 4 KiB body respons. Di bawah itu bia
 
 #### Aturan dan kondisi
 
-- Opt-in saja. Mati secara default, dan handler harus memanggil `res.sendFromCache` lalu `res.sendCached` (engine HTTP), `res.serveCached` lalu `res.sendCached` (gRPC), atau `cacheLookup` / `sendWithCacheFD` milik `zix.Http1` mentah.
-- Hanya `.EPOLL` dan `.URING` di rilis ini. Dispatch model lain membiarkan cache tidak terpasang dan API menurun menjadi plain send.
+- Opt-in saja. Mati secara default, dan handler harus memanggil `res.sendFromCache` lalu `res.sendCached` (engine HTTP), atau `res.serveCached` lalu `res.sendCached` (gRPC).
+- Dispatch model di `zix.Http1`: `.ASYNC`, `.EPOLL`, dan `.URING`. `.EPOLL` dan `.URING` menyimpan satu cache per worker. `.ASYNC` tidak punya worker, jadi menyimpan satu cache per thread io pool, dibuat pada koneksi pertama yang dilayani thread itu. Dengan `response_cache` mati, API menurun menjadi plain send.
+- `.IOCP` dan `.KQUEUE` belum didukung di `zix.Http1`: `run()` mengembalikan `error.ZixHttp1_Server_DispatchModel_NotSupported`, jadi cache tidak pernah mati diam-diam. gRPC tetap memakai cache di `.EPOLL` dan `.URING`.
+- Di `.ASYNC` cache dibebaskan saat accept loop berhenti. Cache yang masih dipakai koneksi yang terbuka baru dibebaskan saat koneksi itu selesai, tidak sebelumnya.
 - Untuk HTTP key adalah method, path, dan query: dua request yang hanya berbeda query string adalah entri yang berbeda, dan Anda tidak boleh mem-cache respons yang bervariasi pada header atau cookie. Saat respons dikompresi (`sendNegotiateFD` / `sendGzipCachedFD`), content-encoding juga dilipat ke dalam key (`hashKeyEncoded`), sehingga varian gzip dan brotli menempati entri berbeda. Untuk gRPC key adalah path plus pesan request, sehingga hanya request yang identik yang hit.
 - Respons QUERY tidak pernah disimpan. Key HTTP tidak membawa content request, jadi dua request QUERY ke satu path dengan body berbeda akan berbagi satu jawaban. RFC 10008 section 2.7 menjadikan cache respons QUERY berstatus MAY, jadi `zix.Http1` menolak penyimpanannya langsung. Tidak ada yang berubah untuk method lain.
 - Cache hanya yang aman diputar ulang selama jendela TTL. Untuk HTTP byte yang sama (termasuk `Date` yang ditangkap) disajikan sampai entri kedaluwarsa, jadi jaga `cache_ttl_ms` tetap pendek untuk konten yang sensitif waktu.
 - Respons lebih besar dari `cache_max_value_bytes` melewati cache dan jatuh kembali ke plain send. Untuk gRPC batas ini berlaku pada pesan respons. Jaga tetap ramping agar hanya respons di atas crossover yang menempati slot.
-- Memori per-worker adalah `cache_max_entries * cache_max_value_bytes`, dikali jumlah worker, secara opsional dibatasi oleh `cache_max_total_bytes`.
+- Memori adalah `cache_max_entries * cache_max_value_bytes` per cache: dikali jumlah worker di `.EPOLL` dan `.URING`, dan dikali jumlah thread io pool yang pernah melayani koneksi di `.ASYNC`. gRPC juga bisa membatasinya dengan `cache_max_total_bytes`.
 
 **Mengapa hanya `.EPOLL` / `.URING`:** cache adalah instance thread-local, tidak pernah dibagi dan tidak pernah dikunci (lock-free by ownership). Invariant itu hanya berlaku saat satu thread milik zix memasang cache (alokasi, set, free saat keluar) dan menjadi satu-satunya thread yang menyentuhnya. Worker shared-nothing `.EPOLL` dan worker `.URING` one-thread-per-ring sama-sama memenuhinya.
 
