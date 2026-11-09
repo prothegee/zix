@@ -1,9 +1,9 @@
 .{
     .name = .jzon,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .semver = .{
         .major = 0,
-        .minor = 1,
+        .minor = 2,
         .patch = 0,
         .release_candidate = null,
     },
