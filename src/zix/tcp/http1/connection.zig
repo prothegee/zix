@@ -222,6 +222,53 @@ const ServeProbe = struct {
     }
 };
 
+const compression = @import("../../utils/compression/compression.zig");
+
+/// Body sendNegotiated compresses in the compression parity test.
+const NEGOTIATED_BODY = blk: {
+    const unit = "zix compression parity body. ";
+    var text: [unit.len * 40]u8 = undefined;
+    for (0..40) |i| @memcpy(text[i * unit.len ..][0..unit.len], unit);
+
+    break :blk text;
+};
+
+fn negotiatedHandler(
+    req: *@import("Request.zig"),
+    res: *@import("Response.zig"),
+    _: *@import("Context.zig"),
+) anyerror!void {
+    res.setContentType(.TEXT_PLAIN);
+
+    try res.sendNegotiated(req, &NEGOTIATED_BODY);
+}
+
+/// Serves one connection with the compression policy installed the way
+/// connEntry does on a .ASYNC pool thread. Runs on its own thread so the
+/// threadlocal policy dies with it.
+const CompressProbe = struct {
+    fn run(fd: std.posix.fd_t) void {
+        head.setDateHeader(false);
+
+        var args = testArgs(false);
+        args.compress = true;
+        compress.setCompression(
+            args.compress,
+            args.compression_min_size,
+            args.compression_max_out,
+        );
+
+        serve.serveConn(
+            fd,
+            negotiatedHandler,
+            .{
+                .max_recv_buf = ServeOpts.BUF_SIZE,
+            },
+            std.testing.io,
+        );
+    }
+};
+
 test "zix http1: connection, deadline is in the future" {
     const io = std.testing.io;
     const now = std.Io.Clock.Timestamp.now(io, .real);
@@ -292,5 +339,44 @@ test "zix http1: connection, serves a miss then a hit from the response cache" {
     try std.testing.expectEqual(CACHED_RESPONSE.len * 2, len);
     try std.testing.expectEqualStrings(CACHED_RESPONSE, out[0..CACHED_RESPONSE.len]);
     try std.testing.expectEqualStrings(CACHED_RESPONSE, out[CACHED_RESPONSE.len..len]);
+}
+
+test "zix http1: connection, serves gzip through sendNegotiated" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+
+    const request = "GET /gz HTTP/1.1\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n";
+    try std.testing.expectEqual(
+        @as(usize, request.len),
+        std.posix.system.write(fds[0], request.ptr, request.len),
+    );
+
+    const thread = try std.Thread.spawn(.{}, CompressProbe.run, .{fds[1]});
+    thread.join();
+    _ = std.posix.system.close(fds[1]);
+
+    var out: [4096]u8 = undefined;
+    var len: usize = 0;
+    while (len < out.len) {
+        const count = try std.posix.read(fds[0], out[len..]);
+        if (count == 0) break;
+
+        len += count;
+    }
+
+    const response = out[0..len];
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Encoding: gzip\r\n") != null);
+
+    const head_end = std.mem.indexOf(u8, response, "\r\n\r\n").?;
+    const plain = try compression.decode(
+        std.testing.allocator,
+        .GZIP,
+        response[head_end + 4 ..],
+        1 << 16,
+    );
+    defer std.testing.allocator.free(plain);
+
+    try std.testing.expectEqualStrings(&NEGOTIATED_BODY, plain);
 }
 
