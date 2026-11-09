@@ -39,15 +39,23 @@ const Sink = @import("Sink.zig");
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate a `Sink` failure into this module's set.
+/// Every failure this module can hand back before translation: its own set joined
+/// with the sink's.
+const Inner = Error || Sink.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - Sink.Error (the failure the sink reported)
+/// err - Inner (the failure a sink call or this module handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn sinkError(err: Sink.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_Integer_NoSpaceLeft => Error.Jzon_Integer_NoSpaceLeft,
+        error.Jzon_Integer_BadNumber => Error.Jzon_Integer_BadNumber,
         error.Jzon_Sink_NoSpaceLeft => Error.Jzon_Integer_NoSpaceLeft,
     };
 }
@@ -124,7 +132,7 @@ pub fn appendFmt(sink: *Sink, value: anytype) Error!void {
         error.NoSpaceLeft => return Error.Jzon_Integer_NoSpaceLeft,
     };
 
-    sink.commit(printed.len) catch |err| return sinkError(err);
+    sink.commit(printed.len) catch |err| return innerError(err);
 }
 
 /// Write an integer straight into the sink.
@@ -170,7 +178,7 @@ pub fn appendTable(sink: *Sink, value: anytype) Error!void {
         digits[start] = '-';
     }
 
-    sink.bytes(digits[start..]) catch |err| return sinkError(err);
+    sink.bytes(digits[start..]) catch |err| return innerError(err);
 }
 
 /// Read an integer out of a number token's bytes.
@@ -324,8 +332,8 @@ test "jzon: integer, parse refuses text no integer can be read from" {
     try std.testing.expectError(Error.Jzon_Integer_BadNumber, parse(i32, "--1"));
 }
 
-test "jzon: integer, sinkError renames no space left to its own name" {
-    const err = sinkError(error.Jzon_Sink_NoSpaceLeft);
+test "jzon: integer, innerError renames sink no space left to its own name" {
+    const err = innerError(error.Jzon_Sink_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_Integer_NoSpaceLeft, err);
 }
@@ -479,5 +487,17 @@ test "jzon: integer, maxDigits bounds the widest value of every width" {
 
         try std.testing.expect(highest.written() <= maxDigits(Value));
     }
+}
+
+test "jzon: integer, innerError keeps its own no space left" {
+    const err = innerError(error.Jzon_Integer_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_Integer_NoSpaceLeft, err);
+}
+
+test "jzon: integer, innerError keeps its own bad number" {
+    const err = innerError(error.Jzon_Integer_BadNumber);
+
+    try std.testing.expectEqual(Error.Jzon_Integer_BadNumber, err);
 }
 
