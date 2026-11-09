@@ -271,6 +271,7 @@ Every `.{` counts one level against `max_depth`, including the levels an `unknow
 - Field and tag names are spelled at compile time. A name that `std.zig.isValidId` refuses (a keyword such as `error`, or one with a space) is spelled `.@"..."`. Each struct entry's `.name = ` (and in `.COMPACT` the comma and space before it) is one comptime literal, so a field costs one copy plus its value.
 - In a string, `"`, `\`, line feed, carriage return and tab get their short escapes. Every other control byte is `\xNN`. Bytes from `0x80` up stay raw when the whole string is valid UTF-8, and are `\xNN` otherwise, so the text is always valid Zig. The UTF-8 check runs only once a byte from `0x80` up appears, so ASCII text never pays for it.
 - A float is `inf`, `-inf`, `nan`, or its shortest decimal form.
+- An integer is decimal, unless its field name is in `hex_fields`: then it is `0x...` (lowercase digits), or `-0x...` when negative. The name check is comptime, so a decimal field pays nothing for the option. Before writing, `serialize` walks the value's type once at compile time and stops the build on a name no struct inside has. A listed field that is not an integer or an optional integer stops the build when its struct is compiled.
 - `.MULTILINE` puts one entry per line, four spaces per level, a comma after every entry. A line break and its indent go out as one copy for up to 16 levels. `.COMPACT` puts everything on one line with commas only between entries. An empty container is `.{}` in both.
 - Every field is written, `null` ones included.
 
