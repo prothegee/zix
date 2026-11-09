@@ -124,6 +124,10 @@ __**Update:**__
       `public_dir_cache_ttl_ms`, and `public_dir_cache_max_entries`.
     - `max_request_body` defaults to 2 MiB (was 8 MiB).
     - `large_body_rcvbuf` is renamed to `large_body_recv_buf`.
+    - `worker_stack_compress_bytes` is renamed to `compress_worker_stack_size_bytes`.
+      It is accepted but not applied yet.
+    - `worker_stack_size_bytes` defaults to 1 MiB (was 512 KiB). It is accepted but
+      not applied yet.
     - `max_entries` and `max_value_bytes` are replaced by `cache_max_entries` and
       `cache_max_value_bytes`.
     - `.ASYNC` copies every `Config` field onto each connection.
@@ -143,6 +147,20 @@ __**Update:**__
       compile until it is handled.
     - `dispatch/common.zig` is removed, `connection.zig` is the one connection
       entry. `logSystem` moved to `tcp/http1/log.zig`.
+    - Response compression is active on `.ASYNC`, `.EPOLL`, and `.URING` through
+      `res.sendNegotiated`. `.EPOLL` and `.URING` install `compress`,
+      `compression_min_size`, and `compression_max_out` once per worker.
+    - `zix.utils.compression` is ported: `encode`, `encodeInto`, `decode`,
+      `negotiate`, `shouldCompress`, `supported_default`, `Encoding`, `Level`,
+      and the `flate`, `flate_fast`, and `brotli` codecs.
+        - A gzip body under 64 KiB uses the fast encoder (`flate_fast`).
+        - The brotli codec is split by responsibility under
+          `utils/compression/brotli/`.
+        - The brotli static dictionary is generated at build time from
+          `dictionary_gen.zig`. No binary file is tracked.
+        - Compression errors follow `ZixUtils_<Module>_<Condition>`. A bad brotli
+          stream reports `ZixUtils_Brotli_Truncated` or `ZixUtils_Brotli_Malformed`
+          (was `ZixDecompressFailed`).
 
 - Http1 examples in the current style, registered under `zig build zix-example-http1`:
     - `http1_json`, `http1_params`, and `http1_paths` are ported.
@@ -199,6 +217,13 @@ __**Fix:**__
   constant 0. They now read `max_request_body` from `Config`.
 
 - A `zix.Http1` PARAM route with more than 8 `:params` never matched and answered 404.
+
+- The brotli encoder could write an invalid stream when a code length passed 15
+  bits (very skewed symbol counts). The length cap now keeps the code complete.
+
+- The brotli decoder could panic on a malformed stream with a distance past 32
+  bits or a dictionary word past the meta-block length. Both are now rejected as
+  `ZixUtils_Brotli_Malformed`.
 
 - `jzon.lastFailure()` could show the field of an earlier failure after a later parse
   failed without naming a field. Every JSON path now records the new failure:
