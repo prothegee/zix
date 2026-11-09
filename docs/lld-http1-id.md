@@ -83,11 +83,14 @@ Satu chunked walk yang dipakai semua dispatch model untuk mem-framing body (RFC 
 ```
 threadlocal tl_deadline_ns: u64 = 0   // 0 = tidak ada deadline terpasang
 
-setTimeout(ms): tl_deadline_ns = (ms == 0) ? 0 : wallClockNs() + ms * 1e6
-isExpired():    tl_deadline_ns != 0 dan wallClockNs() >= tl_deadline_ns
+threadlocal tl_deadline_io: ?std.Io = null  // sumber clock untuk isExpired
+
+setTimeout(io, ms): tl_deadline_io = io
+                    tl_deadline_ns = (ms == 0) ? 0 : wallClockNs(io) + ms * 1e6
+isExpired():        tl_deadline_ns != 0 dan wallClockNs(tl_deadline_io) >= tl_deadline_ns
 ```
 
-`wallClockNs()` adalah `clock_gettime(REALTIME)` mentah. Engine memanggil `setTimeout(opts.handler_timeout_ms)` sebelum setiap dispatch, sehingga deadline basi tidak pernah bocor ke request berikutnya.
+`wallClockNs()` adalah `clock_gettime(REALTIME)` mentah. Engine memanggil `setTimeout(opts.handler_timeout_ms)` sebelum setiap dispatch, sehingga deadline basi tidak pernah bocor ke request berikutnya. Saat deadline terpasang, `invokeHandler` juga menyalinnya ke `ctx.deadline`, sehingga `ctx.isExpired()` dan `zix.Http1.isExpired()` memberi jawaban yang sama.
 
 ### Handoff WebSocket thread-local
 
