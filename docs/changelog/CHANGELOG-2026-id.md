@@ -128,6 +128,10 @@ __**Update:**__
       `public_dir_cache_ttl_ms`, dan `public_dir_cache_max_entries`.
     - Default `max_request_body` adalah 2 MiB (sebelumnya 8 MiB).
     - `large_body_rcvbuf` di-rename menjadi `large_body_recv_buf`.
+    - `worker_stack_compress_bytes` di-rename menjadi `compress_worker_stack_size_bytes`.
+      Field ini sudah diterima tetapi belum diterapkan.
+    - Default `worker_stack_size_bytes` adalah 1 MiB (sebelumnya 512 KiB). Field ini
+      sudah diterima tetapi belum diterapkan.
     - `max_entries` dan `max_value_bytes` diganti dengan `cache_max_entries` dan
       `cache_max_value_bytes`.
     - `.ASYNC` menyalin setiap field `Config` ke setiap koneksi.
@@ -147,6 +151,20 @@ __**Update:**__
       bisa di-compile sampai ditangani.
     - `dispatch/common.zig` dihapus, `connection.zig` menjadi satu-satunya entry
       koneksi. `logSystem` dipindah ke `tcp/http1/log.zig`.
+    - Kompresi respons aktif di `.ASYNC`, `.EPOLL`, dan `.URING` lewat
+      `res.sendNegotiated`. `.EPOLL` dan `.URING` memasang `compress`,
+      `compression_min_size`, dan `compression_max_out` sekali per worker.
+    - `zix.utils.compression` di-port: `encode`, `encodeInto`, `decode`,
+      `negotiate`, `shouldCompress`, `supported_default`, `Encoding`, `Level`,
+      serta codec `flate`, `flate_fast`, dan `brotli`.
+        - Body gzip di bawah 64 KiB memakai encoder cepat (`flate_fast`).
+        - Codec brotli dipecah per tanggung jawab di bawah
+          `utils/compression/brotli/`.
+        - Static dictionary brotli dibuat saat build dari `dictionary_gen.zig`.
+          Tidak ada file biner yang di-track.
+        - Error compression mengikuti `ZixUtils_<Module>_<Condition>`. Stream brotli
+          yang rusak melaporkan `ZixUtils_Brotli_Truncated` atau
+          `ZixUtils_Brotli_Malformed` (sebelumnya `ZixDecompressFailed`).
 
 - Contoh Http1 dengan gaya saat ini, terdaftar di `zig build zix-example-http1`:
     - `http1_json`, `http1_params`, dan `http1_paths` di-porting.
@@ -205,6 +223,14 @@ __**Fix:**__
   konstanta 0. Sekarang keduanya membaca `max_request_body` dari `Config`.
 
 - Rute PARAM `zix.Http1` dengan lebih dari 8 `:param` tidak pernah cocok dan menjawab 404.
+
+- Encoder brotli bisa menulis stream yang tidak valid saat panjang kode melewati
+  15 bit (jumlah simbol yang sangat timpang). Batas panjang sekarang menjaga kode
+  tetap lengkap.
+
+- Decoder brotli bisa panic pada stream rusak dengan distance melewati 32 bit atau
+  kata dictionary yang melewati panjang meta-block. Keduanya sekarang ditolak
+  sebagai `ZixUtils_Brotli_Malformed`.
 
 - `jzon.lastFailure()` bisa menampilkan field dari kegagalan sebelumnya setelah parse
   berikutnya gagal tanpa menyebut field. Setiap jalur JSON sekarang mencatat kegagalan
