@@ -52,15 +52,30 @@ const SHAPE_SCALAR: ScanShape = .{ .scan = .SCALAR };
 /// The width `.GENERATED_VECTOR` runs.
 const SHAPE_VECTOR: ScanShape = .{ .scan = .VECTOR };
 
-/// Translate a `std_parser` failure into the public set.
+/// Every failure a private function here can hand back: the public set joined with
+/// the sets of every read path.
+const Inner = Error || std_parser.Error || scanner_parser.Error || generated_parser.Error;
+
+/// Translate a failure from inside the module into the public set.
 ///
 /// Param:
-/// err - std_parser.Error (the failure the std path reported)
+/// err - Inner (the failure a read path handed back)
 ///
 /// Return:
 /// - Error (the same failure under the public name)
-fn stdParserError(err: std_parser.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_Deserialize_UnknownField => Error.Jzon_Deserialize_UnknownField,
+        error.Jzon_Deserialize_MissingField => Error.Jzon_Deserialize_MissingField,
+        error.Jzon_Deserialize_UnknownEnumValue => Error.Jzon_Deserialize_UnknownEnumValue,
+        error.Jzon_Deserialize_Truncated => Error.Jzon_Deserialize_Truncated,
+        error.Jzon_Deserialize_Unexpected => Error.Jzon_Deserialize_Unexpected,
+        error.Jzon_Deserialize_BadNumber => Error.Jzon_Deserialize_BadNumber,
+        error.Jzon_Deserialize_BadEscape => Error.Jzon_Deserialize_BadEscape,
+        error.Jzon_Deserialize_NoSpaceLeft => Error.Jzon_Deserialize_NoSpaceLeft,
+        error.Jzon_Deserialize_OutOfMemory => Error.Jzon_Deserialize_OutOfMemory,
         error.Jzon_StdParser_UnknownField => Error.Jzon_Deserialize_UnknownField,
         error.Jzon_StdParser_MissingField => Error.Jzon_Deserialize_MissingField,
         error.Jzon_StdParser_UnknownEnumValue => Error.Jzon_Deserialize_UnknownEnumValue,
@@ -68,18 +83,6 @@ fn stdParserError(err: std_parser.Error) Error {
         error.Jzon_StdParser_Unexpected => Error.Jzon_Deserialize_Unexpected,
         error.Jzon_StdParser_BadNumber => Error.Jzon_Deserialize_BadNumber,
         error.Jzon_StdParser_OutOfMemory => Error.Jzon_Deserialize_OutOfMemory,
-    };
-}
-
-/// Translate a `scanner_parser` failure into the public set.
-///
-/// Param:
-/// err - scanner_parser.Error (the failure the scanner path reported)
-///
-/// Return:
-/// - Error (the same failure under the public name)
-fn scannerParserError(err: scanner_parser.Error) Error {
-    return switch (err) {
         error.Jzon_ScannerParser_UnknownField => Error.Jzon_Deserialize_UnknownField,
         error.Jzon_ScannerParser_MissingField => Error.Jzon_Deserialize_MissingField,
         error.Jzon_ScannerParser_UnknownEnumValue => Error.Jzon_Deserialize_UnknownEnumValue,
@@ -88,18 +91,6 @@ fn scannerParserError(err: scanner_parser.Error) Error {
         error.Jzon_ScannerParser_BadNumber => Error.Jzon_Deserialize_BadNumber,
         error.Jzon_ScannerParser_NoSpaceLeft => Error.Jzon_Deserialize_NoSpaceLeft,
         error.Jzon_ScannerParser_OutOfMemory => Error.Jzon_Deserialize_OutOfMemory,
-    };
-}
-
-/// Translate a `generated_parser` failure into the public set.
-///
-/// Param:
-/// err - generated_parser.Error (the failure the generated path reported)
-///
-/// Return:
-/// - Error (the same failure under the public name)
-fn generatedParserError(err: generated_parser.Error) Error {
-    return switch (err) {
         error.Jzon_GeneratedParser_UnknownField => Error.Jzon_Deserialize_UnknownField,
         error.Jzon_GeneratedParser_MissingField => Error.Jzon_Deserialize_MissingField,
         error.Jzon_GeneratedParser_UnknownEnumValue => Error.Jzon_Deserialize_UnknownEnumValue,
@@ -112,27 +103,35 @@ fn generatedParserError(err: generated_parser.Error) Error {
     };
 }
 
-/// Run the generated path at one width and translate its failure.
+/// The body of `deserialize`: run the path the strategy names.
 ///
 /// Param:
 /// Target - type (comptime, the type to build)
 /// allocator - Allocator (owns everything the result points at)
 /// src - []const u8 (the whole document)
-/// options - DeserializeOptions (comptime, string mode and unknown key rule)
-/// shape - ScanShape (comptime, which width to scan at)
+/// options - DeserializeOptions (comptime, strategy, string mode and unknown key rule)
 ///
 /// Return:
 /// - Target (the parsed value)
-/// - Error (the generated path's failure under the public name)
-fn parseGenerated(
+/// - Inner (the read path's failure under its own name)
+fn parseInto(
     comptime Target: type,
     allocator: Allocator,
     src: []const u8,
     comptime options: DeserializeOptions,
-    comptime shape: ScanShape,
-) Error!Target {
-    return generated_parser.parse(Target, allocator, src, options, shape) catch |err|
-        generatedParserError(err);
+) Inner!Target {
+    return switch (options.strategy) {
+        .STD => std_parser.parse(Target, allocator, src, options),
+        .SCANNER => scanner_parser.parse(Target, allocator, src, options),
+        .GENERATED => generated_parser.parse(Target, allocator, src, options, SHAPE_SCALAR),
+        .GENERATED_VECTOR => generated_parser.parse(
+            Target,
+            allocator,
+            src,
+            options,
+            SHAPE_VECTOR,
+        ),
+    };
 }
 
 // --------------------------------------------------------- //
@@ -167,6 +166,10 @@ pub const Error = error{
 ///   generated paths refuse still parses under the default `.STD`.
 /// - The document has to hold one value and nothing after it, so trailing bytes are a
 ///   failure, not something left unread.
+/// - The caller frees what the parse allocated. An arena frees it in one call, and
+///   also frees what a failed parse allocated before it stopped. With a general
+///   allocator every string and slice in the result is the caller's to free, and a
+///   failed parse leaves its partial allocations behind.
 ///
 /// Param:
 /// Target - type (comptime, the type to build)
@@ -177,9 +180,13 @@ pub const Error = error{
 ///
 /// Usage:
 /// ```zig
-/// const order = try jzon.deserialize(Order, arena, body, .{});
+/// // One arena per request: everything the parse allocates is freed at once.
+/// var arena: std.heap.ArenaAllocator = .init(gpa);
+/// defer arena.deinit();
 ///
-/// const faster = try jzon.deserialize(Order, arena, body, .{
+/// const order = try jzon.deserialize(Order, arena.allocator(), body, .{});
+///
+/// const faster = try jzon.deserialize(Order, arena.allocator(), body, .{
 ///     .strategy = .GENERATED,
 ///     .strings = .BORROW,
 ///     .unknown = .SKIP,
@@ -199,14 +206,7 @@ pub fn deserialize(
     src: []const u8,
     comptime options: DeserializeOptions,
 ) Error!Target {
-    return switch (options.strategy) {
-        .STD => std_parser.parse(Target, allocator, src, options) catch |err|
-            stdParserError(err),
-        .SCANNER => scanner_parser.parse(Target, allocator, src, options) catch |err|
-            scannerParserError(err),
-        .GENERATED => parseGenerated(Target, allocator, src, options, SHAPE_SCALAR),
-        .GENERATED_VECTOR => parseGenerated(Target, allocator, src, options, SHAPE_VECTOR),
-    };
+    return parseInto(Target, allocator, src, options) catch |err| innerError(err);
 }
 
 // --------------------------------------------------------- //
@@ -395,6 +395,25 @@ test "jzon deserialize: deserialize, unknown field names the field for lastFailu
     }
 }
 
+test "jzon deserialize: deserialize, escaped unknown field outlives the freed arena" {
+    inline for (GENERATED) |strategy| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+
+        Failure.reset();
+
+        // The escaped key is decoded into the arena, which is freed before the read.
+        try std.testing.expectError(
+            Error.Jzon_Deserialize_UnknownField,
+            deserialize(Pair, arena.allocator(), "{\"id\":1,\"g\\u006fne\":2}", .{
+                .strategy = strategy,
+            }),
+        );
+        arena.deinit();
+
+        try std.testing.expectEqualStrings("gone", Failure.lastFailure().field);
+    }
+}
+
 test "jzon deserialize: deserialize, cursor path failure notes the stop byte" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -423,7 +442,7 @@ test "jzon deserialize: deserialize, trailing bytes after the value are unexpect
     try expectFails([]const u32, "[1][2]", Error.Jzon_Deserialize_Unexpected);
 }
 
-test "jzon deserialize: deserialize, stdParserError maps every member" {
+test "jzon deserialize: deserialize, innerError renames every std_parser member" {
     const cases = .{
         .{ error.Jzon_StdParser_UnknownField, Error.Jzon_Deserialize_UnknownField },
         .{ error.Jzon_StdParser_MissingField, Error.Jzon_Deserialize_MissingField },
@@ -435,11 +454,11 @@ test "jzon deserialize: deserialize, stdParserError maps every member" {
     };
 
     inline for (cases) |case| {
-        try std.testing.expectEqual(case[1], stdParserError(case[0]));
+        try std.testing.expectEqual(case[1], innerError(case[0]));
     }
 }
 
-test "jzon deserialize: deserialize, scannerParserError maps every member" {
+test "jzon deserialize: deserialize, innerError renames every scanner_parser member" {
     const cases = .{
         .{ error.Jzon_ScannerParser_UnknownField, Error.Jzon_Deserialize_UnknownField },
         .{ error.Jzon_ScannerParser_MissingField, Error.Jzon_Deserialize_MissingField },
@@ -455,11 +474,11 @@ test "jzon deserialize: deserialize, scannerParserError maps every member" {
     };
 
     inline for (cases) |case| {
-        try std.testing.expectEqual(case[1], scannerParserError(case[0]));
+        try std.testing.expectEqual(case[1], innerError(case[0]));
     }
 }
 
-test "jzon deserialize: deserialize, generatedParserError maps every member" {
+test "jzon deserialize: deserialize, innerError renames every generated_parser member" {
     const cases = .{
         .{ error.Jzon_GeneratedParser_UnknownField, Error.Jzon_Deserialize_UnknownField },
         .{ error.Jzon_GeneratedParser_MissingField, Error.Jzon_Deserialize_MissingField },
@@ -476,7 +495,15 @@ test "jzon deserialize: deserialize, generatedParserError maps every member" {
     };
 
     inline for (cases) |case| {
-        try std.testing.expectEqual(case[1], generatedParserError(case[0]));
+        try std.testing.expectEqual(case[1], innerError(case[0]));
+    }
+}
+
+test "jzon deserialize: deserialize, innerError keeps every own member" {
+    inline for (@typeInfo(Error).error_set.error_names.?) |name| {
+        const own = @field(Error, name);
+
+        try std.testing.expectEqual(own, innerError(own));
     }
 }
 
