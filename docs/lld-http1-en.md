@@ -27,7 +27,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `tls` | selects the TLS serve path when non-null (native https), else cleartext |
 | `logger` | `logSystem` lifecycle lines |
 
-`compression`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.EPOLL` and `.URING`, where a handler opts in with `res.sendNegotiated` or `core.sendNegotiateFD`. The legacy `core.sendGzipFD` helper still uses the compile-time `core.GZIP_OUT_SIZE` (256 KB). `max_response_headers` (the `addHeader` capacity class) and `conn_timeout_ms` (blocking models only) landed with ADR-062.
+`compress`, `compression_min_size`, and `compression_max_out` (the last renamed from `max_gzip_out`) are read at runtime under `.ASYNC`, `.EPOLL`, and `.URING`, where a handler opts in with `res.sendNegotiated`. `.EPOLL` and `.URING` install them once per worker (`compress.installWorker`), `.ASYNC` once per connection (`connEntry`). `max_response_headers` (the `addHeader` capacity class) and `conn_timeout_ms` (blocking models only) landed with ADR-062.
 
 ---
 
@@ -37,7 +37,6 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 
 ```
 BUF_SIZE      = 16 * 1024   // shared scratch size (direct serveConn default, chunked reader, TLS payload buffers)
-GZIP_OUT_SIZE = 256 * 1024  // sendGzipFD output buffer
 ```
 
 ### parseHead()
@@ -185,7 +184,7 @@ The IMF-fixdate string is reformatted at most once per second per thread, and th
 | `sendSimpleNoBodyFD` | `buildSimpleHeader` only, Content-Length set to the would-be body size (HEAD) |
 | `sendJsonFD` | `sendSimpleFD` with `application/json` |
 | `send100ContinueFD` | literal `HTTP/1.1 100 Continue\r\n\r\n` |
-| `sendGzipFD` | a body under 64 KiB compresses via `compression.flate_fast` (in-tree greedy fixed-Huffman gzip, several times faster than the std matcher, no per-stream state init), larger bodies keep the `std.compress.flate` `.gzip` path over the per-worker encode scratch, then header (`Content-Encoding: gzip`) + compressed bytes |
+| `res.sendNegotiated` | negotiates `Accept-Encoding` against gzip, deflate, br (`policy.supported_default`), skips a body under `compression_min_size` or an already-compressed media type, encodes with `compression.encode` (gzip under 64 KiB via `flate_fast`, above via `std.compress.flate`), sends identity when the result is not smaller or passes `compression_max_out`, else adds `Content-Encoding` and `Vary: Accept-Encoding`. Nothing acceptable answers `406` |
 | `sendChunkedStartFD` | status line + `Transfer-Encoding: chunked`, no Content-Length |
 | `sendChunkFD` | `{x}\r\n` + data + `\r\n`, zero-length data is a no-op (would terminate the body) |
 | `sendChunkedEndFD` | `0\r\n\r\n` |
