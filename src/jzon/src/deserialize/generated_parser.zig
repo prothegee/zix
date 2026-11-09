@@ -66,141 +66,53 @@ const Source = struct {
 ///   the strings that end up in the result.
 const NAME_OPTIONS: DeserializeOptions = .{ .strings = .BORROW };
 
-/// Translate a `Cursor` failure into this module's set.
+/// Every failure a private function here can hand back: this module's own set joined
+/// with the sets of the modules it reads through.
+///
+/// Note:
+/// - Private on purpose. Inside the module every call uses `try`, and `parse`
+///   translates once on the way out, so no call site on the hot path carries its own
+///   translation.
+const Inner = Error || Cursor.Error || ScanShape.Error || integer.Error || float.Error ||
+    fields.Error || skip.Error || string_value.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - Cursor.Error (the failure the cursor reported)
+/// err - Inner (the failure a private function handed back)
 ///
 /// Return:
-/// - Error (the same failure under this module's name)
-fn cursorError(err: Cursor.Error) Error {
+/// - Inner (the same failure under this module's name)
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_GeneratedParser_UnknownField => Error.Jzon_GeneratedParser_UnknownField,
+        error.Jzon_GeneratedParser_MissingField => Error.Jzon_GeneratedParser_MissingField,
+        error.Jzon_GeneratedParser_UnknownEnumValue,
+        => Error.Jzon_GeneratedParser_UnknownEnumValue,
+        error.Jzon_GeneratedParser_Truncated => Error.Jzon_GeneratedParser_Truncated,
+        error.Jzon_GeneratedParser_Unexpected => Error.Jzon_GeneratedParser_Unexpected,
+        error.Jzon_GeneratedParser_BadNumber => Error.Jzon_GeneratedParser_BadNumber,
+        error.Jzon_GeneratedParser_BadEscape => Error.Jzon_GeneratedParser_BadEscape,
+        error.Jzon_GeneratedParser_NoSpaceLeft => Error.Jzon_GeneratedParser_NoSpaceLeft,
+        error.Jzon_GeneratedParser_OutOfMemory => Error.Jzon_GeneratedParser_OutOfMemory,
         error.Jzon_Cursor_Truncated => Error.Jzon_GeneratedParser_Truncated,
         error.Jzon_Cursor_Unexpected => Error.Jzon_GeneratedParser_Unexpected,
-    };
-}
-
-/// Translate a `ScanShape` failure into this module's set.
-///
-/// Param:
-/// err - ScanShape.Error (the failure the width-picked scan reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn scanShapeError(err: ScanShape.Error) Error {
-    return switch (err) {
         error.Jzon_ScanShape_Truncated => Error.Jzon_GeneratedParser_Truncated,
         error.Jzon_ScanShape_Unexpected => Error.Jzon_GeneratedParser_Unexpected,
-    };
-}
-
-/// Translate an `integer` failure into this module's set.
-///
-/// Param:
-/// err - integer.Error (the failure the integer reader reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn integerError(err: integer.Error) Error {
-    return switch (err) {
         error.Jzon_Integer_NoSpaceLeft => Error.Jzon_GeneratedParser_NoSpaceLeft,
         error.Jzon_Integer_BadNumber => Error.Jzon_GeneratedParser_BadNumber,
-    };
-}
-
-/// Translate a `float` failure into this module's set.
-///
-/// Param:
-/// err - float.Error (the failure the float reader reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn floatError(err: float.Error) Error {
-    return switch (err) {
         error.Jzon_Float_NoSpaceLeft => Error.Jzon_GeneratedParser_NoSpaceLeft,
         error.Jzon_Float_BadNumber => Error.Jzon_GeneratedParser_BadNumber,
-    };
-}
-
-/// Translate a `fields` failure into this module's set.
-///
-/// Param:
-/// err - fields.Error (the failure the field bookkeeping reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn fieldsError(err: fields.Error) Error {
-    return switch (err) {
         error.Jzon_Fields_Unexpected => Error.Jzon_GeneratedParser_Unexpected,
         error.Jzon_Fields_MissingField => Error.Jzon_GeneratedParser_MissingField,
-    };
-}
-
-/// Translate a `skip` failure into this module's set.
-///
-/// Param:
-/// err - skip.Error (the failure the value walk reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn skipError(err: skip.Error) Error {
-    return switch (err) {
         error.Jzon_Skip_Truncated => Error.Jzon_GeneratedParser_Truncated,
         error.Jzon_Skip_Unexpected => Error.Jzon_GeneratedParser_Unexpected,
-    };
-}
-
-/// Translate a `string_value` failure into this module's set.
-///
-/// Param:
-/// err - string_value.Error (the failure taking a string reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn stringValueError(err: string_value.Error) Error {
-    return switch (err) {
         error.Jzon_StringValue_BadEscape => Error.Jzon_GeneratedParser_BadEscape,
         error.Jzon_StringValue_NoSpaceLeft => Error.Jzon_GeneratedParser_NoSpaceLeft,
         error.Jzon_StringValue_OutOfMemory => Error.Jzon_GeneratedParser_OutOfMemory,
     };
-}
-
-/// Require `wanted` as the next byte and step past it.
-///
-/// Param:
-/// cursor - *Cursor (the cursor to advance)
-/// wanted - u8 (the byte the grammar needs here)
-///
-/// Return:
-/// - void
-/// - Error.Jzon_GeneratedParser_Truncated or Unexpected when it is not there
-fn expectByte(cursor: *Cursor, wanted: u8) Error!void {
-    cursor.expect(wanted) catch |err| return cursorError(err);
-}
-
-/// The next byte, without taking it.
-///
-/// Param:
-/// cursor - *Cursor (the cursor to look at)
-///
-/// Return:
-/// - u8 (the byte under the cursor)
-/// - Error.Jzon_GeneratedParser_Truncated when the document has ended
-fn peekByte(cursor: *Cursor) Error!u8 {
-    return cursor.peek() catch |err| cursorError(err);
-}
-
-/// Require one literal word (`true`, `false`, `null`) and step past it.
-///
-/// Param:
-/// cursor - *Cursor (the cursor to advance)
-/// text - []const u8 (comptime, the word)
-///
-/// Return:
-/// - void
-/// - Error.Jzon_GeneratedParser_Truncated or Unexpected when it is not there
-fn literal(cursor: *Cursor, comptime text: []const u8) Error!void {
-    cursor.literal(text) catch |err| return cursorError(err);
 }
 
 /// Step over whitespace, then bound the number token that follows.
@@ -211,11 +123,11 @@ fn literal(cursor: *Cursor, comptime text: []const u8) Error!void {
 ///
 /// Return:
 /// - []const u8 (the number token's bytes, unchecked)
-/// - Error.Jzon_GeneratedParser_Truncated or Unexpected when no number starts here
-fn numberText(cursor: *Cursor, comptime shape: ScanShape) Error![]const u8 {
+/// - Inner (a cursor failure, untranslated) when no number starts here
+inline fn numberText(cursor: *Cursor, comptime shape: ScanShape) Inner![]const u8 {
     shape.skipSpace(cursor);
 
-    return cursor.numberSpan() catch |err| cursorError(err);
+    return cursor.numberSpan();
 }
 
 /// Step over whitespace, then read a string token as a value.
@@ -227,62 +139,73 @@ fn numberText(cursor: *Cursor, comptime shape: ScanShape) Error![]const u8 {
 ///
 /// Return:
 /// - []const u8 (the string's value)
-/// - Error (a broken token, a bad escape, or out of memory)
-fn stringToken(
+/// - Inner (a broken token, a bad escape, or out of memory)
+inline fn stringToken(
     source: Source,
     comptime shape: ScanShape,
     comptime options: DeserializeOptions,
-) Error![]const u8 {
+) Inner![]const u8 {
     shape.skipSpace(source.cursor);
 
-    const span = shape.stringSpan(source.cursor) catch |err| return scanShapeError(err);
+    const span = try shape.stringSpan(source.cursor);
 
-    return string_value.take(source.allocator, span, options) catch |err|
-        stringValueError(err);
+    return string_value.take(source.allocator, span, options);
 }
 
-/// Read one value of `Target`, whatever shape the type is.
+/// Read one value of `Target`, whatever shape the type is, straight into `out`.
+///
+/// Note:
+/// - Every read writes into its destination and returns only the error code. A
+///   returned value travels back through a stack slot that the copy, decode, and
+///   error paths all write, and reading it back stalled on every string (measured).
 ///
 /// Param:
 /// Target - type (comptime, the type to build)
+/// out - *Target (where the value goes, left undefined on a failure)
 /// source - Source (the cursor and its allocator)
 /// options - DeserializeOptions (comptime, string mode and unknown key rule)
 /// shape - ScanShape (comptime, which width to scan at)
 ///
 /// Return:
-/// - Target (the value)
-/// - Error (any failure of the token or the field it lands in)
-fn readValue(
+/// - void
+/// - Inner (any failure of the token or the field it lands in)
+fn readInto(
     comptime Target: type,
+    out: *Target,
     source: Source,
     comptime options: DeserializeOptions,
     comptime shape: ScanShape,
-) Error!Target {
+) Inner!void {
     switch (@typeInfo(Target)) {
-        .bool => return readBool(source.cursor, shape),
+        .bool => out.* = try readBool(source.cursor, shape),
 
         .int => {
             const text = try numberText(source.cursor, shape);
 
-            return integer.parse(Target, text) catch |err| integerError(err);
+            out.* = try integer.parse(Target, text);
         },
 
         .float => {
             const text = try numberText(source.cursor, shape);
 
-            return float.parse(Target, text) catch |err| floatError(err);
+            out.* = try float.parse(Target, text);
         },
 
         .optional => |info| {
             shape.skipSpace(source.cursor);
 
-            if ((try peekByte(source.cursor)) == 'n') {
-                try literal(source.cursor, "null");
+            if ((try source.cursor.peek()) == 'n') {
+                try source.cursor.literal("null");
 
-                return null;
+                out.* = null;
+
+                return;
             }
 
-            return try readValue(info.child, source, options, shape);
+            var payload: info.child = undefined;
+            try readInto(info.child, &payload, source, options, shape);
+
+            out.* = payload;
         },
 
         .@"enum" => {
@@ -291,7 +214,7 @@ fn readValue(
                     " is non-exhaustive, so a name cannot cover every value it carries",
             );
 
-            return readEnum(Target, source, shape);
+            out.* = try readEnum(Target, source, shape);
         },
 
         .@"struct" => |info| {
@@ -300,7 +223,7 @@ fn readValue(
                     " is a tuple, which has no object form",
             );
 
-            return readStruct(Target, source, options, shape);
+            try readStruct(Target, out, source, options, shape);
         },
 
         .pointer => |info| {
@@ -309,9 +232,9 @@ fn readValue(
                     " is not a slice, so it has no JSON form",
             );
 
-            if (info.child == u8) return readString(Target, source, options, shape);
+            if (info.child == u8) return readString(Target, out, source, options, shape);
 
-            return readSlice(Target, source, options, shape);
+            try readSlice(Target, out, source, options, shape);
         },
 
         else => @compileError(
@@ -329,18 +252,18 @@ fn readValue(
 /// Return:
 /// - bool (the value)
 /// - Error.Jzon_GeneratedParser_Unexpected when the token is not `true` or `false`
-fn readBool(cursor: *Cursor, comptime shape: ScanShape) Error!bool {
+fn readBool(cursor: *Cursor, comptime shape: ScanShape) Inner!bool {
     shape.skipSpace(cursor);
 
-    switch (try peekByte(cursor)) {
+    switch (try cursor.peek()) {
         't' => {
-            try literal(cursor, "true");
+            try cursor.literal("true");
 
             return true;
         },
 
         'f' => {
-            try literal(cursor, "false");
+            try cursor.literal("false");
 
             return false;
         },
@@ -359,7 +282,7 @@ fn readBool(cursor: *Cursor, comptime shape: ScanShape) Error!bool {
 /// Return:
 /// - Target (the tag)
 /// - Error.Jzon_GeneratedParser_UnknownEnumValue when no tag carries that name
-fn readEnum(comptime Target: type, source: Source, comptime shape: ScanShape) Error!Target {
+fn readEnum(comptime Target: type, source: Source, comptime shape: ScanShape) Inner!Target {
     const name = try stringToken(source, shape, NAME_OPTIONS);
 
     return std.meta.stringToEnum(Target, name) orelse {
@@ -373,25 +296,26 @@ fn readEnum(comptime Target: type, source: Source, comptime shape: ScanShape) Er
 ///
 /// Param:
 /// Target - type (comptime, the struct to build)
+/// out - *Target (the struct, filled field by field)
 /// source - Source (the cursor and its allocator)
 /// options - DeserializeOptions (comptime, string mode and unknown key rule)
 /// shape - ScanShape (comptime, which width to scan at)
 ///
 /// Return:
-/// - Target (the struct)
-/// - Error (a bad key, a bad value, or a field the document owed)
+/// - void
+/// - Inner (a bad key, a bad value, or a field the document owed)
 fn readStruct(
     comptime Target: type,
+    out: *Target,
     source: Source,
     comptime options: DeserializeOptions,
     comptime shape: ScanShape,
-) Error!Target {
+) Inner!void {
     const cursor = source.cursor;
 
     shape.skipSpace(cursor);
-    try expectByte(cursor, '{');
+    try cursor.expect('{');
 
-    var result: Target = undefined;
     var seen: fields.Seen(Target) = .{};
 
     shape.skipSpace(cursor);
@@ -401,21 +325,19 @@ fn readStruct(
             const key = try stringToken(source, shape, NAME_OPTIONS);
 
             shape.skipSpace(cursor);
-            try expectByte(cursor, ':');
+            try cursor.expect(':');
 
-            try readField(Target, &result, &seen, key, source, options, shape);
+            try readField(Target, out, &seen, key, source, options, shape);
 
             shape.skipSpace(cursor);
             if (cursor.accept(',')) continue;
 
-            try expectByte(cursor, '}');
+            try cursor.expect('}');
             break;
         }
     }
 
-    seen.fill(&result) catch |err| return fieldsError(err);
-
-    return result;
+    try seen.fill(out);
 }
 
 /// Read the value behind one object key into the field that key names.
@@ -445,13 +367,14 @@ fn readField(
     source: Source,
     comptime options: DeserializeOptions,
     comptime shape: ScanShape,
-) Error!void {
+) Inner!void {
     inline for (comptime std.meta.fieldNames(Target), 0..) |name, index| {
         if (std.mem.eql(u8, name, key)) {
-            seen.mark(index) catch |err| return fieldsError(err);
+            try seen.mark(index);
 
             const Field = @FieldType(Target, name);
-            @field(result, name) = try readValue(Field, source, options, shape);
+
+            try readInto(Field, &@field(result, name), source, options, shape);
 
             return;
         }
@@ -463,7 +386,7 @@ fn readField(
 
             return Error.Jzon_GeneratedParser_UnknownField;
         },
-        .SKIP => skip.value(source.cursor, shape) catch |err| return skipError(err),
+        .SKIP => try skip.value(source.cursor, shape),
     }
 }
 
@@ -471,19 +394,21 @@ fn readField(
 ///
 /// Param:
 /// Target - type (comptime, a plain slice type)
+/// out - *Target (the slice, owned by the allocator)
 /// source - Source (the cursor and its allocator)
 /// options - DeserializeOptions (comptime, string mode and unknown key rule)
 /// shape - ScanShape (comptime, which width to scan at)
 ///
 /// Return:
-/// - Target (the slice, owned by the allocator)
-/// - Error (a bad element, or Error.Jzon_GeneratedParser_OutOfMemory)
+/// - void
+/// - Inner (a bad element, or Error.Jzon_GeneratedParser_OutOfMemory)
 fn readSlice(
     comptime Target: type,
+    out: *Target,
     source: Source,
     comptime options: DeserializeOptions,
     comptime shape: ScanShape,
-) Error!Target {
+) Inner!void {
     const Element = @typeInfo(Target).pointer.child;
 
     if (Target != []const Element and Target != []Element) @compileError(
@@ -494,7 +419,7 @@ fn readSlice(
     const cursor = source.cursor;
 
     shape.skipSpace(cursor);
-    try expectByte(cursor, '[');
+    try cursor.expect('[');
 
     var elements: std.ArrayList(Element) = .empty;
 
@@ -502,22 +427,22 @@ fn readSlice(
 
     if (!cursor.accept(']')) {
         while (true) {
-            const element = try readValue(Element, source, options, shape);
-
-            elements.append(source.allocator, element) catch |err| switch (err) {
+            const slot = elements.addOne(source.allocator) catch |err| switch (err) {
                 error.OutOfMemory => return Error.Jzon_GeneratedParser_OutOfMemory,
             };
+
+            try readInto(Element, slot, source, options, shape);
 
             shape.skipSpace(cursor);
             if (cursor.accept(',')) continue;
 
-            try expectByte(cursor, ']');
+            try cursor.expect(']');
             break;
         }
     }
 
-    return elements.toOwnedSlice(source.allocator) catch |err| switch (err) {
-        error.OutOfMemory => Error.Jzon_GeneratedParser_OutOfMemory,
+    out.* = elements.toOwnedSlice(source.allocator) catch |err| switch (err) {
+        error.OutOfMemory => return Error.Jzon_GeneratedParser_OutOfMemory,
     };
 }
 
@@ -525,25 +450,27 @@ fn readSlice(
 ///
 /// Param:
 /// Target - type (comptime, must be `[]const u8`)
+/// out - *Target (the string)
 /// source - Source (the cursor and its allocator)
 /// options - DeserializeOptions (comptime, string mode)
 /// shape - ScanShape (comptime, which width to scan at)
 ///
 /// Return:
-/// - Target (the string)
-/// - Error (a broken token, a bad escape, or out of memory)
+/// - void
+/// - Inner (a broken token, a bad escape, or out of memory)
 fn readString(
     comptime Target: type,
+    out: *Target,
     source: Source,
     comptime options: DeserializeOptions,
     comptime shape: ScanShape,
-) Error!Target {
+) Inner!void {
     if (Target != []const u8) @compileError(
         "jzon generated parser: " ++ @typeName(Target) ++
             " is not []const u8, the only string form a parse produces",
     );
 
-    return stringToken(source, shape, options);
+    out.* = try stringToken(source, shape, options);
 }
 
 // --------------------------------------------------------- //
@@ -605,7 +532,8 @@ pub fn parse(
         .cursor = &cursor,
     };
 
-    const value = try readValue(Target, source, options, shape);
+    var value: Target = undefined;
+    readInto(Target, &value, source, options, shape) catch |err| return innerError(err);
 
     shape.skipSpace(&cursor);
     if (!cursor.atEnd()) return Error.Jzon_GeneratedParser_Unexpected;
@@ -671,6 +599,11 @@ fn expectFails(comptime Target: type, src: []const u8, expected: Error) !void {
 fn pointsInto(text: []const u8, document: []const u8) bool {
     return @intFromPtr(text.ptr) >= @intFromPtr(document.ptr) and
         @intFromPtr(text.ptr) < @intFromPtr(document.ptr) + document.len;
+}
+
+/// Require `innerError` to turn `from` into `wanted`.
+fn expectInner(from: Inner, wanted: Error) !void {
+    try std.testing.expectEqual(wanted, innerError(from));
 }
 
 test "jzon deserialize: generated_parser, reads a whole record at both widths" {
@@ -811,62 +744,124 @@ test "jzon deserialize: generated_parser, reads a document laid out with whitesp
     }
 }
 
-test "jzon deserialize: generated_parser, cursorError maps every cursor member" {
-    const truncated = cursorError(error.Jzon_Cursor_Truncated);
-    const unexpected = cursorError(error.Jzon_Cursor_Unexpected);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_Truncated, truncated);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_Unexpected, unexpected);
+test "jzon deserialize: generated_parser, innerError keeps every own member" {
+    try expectInner(
+        error.Jzon_GeneratedParser_UnknownField,
+        Error.Jzon_GeneratedParser_UnknownField,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_MissingField,
+        Error.Jzon_GeneratedParser_MissingField,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_UnknownEnumValue,
+        Error.Jzon_GeneratedParser_UnknownEnumValue,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_Truncated,
+        Error.Jzon_GeneratedParser_Truncated,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_Unexpected,
+        Error.Jzon_GeneratedParser_Unexpected,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_BadNumber,
+        Error.Jzon_GeneratedParser_BadNumber,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_BadEscape,
+        Error.Jzon_GeneratedParser_BadEscape,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_NoSpaceLeft,
+        Error.Jzon_GeneratedParser_NoSpaceLeft,
+    );
+    try expectInner(
+        error.Jzon_GeneratedParser_OutOfMemory,
+        Error.Jzon_GeneratedParser_OutOfMemory,
+    );
 }
 
-test "jzon deserialize: generated_parser, scanShapeError maps every scan member" {
-    const truncated = scanShapeError(error.Jzon_ScanShape_Truncated);
-    const unexpected = scanShapeError(error.Jzon_ScanShape_Unexpected);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_Truncated, truncated);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_Unexpected, unexpected);
+test "jzon deserialize: generated_parser, innerError maps every cursor member" {
+    try expectInner(
+        error.Jzon_Cursor_Truncated,
+        Error.Jzon_GeneratedParser_Truncated,
+    );
+    try expectInner(
+        error.Jzon_Cursor_Unexpected,
+        Error.Jzon_GeneratedParser_Unexpected,
+    );
 }
 
-test "jzon deserialize: generated_parser, integerError maps every integer member" {
-    const no_space = integerError(error.Jzon_Integer_NoSpaceLeft);
-    const bad_number = integerError(error.Jzon_Integer_BadNumber);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_NoSpaceLeft, no_space);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_BadNumber, bad_number);
+test "jzon deserialize: generated_parser, innerError maps every scan member" {
+    try expectInner(
+        error.Jzon_ScanShape_Truncated,
+        Error.Jzon_GeneratedParser_Truncated,
+    );
+    try expectInner(
+        error.Jzon_ScanShape_Unexpected,
+        Error.Jzon_GeneratedParser_Unexpected,
+    );
 }
 
-test "jzon deserialize: generated_parser, floatError maps every float member" {
-    const no_space = floatError(error.Jzon_Float_NoSpaceLeft);
-    const bad_number = floatError(error.Jzon_Float_BadNumber);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_NoSpaceLeft, no_space);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_BadNumber, bad_number);
+test "jzon deserialize: generated_parser, innerError maps every integer member" {
+    try expectInner(
+        error.Jzon_Integer_NoSpaceLeft,
+        Error.Jzon_GeneratedParser_NoSpaceLeft,
+    );
+    try expectInner(
+        error.Jzon_Integer_BadNumber,
+        Error.Jzon_GeneratedParser_BadNumber,
+    );
 }
 
-test "jzon deserialize: generated_parser, fieldsError maps every fields member" {
-    const unexpected = fieldsError(error.Jzon_Fields_Unexpected);
-    const missing = fieldsError(error.Jzon_Fields_MissingField);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_Unexpected, unexpected);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_MissingField, missing);
+test "jzon deserialize: generated_parser, innerError maps every float member" {
+    try expectInner(
+        error.Jzon_Float_NoSpaceLeft,
+        Error.Jzon_GeneratedParser_NoSpaceLeft,
+    );
+    try expectInner(
+        error.Jzon_Float_BadNumber,
+        Error.Jzon_GeneratedParser_BadNumber,
+    );
 }
 
-test "jzon deserialize: generated_parser, skipError maps every skip member" {
-    const truncated = skipError(error.Jzon_Skip_Truncated);
-    const unexpected = skipError(error.Jzon_Skip_Unexpected);
-
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_Truncated, truncated);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_Unexpected, unexpected);
+test "jzon deserialize: generated_parser, innerError maps every fields member" {
+    try expectInner(
+        error.Jzon_Fields_Unexpected,
+        Error.Jzon_GeneratedParser_Unexpected,
+    );
+    try expectInner(
+        error.Jzon_Fields_MissingField,
+        Error.Jzon_GeneratedParser_MissingField,
+    );
 }
 
-test "jzon deserialize: generated_parser, stringValueError maps every string member" {
-    const bad_escape = stringValueError(error.Jzon_StringValue_BadEscape);
-    const no_space = stringValueError(error.Jzon_StringValue_NoSpaceLeft);
-    const no_memory = stringValueError(error.Jzon_StringValue_OutOfMemory);
+test "jzon deserialize: generated_parser, innerError maps every skip member" {
+    try expectInner(
+        error.Jzon_Skip_Truncated,
+        Error.Jzon_GeneratedParser_Truncated,
+    );
+    try expectInner(
+        error.Jzon_Skip_Unexpected,
+        Error.Jzon_GeneratedParser_Unexpected,
+    );
+}
 
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_BadEscape, bad_escape);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_NoSpaceLeft, no_space);
-    try std.testing.expectEqual(Error.Jzon_GeneratedParser_OutOfMemory, no_memory);
+test "jzon deserialize: generated_parser, innerError maps every string member" {
+    try expectInner(
+        error.Jzon_StringValue_BadEscape,
+        Error.Jzon_GeneratedParser_BadEscape,
+    );
+    try expectInner(
+        error.Jzon_StringValue_NoSpaceLeft,
+        Error.Jzon_GeneratedParser_NoSpaceLeft,
+    );
+    try expectInner(
+        error.Jzon_StringValue_OutOfMemory,
+        Error.Jzon_GeneratedParser_OutOfMemory,
+    );
 }
 
 test "jzon deserialize: generated_parser, document that ends early is truncated" {
