@@ -135,7 +135,6 @@ Access via `const zix = @import("zix");`
 | `zix.Http1.sendSimpleFD` | fn | Full response with Content-Length body |
 | `zix.Http1.sendSimpleNoBodyFD` | fn | Headers-only response (HEAD method) |
 | `zix.Http1.sendJsonFD` | fn | `sendSimpleFD` shorthand with `application/json` |
-| `zix.Http1.sendGzipFD` | fn | gzip-compressed response (in-tree `flate_fast` for bodies under 64 KiB, `std.compress.flate` above) |
 | `zix.Http1.sendChunkedStartFD` | fn | Start a `Transfer-Encoding: chunked` response |
 | `zix.Http1.sendChunkFD` | fn | Write one chunk |
 | `zix.Http1.sendChunkedEndFD` | fn | Terminate the chunked body |
@@ -154,7 +153,7 @@ port:                             u16,                     // must be non-zero
 logger:                           ?*Logger = null,         // lifecycle lines, see Logging section
 dispatch_model:                   DispatchModel,
 workers:                          usize = 0,               // 0 = cpu_count, ignored by .ASYNC
-worker_stack_size_bytes:          usize = 1 * 1024,
+worker_stack_size_bytes:          usize = 1 * 1024 * 1024,
 compress_worker_stack_size_bytes: usize = 2 * 1024 * 1024, // worker stack when compress is on
 kernel_backlog:                   u31 = 1 * 1024,          // TCP listen() backlog
 handler_timeout_ms:               u32 = 0,                 // per-handler budget, 0 = disabled
@@ -178,7 +177,7 @@ public_dir_cache_max_entries:     u32 = 256,               // static file cache 
 
 The full field reference (meaning, trade-offs, when to change) lives in [`docs/zix-config-en.md`](zix-config-en.md).
 
-Note: under `.ASYNC` the connection loop borrows the pool thread's receive + body buffer pair (`core.threadConnBufs`), each `max_recv_buf` bytes, reused by every connection that thread serves. `max_recv_buf` therefore sizes the per-connection buffer under every dispatch model (a direct `core.serveConn` caller that leaves `ServeOpts.max_recv_buf` at 0 gets `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated` (or `core.sendNegotiateFD` on the raw path). The `core.sendGzipFD` helper uses the compile-time `core.GZIP_OUT_SIZE`. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
+Note: under `.ASYNC` the connection loop borrows the pool thread's receive + body buffer pair (`core.threadConnBufs`), each `max_recv_buf` bytes, reused by every connection that thread serves. `max_recv_buf` therefore sizes the per-connection buffer under every dispatch model (a direct `core.serveConn` caller that leaves `ServeOpts.max_recv_buf` at 0 gets `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated`. A handler that needs one coding explicitly calls `zix.utils.compression.encode` and sets `Content-Encoding` itself. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
 
 Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
 
@@ -431,7 +430,8 @@ Per-request access logging is the engine's, not the handler's. When `config.logg
 | Per-connection buffer (.EPOLL) | per-worker slab, compact page-aligned slots, `max_recv_buf` bytes usable | Connection |
 | Per-connection recv + send buffers (.URING) | per-worker mmap'd stride slab, compact slots, THP opted out | Connection |
 | Body + output staging (.EPOLL) | `smp_allocator`, per worker | Worker thread |
-| Compression scratch (gzip / negotiate) | one lazily mmap'd per-worker block, reused across calls | Worker thread |
+| Compression output (`sendNegotiated`) | the encoded body on the per-request allocator, freed after `send` | Request |
+| Compression scratch | std flate state and brotli tables on the heap per call, the fast gzip hash table is one 16 KiB threadlocal | Call / worker thread |
 | Per-request arena (`ctx.allocator`) | per worker (event loops) or per connection (blocking models), reset per dispatch | Request |
 | Handler allocations | `ctx.allocator` (arena), or bring your own | Request |
 
