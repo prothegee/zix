@@ -60,46 +60,48 @@ const SHAPE_VECTOR: EmitShape = .{
     .escapes = .VECTOR,
 };
 
-/// Translate a `std_emitter` failure into the public set.
-///
-/// Param:
-/// err - std_emitter.Error (the failure the std path reported)
-///
-/// Return:
-/// - Error (the same failure under the public name)
-fn stdEmitterError(err: std_emitter.Error) Error {
-    return switch (err) {
-        error.Jzon_StdEmitter_NoSpaceLeft => Error.Jzon_Serialize_NoSpaceLeft,
-    };
-}
+/// Every failure a private function here can hand back: the public set joined with
+/// the sets of both emitters.
+const Inner = Error || std_emitter.Error || generated_emitter.Error;
 
-/// Translate a `generated_emitter` failure into the public set.
+/// Translate a failure from inside the module into the public set.
 ///
 /// Param:
-/// err - generated_emitter.Error (the failure the generated path reported)
+/// err - Inner (the failure an emitter handed back)
 ///
 /// Return:
 /// - Error (the same failure under the public name)
-fn generatedEmitterError(err: generated_emitter.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_Serialize_NoSpaceLeft => Error.Jzon_Serialize_NoSpaceLeft,
+        error.Jzon_Serialize_BadNumber => Error.Jzon_Serialize_BadNumber,
+        error.Jzon_Serialize_BadEscape => Error.Jzon_Serialize_BadEscape,
+        error.Jzon_StdEmitter_NoSpaceLeft => Error.Jzon_Serialize_NoSpaceLeft,
         error.Jzon_GeneratedEmitter_NoSpaceLeft => Error.Jzon_Serialize_NoSpaceLeft,
         error.Jzon_GeneratedEmitter_BadNumber => Error.Jzon_Serialize_BadNumber,
         error.Jzon_GeneratedEmitter_BadEscape => Error.Jzon_Serialize_BadEscape,
     };
 }
 
-/// Run one generated pairing and translate its failure.
+/// The body of `serialize`: run the path the strategy names.
 ///
 /// Param:
 /// sink - *Sink (where the JSON text goes)
 /// value - anytype (the value to render)
-/// shape - EmitShape (comptime, the pairing to run)
+/// options - SerializeOptions (comptime, which write path runs)
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Serialize_NoSpaceLeft when the rendered form does not fit
-fn emitGenerated(sink: *Sink, value: anytype, comptime shape: EmitShape) Error!void {
-    generated_emitter.emit(sink, value, shape) catch |err| return generatedEmitterError(err);
+/// - Inner (the NoSpaceLeft of whichever emitter ran) when the rendered form does not fit
+fn emitInto(sink: *Sink, value: anytype, comptime options: SerializeOptions) Inner!void {
+    switch (options.strategy) {
+        .STD => try std_emitter.emit(sink, value),
+        .GENERATED_FMT => try generated_emitter.emit(sink, value, SHAPE_FMT),
+        .GENERATED => try generated_emitter.emit(sink, value, SHAPE_TABLE),
+        .GENERATED_VECTOR => try generated_emitter.emit(sink, value, SHAPE_VECTOR),
+    }
 }
 
 // --------------------------------------------------------- //
@@ -147,12 +149,7 @@ pub fn serialize(
 ) Error!usize {
     var sink: Sink = .init(buf);
 
-    switch (options.strategy) {
-        .STD => std_emitter.emit(&sink, value) catch |err| return stdEmitterError(err),
-        .GENERATED_FMT => try emitGenerated(&sink, value, SHAPE_FMT),
-        .GENERATED => try emitGenerated(&sink, value, SHAPE_TABLE),
-        .GENERATED_VECTOR => try emitGenerated(&sink, value, SHAPE_VECTOR),
-    }
+    emitInto(&sink, value, options) catch |err| return innerError(err);
 
     return sink.written();
 }
@@ -253,28 +250,36 @@ test "jzon serialize: serialize, STD renders a shape the generated paths refuse"
     try std.testing.expectEqualStrings("[1,true]", buf[0..len]);
 }
 
-test "jzon serialize: serialize, stdEmitterError maps no space left" {
-    const err = stdEmitterError(error.Jzon_StdEmitter_NoSpaceLeft);
+test "jzon serialize: serialize, innerError renames std_emitter no space left" {
+    const err = innerError(error.Jzon_StdEmitter_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_Serialize_NoSpaceLeft, err);
 }
 
-test "jzon serialize: serialize, generatedEmitterError maps no space left" {
-    const err = generatedEmitterError(error.Jzon_GeneratedEmitter_NoSpaceLeft);
+test "jzon serialize: serialize, innerError renames generated_emitter no space left" {
+    const err = innerError(error.Jzon_GeneratedEmitter_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_Serialize_NoSpaceLeft, err);
 }
 
-test "jzon serialize: serialize, generatedEmitterError maps bad number" {
-    const err = generatedEmitterError(error.Jzon_GeneratedEmitter_BadNumber);
+test "jzon serialize: serialize, innerError renames generated_emitter bad number" {
+    const err = innerError(error.Jzon_GeneratedEmitter_BadNumber);
 
     try std.testing.expectEqual(Error.Jzon_Serialize_BadNumber, err);
 }
 
-test "jzon serialize: serialize, generatedEmitterError maps bad escape" {
-    const err = generatedEmitterError(error.Jzon_GeneratedEmitter_BadEscape);
+test "jzon serialize: serialize, innerError renames generated_emitter bad escape" {
+    const err = innerError(error.Jzon_GeneratedEmitter_BadEscape);
 
     try std.testing.expectEqual(Error.Jzon_Serialize_BadEscape, err);
+}
+
+test "jzon serialize: serialize, innerError keeps every own member" {
+    inline for (@typeInfo(Error).error_set.error_names.?) |name| {
+        const own = @field(Error, name);
+
+        try std.testing.expectEqual(own, innerError(own));
+    }
 }
 
 test "jzon serialize: serialize, fills a buffer that is exactly big enough" {
