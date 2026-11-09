@@ -41,9 +41,12 @@ const Content = @import("../../utils/http/content.zig");
 const HttpHeader = @import("HttpHeader.zig");
 const Request = @import("Request.zig");
 const compression = @import("../../utils/compression/compression.zig");
+const negotiate = @import("../../utils/compression/negotiate.zig");
+const policy = @import("../../utils/compression/policy.zig");
 const SseWriter = @import("SseWriter.zig");
 
 // --------------------------------------------------------- //
+// Fields:
 
 fd: std.posix.fd_t,
 io: std.Io,
@@ -59,6 +62,7 @@ extra_len: usize = 0,
 const Self = @This();
 
 // --------------------------------------------------------- //
+// Private:
 
 /// Scratch for one extra header line during a streamed header write.
 const EXTRA_HEADER_BUF: usize = 256;
@@ -114,6 +118,7 @@ fn buildFull(self: *Self, body: []const u8) Error![]u8 {
 }
 
 // --------------------------------------------------------- //
+// Public:
 
 /// ZIX Http1 Response error
 pub const Error = error {
@@ -333,13 +338,13 @@ pub fn sendNegotiated(self: *Self, req: *const Request, body: []const u8) Error!
     if (!compress.tl_compression) return self.send(body);
 
     const accept = parser.acceptEncoding(req.head);
-    const encoding = compression.negotiate(accept, &compression.supported_default) orelse {
+    const encoding = negotiate.negotiate(accept, &policy.supported_default) orelse {
         self.setStatus(.NOT_ACCEPTABLE);
 
         return self.send("");
     };
 
-    const should_compress = compression.shouldCompress(
+    const should_compress = policy.shouldCompress(
         body.len, self.contentTypeString(), compress.tl_compression_min_size,
     );
     if (encoding == .IDENTITY or !should_compress) {
@@ -351,6 +356,8 @@ pub fn sendNegotiated(self: *Self, req: *const Request, body: []const u8) Error!
     ) catch |err| switch (err) {
         else => return self.send(body),
     };
+    // send copies the body into the response, so the encoded bytes can go after it.
+    defer self.allocator.free(encoded);
 
     if (encoded.len > compress.tl_compression_max_out or encoded.len >= body.len) {
         return self.send(body);
@@ -411,6 +418,67 @@ pub fn sendStream(self: *Self) Error!SseWriter {
 // Test:
 
 const pair = @import("../../utils/socket/pair.zig");
+
+/// Run sendNegotiated for a request with the given Accept-Encoding line and read
+/// the whole response into out.
+fn testNegotiated(
+    accept_line: []const u8,
+    content_type: Content.Type,
+    body: []const u8,
+    out: []u8,
+) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var raw_buf: [256]u8 = undefined;
+    const raw = try std.fmt.bufPrint(&raw_buf, "GET / HTTP/1.1\r\nHost: x\r\n{s}\r\n", .{
+        accept_line,
+    });
+    const parsed = try parser.parseHead(raw);
+    const req = Request.init(&parsed.head, "", fds[0]);
+
+    var res = Self.init(fds[0], std.testing.io, arena.allocator());
+    res.setContentType(content_type);
+    try res.sendNegotiated(&req, body);
+
+    var len: usize = 0;
+    while (len < out.len) {
+        const n = try std.posix.read(fds[1], out[len..]);
+        len += n;
+
+        const head_end = std.mem.indexOf(u8, out[0..len], "\r\n\r\n") orelse continue;
+        const length_at = std.mem.indexOf(u8, out[0..head_end], "Content-Length: ").?;
+        const length_text = out[length_at + 16 ..];
+        const length_end = std.mem.indexOf(u8, length_text, "\r\n").?;
+        const body_len = try std.fmt.parseInt(usize, length_text[0..length_end], 10);
+        if (len >= head_end + 4 + body_len) break;
+    }
+
+    return out[0..len];
+}
+
+fn testRepeated(comptime unit: []const u8, comptime times: usize) []const u8 {
+    const text = comptime blk: {
+        var out: [unit.len * times]u8 = undefined;
+        for (0..times) |i| @memcpy(out[i * unit.len ..][0..unit.len], unit);
+
+        break :blk out;
+    };
+
+    return &text;
+}
+
+fn testBodyOf(response: []const u8) []const u8 {
+    const head_end = std.mem.indexOf(u8, response, "\r\n\r\n").?;
+
+    return response[head_end + 4 ..];
+}
+
 
 test "zix http1: Response, sends extra headers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -498,5 +566,114 @@ test "zix http1: Response, sends a json body" {
         "HTTP/1.1 200 Ok\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
         buf[0..n],
     );
+}
+
+test "zix http1: Response, sendNegotiated sends identity when compression is off" {
+    compress.setCompression(false, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+
+    const body: [1024]u8 = @splat('a');
+    var out: [4096]u8 = undefined;
+    const response = try testNegotiated("Accept-Encoding: gzip\r\n", .TEXT_PLAIN, &body, &out);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Encoding") == null);
+    try std.testing.expectEqualStrings(&body, testBodyOf(response));
+}
+
+test "zix http1: Response, sendNegotiated sends gzip when accepted" {
+    compress.setCompression(true, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+    defer compress.setCompression(false, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+
+    const body = testRepeated("zix compression body. ", 64);
+    var out: [4096]u8 = undefined;
+    const response = try testNegotiated("Accept-Encoding: gzip\r\n", .TEXT_PLAIN, body, &out);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Encoding: gzip\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "Vary: Accept-Encoding\r\n") != null);
+
+    const plain = try compression.decode(
+        std.testing.allocator,
+        .GZIP,
+        testBodyOf(response),
+        1 << 16,
+    );
+    defer std.testing.allocator.free(plain);
+
+    try std.testing.expectEqualStrings(body, plain);
+}
+
+test "zix http1: Response, sendNegotiated sends brotli when preferred" {
+    compress.setCompression(true, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+    defer compress.setCompression(false, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+
+    const body = testRepeated("zix compression body. ", 64);
+    var out: [4096]u8 = undefined;
+    const response = try testNegotiated(
+        "Accept-Encoding: gzip;q=0.5, br\r\n",
+        .TEXT_PLAIN,
+        body,
+        &out,
+    );
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Encoding: br\r\n") != null);
+
+    const plain = try compression.decode(
+        std.testing.allocator,
+        .BR,
+        testBodyOf(response),
+        1 << 16,
+    );
+    defer std.testing.allocator.free(plain);
+
+    try std.testing.expectEqualStrings(body, plain);
+}
+
+test "zix http1: Response, sendNegotiated below the floor is identity" {
+    compress.setCompression(true, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+    defer compress.setCompression(false, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+
+    var out: [1024]u8 = undefined;
+    const response = try testNegotiated("Accept-Encoding: gzip\r\n", .TEXT_PLAIN, "tiny", &out);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Encoding") == null);
+    try std.testing.expectEqualStrings("tiny", testBodyOf(response));
+}
+
+test "zix http1: Response, sendNegotiated without Accept-Encoding is identity" {
+    compress.setCompression(true, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+    defer compress.setCompression(false, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+
+    const body = testRepeated("zix compression body. ", 64);
+    var out: [4096]u8 = undefined;
+    const response = try testNegotiated("", .TEXT_PLAIN, body, &out);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Encoding") == null);
+    try std.testing.expectEqualStrings(body, testBodyOf(response));
+}
+
+test "zix http1: Response, sendNegotiated output past the cap is identity" {
+    compress.setCompression(true, policy.MIN_SIZE_DEFAULT, 8);
+    defer compress.setCompression(false, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+
+    const body = testRepeated("zix compression body. ", 64);
+    var out: [4096]u8 = undefined;
+    const response = try testNegotiated("Accept-Encoding: gzip\r\n", .TEXT_PLAIN, body, &out);
+
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Encoding") == null);
+    try std.testing.expectEqualStrings(body, testBodyOf(response));
+}
+
+test "zix http1: Response, sendNegotiated with nothing acceptable is 406" {
+    compress.setCompression(true, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+    defer compress.setCompression(false, policy.MIN_SIZE_DEFAULT, 256 * 1024);
+
+    var out: [1024]u8 = undefined;
+    const response = try testNegotiated(
+        "Accept-Encoding: identity;q=0, *;q=0\r\n",
+        .TEXT_PLAIN,
+        "body",
+        &out,
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 406"));
 }
 
