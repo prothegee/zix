@@ -2302,7 +2302,7 @@ Parameter terakhir adalah struct options comptime, dan `.{}` berarti semua field
 | `strings` | `.COPY` | `.COPY` menyalin setiap string ke allocator, `.BORROW` mengarahkan string tanpa escape ke dokumennya, yang lalu harus hidup lebih lama dari nilainya |
 | `unknown` | `.REJECT` | `.REJECT` gagal pada key yang tidak dideklarasikan tipenya, `.SKIP` melompati key itu beserta seluruh nilainya sedalam apa pun nesting-nya |
 
-**Options ZON (`zix.jzon.zon.ZonOptions`):** ZON punya satu jalur per arah, jadi tidak ada strategy. Ia mencakup bentuk yang dipakai `build.zig.zon`: struct, list, string dan string multiline `\\`, integer di basis apa pun, float, boolean, `null`, enum `.tag`, dan komentar `//`.
+**Options ZON (`zix.jzon.zon.ZonOptions`):** ZON punya satu jalur per arah, jadi tidak ada strategy. Ia mencakup bentuk yang dipakai `build.zig.zon`: struct, list, string dan string multiline `\\`, integer di basis apa pun, float, boolean, `null`, enum `.tag`, dan komentar `//`. Tuple (pakai array), union, dan pointer selain slice ditolak saat compile di kedua arah.
 
 | Field | Default | Yang diputuskan |
 | :- | :- | :- |
@@ -2330,7 +2330,7 @@ Tipe field yang tidak punya bentuk di jalur generated adalah compile error yang 
 
 Dua contoh bench butuh `-Doptimize=ReleaseFast`. Build Debug mengukur safety check, bukan jalurnya, dan baris-barisnya saling menumpuk.
 
-Contoh server, juga direncanakan, tinggal bersama contoh engine, bukan di package, dan di-build dari root repo dengan `zig build example-http1_jzon`.
+Contoh server tinggal bersama contoh engine, bukan di package, dan di-build dari root repo dengan `zig build zix-example-http1_jzon`.
 
 | Contoh | Yang ditunjukkan |
 | :- | :- |
