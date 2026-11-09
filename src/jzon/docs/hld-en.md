@@ -167,6 +167,7 @@ sequenceDiagram
 - Numbers are checked with `std.zig.parseNumberLiteral` and string escapes decoded with `std.zig.string_literal`, so the Zig grammar decides what a valid number or escape is.
 - The write side writes into a `Sink`, the same as JSON, in the layout `ZonOptions.layout` names. The fields `ZonOptions.hex_fields` names are written as hex.
 - Field bookkeeping (missing, duplicate, defaults) is the same `fields.zig` JSON uses, and failures report through the same `lastFailure`.
+- Both sides refuse the same types at compile time (a tuple, a non-slice pointer, a non-exhaustive enum, a union), so whatever the write side writes the read side reads back.
 
 ## Where a strategy lands
 
