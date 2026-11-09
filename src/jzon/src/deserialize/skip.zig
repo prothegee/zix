@@ -41,29 +41,25 @@ const float = @import("../float.zig");
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate a `Cursor` failure into this module's set.
+/// Every failure a private function here can hand back: this module's own set joined
+/// with the cursor's and the width-picked scan's.
+const Inner = Error || Cursor.Error || ScanShape.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - Cursor.Error (the failure the cursor reported)
+/// err - Inner (the failure a private function handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn cursorError(err: Cursor.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_Skip_Truncated => Error.Jzon_Skip_Truncated,
+        error.Jzon_Skip_Unexpected => Error.Jzon_Skip_Unexpected,
         error.Jzon_Cursor_Truncated => Error.Jzon_Skip_Truncated,
         error.Jzon_Cursor_Unexpected => Error.Jzon_Skip_Unexpected,
-    };
-}
-
-/// Translate a `ScanShape` failure into this module's set.
-///
-/// Param:
-/// err - ScanShape.Error (the failure the width-picked scan reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn scanShapeError(err: ScanShape.Error) Error {
-    return switch (err) {
         error.Jzon_ScanShape_Truncated => Error.Jzon_Skip_Truncated,
         error.Jzon_ScanShape_Unexpected => Error.Jzon_Skip_Unexpected,
     };
@@ -77,9 +73,10 @@ fn scanShapeError(err: ScanShape.Error) Error {
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Skip_Truncated or Error.Jzon_Skip_Unexpected when the token is broken
-fn stringToken(cursor: *Cursor, comptime shape: ScanShape) Error!void {
-    _ = shape.stringSpan(cursor) catch |err| return scanShapeError(err);
+/// - a Truncated or Unexpected member (the cursor's, the scan's, or this module's)
+///   when the token is broken
+fn stringToken(cursor: *Cursor, comptime shape: ScanShape) Inner!void {
+    _ = try shape.stringSpan(cursor);
 }
 
 /// Step over one value sitting `depth` containers deep.
@@ -91,24 +88,24 @@ fn stringToken(cursor: *Cursor, comptime shape: ScanShape) Error!void {
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Skip_Truncated when the document ends inside the value
-/// - Error.Jzon_Skip_Unexpected when the value is malformed, or nests past MAX_DEPTH
-fn valueAt(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Error!void {
+/// - a Truncated member (the cursor's, the scan's, or this module's) at an early end
+/// - an Unexpected member when the value is malformed, or nests past MAX_DEPTH
+fn valueAt(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Inner!void {
     if (depth > MAX_DEPTH) return Error.Jzon_Skip_Unexpected;
 
     shape.skipSpace(cursor);
 
-    const head = cursor.peek() catch |err| return cursorError(err);
+    const head = try cursor.peek();
 
     switch (head) {
         '{' => return object(cursor, shape, depth),
         '[' => return array(cursor, shape, depth),
         '"' => return stringToken(cursor, shape),
-        't' => cursor.literal("true") catch |err| return cursorError(err),
-        'f' => cursor.literal("false") catch |err| return cursorError(err),
-        'n' => cursor.literal("null") catch |err| return cursorError(err),
+        't' => try cursor.literal("true"),
+        'f' => try cursor.literal("false"),
+        'n' => try cursor.literal("null"),
         '-', '0'...'9' => {
-            const text = cursor.numberSpan() catch |err| return cursorError(err);
+            const text = try cursor.numberSpan();
 
             if (!float.isNumber(text)) return Error.Jzon_Skip_Unexpected;
         },
@@ -126,9 +123,10 @@ fn valueAt(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Error!void 
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Skip_Truncated or Error.Jzon_Skip_Unexpected when the object is broken
-fn object(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Error!void {
-    cursor.expect('{') catch |err| return cursorError(err);
+/// - a Truncated or Unexpected member (the cursor's, the scan's, or this module's)
+///   when the object is broken
+fn object(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Inner!void {
+    try cursor.expect('{');
     shape.skipSpace(cursor);
 
     if (cursor.accept('}')) return;
@@ -138,14 +136,14 @@ fn object(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Error!void {
         try stringToken(cursor, shape);
 
         shape.skipSpace(cursor);
-        cursor.expect(':') catch |err| return cursorError(err);
+        try cursor.expect(':');
 
         try valueAt(cursor, shape, depth + 1);
 
         shape.skipSpace(cursor);
         if (cursor.accept(',')) continue;
 
-        cursor.expect('}') catch |err| return cursorError(err);
+        try cursor.expect('}');
 
         return;
     }
@@ -160,9 +158,10 @@ fn object(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Error!void {
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Skip_Truncated or Error.Jzon_Skip_Unexpected when the array is broken
-fn array(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Error!void {
-    cursor.expect('[') catch |err| return cursorError(err);
+/// - a Truncated or Unexpected member (the cursor's, the scan's, or this module's)
+///   when the array is broken
+fn array(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Inner!void {
+    try cursor.expect('[');
     shape.skipSpace(cursor);
 
     if (cursor.accept(']')) return;
@@ -173,7 +172,7 @@ fn array(cursor: *Cursor, comptime shape: ScanShape, depth: usize) Error!void {
         shape.skipSpace(cursor);
         if (cursor.accept(',')) continue;
 
-        cursor.expect(']') catch |err| return cursorError(err);
+        try cursor.expect(']');
 
         return;
     }
@@ -210,7 +209,7 @@ pub const MAX_DEPTH = 256;
 /// - Error.Jzon_Skip_Truncated when the document ends inside the value
 /// - Error.Jzon_Skip_Unexpected when the value is malformed, or nests past MAX_DEPTH
 pub fn value(cursor: *Cursor, comptime shape: ScanShape) Error!void {
-    return valueAt(cursor, shape, 0);
+    return valueAt(cursor, shape, 0) catch |err| innerError(err);
 }
 
 // --------------------------------------------------------- //
@@ -365,26 +364,38 @@ test "jzon deserialize: skip, steps over empty containers inside a deep one" {
     try expectLeaves("{\"a\":{},\"b\":[],\"c\":{\"d\":[]}}|rest", "|rest");
 }
 
-test "jzon deserialize: skip, cursorError maps truncated" {
-    const err = cursorError(error.Jzon_Cursor_Truncated);
+test "jzon deserialize: skip, innerError renames cursor truncated" {
+    const err = innerError(error.Jzon_Cursor_Truncated);
 
     try std.testing.expectEqual(Error.Jzon_Skip_Truncated, err);
 }
 
-test "jzon deserialize: skip, cursorError maps unexpected" {
-    const err = cursorError(error.Jzon_Cursor_Unexpected);
+test "jzon deserialize: skip, innerError renames cursor unexpected" {
+    const err = innerError(error.Jzon_Cursor_Unexpected);
 
     try std.testing.expectEqual(Error.Jzon_Skip_Unexpected, err);
 }
 
-test "jzon deserialize: skip, scanShapeError maps truncated" {
-    const err = scanShapeError(error.Jzon_ScanShape_Truncated);
+test "jzon deserialize: skip, innerError renames ScanShape truncated" {
+    const err = innerError(error.Jzon_ScanShape_Truncated);
 
     try std.testing.expectEqual(Error.Jzon_Skip_Truncated, err);
 }
 
-test "jzon deserialize: skip, scanShapeError maps unexpected" {
-    const err = scanShapeError(error.Jzon_ScanShape_Unexpected);
+test "jzon deserialize: skip, innerError renames ScanShape unexpected" {
+    const err = innerError(error.Jzon_ScanShape_Unexpected);
+
+    try std.testing.expectEqual(Error.Jzon_Skip_Unexpected, err);
+}
+
+test "jzon deserialize: skip, innerError keeps its own truncated" {
+    const err = innerError(error.Jzon_Skip_Truncated);
+
+    try std.testing.expectEqual(Error.Jzon_Skip_Truncated, err);
+}
+
+test "jzon deserialize: skip, innerError keeps its own unexpected" {
+    const err = innerError(error.Jzon_Skip_Unexpected);
 
     try std.testing.expectEqual(Error.Jzon_Skip_Unexpected, err);
 }
