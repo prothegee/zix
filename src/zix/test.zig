@@ -77,16 +77,21 @@ test {
         _ = @import("tcp/http1/dispatch/epoll.zig");
         _ = @import("tcp/http1/dispatch/uring.zig");
     }
-    _ = @import("tcp/http1/dispatch/common.zig");
     _ = @import("tcp/http1/handler.zig");
     _ = @import("tcp/http1/head.zig");
     _ = @import("tcp/http1/header.zig");
+    _ = @import("tcp/http1/log.zig");
     _ = @import("tcp/http1/parser.zig");
     _ = @import("tcp/http1/reader.zig");
     _ = @import("tcp/http1/router.zig");
     _ = @import("tcp/http1/serve.zig");
     _ = @import("tcp/http1/writer.zig");
-    _ = @import("utils/ResponseCache.zig");
+    _ = @import("utils/Multipart.zig");
+    _ = @import("utils/MultipartField.zig");
+    _ = @import("utils/cache/ResponseCache.zig");
+    _ = @import("utils/cache/async.zig");
+    _ = @import("utils/cache/CacheEntry.zig");
+    _ = @import("utils/cache/CacheRegistry.zig");
     _ = @import("utils/available.zig");
     _ = @import("utils/base32.zig");
     _ = @import("utils/base64.zig");
