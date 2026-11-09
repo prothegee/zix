@@ -179,7 +179,7 @@ Yang dibaca dan ditulis jalur ZON:
 - komentar `//`
 - nama `.@"..."`, untuk nama yang bukan identifier Zig biasa (seperti `error`)
 
-Di luar cakupan: pointer selain slice, tuple di sisi baca, union, char literal, dan `@import`. Angka dicek terhadap grammar Zig dengan `std.zig.parseNumberLiteral`, jadi `+1`, `012`, dan `1__0` ditolak.
+Di luar cakupan: pointer selain slice, tuple (pakai array), union, char literal, dan `@import`. Angka dicek terhadap grammar Zig dengan `std.zig.parseNumberLiteral`, jadi `+1`, `012`, dan `1__0` ditolak.
 
 Output `MULTILINE` untuk satu record:
 
@@ -199,7 +199,7 @@ Output `MULTILINE` untuk satu record:
 
 Jalur JSON generated dan kedua jalur ZON menerima: `bool`, integer lebar apa pun signed maupun unsigned, float lebar apa pun, `[]const u8` sebagai string, slice dari tipe yang tercakup, optional dari tipe yang tercakup, enum exhaustive, dan struct yang field-nya semua dari daftar itu. ZON juga menerima array berukuran tetap.
 
-Yang ditolak saat compile, dengan menyebut tipenya: pointer non-slice dan enum non-exhaustive, dan di sisi baca juga tuple. JSON `.STD` tetap menerima bentuk apa pun yang diterima std, jadi field di luar cakupan adalah pilihan strategy, bukan tembok.
+Yang ditolak saat compile, dengan menyebut tipenya: pointer non-slice, enum non-exhaustive, dan tuple. JSON `.STD` tetap menerima bentuk apa pun yang diterima std, jadi field di luar cakupan adalah pilihan strategy, bukan tembok.
 
 ## Error
 
@@ -254,15 +254,15 @@ Tujuh, di `examples/`. Masing-masing berjalan lalu selesai, tidak ada yang berup
 
 Build dari paketnya dengan `zig build examples`, atau dari root repo dengan `zig build jzon-examples`. Dua contoh bench butuh `-Doptimize=ReleaseFast`. Build Debug mengukur safety check, bukan jalurnya.
 
-Contoh server, juga direncanakan, tinggal bersama contoh engine, bukan di paket ini: `examples/http1_jzon.zig` membaca body request JSON ke record di arena per-request dan menjawab dengan record yang di-render ke stack buffer. Build dari root repo dengan `zig build example-http1_jzon`.
+Contoh server tinggal bersama contoh engine, bukan di paket ini: `examples/http1_jzon.zig` membaca body request JSON ke record di arena per-request dan menjawab dengan record yang di-render ke stack buffer. Build dari root repo dengan `zig build zix-example-http1_jzon`.
 
 ## Pengujian
 
-Dua tier, 783 test, tidak ada yang butuh instalasi apa pun:
+Dua tier, 822 test, tidak ada yang butuh instalasi apa pun:
 
 ```
 zig build unit_edge-test     # 639, test unit dan edge di dalam file di bawah src/
-zig build behaviour-test     # 144, apa yang dilakukan tiap bagian saat diberi yang ia mau
+zig build behaviour-test     # 183, apa yang dilakukan tiap bagian saat diberi yang ia mau
 zig build all-test           # keduanya
 ```
 
