@@ -117,3 +117,8 @@ test "zix: jzon, export has the package semver fields" {
     try std.testing.expect(@hasDecl(jzon.VERSION, "MAJOR"));
 }
 
+test "zix: utils, exports the compression facade" {
+    try std.testing.expect(@hasDecl(utils.compression, "encode"));
+    try std.testing.expect(@hasDecl(utils.compression, "Encoding"));
+}
+
