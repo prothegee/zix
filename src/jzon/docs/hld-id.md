@@ -165,7 +165,7 @@ sequenceDiagram
 
 - Sisi baca menelusuri teks sekali, dengan dispatch dibangun dari `T` saat kompilasi. Tidak ada `std.zig.Ast` yang dibangun.
 - Angka dicek dengan `std.zig.parseNumberLiteral` dan escape string didekode dengan `std.zig.string_literal`, jadi grammar Zig yang memutuskan angka atau escape yang valid.
-- Sisi tulis menulis ke `Sink`, sama seperti JSON, dengan layout yang disebut `ZonOptions.layout`.
+- Sisi tulis menulis ke `Sink`, sama seperti JSON, dengan layout yang disebut `ZonOptions.layout`. Field yang disebut `ZonOptions.hex_fields` ditulis sebagai hex.
 - Pencatatan field (hilang, ganda, default) memakai `fields.zig` yang sama dengan JSON, dan kegagalan dilaporkan lewat `lastFailure` yang sama.
 
 ## Ke mana sebuah strategy mendarat
