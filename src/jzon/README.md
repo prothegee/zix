@@ -6,7 +6,7 @@
 
 <p align="center">
     <b>
-        <i>JSON in both directions, written in pure Zig, standard library only</i>
+        <i>JSON and ZON in both directions, written in pure Zig, standard library only</i>
     </b>
 </p>
 
