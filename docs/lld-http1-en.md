@@ -83,11 +83,14 @@ The one chunked walk every dispatch model frames a body with (RFC 9112 7.1), so 
 ```
 threadlocal tl_deadline_ns: u64 = 0   // 0 = no deadline armed
 
-setTimeout(ms): tl_deadline_ns = (ms == 0) ? 0 : wallClockNs() + ms * 1e6
-isExpired():    tl_deadline_ns != 0 and wallClockNs() >= tl_deadline_ns
+threadlocal tl_deadline_io: ?std.Io = null  // clock source for isExpired
+
+setTimeout(io, ms): tl_deadline_io = io
+                    tl_deadline_ns = (ms == 0) ? 0 : wallClockNs(io) + ms * 1e6
+isExpired():        tl_deadline_ns != 0 and wallClockNs(tl_deadline_io) >= tl_deadline_ns
 ```
 
-`wallClockNs()` is a raw `clock_gettime(REALTIME)`. The engine calls `setTimeout(opts.handler_timeout_ms)` before every dispatch, so a stale deadline can never leak into the next request.
+`wallClockNs()` is a raw `clock_gettime(REALTIME)`. The engine calls `setTimeout(opts.handler_timeout_ms)` before every dispatch, so a stale deadline can never leak into the next request. When a deadline is armed, `invokeHandler` also copies it into `ctx.deadline`, so `ctx.isExpired()` and `zix.Http1.isExpired()` agree.
 
 ### Thread-local WebSocket handoff
 
