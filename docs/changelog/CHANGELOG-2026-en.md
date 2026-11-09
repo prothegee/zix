@@ -130,7 +130,19 @@ __**Update:**__
     - `.EPOLL` and `.URING` install `send_date_header`, `max_response_headers`,
       `handler_timeout_ms`, `max_request_body`, and `large_body_recv_buf` per worker.
       The per-connection buffer follows `max_recv_buf` (was a fixed 16 KiB).
-    - `response_cache` and `public_dir` are accepted but not active yet.
+    - `public_dir` is accepted but not active yet.
+    - `response_cache` is active on `.ASYNC`, `.EPOLL`, and `.URING`:
+        - `.EPOLL` and `.URING` build one cache per worker and free it when the
+          worker ends.
+        - `.ASYNC` builds one cache per io pool thread (`utils/cache/async.zig`).
+          The caches are freed when the accept loop ends, and a cache an open
+          connection still uses is freed when that connection ends.
+        - `cache_max_total_bytes` is not part of `zix.Http1` `Config`.
+    - `.IOCP` and `.KQUEUE` return `error.ZixHttp1_Server_DispatchModel_NotSupported`
+      from `run()`. `run()` lists every dispatch model, so a new model does not
+      compile until it is handled.
+    - `dispatch/common.zig` is removed, `connection.zig` is the one connection
+      entry. `logSystem` moved to `tcp/http1/log.zig`.
 
 - Http1 examples in the current style, registered under `zig build zix-example-http1`:
     - `http1_json`, `http1_params`, and `http1_paths` are ported.
