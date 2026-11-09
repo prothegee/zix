@@ -1289,12 +1289,13 @@ What the key and the cached value are depends on the engine:
 | `zix.Http1` | method, path, query | the full serialized HTTP response, written verbatim |
 | `zix.Grpc` (unary) | path, request message | the response message, re-framed per stream (HPACK and stream id stay correct) |
 
-It is off by default. Enable it on the `.EPOLL` or `.URING` dispatch model:
+It is off by default. On `zix.Http1` it works on the `.ASYNC`, `.EPOLL`, and `.URING` dispatch models:
 
 ```zig
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/report", .handler = reportHandler },
 }).dispatch, .{
+    .io = io,
     .ip = "0.0.0.0",
     .port = 8080,
     .dispatch_model = .EPOLL,
@@ -1302,7 +1303,6 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .cache_max_entries = 256,                // slots, rounded down to a power of two
     .cache_max_value_bytes = 16 * 1024,      // per-slot response cap
     .cache_ttl_ms = 1000,                    // default freshness
-    // .cache_max_total_bytes = 4 * 1024 * 1024, // optional per-worker memory ceiling
 });
 ```
 
@@ -1310,7 +1310,7 @@ A miss builds and stores the response, a fresh hit is served verbatim:
 
 ```zig
 fn reportHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.Context) !void {
-    if (res.sendFromCache(req)) return;          // fresh hit: cached bytes already written
+    if (try res.sendFromCache(req)) return;      // fresh hit: cached bytes already written
 
     const body = try buildExpensiveReport(req);  // runs only on a miss
     res.setContentType(.APPLICATION_JSON);
@@ -1343,13 +1343,15 @@ The measured crossover on loopback is around 4 KiB of response body. Below that 
 
 #### Rules and conditions
 
-- Opt-in only. Off by default, and the handler must call `res.sendFromCache` then `res.sendCached` (HTTP engines), `res.serveCached` then `res.sendCached` (gRPC), or the raw `zix.Http1` `cacheLookup` / `sendWithCacheFD`.
-- `.EPOLL` and `.URING` only in this release. The other dispatch models leave the cache uninstalled and the API degrades to a plain send.
+- Opt-in only. Off by default, and the handler must call `res.sendFromCache` then `res.sendCached` (HTTP engines), or `res.serveCached` then `res.sendCached` (gRPC).
+- Dispatch models on `zix.Http1`: `.ASYNC`, `.EPOLL`, and `.URING`. `.EPOLL` and `.URING` keep one cache per worker. `.ASYNC` has no worker, so it keeps one cache per io pool thread, built on the first connection that thread serves. With `response_cache` off, the API degrades to a plain send.
+- `.IOCP` and `.KQUEUE` are not supported on `zix.Http1` yet: `run()` returns `error.ZixHttp1_Server_DispatchModel_NotSupported`, so the cache is never silently off. gRPC keeps the cache on `.EPOLL` and `.URING`.
+- On `.ASYNC` the caches are freed when the accept loop ends. A cache an open connection still uses is freed when that connection ends, not before.
 - For HTTP the key is method, path, and query: two requests differing only in their query string are distinct entries, and you must not cache responses that vary on a header or cookie. When a response is compressed (`sendNegotiateFD` / `sendGzipCachedFD`), the content-encoding is also folded into the key (`hashKeyEncoded`), so the gzip and brotli variants occupy distinct entries. For gRPC the key is the path plus the request message, so only an identical request hits.
 - A QUERY response is never stored. The HTTP key carries no request content, so two QUERY requests to one path with different bodies would share an answer. RFC 10008 section 2.7 makes caching a QUERY response a MAY, so `zix.Http1` refuses the store outright. Nothing changes for any other method.
 - Cache only what is safe to replay for the TTL window. For HTTP the same bytes (including the captured `Date`) are served until the entry expires, so keep `cache_ttl_ms` short for time-sensitive content.
 - Responses larger than `cache_max_value_bytes` bypass the cache and fall back to a plain send. For gRPC this cap applies to the response message. Keep it lean so only past-crossover responses occupy a slot.
-- Per-worker memory is `cache_max_entries * cache_max_value_bytes`, times the worker count, optionally bounded by `cache_max_total_bytes`.
+- Memory is `cache_max_entries * cache_max_value_bytes` per cache: times the worker count on `.EPOLL` and `.URING`, and times the io pool threads that served a connection on `.ASYNC`. gRPC can also bound it with `cache_max_total_bytes`.
 
 **Why `.EPOLL` / `.URING` only:** the cache is a thread-local instance, never shared and never locked (lock-free by ownership). That invariant holds only when one zix-owned thread installs the cache (allocate, set, free on exit) and is the sole thread that touches it. The shared-nothing `.EPOLL` workers and the one-thread-per-ring `.URING` workers both satisfy it.
 
