@@ -2301,6 +2301,7 @@ The last parameter is a comptime options struct, and `.{}` means every field at 
 | `unknown` | `.REJECT` | same as JSON |
 | `max_depth` | `256` | how many `.{}` levels a document may nest before it is refused |
 | `layout` | `.MULTILINE` | `.MULTILINE` writes one entry per line, `.COMPACT` writes one line |
+| `hex_fields` | `&.{}` | field names written as hex (`0x4cc61d74dc93a20b`), the others stay decimal |
 
 **Errors:** a render reports `NoSpaceLeft` (`Jzon_Serialize_NoSpaceLeft`, `Jzon_ZonSerialize_NoSpaceLeft`) and nothing else. A parse reports one set whichever path ran: `UnknownField`, `MissingField`, `UnknownEnumValue`, `Truncated`, `Unexpected`, `BadNumber`, `BadEscape`, `OutOfMemory` (as `Jzon_Deserialize_*` or `Jzon_ZonDeserialize_*`). `zix.jzon.lastFailure()` tells which field and which byte a failed parse stopped on, for both formats.
 
