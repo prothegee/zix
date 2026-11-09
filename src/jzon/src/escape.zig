@@ -78,15 +78,23 @@ const CONTROL: [0x20]Escaped = build: {
     break :build table;
 };
 
-/// Translate a `Sink` failure into this module's set.
+/// Every failure a private function here can hand back: this module's own set joined
+/// with the sink's.
+const Inner = Error || Sink.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - Sink.Error (the failure the sink reported)
+/// err - Inner (the failure a private function handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn sinkError(err: Sink.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_Escape_NoSpaceLeft => Error.Jzon_Escape_NoSpaceLeft,
+        error.Jzon_Escape_BadEscape => Error.Jzon_Escape_BadEscape,
         error.Jzon_Sink_NoSpaceLeft => Error.Jzon_Escape_NoSpaceLeft,
     };
 }
@@ -101,9 +109,9 @@ fn sinkError(err: Sink.Error) Error {
 ///
 /// Return:
 /// - usize (the position just past the escape that was decoded)
-/// - Error.Jzon_Escape_NoSpaceLeft when the encoded code point does not fit
+/// - Error.Jzon_Sink_NoSpaceLeft when the encoded code point does not fit
 /// - Error.Jzon_Escape_BadEscape on a short escape, a bad hex digit, or an unpaired half
-fn decodeUnicode(sink: *Sink, raw: []const u8, index: usize) Error!usize {
+fn decodeUnicode(sink: *Sink, raw: []const u8, index: usize) Inner!usize {
     const first = try hexQuad(raw, index);
     const after_first = index + 4;
 
@@ -165,15 +173,92 @@ fn hexQuad(raw: []const u8, index: usize) Error!u16 {
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Escape_NoSpaceLeft when the encoded bytes do not fit
+/// - Error.Jzon_Sink_NoSpaceLeft when the encoded bytes do not fit
 /// - Error.Jzon_Escape_BadEscape when the code point has no UTF-8 form
-fn writeUtf8(sink: *Sink, codepoint: u21) Error!void {
+fn writeUtf8(sink: *Sink, codepoint: u21) Inner!void {
     var encoded: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(codepoint, &encoded) catch |err| switch (err) {
         else => return Error.Jzon_Escape_BadEscape,
     };
 
-    sink.bytes(encoded[0..len]) catch |err| return sinkError(err);
+    try sink.bytes(encoded[0..len]);
+}
+
+/// The body of `spell`, failing with the inner set.
+fn spellInto(sink: *Sink, byte: u8) Inner!void {
+    switch (byte) {
+        '"' => try sink.literal("\\\""),
+        '\\' => try sink.literal("\\\\"),
+        0x00...0x1f => {
+            const entry = CONTROL[byte];
+            try sink.bytes(entry.text[0..entry.len]);
+        },
+        else => try sink.byte(byte),
+    }
+}
+
+/// The body of `encodeBody`, failing with the inner set.
+fn bodyInto(sink: *Sink, text: []const u8) Inner!void {
+    var clean_from: usize = 0;
+    var index: usize = 0;
+
+    while (index < text.len) : (index += 1) {
+        const byte = text[index];
+        if (!isEscaped(byte)) continue;
+
+        try sink.bytes(text[clean_from..index]);
+        try spellInto(sink, byte);
+
+        clean_from = index + 1;
+    }
+
+    try sink.bytes(text[clean_from..]);
+}
+
+/// The body of `encode`, failing with the inner set.
+fn quoted(sink: *Sink, text: []const u8) Inner!void {
+    try sink.byte('"');
+    try bodyInto(sink, text);
+    try sink.byte('"');
+}
+
+/// The body of `decode`, failing with the inner set.
+fn decodeInto(sink: *Sink, raw: []const u8) Inner!void {
+    var index: usize = 0;
+
+    while (index < raw.len) {
+        if (raw[index] != '\\') {
+            const start = index;
+            while (index < raw.len and raw[index] != '\\') : (index += 1) {}
+
+            try sink.bytes(raw[start..index]);
+            continue;
+        }
+
+        index += 1;
+        if (index == raw.len) return Error.Jzon_Escape_BadEscape;
+
+        const spelling = raw[index];
+        index += 1;
+
+        const decoded: u8 = switch (spelling) {
+            '"' => '"',
+            '\\' => '\\',
+            '/' => '/',
+            'b' => 0x08,
+            'f' => 0x0c,
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'u' => {
+                index = try decodeUnicode(sink, raw, index);
+                continue;
+            },
+            else => return Error.Jzon_Escape_BadEscape,
+        };
+
+        try sink.byte(decoded);
+    }
 }
 
 // --------------------------------------------------------- //
@@ -238,15 +323,7 @@ pub fn needsEscape(text: []const u8) bool {
 /// - void
 /// - Error.Jzon_Escape_NoSpaceLeft when the spelling does not fit
 pub fn spell(sink: *Sink, byte: u8) Error!void {
-    switch (byte) {
-        '"' => sink.literal("\\\"") catch |err| return sinkError(err),
-        '\\' => sink.literal("\\\\") catch |err| return sinkError(err),
-        0x00...0x1f => {
-            const entry = CONTROL[byte];
-            sink.bytes(entry.text[0..entry.len]) catch |err| return sinkError(err);
-        },
-        else => sink.byte(byte) catch |err| return sinkError(err),
-    }
+    return spellInto(sink, byte) catch |err| innerError(err);
 }
 
 /// Write `text` as a complete JSON string, quotes included.
@@ -259,9 +336,7 @@ pub fn spell(sink: *Sink, byte: u8) Error!void {
 /// - void
 /// - Error.Jzon_Escape_NoSpaceLeft when the escaped form does not fit
 pub fn encode(sink: *Sink, text: []const u8) Error!void {
-    sink.byte('"') catch |err| return sinkError(err);
-    try encodeBody(sink, text);
-    sink.byte('"') catch |err| return sinkError(err);
+    return quoted(sink, text) catch |err| innerError(err);
 }
 
 /// Write `text` escaped, without the surrounding quotes.
@@ -279,20 +354,7 @@ pub fn encode(sink: *Sink, text: []const u8) Error!void {
 /// - void
 /// - Error.Jzon_Escape_NoSpaceLeft when the escaped form does not fit
 pub fn encodeBody(sink: *Sink, text: []const u8) Error!void {
-    var clean_from: usize = 0;
-    var index: usize = 0;
-
-    while (index < text.len) : (index += 1) {
-        const byte = text[index];
-        if (!isEscaped(byte)) continue;
-
-        sink.bytes(text[clean_from..index]) catch |err| return sinkError(err);
-        try spell(sink, byte);
-
-        clean_from = index + 1;
-    }
-
-    sink.bytes(text[clean_from..]) catch |err| return sinkError(err);
+    return bodyInto(sink, text) catch |err| innerError(err);
 }
 
 /// Write the decoded value of an escaped string body.
@@ -313,41 +375,7 @@ pub fn encodeBody(sink: *Sink, text: []const u8) Error!void {
 /// - Error.Jzon_Escape_NoSpaceLeft when the decoded form does not fit
 /// - Error.Jzon_Escape_BadEscape on an escape the rules do not spell
 pub fn decode(sink: *Sink, raw: []const u8) Error!void {
-    var index: usize = 0;
-
-    while (index < raw.len) {
-        if (raw[index] != '\\') {
-            const start = index;
-            while (index < raw.len and raw[index] != '\\') : (index += 1) {}
-
-            sink.bytes(raw[start..index]) catch |err| return sinkError(err);
-            continue;
-        }
-
-        index += 1;
-        if (index == raw.len) return Error.Jzon_Escape_BadEscape;
-
-        const spelling = raw[index];
-        index += 1;
-
-        const decoded: u8 = switch (spelling) {
-            '"' => '"',
-            '\\' => '\\',
-            '/' => '/',
-            'b' => 0x08,
-            'f' => 0x0c,
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'u' => {
-                index = try decodeUnicode(sink, raw, index);
-                continue;
-            },
-            else => return Error.Jzon_Escape_BadEscape,
-        };
-
-        sink.byte(decoded) catch |err| return sinkError(err);
-    }
+    return decodeInto(sink, raw) catch |err| innerError(err);
 }
 
 // --------------------------------------------------------- //
@@ -652,5 +680,23 @@ test "jzon: escape, decode refuses to overrun the buffer" {
 
 test "jzon: escape, needsEscape on an empty string is false" {
     try std.testing.expect(!needsEscape(""));
+}
+
+test "jzon: escape, innerError keeps its own no space left" {
+    const err = innerError(error.Jzon_Escape_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_Escape_NoSpaceLeft, err);
+}
+
+test "jzon: escape, innerError keeps its own bad escape" {
+    const err = innerError(error.Jzon_Escape_BadEscape);
+
+    try std.testing.expectEqual(Error.Jzon_Escape_BadEscape, err);
+}
+
+test "jzon: escape, innerError renames sink no space left to its own name" {
+    const err = innerError(error.Jzon_Sink_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_Escape_NoSpaceLeft, err);
 }
 
