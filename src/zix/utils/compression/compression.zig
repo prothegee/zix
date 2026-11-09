@@ -8,11 +8,13 @@
 //! 
 //! ### brief:
 //! 
-//! Accept-Encoding negotiation and the compression facade.
+//! Compression facade: encode, encode into a buffer, and decode with a chosen
+//! content coding, plus the public compression namespace.
 //! 
 //! ### note:
 //! 
-//! n/a
+//! gzip bodies under 64 KiB use the fast encoder (flate_fast). Larger bodies use
+//! std flate.
 //! 
 //! ---------------------------------------------------------
 //! 
@@ -30,180 +32,349 @@
 //!
 
 const std = @import("std");
-const Encoding = @import("../http/encoding.zig").Encoding;
+const brotli_codec = @import("brotli/brotli.zig");
+const flate_codec = @import("flate/flate.zig");
+const flate_fast_codec = @import("flate/flate_fast.zig");
+const negotiate_mod = @import("negotiate.zig");
+const policy = @import("policy.zig");
 
 // --------------------------------------------------------- //
 // Private:
 
-/// The qualities a coding token carries in the header: its explicit entry and the
-/// wildcard entry, each in milli units (0 to 1000), or null when not present.
-const Scan = struct {
-    explicit: ?u16 = null,
-    wildcard: ?u16 = null,
-};
+const Inner = Error || std.mem.Allocator.Error || flate_codec.Error || brotli_codec.Error;
 
-/// Scan the header for a coding token, capturing both an explicit entry and a wildcard.
-///
-/// Param:
-/// header - []const u8 (trimmed Accept-Encoding value)
-/// token - []const u8 (coding name to score, matched case-insensitively)
-///
-/// Return:
-/// - Scan (explicit and wildcard qualities, each null when absent)
-fn scan(header: []const u8, token: []const u8) Scan {
-    var result: Scan = .{};
+fn innerError(err: Inner) Error {
+    @branchHint(.cold);
 
-    var entry_iter = std.mem.splitScalar(u8, header, ',');
-    while (entry_iter.next()) |raw_entry| {
-        const entry = std.mem.trim(u8, raw_entry, " \t");
-        if (entry.len == 0) continue;
-
-        var field_iter = std.mem.splitScalar(u8, entry, ';');
-        const name = std.mem.trim(u8, field_iter.next().?, " \t");
-
-        var quality: u16 = 1000;
-        while (field_iter.next()) |raw_param| {
-            const param = std.mem.trim(u8, raw_param, " \t");
-
-            if (param.len >= 2 and (param[0] == 'q' or param[0] == 'Q') and param[1] == '=') {
-                quality = parseQuality(std.mem.trim(u8, param[2..], " \t"));
-            }
-        }
-
-        if (std.mem.eql(u8, name, "*")) {
-            result.wildcard = quality;
-        } else if (std.ascii.eqlIgnoreCase(name, token)) {
-            result.explicit = quality;
-        }
-    }
-
-    return result;
+    return switch (err) {
+        error.ZixUtils_Compression_CompressFailed => Error.ZixUtils_Compression_CompressFailed,
+        error.ZixUtils_Compression_DecompressFailed => Error.ZixUtils_Compression_DecompressFailed,
+        error.ZixUtils_Compression_OutputTooLarge => Error.ZixUtils_Compression_OutputTooLarge,
+        error.ZixUtils_Compression_BufferTooSmall => Error.ZixUtils_Compression_BufferTooSmall,
+        error.ZixUtils_Compression_OutOfMemory => Error.ZixUtils_Compression_OutOfMemory,
+        error.ZixUtils_Compression_InvalidWindowBits => {
+            return Error.ZixUtils_Compression_InvalidWindowBits;
+        },
+        error.ZixUtils_Compression_InputTooLarge => Error.ZixUtils_Compression_InputTooLarge,
+        error.ZixUtils_Compression_Truncated => Error.ZixUtils_Compression_Truncated,
+        error.ZixUtils_Compression_Malformed => Error.ZixUtils_Compression_Malformed,
+        error.OutOfMemory => Error.ZixUtils_Compression_OutOfMemory,
+        error.ZixUtils_Flate_CompressFailed => Error.ZixUtils_Compression_CompressFailed,
+        error.ZixUtils_Flate_DecompressFailed => Error.ZixUtils_Compression_DecompressFailed,
+        error.ZixUtils_Flate_OutputTooLarge => Error.ZixUtils_Compression_OutputTooLarge,
+        error.ZixUtils_Flate_BufferTooSmall => Error.ZixUtils_Compression_BufferTooSmall,
+        error.ZixUtils_Flate_OutOfMemory => Error.ZixUtils_Compression_OutOfMemory,
+        error.ZixUtils_Brotli_InvalidWindowBits => Error.ZixUtils_Compression_InvalidWindowBits,
+        error.ZixUtils_Brotli_InputTooLarge => Error.ZixUtils_Compression_InputTooLarge,
+        error.ZixUtils_Brotli_BufferTooSmall => Error.ZixUtils_Compression_BufferTooSmall,
+        error.ZixUtils_Brotli_Truncated => Error.ZixUtils_Compression_Truncated,
+        error.ZixUtils_Brotli_Malformed => Error.ZixUtils_Compression_Malformed,
+        error.ZixUtils_Brotli_OutputTooLarge => Error.ZixUtils_Compression_OutputTooLarge,
+        error.ZixUtils_Brotli_OutOfMemory => Error.ZixUtils_Compression_OutOfMemory,
+    };
 }
 
-/// Parse an HTTP quality value into milli units (0 to 1000).
-///
-/// Note:
-/// - Grammar is ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] ). A malformed value
-///   is treated leniently as 1000 (as if no q param was present), never as a silent 0
-///   that would wrongly forbid a coding.
-///
-/// Param:
-/// text - []const u8 (the value after q=)
-///
-/// Return:
-/// - u16 (0 to 1000)
-fn parseQuality(text: []const u8) u16 {
-    if (text.len == 0) return 1000;
-
-    if (text[0] == '1') return 1000;
-    if (text[0] != '0') return 1000;
-
-    if (text.len == 1) return 0;
-    if (text[1] != '.') return 0;
-
-    var fraction: u16 = 0;
-    var scale: u16 = 100;
-    var index: usize = 2;
-    while (index < text.len and scale > 0) : (index += 1) {
-        const digit = text[index];
-        if (digit < '0' or digit > '9') break;
-
-        fraction += @as(u16, digit - '0') * scale;
-        scale /= 10;
+/// gzip into a fresh buffer: the fast encoder under its cap, std flate above it.
+fn gzipAlloc(allocator: std.mem.Allocator, data: []const u8, level: Level) Inner![]u8 {
+    const bound = flate_fast_codec.gzipFastBound(data.len);
+    if (!flate_fast_codec.fitsFast(data.len, bound)) {
+        return flate_codec.compressGzipAlloc(allocator, data, level);
     }
 
-    return fraction;
+    const buf = try allocator.alloc(u8, bound);
+    errdefer allocator.free(buf);
+
+    const written = flate_fast_codec.gzipFastInto(data, buf);
+
+    return allocator.realloc(buf, written);
+}
+
+fn encodeInner(
+    allocator: std.mem.Allocator,
+    encoding: Encoding,
+    data: []const u8,
+    level: Level,
+) Inner![]u8 {
+    return switch (encoding) {
+        .IDENTITY => allocator.dupe(u8, data),
+        .GZIP => gzipAlloc(allocator, data, level),
+        .DEFLATE => flate_codec.compressDeflateAlloc(allocator, data, level),
+        .BR => brotli_codec.compressBrotliAlloc(allocator, data, level),
+    };
+}
+
+fn encodeIntoInner(
+    allocator: std.mem.Allocator,
+    encoding: Encoding,
+    data: []const u8,
+    out_buf: []u8,
+    level: Level,
+) Inner!usize {
+    switch (encoding) {
+        .IDENTITY => {
+            if (out_buf.len < data.len) return Error.ZixUtils_Compression_BufferTooSmall;
+
+            @memcpy(out_buf[0..data.len], data);
+
+            return data.len;
+        },
+        .GZIP => {
+            if (flate_fast_codec.fitsFast(data.len, out_buf.len)) {
+                return flate_fast_codec.gzipFastInto(data, out_buf);
+            }
+
+            return flate_codec.compressGzip(allocator, data, out_buf, level);
+        },
+        .DEFLATE => return flate_codec.compressDeflate(allocator, data, out_buf, level),
+        .BR => return brotli_codec.compressBrotli(allocator, data, out_buf, level),
+    }
+}
+
+fn decodeInner(
+    allocator: std.mem.Allocator,
+    encoding: Encoding,
+    data: []const u8,
+    max_out: usize,
+) Inner![]u8 {
+    return switch (encoding) {
+        .IDENTITY => allocator.dupe(u8, data),
+        .GZIP => flate_codec.decompressGzipAlloc(allocator, data, max_out),
+        .DEFLATE => flate_codec.decompressDeflateAlloc(allocator, data, max_out),
+        .BR => brotli_codec.decompressBrotliAlloc(allocator, data, max_out),
+    };
 }
 
 // --------------------------------------------------------- //
 // Public:
 
-pub const MIN_SIZE_DEFAULT: usize = 256;
+pub const Error = error {
+    ZixUtils_Compression_CompressFailed,
+    ZixUtils_Compression_DecompressFailed,
+    ZixUtils_Compression_OutputTooLarge,
+    ZixUtils_Compression_BufferTooSmall,
+    ZixUtils_Compression_OutOfMemory,
+    ZixUtils_Compression_InvalidWindowBits,
+    ZixUtils_Compression_InputTooLarge,
+    ZixUtils_Compression_Truncated,
+    ZixUtils_Compression_Malformed,
+};
 
-/// Pick the content coding to use for a response, honouring the client Accept-Encoding
-/// preferences against the server-producible set.
-///
-/// Note:
-/// - Policy is compression-leaning (the common server behaviour): the
-///   best producible coding is chosen whenever it is acceptable (q greater than 0).
-///   identity only wins when the client lists it EXPLICITLY with a strictly higher q.
-///   An unlisted or wildcard-matched identity does not suppress compression.
-/// - Among producible codings, the highest client q wins. At equal q, the earlier entry
-///   in supported wins (server preference order).
-/// - An absent header defaults to identity (conservative, only compress when the client
-///   asks). An empty field value means the client wants identity only (RFC 9110).
+/// gzip and deflate codec.
+pub const flate = flate_codec;
+
+/// Fast gzip encoder for bodies under 64 KiB.
+pub const flate_fast = flate_fast_codec;
+
+/// Brotli codec.
+pub const brotli = brotli_codec;
+
+/// HTTP content coding.
+pub const Encoding = @import("../http/encoding.zig").Encoding;
+
+/// Compression effort.
+pub const Level = @import("level.zig").Level;
+
+/// Default size floor, see policy.zig.
+pub const MIN_SIZE_DEFAULT = policy.MIN_SIZE_DEFAULT;
+
+/// Producible codings in server preference order, see policy.zig.
+pub const supported_default = policy.supported_default;
+
+/// Accept-Encoding negotiation, see negotiate.zig.
+pub const negotiate = negotiate_mod.negotiate;
+
+/// Whether a body is worth compressing, see policy.zig.
+pub const shouldCompress = policy.shouldCompress;
+
+/// Encode a body with the chosen coding into a fresh buffer.
 ///
 /// Param:
-/// accept_encoding - ?[]const u8 (the raw Accept-Encoding field value, or null if absent)
-/// supported - []const Encoding (producible codings in server-preference order)
+/// allocator - std.mem.Allocator (owns the returned slice)
+/// encoding - Encoding (chosen coding)
+/// data - []const u8 (uncompressed body)
+/// level - Level (effort, ignored for identity)
 ///
 /// Return:
-/// - Encoding (the chosen coding, possibly identity)
-/// - null when nothing is acceptable (identity is forbidden via q=0 and no producible
-///   coding is acceptable), which the caller answers with 406 Not Acceptable
-pub fn negotiate(accept_encoding: ?[]const u8, supported: []const Encoding) ?Encoding {
-    const header = accept_encoding orelse return .IDENTITY;
+/// - []u8 (owned. For identity it is a copy of data)
+/// - Error when the codec fails or memory runs out
+pub fn encode(
+    allocator: std.mem.Allocator,
+    encoding: Encoding,
+    data: []const u8,
+    level: Level,
+) Error![]u8 {
+    return encodeInner(allocator, encoding, data, level) catch |err| innerError(err);
+}
 
-    const trimmed = std.mem.trim(u8, header, " \t");
-    if (trimmed.len == 0) return .IDENTITY;
+/// Encode a body with the chosen coding into a caller buffer.
+///
+/// Param:
+/// allocator - std.mem.Allocator (transient codec scratch)
+/// encoding - Encoding (chosen coding)
+/// data - []const u8 (uncompressed body)
+/// out_buf - []u8 (destination)
+/// level - Level (effort, ignored for identity)
+///
+/// Return:
+/// - usize (encoded byte count written into out_buf)
+/// - Error.ZixUtils_Compression_BufferTooSmall when out_buf cannot hold the result
+pub fn encodeInto(
+    allocator: std.mem.Allocator,
+    encoding: Encoding,
+    data: []const u8,
+    out_buf: []u8,
+    level: Level,
+) Error!usize {
+    return encodeIntoInner(allocator, encoding, data, out_buf, level) catch |err| {
+        return innerError(err);
+    };
+}
 
-    const identity = scan(trimmed, "identity");
-    const identity_available = identity.explicit orelse identity.wildcard orelse 1000;
-
-    var best_encoding: ?Encoding = null;
-    var best_quality: u16 = 0;
-    for (supported) |encoding| {
-        const match = scan(trimmed, encoding.token());
-        const quality = match.explicit orelse match.wildcard orelse 0;
-
-        if (quality > best_quality) {
-            best_quality = quality;
-            best_encoding = encoding;
-        }
-    }
-
-    if (best_encoding) |encoding| {
-        if (best_quality > 0) {
-            if (identity.explicit) |identity_quality| {
-                if (identity_quality > best_quality) return .IDENTITY;
-            }
-
-            return encoding;
-        }
-    }
-
-    if (identity_available > 0) return .IDENTITY;
-
-    return null;
+/// Decode a body in the given coding into a fresh buffer.
+///
+/// Param:
+/// allocator - std.mem.Allocator (owns the returned slice)
+/// encoding - Encoding (coding the data is in)
+/// data - []const u8 (encoded body)
+/// max_out - usize (bomb guard, ignored for identity)
+///
+/// Return:
+/// - []u8 (owned)
+/// - Error.ZixUtils_Compression_OutputTooLarge past max_out
+/// - Error when the stream is bad
+pub fn decode(
+    allocator: std.mem.Allocator,
+    encoding: Encoding,
+    data: []const u8,
+    max_out: usize,
+) Error![]u8 {
+    return decodeInner(allocator, encoding, data, max_out) catch |err| innerError(err);
 }
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 // Test:
 
-// TODO: zix.utils.compression unit test
+fn roundTrip(encoding: Encoding, original: []const u8) !void {
+    const packed_bytes = try encode(std.testing.allocator, encoding, original, .DEFAULT);
+    defer std.testing.allocator.free(packed_bytes);
 
-test "zix utils: compression, picks the best coding" {
-    const supported = [_]Encoding{ .GZIP, .BR };
+    const restored = try decode(std.testing.allocator, encoding, packed_bytes, 1 << 20);
+    defer std.testing.allocator.free(restored);
 
-    try std.testing.expectEqual(Encoding.IDENTITY, negotiate(null, &supported).?);
-    try std.testing.expectEqual(Encoding.IDENTITY, negotiate("", &supported).?);
-    try std.testing.expectEqual(Encoding.GZIP, negotiate("gzip", &supported).?);
-    try std.testing.expectEqual(Encoding.BR, negotiate("gzip;q=0.5, br;q=0.9", &supported).?);
-    try std.testing.expectEqual(
-        Encoding.IDENTITY,
-        negotiate("gzip;q=0.5, identity;q=0.9", &supported).?,
+    try std.testing.expectEqualSlices(u8, original, restored);
+}
+
+test "zix utils compression: compression, identity is a copy" {
+    const original = "passthrough body";
+
+    const out = try encode(std.testing.allocator, .IDENTITY, original, .DEFAULT);
+    defer std.testing.allocator.free(out);
+
+    try std.testing.expectEqualStrings(original, out);
+    try std.testing.expect(out.ptr != original.ptr);
+}
+
+test "zix utils compression: compression, gzip round-trips" {
+    try roundTrip(.GZIP, "facade roundtrip over the gzip codec");
+}
+
+test "zix utils compression: compression, gzip above the fast cap round-trips" {
+    const original = try std.testing.allocator.alloc(u8, 70 * 1024);
+    defer std.testing.allocator.free(original);
+
+    for (original, 0..) |*byte, i| byte.* = @truncate(i % 251);
+
+    try roundTrip(.GZIP, original);
+}
+
+test "zix utils compression: compression, deflate round-trips" {
+    try roundTrip(.DEFLATE, "facade roundtrip over the deflate codec");
+}
+
+test "zix utils compression: compression, brotli round-trips" {
+    try roundTrip(.BR, "facade roundtrip over the brotli codec, repeated. " ++
+        "facade roundtrip over the brotli codec, repeated.");
+}
+
+test "zix utils compression: compression, encodeInto gzip round-trips" {
+    const original = "facade into-buffer roundtrip over the gzip codec, repeated. " ++
+        "facade into-buffer roundtrip over the gzip codec, repeated.";
+
+    var out: [512]u8 = undefined;
+    const written = try encodeInto(std.testing.allocator, .GZIP, original, &out, .DEFAULT);
+
+    const restored = try decode(std.testing.allocator, .GZIP, out[0..written], 1024);
+    defer std.testing.allocator.free(restored);
+
+    try std.testing.expectEqualStrings(original, restored);
+}
+
+test "zix utils compression: compression, encodeInto gzip with a small buffer uses std" {
+    const original = "short";
+
+    var out: [flate_codec.compressBound(original.len)]u8 = undefined;
+    const written = try encodeInto(std.testing.allocator, .GZIP, original, &out, .DEFAULT);
+
+    const restored = try decode(std.testing.allocator, .GZIP, out[0..written], 64);
+    defer std.testing.allocator.free(restored);
+
+    try std.testing.expectEqualStrings(original, restored);
+}
+
+test "zix utils compression: compression, encodeInto identity copies" {
+    var out: [8]u8 = undefined;
+    const written = try encodeInto(std.testing.allocator, .IDENTITY, "abc", &out, .DEFAULT);
+
+    try std.testing.expectEqualStrings("abc", out[0..written]);
+}
+
+test "zix utils compression: compression, encodeInto identity short buffer is too small" {
+    var tiny: [2]u8 = undefined;
+
+    try std.testing.expectError(
+        Error.ZixUtils_Compression_BufferTooSmall,
+        encodeInto(std.testing.allocator, .IDENTITY, "abc", &tiny, .DEFAULT),
     );
 }
 
-test "zix utils: compression, negotiation edges" {
-    const supported = [_]Encoding{ .GZIP, .BR };
+test "zix utils compression: compression, decode gzip past the cap is too large" {
+    var original: [1024]u8 = undefined;
+    @memset(&original, 'A');
 
-    // q=0 forbids a coding, so identity wins.
-    try std.testing.expectEqual(Encoding.IDENTITY, negotiate("gzip;q=0", &supported).?);
-    // identity forbidden and nothing else acceptable -> null (406).
-    try std.testing.expect(negotiate("gzip;q=0, br;q=0, identity;q=0", &supported) == null);
-    // Wildcard applies when nothing is named.
-    try std.testing.expectEqual(Encoding.GZIP, negotiate("*;q=0.5", &supported).?);
+    const packed_bytes = try encode(std.testing.allocator, .GZIP, &original, .DEFAULT);
+    defer std.testing.allocator.free(packed_bytes);
+
+    try std.testing.expectError(
+        Error.ZixUtils_Compression_OutputTooLarge,
+        decode(std.testing.allocator, .GZIP, packed_bytes, 16),
+    );
+}
+
+test "zix utils compression: compression, decode bad gzip fails" {
+    try std.testing.expectError(
+        Error.ZixUtils_Compression_DecompressFailed,
+        decode(std.testing.allocator, .GZIP, "\x1f\x8b\x08\x00 not gzip", 64),
+    );
+}
+
+test "zix utils compression: compression, decode empty brotli is truncated" {
+    try std.testing.expectError(
+        Error.ZixUtils_Compression_Truncated,
+        decode(std.testing.allocator, .BR, "", 64),
+    );
+}
+
+test "zix utils compression: compression, failing allocator is out of memory" {
+    try std.testing.expectError(
+        Error.ZixUtils_Compression_OutOfMemory,
+        encode(std.testing.failing_allocator, .GZIP, "abc", .DEFAULT),
+    );
+}
+
+test "zix utils compression: compression, re-exports the policy" {
+    try std.testing.expectEqual(@as(usize, 256), MIN_SIZE_DEFAULT);
+    try std.testing.expect(!shouldCompress(10, "text/plain", MIN_SIZE_DEFAULT));
+    try std.testing.expectEqual(Encoding.GZIP, negotiate("gzip", &supported_default).?);
 }
 
