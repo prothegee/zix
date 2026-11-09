@@ -53,6 +53,12 @@ pub const DateTime = @import("date_and_time.zig");
 /// ZIX Utils file
 pub const File = @import("file.zig");
 
+/// ZIX Utils multipart/form-data parser
+pub const Multipart = @import("Multipart.zig");
+
+/// ZIX Utils one parsed multipart/form-data part
+pub const MultipartField = @import("MultipartField.zig");
+
 /// ZIX Utils generator
 pub const Generator = @import("generator.zig");
 
