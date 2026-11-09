@@ -33,7 +33,7 @@
 const std = @import("std");
 const jzon = @import("jzon");
 
-const Strategy = jzon.DeserializeStrategy;
+const Strategy = jzon.json.DeserializeStrategy;
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -99,7 +99,7 @@ test "jzon behaviour: deserialize, every strategy reads the same order" {
     defer arena.deinit();
 
     inline for (STRATEGIES) |strategy| {
-        const order = try jzon.deserialize(Order, arena.allocator(), DOCUMENT, .{
+        const order = try jzon.json.deserialize(Order, arena.allocator(), DOCUMENT, .{
             .strategy = strategy,
         });
 
@@ -123,18 +123,18 @@ test "jzon behaviour: deserialize, every strategy reads each shape on its own" {
     const allocator = arena.allocator();
 
     inline for (STRATEGIES) |strategy| {
-        const options: jzon.DeserializeOptions = .{ .strategy = strategy };
+        const options: jzon.json.DeserializeOptions = .{ .strategy = strategy };
 
-        const yes = try jzon.deserialize(bool, allocator, "true", options);
-        const no = try jzon.deserialize(bool, allocator, "false", options);
-        const byte = try jzon.deserialize(u8, allocator, "255", options);
-        const signed = try jzon.deserialize(i64, allocator, "-9", options);
-        const ratio = try jzon.deserialize(f64, allocator, "0.5", options);
-        const status = try jzon.deserialize(Status, allocator, "\"CANCELLED\"", options);
-        const text = try jzon.deserialize([]const u8, allocator, "\"text\"", options);
-        const numbers = try jzon.deserialize([]const u32, allocator, "[1,2,3]", options);
-        const absent = try jzon.deserialize(?u8, allocator, "null", options);
-        const present = try jzon.deserialize(?u8, allocator, "9", options);
+        const yes = try jzon.json.deserialize(bool, allocator, "true", options);
+        const no = try jzon.json.deserialize(bool, allocator, "false", options);
+        const byte = try jzon.json.deserialize(u8, allocator, "255", options);
+        const signed = try jzon.json.deserialize(i64, allocator, "-9", options);
+        const ratio = try jzon.json.deserialize(f64, allocator, "0.5", options);
+        const status = try jzon.json.deserialize(Status, allocator, "\"CANCELLED\"", options);
+        const text = try jzon.json.deserialize([]const u8, allocator, "\"text\"", options);
+        const numbers = try jzon.json.deserialize([]const u32, allocator, "[1,2,3]", options);
+        const absent = try jzon.json.deserialize(?u8, allocator, "null", options);
+        const present = try jzon.json.deserialize(?u8, allocator, "9", options);
 
         try std.testing.expect(yes);
         try std.testing.expect(!no);
@@ -163,7 +163,7 @@ test "jzon behaviour: deserialize, every strategy reads a document laid out with
     ;
 
     inline for (STRATEGIES) |strategy| {
-        const totals = try jzon.deserialize(Totals, arena.allocator(), src, .{
+        const totals = try jzon.json.deserialize(Totals, arena.allocator(), src, .{
             .strategy = strategy,
         });
 
@@ -181,14 +181,14 @@ test "jzon behaviour: deserialize, borrow mode reaches the path the strategy nam
     const with_string = "{\"sku\":\"borrowed\",\"qty\":1,\"price_cents\":2}";
 
     inline for (STRATEGIES) |strategy| {
-        const borrowed = try jzon.deserialize(Line, allocator, with_string, .{
+        const borrowed = try jzon.json.deserialize(Line, allocator, with_string, .{
             .strategy = strategy,
             .strings = .BORROW,
         });
 
         try std.testing.expect(inside(with_string, borrowed.sku));
 
-        const copied = try jzon.deserialize(Line, allocator, with_string, .{
+        const copied = try jzon.json.deserialize(Line, allocator, with_string, .{
             .strategy = strategy,
             .strings = .COPY,
         });
@@ -197,7 +197,7 @@ test "jzon behaviour: deserialize, borrow mode reaches the path the strategy nam
         try std.testing.expectEqualStrings("borrowed", copied.sku);
 
         // A value with no string in it reads the same under either mode.
-        const totals = try jzon.deserialize(Totals, allocator, src, .{
+        const totals = try jzon.json.deserialize(Totals, allocator, src, .{
             .strategy = strategy,
             .strings = .BORROW,
         });
@@ -215,7 +215,7 @@ test "jzon behaviour: deserialize, escaped string is decoded whichever mode was 
     const src = "{\"sku\":\"one\\ttwo\",\"qty\":1,\"price_cents\":2}";
 
     inline for (STRATEGIES) |strategy| {
-        const borrowed = try jzon.deserialize(Line, arena.allocator(), src, .{
+        const borrowed = try jzon.json.deserialize(Line, arena.allocator(), src, .{
             .strategy = strategy,
             .strings = .BORROW,
         });
@@ -233,7 +233,7 @@ test "jzon behaviour: deserialize, unknown key rule reaches the path the strateg
     const src = "{\"net_cents\":1,\"extra\":{\"deep\":[1,2,{\"a\":null}]},\"tax_cents\":2}";
 
     inline for (STRATEGIES) |strategy| {
-        const skipped = try jzon.deserialize(Totals, allocator, src, .{
+        const skipped = try jzon.json.deserialize(Totals, allocator, src, .{
             .strategy = strategy,
             .unknown = .SKIP,
         });
@@ -241,13 +241,13 @@ test "jzon behaviour: deserialize, unknown key rule reaches the path the strateg
         try std.testing.expectEqual(@as(i64, 1), skipped.net_cents);
         try std.testing.expectEqual(@as(i64, 2), skipped.tax_cents);
 
-        const rejected = jzon.deserialize(Totals, allocator, src, .{
+        const rejected = jzon.json.deserialize(Totals, allocator, src, .{
             .strategy = strategy,
             .unknown = .REJECT,
         });
 
         try std.testing.expectError(
-            jzon.DeserializeError.Jzon_Deserialize_UnknownField,
+            jzon.json.DeserializeError.Jzon_Deserialize_UnknownField,
             rejected,
         );
     }
@@ -258,7 +258,7 @@ test "jzon behaviour: deserialize, every strategy gives an absent field its decl
     defer arena.deinit();
 
     inline for (STRATEGIES) |strategy| {
-        const value = try jzon.deserialize(Defaults, arena.allocator(), "{\"id\":1}", .{
+        const value = try jzon.json.deserialize(Defaults, arena.allocator(), "{\"id\":1}", .{
             .strategy = strategy,
         });
 
@@ -278,10 +278,10 @@ test "jzon behaviour: deserialize, reads a shape only the default strategy has a
     // std fills a byte slice from an array of numbers and takes a tuple as an
     // array. The generated strategies refuse both at compile time, so the
     // default one is the reason a caller is never stuck.
-    const text = try jzon.deserialize([]const u8, allocator, "[104,105]", .{});
+    const text = try jzon.json.deserialize([]const u8, allocator, "[104,105]", .{});
     try std.testing.expectEqualStrings("hi", text);
 
-    const pair = try jzon.deserialize(struct { u8, bool }, allocator, "[1,true]", .{});
+    const pair = try jzon.json.deserialize(struct { u8, bool }, allocator, "[1,true]", .{});
     try std.testing.expectEqual(@as(u8, 1), pair[0]);
     try std.testing.expect(pair[1]);
 }
@@ -293,11 +293,14 @@ test "jzon behaviour: deserialize, a rejected field is named, which the error va
     jzon.Failure.reset();
 
     const body = "{\"id\":42,\"customer\":\"Ada\",\"discount\":5}";
-    const result = jzon.deserialize(Record, arena.allocator(), body, .{
+    const result = jzon.json.deserialize(Record, arena.allocator(), body, .{
         .strategy = .GENERATED,
     });
 
-    try std.testing.expectError(jzon.DeserializeError.Jzon_Deserialize_UnknownField, result);
+    try std.testing.expectError(
+        jzon.json.DeserializeError.Jzon_Deserialize_UnknownField,
+        result,
+    );
 
     const why = jzon.lastFailure();
 
@@ -311,11 +314,14 @@ test "jzon behaviour: deserialize, a field the document never filled is named" {
 
     jzon.Failure.reset();
 
-    const result = jzon.deserialize(Record, arena.allocator(), "{\"id\":42}", .{
+    const result = jzon.json.deserialize(Record, arena.allocator(), "{\"id\":42}", .{
         .strategy = .GENERATED,
     });
 
-    try std.testing.expectError(jzon.DeserializeError.Jzon_Deserialize_MissingField, result);
+    try std.testing.expectError(
+        jzon.json.DeserializeError.Jzon_Deserialize_MissingField,
+        result,
+    );
 
     const why = jzon.lastFailure();
 
@@ -330,11 +336,11 @@ test "jzon behaviour: deserialize, a document that stops early reports the byte 
     jzon.Failure.reset();
 
     const cut = "{\"id\":42,\"customer\":\"Ada";
-    const result = jzon.deserialize(Record, arena.allocator(), cut, .{
+    const result = jzon.json.deserialize(Record, arena.allocator(), cut, .{
         .strategy = .GENERATED,
     });
 
-    try std.testing.expectError(jzon.DeserializeError.Jzon_Deserialize_Truncated, result);
+    try std.testing.expectError(jzon.json.DeserializeError.Jzon_Deserialize_Truncated, result);
 
     const why = jzon.lastFailure();
 
