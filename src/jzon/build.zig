@@ -42,7 +42,15 @@ const ALLOWED_ZIG = struct {
 };
 
 /// Example names, one per file under `examples/`.
-const EXAMPLES = [_][]const u8{};
+const EXAMPLES = [_][]const u8{
+    "serialize",
+    "deserialize",
+    "strings",
+    "unknown_keys",
+    "bench_serialize",
+    "bench_deserialize",
+    "zon_file",
+};
 
 /// Behaviour tier suites, one per file under `tests/behaviour/`.
 const BEHAVIOUR_SUITES = [_][]const u8{
