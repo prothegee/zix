@@ -79,6 +79,35 @@ const Source = struct {
     }
 };
 
+/// Record where the scanner stopped, unless the failure already named a field.
+///
+/// Note:
+/// - UnknownField, MissingField and UnknownEnumValue note their name where they
+///   happen. Every other failure is noted here, so `lastFailure` never shows a field
+///   left over from an earlier parse on this thread.
+/// - The offset is the scanner's position, which is just past the token it stopped on.
+///
+/// Param:
+/// scanner - *const std.json.Scanner (the scanner the parse ran on)
+/// err - Error (the failure, already in this module's set)
+///
+/// Return:
+/// - Error (the same failure it was given, always)
+fn failed(scanner: *const std.json.Scanner, err: Error) Error {
+    @branchHint(.cold);
+
+    switch (err) {
+        error.Jzon_ScannerParser_UnknownField,
+        error.Jzon_ScannerParser_MissingField,
+        error.Jzon_ScannerParser_UnknownEnumValue,
+        => {},
+
+        else => Failure.noteOffset(scanner.cursor),
+    }
+
+    return err;
+}
+
 /// Translate one of the scanner's failures into this module's set.
 ///
 /// Note:
@@ -418,7 +447,8 @@ fn numberText(source: Source) Error![]const u8 {
 /// Note:
 /// - UnknownField, MissingField, UnknownEnumValue: the document and the type
 ///   disagree. They also record the field name for `lastFailure`.
-/// - Truncated, Unexpected, BadNumber: the document is not what it claims.
+/// - Truncated, Unexpected, BadNumber: the document is not what it claims. They
+///   record the scanner's position for `lastFailure`.
 /// - NoSpaceLeft exists so every member of `integer.Error` and `float.Error` maps to
 ///   a real member here. A read never returns it.
 pub const Error = error{
@@ -467,11 +497,13 @@ pub fn parse(
         .value_cap = src.len,
     };
 
-    const value = readValue(Target, source, options) catch |err| return innerError(err);
+    const value = readValue(Target, source, options) catch |err| {
+        return failed(&scanner, innerError(err));
+    };
 
-    if ((try source.next(.alloc_if_needed)) != .end_of_document) {
-        return Error.Jzon_ScannerParser_Unexpected;
-    }
+    const tail = source.next(.alloc_if_needed) catch |err| return failed(&scanner, err);
+
+    if (tail != .end_of_document) return failed(&scanner, Error.Jzon_ScannerParser_Unexpected);
 
     return value;
 }
@@ -815,5 +847,58 @@ test "jzon deserialize: scanner_parser, reads a nested slice of slices" {
     try std.testing.expectEqual(@as(u32, 2), grid[0][1]);
     try std.testing.expectEqual(@as(usize, 0), grid[1].len);
     try std.testing.expectEqual(@as(u32, 3), grid[2][0]);
+}
+
+test "jzon deserialize: scanner_parser, syntax error clears a stale field" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const Target = struct { id: u32 };
+
+    Failure.noteField("stale");
+
+    const result = parse(Target, arena.allocator(), "{\"id\":x}", .{});
+
+    try std.testing.expectError(Error.Jzon_ScannerParser_Unexpected, result);
+    try std.testing.expectEqualStrings("", Failure.lastFailure().field);
+}
+
+test "jzon deserialize: scanner_parser, bad number records the scanner position" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const Target = struct { id: u8 };
+
+    Failure.noteField("stale");
+
+    const result = parse(Target, arena.allocator(), "{\"id\":-1}", .{});
+
+    try std.testing.expectError(Error.Jzon_ScannerParser_BadNumber, result);
+    try std.testing.expectEqualStrings("", Failure.lastFailure().field);
+    try std.testing.expectEqual(@as(usize, 8), Failure.lastFailure().offset);
+}
+
+test "jzon deserialize: scanner_parser, trailing bytes record the scanner position" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    Failure.noteField("stale");
+
+    const result = parse(u8, arena.allocator(), "1 2", .{});
+
+    try std.testing.expectError(Error.Jzon_ScannerParser_Unexpected, result);
+    try std.testing.expectEqualStrings("", Failure.lastFailure().field);
+}
+
+test "jzon deserialize: scanner_parser, unknown field keeps its noted name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const Target = struct { id: u32 };
+
+    const result = parse(Target, arena.allocator(), "{\"id\":1,\"zed\":2}", .{});
+
+    try std.testing.expectError(Error.Jzon_ScannerParser_UnknownField, result);
+    try std.testing.expectEqualStrings("zed", Failure.lastFailure().field);
 }
 
