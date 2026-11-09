@@ -56,7 +56,8 @@ const StdError = std.json.ParseError(std.json.Scanner);
 ///
 /// Return:
 /// - Error (the closest failure under this module's name)
-fn stdError(err: StdError) Error {
+inline fn stdError(err: StdError) Error {
+    @branchHint(.cold);
     return switch (err) {
         error.OutOfMemory => Error.Jzon_StdParser_OutOfMemory,
         error.UnknownField => Error.Jzon_StdParser_UnknownField,
