@@ -2310,6 +2310,7 @@ Parameter terakhir adalah struct options comptime, dan `.{}` berarti semua field
 | `unknown` | `.REJECT` | sama dengan JSON |
 | `max_depth` | `256` | berapa level `.{}` yang boleh di-nest sebelum dokumen ditolak |
 | `layout` | `.MULTILINE` | `.MULTILINE` menulis satu entri per baris, `.COMPACT` menulis satu baris |
+| `hex_fields` | `&.{}` | nama field yang ditulis sebagai hex (`0x4cc61d74dc93a20b`), field lain tetap desimal |
 
 **Error:** proses render melaporkan `NoSpaceLeft` (`Jzon_Serialize_NoSpaceLeft`, `Jzon_ZonSerialize_NoSpaceLeft`) dan tidak ada yang lain. Proses parse melaporkan satu set jalur mana pun yang berjalan: `UnknownField`, `MissingField`, `UnknownEnumValue`, `Truncated`, `Unexpected`, `BadNumber`, `BadEscape`, `OutOfMemory` (sebagai `Jzon_Deserialize_*` atau `Jzon_ZonDeserialize_*`). `zix.jzon.lastFailure()` memberi tahu field dan byte mana tempat parse yang gagal berhenti, untuk kedua format.
 
