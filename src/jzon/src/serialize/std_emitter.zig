@@ -39,15 +39,22 @@ const Sink = @import("../Sink.zig");
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate a `Sink` failure into this module's set.
+/// Every failure this module can hand back before translation: its own set joined
+/// with the sink's.
+const Inner = Error || Sink.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - Sink.Error (the failure the sink reported)
+/// err - Inner (the failure a sink call or this module handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn sinkError(err: Sink.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_StdEmitter_NoSpaceLeft => Error.Jzon_StdEmitter_NoSpaceLeft,
         error.Jzon_Sink_NoSpaceLeft => Error.Jzon_StdEmitter_NoSpaceLeft,
     };
 }
@@ -83,7 +90,7 @@ pub fn emit(sink: *Sink, value: anytype) Error!void {
         error.WriteFailed => return Error.Jzon_StdEmitter_NoSpaceLeft,
     };
 
-    sink.commit(writer.buffered().len) catch |err| return sinkError(err);
+    sink.commit(writer.buffered().len) catch |err| return innerError(err);
 }
 
 // --------------------------------------------------------- //
@@ -169,8 +176,8 @@ test "jzon serialize: std_emitter, value that does not fit leaves the sink untou
     try std.testing.expectEqualStrings("[", sink.filled());
 }
 
-test "jzon serialize: std_emitter, sinkError renames no space left to its own name" {
-    const err = sinkError(error.Jzon_Sink_NoSpaceLeft);
+test "jzon serialize: std_emitter, innerError renames sink no space left to its own name" {
+    const err = innerError(error.Jzon_Sink_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_StdEmitter_NoSpaceLeft, err);
 }
@@ -265,5 +272,11 @@ test "jzon serialize: std_emitter, renders a value nested several levels deep" {
         "{\"middle\":{\"leaf\":{\"value\":9}}}",
         sink.filled(),
     );
+}
+
+test "jzon serialize: std_emitter, innerError keeps its own no space left" {
+    const err = innerError(error.Jzon_StdEmitter_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_StdEmitter_NoSpaceLeft, err);
 }
 
