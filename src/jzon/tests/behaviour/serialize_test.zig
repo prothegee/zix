@@ -33,7 +33,7 @@
 const std = @import("std");
 const jzon = @import("jzon");
 
-const Strategy = jzon.SerializeStrategy;
+const Strategy = jzon.json.SerializeStrategy;
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -100,7 +100,7 @@ const RENDERED =
 fn expectEveryStrategyRenders(expected: []const u8, value: anytype) !void {
     inline for (STRATEGIES) |strategy| {
         var buf: [2048]u8 = undefined;
-        const len = try jzon.serialize(&buf, value, .{ .strategy = strategy });
+        const len = try jzon.json.serialize(&buf, value, .{ .strategy = strategy });
 
         try std.testing.expectEqualStrings(expected, buf[0..len]);
     }
@@ -140,7 +140,7 @@ test "jzon behaviour: serialize, returns the length of what landed and leaves th
 
     inline for (STRATEGIES) |strategy| {
         var buf: [64]u8 = @splat('#');
-        const len = try jzon.serialize(&buf, numbers, .{ .strategy = strategy });
+        const len = try jzon.json.serialize(&buf, numbers, .{ .strategy = strategy });
 
         try std.testing.expectEqual(@as(usize, 7), len);
         try std.testing.expectEqualStrings("[10,20]", buf[0..len]);
@@ -165,11 +165,11 @@ test "jzon behaviour: serialize, renders a shape only the default strategy has a
     // A tuple has no object form and a non-exhaustive enum may carry a value no
     // tag names, so the generated strategies refuse both at compile time. The
     // default one is the reason a caller is never stuck.
-    const tuple_len = try jzon.serialize(&buf, .{ @as(u8, 1), true, "x" }, .{});
+    const tuple_len = try jzon.json.serialize(&buf, .{ @as(u8, 1), true, "x" }, .{});
     try std.testing.expectEqualStrings("[1,true,\"x\"]", buf[0..tuple_len]);
 
     const Loose = enum(u8) { FIRST = 1, _ };
-    const loose_len = try jzon.serialize(&buf, @as(Loose, @enumFromInt(9)), .{});
+    const loose_len = try jzon.json.serialize(&buf, @as(Loose, @enumFromInt(9)), .{});
     try std.testing.expectEqualStrings("9", buf[0..loose_len]);
 }
 
