@@ -86,7 +86,7 @@ inline fn innerError(err: Inner) Error {
 /// Param:
 /// sink - *Sink (where the text goes)
 /// value - anytype (the value to write)
-/// layout - ZonOptions.Layout (comptime, multiline or compact)
+/// options - ZonOptions (comptime, `layout` and `hex_fields` are read)
 /// level - usize (how many containers enclose this value)
 ///
 /// Return:
@@ -95,7 +95,7 @@ inline fn innerError(err: Inner) Error {
 fn writeValue(
     sink: *Sink,
     value: anytype,
-    comptime layout: ZonOptions.Layout,
+    comptime options: ZonOptions,
     level: usize,
 ) Inner!void {
     const Value = @TypeOf(value);
@@ -106,7 +106,7 @@ fn writeValue(
         .float => try writeFloat(sink, value),
 
         .optional => if (value) |inner| {
-            try writeValue(sink, inner, layout, level);
+            try writeValue(sink, inner, options, level);
         } else {
             try sink.literal("null");
         },
@@ -123,13 +123,13 @@ fn writeValue(
 
         .@"struct" => |info| {
             if (info.is_tuple) {
-                try writeList(sink, value, layout, level);
+                try writeList(sink, value, options, level);
             } else {
-                try writeStruct(sink, value, layout, level);
+                try writeStruct(sink, value, options, level);
             }
         },
 
-        .array => try writeList(sink, value, layout, level),
+        .array => try writeList(sink, value, options, level),
 
         .pointer => |info| {
             if (info.size != .slice) {
@@ -139,7 +139,7 @@ fn writeValue(
             if (info.child == u8) {
                 try writeString(sink, value);
             } else {
-                try writeList(sink, value, layout, level);
+                try writeList(sink, value, options, level);
             }
         },
 
@@ -166,6 +166,132 @@ fn writeFloat(sink: *Sink, value: anytype) Inner!void {
     };
 
     try sink.commit(printed.len);
+}
+
+/// Write an integer as `0x...`, or `-0x...` when it is negative.
+///
+/// Param:
+/// sink - *Sink (where the text goes)
+/// value - anytype (any integer width)
+///
+/// Return:
+/// - void
+/// - Error.Jzon_ZonSerialize_NoSpaceLeft when the digits do not fit
+fn writeHex(sink: *Sink, value: anytype) Inner!void {
+    if (value < 0) try sink.byte('-');
+
+    try sink.literal("0x");
+
+    const magnitude = @abs(value);
+    const printed = std.fmt.bufPrint(sink.tail(), "{x}", .{magnitude}) catch |err| switch (err) {
+        error.NoSpaceLeft => return Error.Jzon_ZonSerialize_NoSpaceLeft,
+    };
+
+    try sink.commit(printed.len);
+}
+
+/// Write a field named in `hex_fields`: an integer as hex, a null as `null`.
+///
+/// Param:
+/// sink - *Sink (where the text goes)
+/// value - anytype (an integer or an optional integer)
+/// name - []const u8 (comptime, the field name, for the compile error)
+///
+/// Return:
+/// - void
+/// - Error.Jzon_ZonSerialize_NoSpaceLeft when the text does not fit
+fn writeHexField(sink: *Sink, value: anytype, comptime name: []const u8) Inner!void {
+    switch (@typeInfo(@TypeOf(value))) {
+        .int => try writeHex(sink, value),
+
+        .optional => |info| {
+            if (@typeInfo(info.child) != .int) hexNotInteger(name, @TypeOf(value));
+
+            if (value) |inner| try writeHex(sink, inner) else try sink.literal("null");
+        },
+
+        else => hexNotInteger(name, @TypeOf(value)),
+    }
+}
+
+/// Stop the build: a name in `hex_fields` belongs to a field that is not an integer.
+///
+/// Param:
+/// name - []const u8 (comptime, the field name)
+/// Field - type (the field's type)
+fn hexNotInteger(comptime name: []const u8, comptime Field: type) noreturn {
+    @compileError("jzon zon: hex field \"" ++ name ++ "\" is " ++ @typeName(Field) ++
+        ", not an integer");
+}
+
+/// Whether a name is in `hex_fields`.
+///
+/// Param:
+/// hex_fields - []const []const u8 (comptime, the names from the options)
+/// name - []const u8 (comptime, the field name)
+///
+/// Return:
+/// - bool (true when the field is written as hex)
+fn isHexField(comptime hex_fields: []const []const u8, comptime name: []const u8) bool {
+    comptime {
+        for (hex_fields) |hex_name| {
+            if (std.mem.eql(u8, hex_name, name)) return true;
+        }
+
+        return false;
+    }
+}
+
+/// Whether a struct reachable from a type has a field with this name.
+///
+/// Param:
+/// Value - type (comptime, the type to search)
+/// name - []const u8 (comptime, the field name)
+/// seen - []const type (comptime, the types already searched, so a type that holds
+///   itself does not loop)
+///
+/// Return:
+/// - bool (true when some struct inside has the field)
+fn hasField(comptime Value: type, comptime name: []const u8, comptime seen: []const type) bool {
+    comptime {
+        for (seen) |done| {
+            if (done == Value) return false;
+        }
+
+        const next = seen ++ [_]type{Value};
+
+        return switch (@typeInfo(Value)) {
+            .optional => |info| hasField(info.child, name, next),
+            .array => |info| hasField(info.child, name, next),
+            .pointer => |info| hasField(info.child, name, next),
+
+            .@"struct" => |info| found: {
+                for (info.field_names, info.field_types) |field_name, Field| {
+                    if (!info.is_tuple and std.mem.eql(u8, field_name, name)) break :found true;
+                    if (hasField(Field, name, next)) break :found true;
+                }
+
+                break :found false;
+            },
+
+            else => false,
+        };
+    }
+}
+
+/// Stop the build when a name in `hex_fields` is not a field anywhere in the value.
+///
+/// Param:
+/// Value - type (comptime, the type being written)
+/// hex_fields - []const []const u8 (comptime, the names from the options)
+fn checkHexFields(comptime Value: type, comptime hex_fields: []const []const u8) void {
+    comptime {
+        for (hex_fields) |name| {
+            if (!hasField(Value, name, &.{})) @compileError(
+                "jzon zon: hex field \"" ++ name ++ "\" is not a field of " ++ @typeName(Value),
+            );
+        }
+    }
 }
 
 /// Spell a field or tag name at compile time, quoted as `@"..."` when it is not a
@@ -332,7 +458,7 @@ fn writeSeparator(sink: *Sink, comptime layout: ZonOptions.Layout, is_last: bool
 /// Param:
 /// sink - *Sink (where the text goes)
 /// value - anytype (the struct)
-/// layout - ZonOptions.Layout (comptime, multiline or compact)
+/// options - ZonOptions (comptime, `layout` and `hex_fields` are read)
 /// level - usize (how many containers enclose this one)
 ///
 /// Return:
@@ -341,9 +467,10 @@ fn writeSeparator(sink: *Sink, comptime layout: ZonOptions.Layout, is_last: bool
 fn writeStruct(
     sink: *Sink,
     value: anytype,
-    comptime layout: ZonOptions.Layout,
+    comptime options: ZonOptions,
     level: usize,
 ) Inner!void {
+    const layout = options.layout;
     const names = comptime std.meta.fieldNames(@TypeOf(value));
 
     if (names.len == 0) return sink.literal(".{}");
@@ -364,7 +491,12 @@ fn writeStruct(
             },
         }
 
-        try writeValue(sink, @field(value, name), layout, level + 1);
+        if (comptime isHexField(options.hex_fields, name)) {
+            try writeHexField(sink, @field(value, name), name);
+        } else {
+            try writeValue(sink, @field(value, name), options, level + 1);
+        }
+
         if (layout == .MULTILINE) try sink.byte(',');
     }
 
@@ -377,7 +509,7 @@ fn writeStruct(
 /// Param:
 /// sink - *Sink (where the text goes)
 /// items - anytype (the elements)
-/// layout - ZonOptions.Layout (comptime, multiline or compact)
+/// options - ZonOptions (comptime, `layout` and `hex_fields` are read)
 /// level - usize (how many containers enclose this one)
 ///
 /// Return:
@@ -386,9 +518,11 @@ fn writeStruct(
 fn writeList(
     sink: *Sink,
     items: anytype,
-    comptime layout: ZonOptions.Layout,
+    comptime options: ZonOptions,
     level: usize,
 ) Inner!void {
+    const layout = options.layout;
+
     if (items.len == 0) return sink.literal(".{}");
 
     try sink.literal(".{");
@@ -396,13 +530,13 @@ fn writeList(
     if (@typeInfo(@TypeOf(items)) == .@"struct") {
         inline for (items, 0..) |item, index| {
             try writeBreak(sink, layout, level + 1);
-            try writeValue(sink, item, layout, level + 1);
+            try writeValue(sink, item, options, level + 1);
             try writeSeparator(sink, layout, index + 1 == items.len);
         }
     } else {
         for (items, 0..) |item, index| {
             try writeBreak(sink, layout, level + 1);
-            try writeValue(sink, item, layout, level + 1);
+            try writeValue(sink, item, options, level + 1);
             try writeSeparator(sink, layout, index + 1 == items.len);
         }
     }
@@ -435,7 +569,7 @@ pub const Error = error{
 /// Param:
 /// buf - []u8 (where the ZON text goes, caller owned)
 /// value - anytype (the value to write)
-/// options - ZonOptions (comptime, only `layout` is read)
+/// options - ZonOptions (comptime, `layout` and `hex_fields` are read)
 ///
 /// Usage:
 /// ```zig
@@ -443,15 +577,20 @@ pub const Error = error{
 ///
 /// const len = try jzon.zon.serialize(&buf, package, .{});
 /// const compact = try jzon.zon.serialize(&buf, package, .{ .layout = .COMPACT });
+/// const hex = try jzon.zon.serialize(&buf, package, .{
+///     .hex_fields = &.{"fingerprint"},
+/// });
 /// ```
 ///
 /// Return:
 /// - usize (how many bytes of `buf` the value took)
 /// - Error.Jzon_ZonSerialize_NoSpaceLeft when the text does not fit
 pub fn serialize(buf: []u8, value: anytype, comptime options: ZonOptions) Error!usize {
+    comptime checkHexFields(@TypeOf(value), options.hex_fields);
+
     var sink: Sink = .init(buf);
 
-    writeValue(&sink, value, options.layout, 0) catch |err| return innerError(err);
+    writeValue(&sink, value, options, 0) catch |err| return innerError(err);
 
     return sink.written();
 }
@@ -817,5 +956,175 @@ test "jzon zon: serialize, round trip past BREAK_LEVELS" {
     const back = try deserialize(Deep, arena.allocator(), buf[0..len], .{});
 
     try std.testing.expectEqualDeep(value, back);
+}
+
+test "jzon zon: serialize, hex field is written as hex" {
+    const Package = struct {
+        major: u32,
+        fingerprint: u64,
+    };
+    const value: Package = .{
+        .major = 6,
+        .fingerprint = 0x4cc61d74dc93a20b,
+    };
+    const expected = ".{ .major = 6, .fingerprint = 0x4cc61d74dc93a20b }";
+
+    try expectEmits(expected, value, .{
+        .layout = .COMPACT,
+        .hex_fields = &.{"fingerprint"},
+    });
+}
+
+test "jzon zon: serialize, every listed hex field is written as hex" {
+    const Masks = struct {
+        read: u8,
+        write: u16,
+        count: u8,
+    };
+    const value: Masks = .{
+        .read = 0xff,
+        .write = 0x1f,
+        .count = 3,
+    };
+    const expected = ".{ .read = 0xff, .write = 0x1f, .count = 3 }";
+
+    try expectEmits(expected, value, .{
+        .layout = .COMPACT,
+        .hex_fields = &.{
+            "read",
+            "write",
+        },
+    });
+}
+
+test "jzon zon: serialize, hex field matches at every depth" {
+    const Item = struct { id: u8 };
+    const Outer = struct {
+        id: u8,
+        items: []const Item,
+    };
+    const value: Outer = .{
+        .id = 10,
+        .items = &.{.{ .id = 11 }},
+    };
+    const expected = ".{ .id = 0xa, .items = .{ .{ .id = 0xb } } }";
+
+    try expectEmits(expected, value, .{
+        .layout = .COMPACT,
+        .hex_fields = &.{"id"},
+    });
+}
+
+test "jzon zon: serialize, negative hex field" {
+    const Offset = struct { delta: i64 };
+    const value: Offset = .{ .delta = std.math.minInt(i64) };
+
+    try expectEmits(".{ .delta = -0x8000000000000000 }", value, .{
+        .layout = .COMPACT,
+        .hex_fields = &.{"delta"},
+    });
+}
+
+test "jzon zon: serialize, zero hex field" {
+    const Flags = struct { bits: u32 };
+    const value: Flags = .{ .bits = 0 };
+
+    try expectEmits(".{ .bits = 0x0 }", value, .{
+        .layout = .COMPACT,
+        .hex_fields = &.{"bits"},
+    });
+}
+
+test "jzon zon: serialize, optional hex field" {
+    const Maybe = struct {
+        set: ?u16,
+        unset: ?u16,
+    };
+    const value: Maybe = .{
+        .set = 0xbeef,
+        .unset = null,
+    };
+    const expected = ".{ .set = 0xbeef, .unset = null }";
+
+    try expectEmits(expected, value, .{
+        .layout = .COMPACT,
+        .hex_fields = &.{
+            "set",
+            "unset",
+        },
+    });
+}
+
+test "jzon zon: serialize, hex field that does not fit is no space left" {
+    const Package = struct { fingerprint: u64 };
+    const value: Package = .{ .fingerprint = 0x4cc61d74dc93a20b };
+
+    var buf: [24]u8 = undefined;
+
+    try std.testing.expectError(
+        Error.Jzon_ZonSerialize_NoSpaceLeft,
+        serialize(&buf, value, .{
+            .layout = .COMPACT,
+            .hex_fields = &.{"fingerprint"},
+        }),
+    );
+}
+
+test "jzon zon: serialize, round trip hex fields in both layouts" {
+    const Package = struct {
+        major: u32,
+        fingerprint: u64,
+        delta: ?i32,
+    };
+    const value: Package = .{
+        .major = 6,
+        .fingerprint = 0x4cc61d74dc93a20b,
+        .delta = -0x1f,
+    };
+
+    try expectRoundTrip(Package, value, .{ .hex_fields = &.{
+        "fingerprint",
+        "delta",
+    } });
+    try expectRoundTrip(Package, value, .{
+        .layout = .COMPACT,
+        .hex_fields = &.{"fingerprint"},
+    });
+}
+
+test "jzon zon: serialize, isHexField finds a listed name" {
+    try std.testing.expect(comptime isHexField(&.{
+        "a",
+        "fingerprint",
+    }, "fingerprint"));
+}
+
+test "jzon zon: serialize, isHexField skips an unlisted name" {
+    try std.testing.expect(!comptime isHexField(&.{"fingerprint"}, "major"));
+}
+
+test "jzon zon: serialize, hasField finds a nested field" {
+    const Line = struct { sku: u8 };
+    const Order = struct { lines: []const ?Line };
+
+    try std.testing.expect(comptime hasField(Order, "sku", &.{}));
+}
+
+test "jzon zon: serialize, hasField misses an absent name" {
+    try std.testing.expect(!comptime hasField(Point, "z", &.{}));
+}
+
+test "jzon zon: serialize, hasField skips tuple positions" {
+    try std.testing.expect(!comptime hasField(struct { u8 }, "0", &.{}));
+}
+
+test "jzon zon: serialize, hasField stops on a type that holds itself" {
+    const Tree = struct {
+        value: u8,
+        children: []const @This(),
+    };
+
+    try std.testing.expect(comptime hasField(Tree, "value", &.{}));
+    try std.testing.expect(!comptime hasField(Tree, "missing", &.{}));
 }
 
