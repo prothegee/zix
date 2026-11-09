@@ -14,7 +14,8 @@
 //!
 //! An error value has nowhere to put a field name or an offset, so this is a side
 //! channel. It is per thread and the next failure replaces it, so read it right after
-//! a parse returned an error.
+//! a parse returned an error. The field name is copied into a per-thread buffer, so it
+//! stays readable after the document or the arena behind it is freed.
 //!
 //! ---------------------------------------------------------
 //!
@@ -37,6 +38,7 @@ const std = @import("std");
 // Fields:
 
 /// The field the failure is about, empty when the failure is not about a field.
+/// Points into this thread's own copy, cut to FIELD_CAPACITY bytes.
 field: []const u8 = "",
 /// Byte offset into the source where the parse stopped, or 0 when the path cannot
 /// report one. The std-backed path never reports an offset, because std does not
@@ -53,8 +55,37 @@ const Self = @This();
 /// Per thread, because a parse never crosses threads: it is one call over one buffer.
 threadlocal var last_failure: Self = .{};
 
+/// This thread's copy of the last field name, so `field` never points at memory the
+/// caller has freed.
+threadlocal var field_copy: [FIELD_CAPACITY]u8 = undefined;
+
+/// Copy a field name into this thread's buffer.
+///
+/// Note:
+/// - A name longer than FIELD_CAPACITY keeps only its first FIELD_CAPACITY bytes.
+/// - The name may already point into the buffer (a caller passing back the last
+///   `field`), so the copy is a move.
+///
+/// Param:
+/// field - []const u8 (the field name, from the source, an arena, or reflection)
+///
+/// Return:
+/// - []const u8 (the copy, inside this thread's buffer)
+fn keepField(field: []const u8) []const u8 {
+    @branchHint(.cold);
+
+    const len = @min(field.len, FIELD_CAPACITY);
+
+    @memmove(field_copy[0..len], field[0..len]);
+
+    return field_copy[0..len];
+}
+
 // --------------------------------------------------------- //
 // Public:
+
+/// The longest field name a failure keeps. A longer name is cut to this many bytes.
+pub const FIELD_CAPACITY = 64;
 
 /// What the last failed parse on this thread was about.
 ///
@@ -85,13 +116,13 @@ pub fn lastFailure() Self {
 /// Record that the failure about to be returned is about this field.
 ///
 /// Param:
-/// field - []const u8 (the field name, borrowed from the source or from reflection)
+/// field - []const u8 (the field name, copied, so the caller may free it after)
 ///
 /// Return:
 /// - void
 pub fn noteField(field: []const u8) void {
     last_failure = .{
-        .field = field,
+        .field = keepField(field),
         .offset = 0,
         .filled = true,
     };
@@ -115,14 +146,14 @@ pub fn noteOffset(offset: usize) void {
 /// Record both, for a failure that knows the field and where it was reading.
 ///
 /// Param:
-/// field - []const u8 (the field name, borrowed from the source or from reflection)
+/// field - []const u8 (the field name, copied, so the caller may free it after)
 /// offset - usize (byte offset into the source)
 ///
 /// Return:
 /// - void
 pub fn noteFieldAt(field: []const u8, offset: usize) void {
     last_failure = .{
-        .field = field,
+        .field = keepField(field),
         .offset = offset,
         .filled = true,
     };
@@ -210,5 +241,61 @@ test "jzon deserialize: Failure, offset at zero still counts as filled" {
 
     try std.testing.expect(failure.filled);
     try std.testing.expectEqual(@as(usize, 0), failure.offset);
+}
+
+test "jzon deserialize: Failure, field outlives the buffer it came from" {
+    var source = "customer".*;
+
+    reset();
+    noteField(&source);
+    @memset(&source, 'x');
+
+    try std.testing.expectEqualStrings("customer", lastFailure().field);
+}
+
+test "jzon deserialize: Failure, field from noteFieldAt outlives its buffer" {
+    var source = "status".*;
+
+    reset();
+    noteFieldAt(&source, 5);
+    @memset(&source, 'x');
+
+    try std.testing.expectEqualStrings("status", lastFailure().field);
+}
+
+test "jzon deserialize: Failure, field at FIELD_CAPACITY is kept whole" {
+    const name: [FIELD_CAPACITY]u8 = @splat('a');
+
+    reset();
+    noteField(&name);
+
+    try std.testing.expectEqualStrings(&name, lastFailure().field);
+}
+
+test "jzon deserialize: Failure, field past FIELD_CAPACITY is cut" {
+    const name: [FIELD_CAPACITY + 1]u8 = @splat('a');
+
+    reset();
+    noteField(&name);
+
+    try std.testing.expectEqualStrings(name[0..FIELD_CAPACITY], lastFailure().field);
+}
+
+test "jzon deserialize: Failure, empty field stays empty" {
+    reset();
+    noteFieldAt("", 4);
+
+    const failure = lastFailure();
+
+    try std.testing.expect(failure.filled);
+    try std.testing.expectEqualStrings("", failure.field);
+}
+
+test "jzon deserialize: Failure, field passed back from lastFailure is kept" {
+    reset();
+    noteField("total");
+    noteField(lastFailure().field[1..]);
+
+    try std.testing.expectEqualStrings("otal", lastFailure().field);
 }
 
