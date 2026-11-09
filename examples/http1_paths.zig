@@ -8,13 +8,13 @@
 //!
 //! ### brief:
 //!
-//! Http1 server example that routes by hand from path segments.
+//! Http1 server example that routes paths with the .PARAM and .PREFIX route kinds.
 //!
 //! ### note:
 //!
-//! This example routes manually in `dispatch` with startsWith and splitScalar,
-//! to show custom matching beyond the built-in route kinds.
-//! The Http1 Router also supports .PREFIX and .PARAM directly.
+//! Router priority is EXACT, then PARAM (first registered wins), then PREFIX
+//! (longest wins). /path/user/:id is registered before the tenant route, so
+//! /path/user/alice reaches userHandler.
 //!
 //! ---------------------------------------------------------
 //!
@@ -66,11 +66,11 @@ fn splitSegments(path: []const u8, out: [][]const u8) usize {
 
 // --------------------------------------------------------- //
 
-// GET /path
+// GET /path (PREFIX route)
 // GET /path/<seg1>
 // GET /path/<seg1>/<seg2>/<seg3>
 // ... up to MAX_PATH_SEGMENTS segments after /path
-// Exactly 2 segments after /path go to userHandler or tenantHandler instead.
+// Exactly 2 segments after /path match a PARAM route first.
 // More than MAX_PATH_SEGMENTS -> 404
 //
 // curl usage: curl -X GET "http://localhost:9023/path"
@@ -123,7 +123,7 @@ fn pathsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1
     try res.sendJson(json.items);
 }
 
-// GET /path/user/:id
+// GET /path/user/:id (PARAM route)
 //
 // curl usage: curl -X GET "http://localhost:9023/path/user/alice"
 // curl usage: curl -X GET "http://localhost:9023/path/user/123"
@@ -135,18 +135,12 @@ fn userHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.
         return;
     }
 
-    const prefix = "/path/user/";
-    const id = if (std.mem.startsWith(u8, req.path(), prefix))
-        req.path()[prefix.len..]
-    else
-        "";
-
-    if (id.len == 0) {
+    const id = req.pathParam("id") orelse {
         res.setStatus(.BAD_REQUEST);
 
         try res.sendJson("{\"error\":\"missing path param: id\"}");
         return;
-    }
+    };
 
     var buf: [256]u8 = undefined;
     const json = try std.fmt.bufPrint(
@@ -158,8 +152,8 @@ fn userHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, _: *zix.Http1.
     try res.sendJson(json);
 }
 
-// GET /path/:tenant-id/:tenant-branch
-// Matches /path/<seg1>/<seg2> where seg1 != "user".
+// GET /path/:tenant-id/:tenant-branch (PARAM route)
+// Matches /path/<seg1>/<seg2> when /path/user/:id did not match first.
 //
 // curl usage: curl -X GET "http://localhost:9023/path/acme/main"
 // curl usage: curl -X GET "http://localhost:9023/path/acme/dev"
@@ -168,7 +162,6 @@ fn tenantHandler(
     req: *zix.Http1.Request,
     res: *zix.Http1.Response,
     _: *zix.Http1.Context,
-    segments: []const []const u8,
 ) !void {
     if (req.method() != .GET) {
         res.setStatus(.METHOD_NOT_ALLOWED);
@@ -177,8 +170,8 @@ fn tenantHandler(
         return;
     }
 
-    const tenant_id = segments[1];
-    const tenant_branch = segments[2];
+    const tenant_id = req.pathParam("tenant-id") orelse "";
+    const tenant_branch = req.pathParam("tenant-branch") orelse "";
 
     var buf: [512]u8 = undefined;
     const json = try std.fmt.bufPrint(
@@ -192,38 +185,26 @@ fn tenantHandler(
 
 // --------------------------------------------------------- //
 
-fn dispatch(
-    req: *zix.Http1.Request,
-    res: *zix.Http1.Response,
-    ctx: *zix.Http1.Context,
-) anyerror!void {
-    var segments: [MAX_PATH_SEGMENTS + 2][]const u8 = undefined;
-    const count = splitSegments(req.path(), &segments);
-    const under_path = count >= 1 and std.mem.eql(u8, segments[0], "path");
-
-    // /path/user/<id>: 3 segments, segments[1] is "user".
-    if (under_path and count == 3 and std.mem.eql(u8, segments[1], "user")) {
-        return userHandler(req, res, ctx);
-    }
-
-    // /path/<tenant-id>/<tenant-branch>: 3 segments, segments[1] is not "user".
-    if (under_path and count == 3) {
-        return tenantHandler(req, res, ctx, segments[0..count]);
-    }
-
-    // /path prefix, any other segment count.
-    if (under_path) {
-        return pathsHandler(req, res, ctx);
-    }
-
-    res.setStatus(.NOT_FOUND);
-    res.setContentType(.TEXT_PLAIN);
-
-    try res.send("Not Found");
-}
+const Routes = zix.Http1.Router(&[_]zix.Http1.Route{
+    .{
+        .path = "/path/user/:id",
+        .handler = userHandler,
+        .kind = .PARAM,
+    },
+    .{
+        .path = "/path/:tenant-id/:tenant-branch",
+        .handler = tenantHandler,
+        .kind = .PARAM,
+    },
+    .{
+        .path = "/path",
+        .handler = pathsHandler,
+        .kind = .PREFIX,
+    },
+});
 
 pub fn main(init: std.process.Init) !void {
-    var server = zix.Http1.Server.init(dispatch, .{
+    var server = zix.Http1.Server.init(Routes.dispatch, .{
         .io = init.io,
         .ip = IP,
         .port = PORT,
