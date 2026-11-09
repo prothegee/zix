@@ -61,6 +61,26 @@ const EXAMPLES = .{
         "http1",
     },
     .{
+        "zix-example-http1_xtra_headers",
+        "examples/http1_xtra_headers.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_middleware",
+        "examples/http1_middleware.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_query",
+        "examples/http1_query.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_timeout_resp",
+        "examples/http1_timeout_resp.zig",
+        "http1",
+    },
+    .{
         "zix-example-http1_upload",
         "examples/http1_upload.zig",
         "http1",
