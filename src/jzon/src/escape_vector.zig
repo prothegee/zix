@@ -43,33 +43,24 @@ const LANES = lane.LANES;
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate a `Sink` failure into this module's set.
-///
-/// Param:
-/// err - Sink.Error (the failure the sink reported)
-///
-/// Return:
-/// - Error (the same failure under this module's name)
-fn sinkError(err: Sink.Error) Error {
-    return switch (err) {
-        error.Jzon_Sink_NoSpaceLeft => Error.Jzon_EscapeVector_NoSpaceLeft,
-    };
-}
+/// Every failure a private function here can hand back: this module's own set joined
+/// with the sets of the sink and the scalar escape.
+const Inner = Error || Sink.Error || escape.Error;
 
-/// Translate an `escape` failure into this module's set.
-///
-/// Note:
-/// - Only `escape.spell` is called from here, and it only writes, so BadEscape is not
-///   expected. It still maps to a real member, so a change in `escape` shows up as an
-///   error, not as undefined behaviour.
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - escape.Error (the failure the scalar escape reported)
+/// err - Inner (the failure a private function handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn escapeError(err: escape.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_EscapeVector_NoSpaceLeft => Error.Jzon_EscapeVector_NoSpaceLeft,
+        error.Jzon_EscapeVector_BadEscape => Error.Jzon_EscapeVector_BadEscape,
+        error.Jzon_Sink_NoSpaceLeft => Error.Jzon_EscapeVector_NoSpaceLeft,
         error.Jzon_Escape_NoSpaceLeft => Error.Jzon_EscapeVector_NoSpaceLeft,
         error.Jzon_Escape_BadEscape => Error.Jzon_EscapeVector_BadEscape,
     };
@@ -84,6 +75,63 @@ fn escapeError(err: escape.Error) Error {
 /// - bool (true when the lane holds at least one byte to escape)
 inline fn anyEscaped(chunk: Chunk) bool {
     return lane.firstEscaped(chunk) != null;
+}
+
+/// The body of `encodeBody`, failing with the inner set.
+///
+/// Param:
+/// sink - *Sink (where the bytes go)
+/// text - []const u8 (the bytes to escape and write)
+///
+/// Return:
+/// - void
+/// - Inner (a sink or escape failure, untranslated)
+fn bodyInto(sink: *Sink, text: []const u8) Inner!void {
+    var clean_from: usize = 0;
+    var index: usize = 0;
+
+    while (index + LANES <= text.len) : (index += LANES) {
+        const chunk: Chunk = text[index..][0..LANES].*;
+        if (!anyEscaped(chunk)) continue;
+
+        var offset = index;
+        while (offset < index + LANES) : (offset += 1) {
+            const byte = text[offset];
+            if (!escape.isEscaped(byte)) continue;
+
+            try sink.bytes(text[clean_from..offset]);
+            try escape.spell(sink, byte);
+
+            clean_from = offset + 1;
+        }
+    }
+
+    while (index < text.len) : (index += 1) {
+        const byte = text[index];
+        if (!escape.isEscaped(byte)) continue;
+
+        try sink.bytes(text[clean_from..index]);
+        try escape.spell(sink, byte);
+
+        clean_from = index + 1;
+    }
+
+    try sink.bytes(text[clean_from..]);
+}
+
+/// The body of `encode`: quotes around the escaped text.
+///
+/// Param:
+/// sink - *Sink (where the string goes)
+/// text - []const u8 (the bytes to escape and write)
+///
+/// Return:
+/// - void
+/// - Inner (a sink or escape failure, untranslated)
+fn quoted(sink: *Sink, text: []const u8) Inner!void {
+    try sink.byte('"');
+    try bodyInto(sink, text);
+    try sink.byte('"');
 }
 
 // --------------------------------------------------------- //
@@ -110,9 +158,7 @@ pub const Error = error{
 /// - void
 /// - Error.Jzon_EscapeVector_NoSpaceLeft when the escaped form does not fit
 pub fn encode(sink: *Sink, text: []const u8) Error!void {
-    sink.byte('"') catch |err| return sinkError(err);
-    try encodeBody(sink, text);
-    sink.byte('"') catch |err| return sinkError(err);
+    return quoted(sink, text) catch |err| innerError(err);
 }
 
 /// Write `text` escaped, without the surrounding quotes.
@@ -130,36 +176,7 @@ pub fn encode(sink: *Sink, text: []const u8) Error!void {
 /// - void
 /// - Error.Jzon_EscapeVector_NoSpaceLeft when the escaped form does not fit
 pub fn encodeBody(sink: *Sink, text: []const u8) Error!void {
-    var clean_from: usize = 0;
-    var index: usize = 0;
-
-    while (index + LANES <= text.len) : (index += LANES) {
-        const chunk: Chunk = text[index..][0..LANES].*;
-        if (!anyEscaped(chunk)) continue;
-
-        var offset = index;
-        while (offset < index + LANES) : (offset += 1) {
-            const byte = text[offset];
-            if (!escape.isEscaped(byte)) continue;
-
-            sink.bytes(text[clean_from..offset]) catch |err| return sinkError(err);
-            escape.spell(sink, byte) catch |err| return escapeError(err);
-
-            clean_from = offset + 1;
-        }
-    }
-
-    while (index < text.len) : (index += 1) {
-        const byte = text[index];
-        if (!escape.isEscaped(byte)) continue;
-
-        sink.bytes(text[clean_from..index]) catch |err| return sinkError(err);
-        escape.spell(sink, byte) catch |err| return escapeError(err);
-
-        clean_from = index + 1;
-    }
-
-    sink.bytes(text[clean_from..]) catch |err| return sinkError(err);
+    return bodyInto(sink, text) catch |err| innerError(err);
 }
 
 // --------------------------------------------------------- //
@@ -340,14 +357,32 @@ test "jzon: escape_vector, encode into an empty buffer is no space left" {
     try std.testing.expectError(Error.Jzon_EscapeVector_NoSpaceLeft, encode(&sink, ""));
 }
 
-test "jzon: escape_vector, escapeError renames no space left to its own name" {
-    const err = escapeError(error.Jzon_Escape_NoSpaceLeft);
+test "jzon: escape_vector, innerError keeps its own no space left" {
+    const err = innerError(error.Jzon_EscapeVector_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_EscapeVector_NoSpaceLeft, err);
 }
 
-test "jzon: escape_vector, escapeError renames bad escape to its own name" {
-    const err = escapeError(error.Jzon_Escape_BadEscape);
+test "jzon: escape_vector, innerError keeps its own bad escape" {
+    const err = innerError(error.Jzon_EscapeVector_BadEscape);
+
+    try std.testing.expectEqual(Error.Jzon_EscapeVector_BadEscape, err);
+}
+
+test "jzon: escape_vector, innerError renames sink no space left to its own name" {
+    const err = innerError(error.Jzon_Sink_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_EscapeVector_NoSpaceLeft, err);
+}
+
+test "jzon: escape_vector, innerError renames escape no space left to its own name" {
+    const err = innerError(error.Jzon_Escape_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_EscapeVector_NoSpaceLeft, err);
+}
+
+test "jzon: escape_vector, innerError renames escape bad escape to its own name" {
+    const err = innerError(error.Jzon_Escape_BadEscape);
 
     try std.testing.expectEqual(Error.Jzon_EscapeVector_BadEscape, err);
 }
