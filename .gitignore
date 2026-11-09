@@ -89,3 +89,5 @@ common_test.*
 ##
 ## file: exclude
 ##
+!/src/zix/utils/cache/
+!/src/zix/utils/cache/**
