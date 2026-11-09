@@ -2293,7 +2293,7 @@ The last parameter is a comptime options struct, and `.{}` means every field at 
 | `strings` | `.COPY` | `.COPY` copies every string into the allocator, `.BORROW` points a string with no escape at the document, which then has to outlive the value |
 | `unknown` | `.REJECT` | `.REJECT` fails on a key the type does not declare, `.SKIP` steps over the key and its whole value however deep it nests |
 
-**ZON options (`zix.jzon.zon.ZonOptions`):** ZON has one path per direction, so there is no strategy. It covers the shape `build.zig.zon` uses: structs, lists, strings and `\\` multiline strings, integers in any base, floats, booleans, `null`, `.tag` enums, and `//` comments.
+**ZON options (`zix.jzon.zon.ZonOptions`):** ZON has one path per direction, so there is no strategy. It covers the shape `build.zig.zon` uses: structs, lists, strings and `\\` multiline strings, integers in any base, floats, booleans, `null`, `.tag` enums, and `//` comments. Tuples (use an array), unions, and pointers other than slices are refused at compile time in both directions.
 
 | Field | Default | What it decides |
 | :- | :- | :- |
@@ -2321,7 +2321,7 @@ A field type a generated path has no form for is a compile error naming the type
 
 The two bench examples want `-Doptimize=ReleaseFast`. A Debug build measures the safety checks rather than the paths, and the rows collapse onto each other.
 
-A server example, also planned, lives with the engine examples rather than in the package and is built from the repo root with `zig build example-http1_jzon`.
+A server example lives with the engine examples rather than in the package and is built from the repo root with `zig build zix-example-http1_jzon`.
 
 | Example | What it shows |
 | :- | :- |
