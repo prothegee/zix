@@ -30,7 +30,8 @@
 //!
 
 const std = @import("std");
-const compression = @import("../../utils/compression/compression.zig");
+const Config = @import("Config.zig");
+const policy = @import("../../utils/compression/policy.zig");
 
 // --------------------------------------------------------- //
 // Private:
@@ -47,7 +48,7 @@ pub threadlocal var tl_compression: bool = false;
 
 /// Body size floor for compression, installed from
 /// config.compression_min_size.
-pub threadlocal var tl_compression_min_size: usize = compression.MIN_SIZE_DEFAULT;
+pub threadlocal var tl_compression_min_size: usize = policy.MIN_SIZE_DEFAULT;
 
 /// Compressed-output cap, installed from config.compression_max_out. A
 /// compressed result above this is discarded and the response is sent
@@ -67,13 +68,24 @@ pub fn setCompression(enabled: bool, min_size: usize, max_out: usize) void {
     tl_compression_max_out = max_out;
 }
 
+/// Install the compression policy for this worker from the server config.
+///
+/// Note:
+/// - Runs once per worker at start, never per request.
+///
+/// Param:
+/// config - Config (compress, compression_min_size, compression_max_out)
+pub fn installWorker(config: Config) void {
+    setCompression(config.compress, config.compression_min_size, config.compression_max_out);
+}
+
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 // Test:
 
 test "zix http1: compress, installs the policy" {
     setCompression(true, 128, 4096);
-    defer setCompression(false, compression.MIN_SIZE_DEFAULT, GZIP_OUT_SIZE);
+    defer setCompression(false, policy.MIN_SIZE_DEFAULT, GZIP_OUT_SIZE);
 
     try std.testing.expect(tl_compression);
     try std.testing.expectEqual(@as(usize, 128), tl_compression_min_size);
@@ -82,12 +94,45 @@ test "zix http1: compress, installs the policy" {
 
 test "zix http1: compress, turns off with zero bounds" {
     setCompression(true, 128, 4096);
-    defer setCompression(false, compression.MIN_SIZE_DEFAULT, GZIP_OUT_SIZE);
+    defer setCompression(false, policy.MIN_SIZE_DEFAULT, GZIP_OUT_SIZE);
 
     setCompression(false, 0, 0);
 
     try std.testing.expect(!tl_compression);
     try std.testing.expectEqual(@as(usize, 0), tl_compression_min_size);
     try std.testing.expectEqual(@as(usize, 0), tl_compression_max_out);
+}
+
+test "zix http1: compress, installWorker copies the config knobs" {
+    defer setCompression(false, policy.MIN_SIZE_DEFAULT, GZIP_OUT_SIZE);
+
+    installWorker(.{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 0,
+        .dispatch_model = .ASYNC,
+        .compress = true,
+        .compression_min_size = 512,
+        .compression_max_out = 2048,
+    });
+
+    try std.testing.expect(tl_compression);
+    try std.testing.expectEqual(@as(usize, 512), tl_compression_min_size);
+    try std.testing.expectEqual(@as(usize, 2048), tl_compression_max_out);
+}
+
+test "zix http1: compress, installWorker keeps compression off by default" {
+    setCompression(true, 1, 1);
+    defer setCompression(false, policy.MIN_SIZE_DEFAULT, GZIP_OUT_SIZE);
+
+    installWorker(.{
+        .io = std.testing.io,
+        .ip = "127.0.0.1",
+        .port = 0,
+        .dispatch_model = .ASYNC,
+    });
+
+    try std.testing.expect(!tl_compression);
+    try std.testing.expectEqual(policy.MIN_SIZE_DEFAULT, tl_compression_min_size);
 }
 
