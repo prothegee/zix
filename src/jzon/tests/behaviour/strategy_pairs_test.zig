@@ -33,9 +33,9 @@
 const std = @import("std");
 const jzon = @import("jzon");
 
-const DeserializeStrategy = jzon.DeserializeStrategy;
-const SerializeStrategy = jzon.SerializeStrategy;
-const Strings = jzon.Strings;
+const DeserializeStrategy = jzon.json.DeserializeStrategy;
+const SerializeStrategy = jzon.json.SerializeStrategy;
+const Strings = jzon.json.Strings;
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -132,7 +132,7 @@ fn expectEveryReadStrategy(expected: Order, rendered: []const u8) !void {
 
     inline for (READ) |strategy| {
         inline for (MODES) |mode| {
-            const actual = try jzon.deserialize(Order, arena.allocator(), rendered, .{
+            const actual = try jzon.json.deserialize(Order, arena.allocator(), rendered, .{
                 .strategy = strategy,
                 .strings = mode,
             });
@@ -147,7 +147,7 @@ fn expectEveryReadStrategy(expected: Order, rendered: []const u8) !void {
 fn expectEveryPair(order: Order) !void {
     inline for (WRITE) |strategy| {
         var buf: [2048]u8 = undefined;
-        const len = try jzon.serialize(&buf, order, .{ .strategy = strategy });
+        const len = try jzon.json.serialize(&buf, order, .{ .strategy = strategy });
 
         try expectEveryReadStrategy(order, buf[0..len]);
     }
@@ -193,11 +193,11 @@ test "jzon behaviour: strategy pairs, every pair round trips the extremes of the
 
 test "jzon behaviour: strategy pairs, every serialize strategy renders the same bytes" {
     var expected_buf: [2048]u8 = undefined;
-    const expected_len = try jzon.serialize(&expected_buf, ORDER, .{});
+    const expected_len = try jzon.json.serialize(&expected_buf, ORDER, .{});
 
     inline for (WRITE) |strategy| {
         var buf: [2048]u8 = undefined;
-        const len = try jzon.serialize(&buf, ORDER, .{ .strategy = strategy });
+        const len = try jzon.json.serialize(&buf, ORDER, .{ .strategy = strategy });
 
         try std.testing.expectEqualStrings(expected_buf[0..expected_len], buf[0..len]);
     }
