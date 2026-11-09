@@ -1,6 +1,6 @@
 //! ZIX utils response cache
 //!
-//! ### file: src/zix/utils/ResponseCache.zig
+//! ### file: src/zix/utils/cache/ResponseCache.zig
 //! 
 //! ### author: Prana Ron
 //! 
@@ -31,8 +31,8 @@
 //!
 
 const std = @import("std");
-const Config = @import("../tcp/http1/Config.zig");
-const slab_mem = @import("../multiplexers/slab.zig");
+const Config = @import("../../tcp/http1/Config.zig");
+const slab_mem = @import("../../multiplexers/slab.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -282,7 +282,7 @@ pub fn unpin(self: *Self, slot: u32) void {
 
 // TODO: zix.utils.ResponseCache.zig unit test
 
-test "zix utils: response cache, stores and expires" {
+test "zix utils cache: ResponseCache, stores and expires" {
     const config: Config = .{
         .io = std.testing.io,
         .ip = "127.0.0.1",
@@ -308,7 +308,7 @@ test "zix utils: response cache, stores and expires" {
     try std.testing.expect(cache.lookup(8, 20) == null);
 }
 
-test "zix utils: response cache, rejects a value past the slot cap" {
+test "zix utils cache: ResponseCache, rejects a value past the slot cap" {
     const config: Config = .{
         .io = std.testing.io,
         .ip = "127.0.0.1",
@@ -327,7 +327,7 @@ test "zix utils: response cache, rejects a value past the slot cap" {
     try std.testing.expect(cache.lookup(9, 10) == null);
 }
 
-test "zix utils: response cache, hitSlot rejects a foreign slice" {
+test "zix utils cache: ResponseCache, hitSlot rejects a foreign slice" {
     const config: Config = .{
         .io = std.testing.io,
         .ip = "127.0.0.1",
