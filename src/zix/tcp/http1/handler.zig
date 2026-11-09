@@ -48,6 +48,10 @@ const writer = @import("writer.zig");
 /// 0 means no deadline is active.
 threadlocal var tl_deadline_ns: u64 = 0;
 
+/// The io that armed tl_deadline_ns, kept so isExpired can read the same clock
+/// without an io argument.
+threadlocal var tl_deadline_io: ?std.Io = null;
+
 /// Wall-clock nanoseconds since the epoch.
 fn wallClockNs(io: std.Io) u64 {
     const ts = std.Io.Clock.Timestamp.now(io, .real);
@@ -123,10 +127,29 @@ pub threadlocal var tl_body_info: ?BodyInfo = null;
 /// io - std.Io (the worker io used to read the wall clock)
 /// ms - u32 (budget in milliseconds, 0 clears)
 pub fn setTimeout(io: std.Io, ms: u32) void {
+    tl_deadline_io = io;
     tl_deadline_ns = if (ms == 0)
         0
     else
         wallClockNs(io) + @as(u64, ms) * std.time.ns_per_ms;
+}
+
+/// Whether the per-handler deadline armed for this thread has passed.
+///
+/// Note:
+/// - Same budget as ctx.isExpired() before a handler shortens its own
+///   deadline with ctx.setTimeout.
+/// - The handler must check it, nothing is interrupted.
+///
+/// Return:
+/// - true when a deadline is armed and has passed
+/// - false when no deadline is armed or it is still ahead
+pub fn isExpired() bool {
+    if (tl_deadline_ns == 0) return false;
+
+    const io = tl_deadline_io orelse return false;
+
+    return wallClockNs(io) >= tl_deadline_ns;
 }
 
 /// Build the request, response, and context trio over a parsed request and
@@ -167,6 +190,9 @@ pub inline fn invokeHandler(
     var res = Response.init(fd, io, allocator);
     var ctx = Context.init(io, allocator, fd);
     ctx.logger = tl_access_logger;
+    if (tl_deadline_ns != 0) {
+        ctx.deadline = std.Io.Timestamp.fromNanoseconds(tl_deadline_ns).withClock(.real);
+    }
 
     if (tl_body_info) |info| {
         req.body_received = info.received;
@@ -210,6 +236,14 @@ fn failingHandler(_: *Request, _: *Response, _: *Context) anyerror!void {
 fn bodyInfoHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
     try std.testing.expectEqual(@as(u64, 4), req.bodyReceived());
     try std.testing.expect(req.bodyComplete());
+
+    try res.send("ok");
+}
+
+threadlocal var tl_seen_deadline: ?std.Io.Clock.Timestamp = null;
+
+fn deadlineProbeHandler(_: *Request, res: *Response, ctx: *Context) anyerror!void {
+    tl_seen_deadline = ctx.deadline;
 
     try res.send("ok");
 }
@@ -387,5 +421,64 @@ fn readLoggedLine(root: std.Io.Dir, allocator: std.mem.Allocator) ![]u8 {
     }
 
     return error.ZixNoLogLine;
+}
+
+test "zix http1: handler, isExpired is false without a deadline" {
+    setTimeout(std.testing.io, 0);
+
+    try std.testing.expect(!isExpired());
+}
+
+test "zix http1: handler, isExpired is false before the deadline" {
+    setTimeout(std.testing.io, 60_000);
+    defer setTimeout(std.testing.io, 0);
+
+    try std.testing.expect(!isExpired());
+}
+
+test "zix http1: handler, isExpired is true past the deadline" {
+    setTimeout(std.testing.io, 60_000);
+    defer setTimeout(std.testing.io, 0);
+
+    tl_deadline_ns = 1;
+
+    try std.testing.expect(isExpired());
+}
+
+test "zix http1: handler, armed budget fills the context deadline" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    setTimeout(std.testing.io, 60_000);
+    defer setTimeout(std.testing.io, 0);
+
+    tl_seen_deadline = null;
+    const parsed = testHead();
+    invokeHandler(
+        deadlineProbeHandler, &parsed, "", fds[0], std.testing.io, std.testing.allocator,
+    );
+
+    const seen = tl_seen_deadline orelse return error.ZixTest_NoDeadline;
+    try std.testing.expectEqual(std.Io.Clock.real, seen.clock);
+    try std.testing.expectEqual(@as(i96, tl_deadline_ns), seen.raw.toNanoseconds());
+}
+
+test "zix http1: handler, no budget leaves the context deadline empty" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    setTimeout(std.testing.io, 0);
+    tl_seen_deadline = std.Io.Clock.Timestamp.now(std.testing.io, .real);
+
+    const parsed = testHead();
+    invokeHandler(
+        deadlineProbeHandler, &parsed, "", fds[0], std.testing.io, std.testing.allocator,
+    );
+
+    try std.testing.expect(tl_seen_deadline == null);
 }
 
