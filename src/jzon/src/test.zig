@@ -61,5 +61,10 @@ test {
     _ = @import("serialize/generated_emitter.zig");
     _ = @import("serialize/serialize.zig");
     _ = @import("serialize/std_emitter.zig");
+    _ = @import("zon/ZonOptions.zig");
+    _ = @import("zon/deserialize.zig");
+    _ = @import("zon/grammar.zig");
+    _ = @import("zon/lib.zig");
+    _ = @import("zon/serialize.zig");
 }
 
