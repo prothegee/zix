@@ -45,15 +45,23 @@ const Sink = @import("Sink.zig");
 // --------------------------------------------------------- //
 // Private:
 
-/// Translate a `Sink` failure into this module's set.
+/// Every failure a private function here can hand back: this module's own set joined
+/// with the sink's.
+const Inner = Error || Sink.Error;
+
+/// Translate a failure from inside the module into this module's public set.
 ///
 /// Param:
-/// err - Sink.Error (the failure the sink reported)
+/// err - Inner (the failure a private function handed back)
 ///
 /// Return:
 /// - Error (the same failure under this module's name)
-fn sinkError(err: Sink.Error) Error {
+inline fn innerError(err: Inner) Error {
+    @branchHint(.cold);
+
     return switch (err) {
+        error.Jzon_Float_NoSpaceLeft => Error.Jzon_Float_NoSpaceLeft,
+        error.Jzon_Float_BadNumber => Error.Jzon_Float_BadNumber,
         error.Jzon_Sink_NoSpaceLeft => Error.Jzon_Float_NoSpaceLeft,
     };
 }
@@ -70,13 +78,29 @@ fn sinkError(err: Sink.Error) Error {
 ///
 /// Return:
 /// - void
-/// - Error.Jzon_Float_NoSpaceLeft when the digits do not fit
-fn printInto(sink: *Sink, value: anytype) Error!void {
+/// - Error.Jzon_Float_NoSpaceLeft when the digits do not fit the tail
+/// - Error.Jzon_Sink_NoSpaceLeft when the sink refuses the digits
+fn printInto(sink: *Sink, value: anytype) Inner!void {
     const printed = std.fmt.bufPrint(sink.tail(), "{}", .{value}) catch |err| switch (err) {
         error.NoSpaceLeft => return Error.Jzon_Float_NoSpaceLeft,
     };
 
-    sink.commit(printed.len) catch |err| return sinkError(err);
+    try sink.commit(printed.len);
+}
+
+/// The body of `append`, failing with the inner set.
+fn appendInto(sink: *Sink, value: anytype) Inner!void {
+    // Reject a non-float at compile time, so an integer cannot reach the float
+    // spelling by accident.
+    _ = floatInfo(@TypeOf(value));
+
+    const narrowed: f64 = @floatCast(value);
+
+    if (narrowed == value) return printInto(sink, narrowed);
+
+    try sink.byte('"');
+    try printInto(sink, value);
+    try sink.byte('"');
 }
 
 /// How many digits in a row start at `from`.
@@ -141,17 +165,7 @@ pub const Error = error{
 /// - void
 /// - Error.Jzon_Float_NoSpaceLeft when the rendered form does not fit
 pub fn append(sink: *Sink, value: anytype) Error!void {
-    // Reject a non-float at compile time, so an integer cannot reach the float
-    // spelling by accident.
-    _ = floatInfo(@TypeOf(value));
-
-    const narrowed: f64 = @floatCast(value);
-
-    if (narrowed == value) return printInto(sink, narrowed);
-
-    sink.byte('"') catch |err| return sinkError(err);
-    try printInto(sink, value);
-    sink.byte('"') catch |err| return sinkError(err);
+    return appendInto(sink, value) catch |err| innerError(err);
 }
 
 /// Read a float out of a number token's bytes.
@@ -389,8 +403,8 @@ test "jzon: float, parse past the width of a narrow type widens like std.json" {
     try std.testing.expectEqual(@as(f16, 1.5), try parse(f16, "1.5"));
 }
 
-test "jzon: float, sinkError renames no space left to its own name" {
-    const err = sinkError(error.Jzon_Sink_NoSpaceLeft);
+test "jzon: float, innerError renames sink no space left to its own name" {
+    const err = innerError(error.Jzon_Sink_NoSpaceLeft);
 
     try std.testing.expectEqual(Error.Jzon_Float_NoSpaceLeft, err);
 }
@@ -580,5 +594,17 @@ test "jzon: float, parse reads the extremes of f64 back from append" {
 
         try std.testing.expectEqual(sample, try parse(f64, sink.filled()));
     }
+}
+
+test "jzon: float, innerError keeps its own no space left" {
+    const err = innerError(error.Jzon_Float_NoSpaceLeft);
+
+    try std.testing.expectEqual(Error.Jzon_Float_NoSpaceLeft, err);
+}
+
+test "jzon: float, innerError keeps its own bad number" {
+    const err = innerError(error.Jzon_Float_BadNumber);
+
+    try std.testing.expectEqual(Error.Jzon_Float_BadNumber, err);
 }
 
