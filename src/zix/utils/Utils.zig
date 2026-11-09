@@ -47,6 +47,9 @@ pub const Charsets = @import("charsets.zig");
 /// ZIX Utils check string
 pub const CheckString = @import("check/string.zig");
 
+/// ZIX Utils compression: codecs, negotiation, and the encode facade
+pub const compression = @import("compression/compression.zig");
+
 /// ZIX Utils date and time
 pub const DateTime = @import("date_and_time.zig");
 
