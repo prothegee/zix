@@ -144,6 +144,36 @@ __**Update:**__
     - `examples/http_*.zig` links now point to the matching `examples/http1_*.zig`.
     - ADRs, past changelog releases, and migration guides keep `zix.Http` as history.
 
+    ---
+
+- **`jzon` 0.2.0**:
+    - Ported to `src/jzon` as a standalone package for Zig 0.17, also exported as `zix.jzon`.
+    - Breaking: JSON moves under `jzon.json`. `jzon.serialize` is now
+      `jzon.json.serialize`, `jzon.deserialize` is now `jzon.json.deserialize`, and the
+      options, strategies, and error sets follow (`jzon.json.SerializeOptions`,
+      `jzon.json.DeserializeStrategy`, `jzon.json.Strings`, `jzon.json.Unknown`, ...).
+    - Breaking: error names follow `Jzon_<Module>_<Condition>`. `JzonUnknownField` is now
+      `Jzon_Deserialize_UnknownField`, `JzonTruncated` is now `Jzon_Deserialize_Truncated`.
+    - New ZON codec: `jzon.zon.serialize` and `jzon.zon.deserialize`, with
+      `jzon.zon.ZonOptions`. It reads and writes the shape `build.zig.zon` uses: structs,
+      lists, strings and `\\` multiline strings, integers in any base, floats, booleans,
+      `null`, `.tag` enums, and `//` comments.
+    - `ZonOptions`: `strings` (`.COPY` or `.BORROW`), `unknown` (`.REJECT` or `.SKIP`),
+      `max_depth` (default 256), `layout` (`.MULTILINE` or `.COMPACT`), and `hex_fields`.
+    - `hex_fields` writes the named integer fields as hex (`.fingerprint = 0x4cc61d74dc93a20b`).
+      A name that is not a field, or a field that is not an integer, is a compile error.
+    - ZON refuses tuples (use an array), unions, non-slice pointers, and non-exhaustive
+      enums at compile time in both directions, so whatever it writes reads back.
+    - `jzon.lastFailure()` reports the field and byte for ZON too.
+    - Examples under `src/jzon/examples`: `serialize`, `deserialize`, `strings`,
+      `unknown_keys`, `zon_file`, `bench_serialize`, and `bench_deserialize`.
+    - `examples/http1_jzon.zig`: a JSON body in and a JSON body out on `zix.Http1`,
+      built with `zig build zix-example-http1_jzon`.
+    - Root build steps: `jzon-unit_edge-test`, `jzon-behaviour-test`, `jzon-all-test`,
+      and `jzon-examples`. Unit and edge tests live in their source files (639), and
+      behaviour suites in `src/jzon/tests/behaviour` (183).
+    - Docs: README, HLD, LLD, and benchmark under `src/jzon` (EN + ID).
+
 <br>
 
 __**Fix:**__
@@ -157,6 +187,10 @@ __**Fix:**__
   constant 0. They now read `max_request_body` from `Config`.
 
 - A `zix.Http1` PARAM route with more than 8 `:params` never matched and answered 404.
+
+- `jzon.lastFailure()` could show the field of an earlier failure after a later parse
+  failed without naming a field. Every JSON path now records the new failure:
+  `.STD` an empty one, `.SCANNER` and `.GENERATED` the byte where the parse stopped.
 
 <br>
 
