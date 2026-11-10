@@ -40,6 +40,7 @@ pub const Server = @import("Server.zig");
 pub const DispatchModel = @import("../../shared/dispatch.zig").Model;
 pub const HandlerFn = @import("handler.zig").HandlerFn;
 pub const isExpired = @import("handler.zig").isExpired;
+pub const setStatic = @import("static.zig").setStatic;
 
 pub const Route = router.Route;
 pub const Router = router.Router;
@@ -156,5 +157,9 @@ test "zix http1: Http1, Multipart parses a form field" {
 
     const field: *@This().MultipartField = parser.getField("one").?;
     try std.testing.expectEqualStrings("1", field.data);
+}
+
+test "zix http1: Http1, setStatic is the static module setter" {
+    try std.testing.expect(@This().setStatic == @import("static.zig").setStatic);
 }
 
