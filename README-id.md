@@ -1134,6 +1134,10 @@ websocat    "ws://localhost:9028/ws"
 
 Callback per-frame tidak membawa konteks per-koneksi, jadi aplikasi berbasis room menyimpan registry sendiri dengan key fd (lihat contoh di bawah).
 
+**Ukuran frame**: `ws_recv_buf` (default 16 KiB) menentukan buffer koneksi WebSocket dan frame terbesar yang boleh dikirim client. Nilai ini terpisah dari `max_recv_buf`: koneksi mengganti buffer-nya ke `ws_recv_buf` saat upgrade, jadi menaikkan `max_recv_buf` untuk upload tidak membesarkan koneksi WebSocket. Frame yang lebih besar dijawab close `1009` dan koneksi berakhir. Di `.URING` frame dibaca lewat provided-buffer ring per worker, jadi WebSocket yang idle tidak menahan recv buffer.
+
+**Error**: `serve` mengembalikan `ZixHttp1_WebSocket_*` (`KeyTooLong`, `NoSpaceLeft`, `BrokenPipe`, `HeadBuild`) dan `sendFD` mengembalikan `ZixHttp1_WebSocketSend_*` (`BrokenPipe`, `HeadBuild`). WebSocket melalui TLS (`serveTls`) belum di-porting ke `zix.Http1`.
+
 **Menggabungkan HTTP, static, dan WebSocket dalam satu server**: daftarkan semua tipe handler bersamaan, routing menangani dispatch. Rute yang tidak cocok diteruskan ke static serving:
 
 ```zig
@@ -1154,7 +1158,7 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
 
 **Kapan digunakan:** pakai WebSocket untuk push dua arah latensi rendah (chat, presence, dashboard live, state game). Pasangkan dengan `.ASYNC` agar koneksi berumur panjang tidak pernah menahan thread pool, dan gunakan `broadcast` build-once saat satu pesan menyebar ke satu room. Jika aliran data satu arah server-ke-client, pilih SSE: lebih sederhana dan reconnect native di browser.
 
-**Build-once broadcast fanout**: `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` men-serialize frame satu kali saja dan menulis byte yang sama ke setiap fd dalam room yang dikelola pemanggil, sehingga sebuah broadcast hanya berbiaya satu serialization tidak peduli berapa banyak member yang dijangkau. Write yang gagal ke peer mati dilewati (engine EPOLL memanen fd itu pada event berikutnya), dan jalur payload besar membangun header sekali dan menulis payload tanpa menyalinnya ke staging buffer.
+**Build-once broadcast fanout**: `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` men-serialize frame satu kali saja dan menulis byte yang sama ke setiap fd dalam room yang dikelola pemanggil, sehingga sebuah broadcast hanya berbiaya satu serialization tidak peduli berapa banyak member yang dijangkau. Write yang gagal ke peer mati dilewati (engine menutup fd itu pada event berikutnya), dan jalur payload besar membangun header sekali dan menulis payload tanpa menyalinnya ke staging buffer.
 
 <br>
 
