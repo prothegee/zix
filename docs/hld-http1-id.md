@@ -179,7 +179,7 @@ Referensi field lengkap (arti, trade-off, kapan diubah) ada di [`docs/zix-config
 
 Catatan: pada `.ASYNC` loop koneksi meminjam pasangan buffer receive + body milik pool thread (`core.threadConnBufs`), masing-masing `max_recv_buf` byte, dipakai ulang oleh setiap koneksi yang dilayani thread itu. `max_recv_buf` karenanya menentukan ukuran buffer per-connection pada semua dispatch model (pemanggil `core.serveConn` langsung yang membiarkan `ServeOpts.max_recv_buf` di 0 mendapat `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` menyetel `SO_RCVBUF` hanya pada jalur body besar (upload), membiarkan cell request kecil pada default kernel. `tls` opt-in ke native https: saat non-null server menyajikan HTTP/1.1 di atas TLS pada jalur ter-gate, selain itu cleartext. Field `compress`, `compression_min_size`, dan `compression_max_out` (yang terakhir di-rename dari `max_gzip_out`) dibaca saat runtime pada semua dispatch model: handler opt-in dengan `res.sendNegotiated`. Handler yang butuh satu coding secara eksplisit memanggil `zix.utils.compression.encode` dan menyetel `Content-Encoding` sendiri. Content-Length yang dideklarasikan melewati `max_request_body` ditolak dengan `413` sebelum body dibaca (0 mematikan cek), dan body chunked dibatasi receive buffer karena tidak mendeklarasikan panjang di muka.
 
-Catatan: `ws_recv_buf` menentukan ukuran buffer per-connection WebSocket. Pada `.EPOLL` menentukan ukuran buffer recv; pada `.URING` menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask, independen dari `max_recv_buf` request yang kecil. `0` jatuh ke `max_recv_buf`. Set lebih besar dari `max_recv_buf` untuk memberi koneksi WebSocket ruang lebih mengakumulasi burst pipelined yang dalam sebelum engine compact dan re-read saat fill.
+Catatan: `ws_recv_buf` (default 16 KiB) menentukan ukuran buffer koneksi WebSocket dan menjadi frame terbesar yang diterima. Nilai ini terpisah dari `max_recv_buf`: koneksi mengganti buffer-nya ke `ws_recv_buf` saat upgrade, di setiap dispatch model, dan scratch unmask punya ukuran yang sama (per worker di `.EPOLL` dan `.URING`, per pool thread di `.ASYNC`). `0` jatuh ke 16 KiB. Menaikkan `max_recv_buf` untuk upload tidak membesarkan koneksi WebSocket.
 
 Catatan: `send_date_header` default `true` untuk kepatuhan RFC 7231. Set `false` pada jalur panas di mana klien tidak mengonsumsi `Date` untuk membuang header (37 byte per response). Write helper terkelola menghormati flag ini.
 
@@ -406,10 +406,11 @@ sequenceDiagram
 - `WebSocket.serve(fd, key, on_frame)` menghitung accept key, menulis `101 Switching Protocols`, dan meminta promosi melalui slot handoff thread-local yang dibaca engine tepat setelah handler return.
 - Ping otomatis dibalas pong dan close otomatis digema oleh engine. Callback hanya pernah menerima frame text dan binary.
 - Frame yang dikirim dalam satu pass pump digabung menjadi satu `write()`.
-- Promosi hanya dihormati pada `.EPOLL`. Pada `.ASYNC` handoff dibersihkan dan koneksi berakhir setelah handler return.
-- Melalui TLS (`config.tls`, jalur thread-per-koneksi), panggil `WebSocket.serveTls(fd, key, on_frame)` (ADR-055): `101` dan tiap frame dienkripsi lewat ADR-054 stream sink, dan thread https menjalankan frame loop inline atas TLS session. Rooms / broadcast hanya cleartext (enkripsi per-session), jadi wss bersifat per-koneksi.
+- Promosi dihormati pada `.ASYNC` (blocking loop), `.EPOLL` (pump event loop), dan `.URING` (pump staged, satu ring send per pass).
+- Frame yang lebih besar dari `ws_recv_buf` dijawab close `1009` dan koneksi berakhir.
+- `WebSocket.serveTls` (wss) belum di-porting ke `zix.Http1`. TLS adalah langkah terpisah.
 
-Lihat `examples/http1_websocket.zig` (cleartext) dan `examples/tls/tls_http1_ws.zig` (wss).
+Lihat `examples/http1_websocket.zig` (cleartext). Contoh wss menunggu langkah TLS.
 
 ---
 
