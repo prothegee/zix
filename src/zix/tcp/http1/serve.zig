@@ -40,9 +40,15 @@ const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 const ServeOpts = @import("ServeOpts.zig");
 const writer = @import("writer.zig");
+const ws_pending = @import("websocket/pending.zig");
+const ws_pump = @import("websocket/pump.zig");
 
 // --------------------------------------------------------- //
 // Private:
+
+/// Staging for one blocking WebSocket pump pass, so a pipelined burst of
+/// replies costs one write.
+const WS_OUT_SIZE: usize = 4 * 1024;
 
 /// This pool thread's receive and body buffers.
 ///
@@ -90,6 +96,46 @@ fn threadConnBufs(size: usize) ?struct { recv: []u8, body: []u8 } {
     }
 
     return .{ .recv = tl_recv_buf[0..size], .body = tl_body_buf[0..size] };
+}
+
+/// This pool thread's WebSocket frame buffer and unmask scratch, apart from
+/// the HTTP buffers so ws_recv_buf stays independent of max_recv_buf.
+threadlocal var tl_ws_recv_buf: []u8 = &.{};
+threadlocal var tl_ws_payload_buf: []u8 = &.{};
+
+/// The pair of WebSocket buffers this pool thread serves frames with,
+/// allocated on the first upgrade and grown only when a later one asks for
+/// more.
+///
+/// Param:
+/// size - usize (bytes each buffer must hold, from config.ws_recv_buf)
+///
+/// Return:
+/// - the two buffers, each exactly size bytes
+/// - null when the allocation failed, the caller drops the connection
+fn threadWsBufs(size: usize) ?struct { recv: []u8, payload: []u8 } {
+    if (tl_ws_recv_buf.len < size) {
+        const grown = std.heap.smp_allocator.realloc(
+            tl_ws_recv_buf, size,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return null,
+        };
+        tl_ws_recv_buf = grown;
+    }
+
+    if (tl_ws_payload_buf.len < size) {
+        const grown = std.heap.smp_allocator.realloc(
+            tl_ws_payload_buf, size,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return null,
+        };
+        tl_ws_payload_buf = grown;
+    }
+
+    return .{
+        .recv = tl_ws_recv_buf[0..size],
+        .payload = tl_ws_payload_buf[0..size],
+    };
 }
 
 // --------------------------------------------------------- //
@@ -329,7 +375,24 @@ pub fn serveConn(
             handler_fn, &head, body_buf[0..body_len], fd, io, arena.allocator(),
         );
 
-        std.log.info("TODO: if (takeWebSocket)", .{});
+        // A handler that called WebSocket.serve owns the connection from here:
+        // the frame loop runs until the peer leaves, then the connection ends.
+        if (ws_pending.take()) |pending| {
+            const ws_size =
+                if (opts.ws_recv_buf == 0) ServeOpts.WS_RECV_BUF_DEFAULT else opts.ws_recv_buf;
+            const ws_bufs = threadWsBufs(ws_size) orelse return;
+            var ws_out_buf: [WS_OUT_SIZE]u8 = undefined;
+
+            ws_pump.serveBlocking(
+                pending.fd,
+                pending.on_frame,
+                ws_bufs.recv,
+                ws_bufs.payload,
+                &ws_out_buf,
+            );
+
+            return;
+        }
 
         if (!head.keep_alive) return;
 
@@ -368,6 +431,7 @@ pub fn serveConn(
 // Test:
 
 const pair = @import("../../utils/socket/pair.zig");
+const websocket = @import("websocket.zig");
 
 fn testWriteAll(fd: std.posix.fd_t, data: []const u8) !void {
     var written: usize = 0;
@@ -389,6 +453,27 @@ fn okHandler(req: *Request, res: *Response, _: *Context) anyerror!void {
     _ = req;
 
     try res.send("ok");
+}
+
+fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
+    websocket.sendFD(fd, @enumFromInt(opcode), payload) catch |err| switch (err) {
+        error.ZixHttp1_WebSocketSend_BrokenPipe,
+        error.ZixHttp1_WebSocketSend_HeadBuild,
+        => {},
+    };
+}
+
+fn wsHandler(req: *Request, _: *Response, _: *Context) anyerror!void {
+    try websocket.serve(req.fd, req.header("sec-websocket-key").?, testWsEcho);
+}
+
+fn testReadExact(fd: std.posix.fd_t, out: []u8) !void {
+    var got: usize = 0;
+    while (got < out.len) {
+        const n = try reader.readOnceFD(fd, out[got..]);
+        if (n == 0) return error.TestReadClosed;
+        got += n;
+    }
 }
 
 test "zix http1: serve, answers one request" {
@@ -434,5 +519,89 @@ test "zix http1: serve, answers 431 for an oversized head" {
         "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n",
         buf[0..n],
     );
+}
+
+test "zix http1: serve, runs the WebSocket frame loop after serve" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const thread = try std.Thread.spawn(.{}, serveConn, .{
+        fds[1],
+        wsHandler,
+        ServeOpts{ .max_recv_buf = ServeOpts.BUF_SIZE },
+        std.testing.io,
+    });
+
+    try testWriteAll(
+        fds[0],
+        "GET /ws HTTP/1.1\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    );
+
+    const expected_head =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+    var head_buf: [expected_head.len]u8 = undefined;
+    try testReadExact(fds[0], &head_buf);
+
+    // Masked "Hello" from RFC 6455 section 5.7, then a masked empty close.
+    const hello = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
+    try testWriteAll(fds[0], &hello);
+    var echo: [7]u8 = undefined;
+    try testReadExact(fds[0], &echo);
+
+    try testWriteAll(fds[0], &[_]u8{ 0x88, 0x80, 1, 2, 3, 4 });
+    var close: [2]u8 = undefined;
+    try testReadExact(fds[0], &close);
+
+    thread.join();
+
+    try std.testing.expectEqualStrings(expected_head, &head_buf);
+    try std.testing.expectEqualStrings("Hello", echo[2..]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x88, 0 }, &close);
+}
+
+test "zix http1: serve, WebSocket frame past ws_recv_buf gets 1009" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const thread = try std.Thread.spawn(.{}, serveConn, .{
+        fds[1],
+        wsHandler,
+        ServeOpts{
+            .max_recv_buf = 64 * 1024,
+            .ws_recv_buf = 4,
+        },
+        std.testing.io,
+    });
+
+    try testWriteAll(
+        fds[0],
+        "GET /ws HTTP/1.1\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    );
+
+    var head_buf: [129]u8 = undefined;
+    try testReadExact(fds[0], &head_buf);
+
+    const hello = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
+    try testWriteAll(fds[0], &hello);
+
+    var close: [4]u8 = undefined;
+    try testReadExact(fds[0], &close);
+
+    thread.join();
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x88, 2, 0x03, 0xF1 }, &close);
 }
 
