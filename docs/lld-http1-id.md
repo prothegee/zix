@@ -22,7 +22,7 @@ Struct polos dengan default, tanpa alokasi saat konstruksi. Field yang dibaca sa
 | `handler_timeout_ms` | dipasang sebelum setiap dispatch di semua model |
 | `max_recv_buf` | ukuran buffer per-connection pada semua model: slot .EPOLL / .URING (`ConnTable.alloc`), pasangan pool-thread .ASYNC (`threadConnBufs`) |
 | `large_body_recv_buf` | `SO_RCVBUF` khusus jalur body besar (upload), semua model, 0 = default kernel |
-| `ws_recv_buf` | ukuran buffer per-connection WebSocket, 0 jatuh ke `max_recv_buf`. .EPOLL menentukan ukuran buffer recv, .URING menentukan ukuran buffer frame-accumulation (`conn.buf`) dan scratch unmask |
+| `ws_recv_buf` | buffer koneksi WebSocket dan frame terbesar, default 16 KiB, 0 jatuh ke 16 KiB, terpisah dari `max_recv_buf`. Semua model: buffer koneksi diubah ukurannya saat upgrade, scratch unmask per worker (.EPOLL, .URING) atau per pool thread (.ASYNC) |
 | `send_date_header` | write helper terkelola: menyertakan atau membuang header `Date` |
 | `tls` | memilih jalur serve TLS saat non-null (native https), selain itu cleartext |
 | `logger` | baris lifecycle `logSystem` |
@@ -95,13 +95,13 @@ isExpired():        tl_deadline_ns != 0 dan wallClockNs(tl_deadline_io) >= tl_de
 ### Handoff WebSocket thread-local
 
 ```
-threadlocal tl_ws_pending: ?WsPending = null    // { fd, on_frame }
+threadlocal tl_pending: ?WebSocketPending = null    // { fd, on_frame }, websocket/pending.zig
 
-requestWebSocket(fd, cb): tl_ws_pending = .{ fd, cb }   // dipanggil WebSocket.serve
-takeWebSocket():          baca + bersihkan              // dipanggil engine setelah setiap dispatch
+pending.request(fd, cb): tl_pending = .{ fd, cb }   // dipanggil WebSocket.serve
+pending.take():          baca + bersihkan           // dipanggil engine setelah setiap handler
 ```
 
-`serveConn` / `serveConnOne` membersihkan handoff dan menutup koneksi (promosi hanya untuk EPOLL). Loop parse EPOLL menyimpan callback ke `conn.ws` dan mengalihkan koneksi ke pemompaan frame.
+`serveConn` (.ASYNC) menjalankan `pump.serveBlocking` atas handoff yang diambil sampai peer pergi, lalu mengakhiri koneksi. Loop parse .EPOLL dan .URING menyimpan callback ke `conn.ws`, mengubah ukuran `conn.buf` ke `ws_recv_buf`, dan mengalihkan koneksi ke pemompaan frame.
 
 ### RespSink: penggabungan response per-event
 
@@ -310,7 +310,7 @@ Conn = {
 1. listener pribadi (reuse_address) -> setNonBlock(listener_fd)
 2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
 3. scratch per-worker (smp_allocator): body_buf berukuran dari knob slot recv
-   (ws_recv_buf, selain itu max_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
+   (max_recv_buf), ws_payload_buf (ws_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
 4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       event listener       -> acceptAll
       HUP/ERR              -> close
@@ -432,7 +432,7 @@ Watch POLLIN multishot untuk fd asing (socket driver) di ring milik worker, di-a
 
 #### WebSocket di ring
 
-`IoUring.BufferGroup` per-worker (provided-buffer ring) melayani recv WebSocket (Phase 4b): kernel menyerahkan buffer hanya saat sebuah frame tiba, sehingga koneksi idle tidak mengikat recv buffer apa pun, kemenangan memory-scaling pada jumlah koneksi tinggi. `wsHandleBuf` mem-parse satu batch whole-frame di tempat dari buffer yang dipilih (zero copy) dan hanya menyalin frame parsial yang tertinggal ke `conn.buf`. Kernel tanpa dukungan buffer-ring membiarkan `ws_bufs` null, dan WebSocket jatuh kembali ke jalur plain recv-into-`conn.buf`.
+`IoUring.BufferGroup` per-worker (provided-buffer ring) melayani recv WebSocket (Phase 4b): kernel menyerahkan buffer hanya saat sebuah frame tiba, sehingga koneksi idle tidak mengikat recv buffer apa pun, kemenangan memory-scaling pada jumlah koneksi tinggi. `pumpWsSelected` mem-parse satu batch whole-frame di tempat dari buffer yang dipilih (zero copy) dan hanya menyalin frame parsial yang tertinggal ke `conn.buf`. Completion `ENOBUFS` memasang ulang recv, bukan menutup koneksi. Kernel tanpa dukungan buffer-ring membiarkan `ws_bufs` null, dan WebSocket jatuh kembali ke jalur plain recv-into-`conn.buf`.
 
 #### finishClose(): teardown ring (ADR-041)
 
@@ -455,7 +455,11 @@ Handler dibakukan ke dalam tipe sehingga `run()` tidak menerima argumen dan disp
 
 ---
 
-## websocket.zig: codec RFC 6455 + pump engine
+## websocket/: codec RFC 6455 + pump engine
+
+`websocket.zig` adalah namespace publik (`zix.Http1.WebSocket`). Bagian-bagiannya ada di bawah `websocket/`: `opcode.zig`, `frame_fn.zig`, `WsFrame.zig`, `WsParseResult.zig`, `WsPumpResult.zig`, `WsRingPumpResult.zig`, `WsSendSink.zig`, `WebSocketPending.zig`, `frame.zig`, `upgrade.zig`, `send.zig`, `pump.zig`, dan `pending.zig`.
+
+Saat upgrade engine mengubah ukuran buffer koneksi ke `ws_recv_buf` (`resizeForWs` di .EPOLL dan .URING, pasangan per-thread terpisah di .ASYNC). Byte frame yang datang bersama handshake tetap disimpan. Jika tidak muat, koneksi ditutup.
 
 ### Konstanta format frame
 
@@ -472,7 +476,9 @@ header frame server maksimum 10 byte
 2. byte 0: FIN + opcode, byte 1: MASK + panjang 7-bit
 3. panjang extended (2 atau 8 byte) saat ditandai
 4. mask key saat MASK terpasang
-5. payload dibatasi payload_buf.len:
+5. payload lebih panjang dari payload_buf.len -> error.ZixHttp1_WebSocketFrame_PayloadTooLarge
+   (dicek begitu panjangnya diketahui, sebelum payload tiba)
+   selain itu:
       masked   -> XOR-unmask ke payload_buf
       unmasked -> slice zero-copy ke buf
 6. mengembalikan { frame, consumed } atau null saat byte masih kurang
@@ -486,7 +492,7 @@ Jalur masked meng-unmask dengan XOR `@Vector(16, u8)` selebar 16 byte terhadap m
 
 ### acceptKey() / upgrade()
 
-`acceptKey` menyambung key client dengan GUID RFC 6455, SHA-1, base64 ke `[64]u8` milik pemanggil (`error.ZixKeyTooLong` melewati 128 byte input). `upgrade` menulis blok `101 Switching Protocols` penuh melalui `core.writeAllFD` (sadar sink, sehingga pada EPOLL ditahapkan bersama response lain).
+`acceptKey` menyambung key client dengan GUID RFC 6455, SHA-1, base64 ke `[64]u8` milik pemanggil (`ZixHttp1_WebSocketFrame_KeyTooLong` melewati 128 byte input). `upgrade` menulis blok `101 Switching Protocols` penuh melalui `writer.writeAllFD` (sadar sink, sehingga pada .EPOLL dan .URING ditahapkan bersama response lain).
 
 ### send() dan SendSink
 
@@ -494,14 +500,15 @@ Jalur masked meng-unmask dengan XOR `@Vector(16, u8)` selebar 16 byte terhadap m
 
 ```
 send(fd, opcode, payload):
-  sink aktif -> tahapkan header lalu payload       (error.BrokenPipe bila sink gagal)
+  sink aktif dan sink.fd == fd -> tahapkan header lalu payload
+                                  (ZixHttp1_WebSocketSend_BrokenPipe bila sink gagal)
   payload + header <= 4096 -> bangun satu buffer, satu writeAllFD
   lebih besar -> tulis header lalu payload terpisah (menghindari salinan stack besar)
 ```
 
 ### serve()
 
-`acceptKey` + `upgrade` + `core.requestWebSocket(fd, on_frame)`. Dipanggil dari dalam handler http1. Engine menghormati promosi hanya pada `.EPOLL`.
+`acceptKey` + `upgrade` + `pending.request(fd, on_frame)`. Dipanggil dari dalam handler http1. Engine mengambil promosi tepat setelah handler return, di `.ASYNC`, `.EPOLL`, dan `.URING`.
 
 ### pump()
 
@@ -512,6 +519,7 @@ loop atas data:
   text/binary -> on_frame(fd, opcode, payload)
   ping        -> kirim pong (payload digema)
   close       -> kirim close, konsumsi, berhenti dengan close = true
+  terlalu besar -> kirim close 1009, berhenti dengan close = true
   pong/continuation/lainnya -> diabaikan
 flush sink
 return { consumed, close: close atau sink.failed }
