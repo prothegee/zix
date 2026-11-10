@@ -280,8 +280,6 @@ pub fn unpin(self: *Self, slot: u32) void {
 // --------------------------------------------------------- //
 // Test:
 
-// TODO: zix.utils.ResponseCache.zig unit test
-
 test "zix utils cache: ResponseCache, stores and expires" {
     const config: Config = .{
         .io = std.testing.io,
