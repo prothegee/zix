@@ -111,6 +111,11 @@ const EXAMPLES = .{
         "http1",
     },
     .{
+        "zix-example-http1_websocket",
+        "examples/http1_websocket.zig",
+        "http1",
+    },
+    .{
         "zix-example-http1_upload",
         "examples/http1_upload.zig",
         "http1",
