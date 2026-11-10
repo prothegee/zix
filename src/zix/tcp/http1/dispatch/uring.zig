@@ -13,7 +13,7 @@
 //!
 //! ### note:
 //!
-//! Cleartext HTTP/1.1 only. TLS, WebSocket, and SSE are not part of this
+//! Cleartext HTTP/1.1 and WebSocket. TLS and SSE are not part of this
 //! model yet. A connection is served on one worker from
 //! accept to close. A response larger than the staging cap falls back to the
 //! blocking writer.
@@ -51,6 +51,10 @@ const reader = @import("../reader.zig");
 const static = @import("../static.zig");
 const RespSink = @import("../RespSink.zig");
 const writer = @import("../writer.zig");
+const ws_pending = @import("../websocket/pending.zig");
+const ws_pump = @import("../websocket/pump.zig");
+const WsFrameFn = @import("../websocket/frame_fn.zig").WsFrameFn;
+const WS_RECV_BUF_DEFAULT = @import("../ServeOpts.zig").WS_RECV_BUF_DEFAULT;
 const ResponseCache = @import("../../../utils/cache/ResponseCache.zig");
 const slab = @import("../../../multiplexers/slab.zig");
 
@@ -88,6 +92,14 @@ const RESPONSE_413_CLOSE =
     "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const RESPONSE_431 =
     "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n";
+
+/// Buffer group id of the WebSocket provided-buffer ring.
+const WS_RING_BGID: u16 = 1;
+/// Bytes per buffer in the WebSocket ring.
+const WS_RING_BUF_SIZE: u32 = 4096;
+/// Buffers in the WebSocket ring, shared by every WebSocket connection of one
+/// worker.
+const WS_RING_BUF_COUNT: u16 = 256;
 
 const ConnOutcome = enum {
     keep_alive,
@@ -133,6 +145,9 @@ const Conn = struct {
     /// Bytes the kernel owns while a send SQE is outstanding.
     inflight: usize = 0,
     closing: bool = false,
+    /// Set once a handler promoted the connection to WebSocket. From then on
+    /// buf holds frame bytes, not requests.
+    ws: ?WsFrameFn = null,
 };
 
 /// One worker's setup, passed by value to the spawned thread.
@@ -166,6 +181,14 @@ const Worker = struct {
     /// SO_RCVBUF set when a body larger than the receive buffer is drained. 0 keeps
     /// the kernel default.
     large_body_recv_buf: usize = 0,
+    /// Provided-buffer ring for WebSocket recvs. The kernel picks a buffer only
+    /// when a frame arrives, so an idle WebSocket ties up no recv buffer. null
+    /// when the kernel has no buffer rings: WebSocket then uses plain recv.
+    ws_bufs: ?IoUring.BufferGroup = null,
+    /// Connection buffer size after a WebSocket upgrade, from config.ws_recv_buf.
+    ws_recv_buf_size: usize = WS_RECV_BUF_DEFAULT,
+    /// Per-worker unmask scratch, ws_recv_buf_size bytes. Sets the largest frame.
+    ws_payload_buf: []u8 = &.{},
 
     fn getSqe(self: *Worker) ?*linux.io_uring_sqe {
         if (self.ring.get_sqe()) |sqe| return sqe else |_| {}
@@ -208,6 +231,14 @@ const Worker = struct {
             return;
         }
 
+        if (conn.ws != null) {
+            if (self.ws_bufs) |*group| {
+                self.armWsRecv(conn, group);
+
+                return;
+            }
+        }
+
         const sqe = self.getSqe() orelse {
             self.beginClose(conn);
 
@@ -216,6 +247,36 @@ const Worker = struct {
 
         sqe.prep_recv(conn.fd, conn.buf[conn.filled..], 0);
         sqe.user_data = packUserData(.recv, conn.gen, conn.fd);
+    }
+
+    /// Arm a buffer-select recv for a WebSocket connection. A full submission
+    /// queue is submitted once and retried. A second failure closes.
+    fn armWsRecv(self: *Worker, conn: *Conn, group: *IoUring.BufferGroup) void {
+        const user_data = packUserData(.recv, conn.gen, conn.fd);
+
+        _ = group.recv(user_data, conn.fd, 0) catch |first_err| switch (first_err) {
+            else => {
+                // Best effort: a failed submit leaves the queue full, and the
+                // retry below closes.
+                _ = self.ring.submit() catch |err| switch (err) {
+                    else => {},
+                };
+
+                _ = group.recv(user_data, conn.fd, 0) catch |err| switch (err) {
+                    else => self.beginClose(conn),
+                };
+            },
+        };
+    }
+
+    /// Hand a ring-selected buffer back to the kernel.
+    fn putWsBuf(self: *Worker, cqe: linux.io_uring_cqe) void {
+        const group = if (self.ws_bufs) |*bufs| bufs else return;
+
+        // Best effort: a buffer id the ring did not give out cannot go back.
+        group.put(cqe) catch |err| switch (err) {
+            else => {},
+        };
     }
 
     fn armDrainRecv(self: *Worker, conn: *Conn) void {
@@ -280,10 +341,42 @@ const Worker = struct {
     }
 
     fn handleRecv(self: *Worker, cqe: linux.io_uring_cqe, decoded: Decoded) void {
-        const conn = self.lookup(decoded) orelse return;
+        const has_buf = (cqe.flags & linux.IORING_CQE_F_BUFFER) != 0;
+
+        const conn = self.lookup(decoded) orelse {
+            // Freed while a buffer-select recv was in flight: return the buffer.
+            if (has_buf) self.putWsBuf(cqe);
+
+            return;
+        };
+
         if (cqe.res <= 0) {
-            stageHangupAnswer(conn);
+            // The ring ran dry: re-arm instead of dropping the connection.
+            const no_bufs = cqe.res == -@as(i32, @intFromEnum(linux.E.NOBUFS));
+            if (no_bufs and conn.ws != null and self.ws_bufs != null) {
+                self.armRecv(conn);
+
+                return;
+            }
+
+            if (has_buf) self.putWsBuf(cqe);
+
+            // A WebSocket stream gets no HTTP answer, it just ends.
+            if (conn.ws == null) stageHangupAnswer(conn);
             self.beginClose(conn);
+
+            return;
+        }
+
+        if (conn.ws) |on_frame| {
+            if (has_buf) {
+                self.pumpWsSelected(conn, on_frame, cqe);
+
+                return;
+            }
+
+            conn.filled += @intCast(cqe.res);
+            self.pumpWs(conn, on_frame);
 
             return;
         }
@@ -342,6 +435,121 @@ const Worker = struct {
 
         if (conn.drain > 0) {
             self.armDrainRecv(conn);
+
+            return;
+        }
+
+        // Frames that came with the handshake, or a partial frame left by the
+        // last pass. A partial frame stages nothing and falls through to recv.
+        if (conn.ws) |on_frame| {
+            if (conn.filled > 0) {
+                self.pumpWs(conn, on_frame);
+
+                return;
+            }
+        }
+
+        self.armRecv(conn);
+    }
+
+    /// Run the frame loop over buf and submit every reply as one ring send.
+    /// No send is in flight here, so the pump stages from the front of
+    /// send_buf.
+    fn pumpWs(self: *Worker, conn: *Conn, on_frame: WsFrameFn) void {
+        const result = ws_pump.pumpRing(
+            conn.fd,
+            conn.buf[0..conn.filled],
+            self.ws_payload_buf,
+            conn.send_buf,
+            on_frame,
+        );
+
+        if (result.consumed > 0) {
+            const rest = conn.filled - result.consumed;
+
+            std.mem.copyForwards(
+                u8,
+                conn.buf[0..rest],
+                conn.buf[result.consumed..conn.filled],
+            );
+            conn.filled = rest;
+        }
+
+        self.afterPumpWs(conn, result.staged, result.close);
+    }
+
+    /// Frames delivered into a ring-selected buffer. With no carried partial
+    /// frame they are pumped in place (no copy), and only a trailing partial
+    /// frame is copied into buf. With a carry, the bytes join buf first. The
+    /// buffer goes back to the ring before the next step.
+    fn pumpWsSelected(
+        self: *Worker,
+        conn: *Conn,
+        on_frame: WsFrameFn,
+        cqe: linux.io_uring_cqe,
+    ) void {
+        const group = if (self.ws_bufs) |*bufs| bufs else {
+            self.beginClose(conn);
+
+            return;
+        };
+        const data = group.get(cqe) catch |err| switch (err) {
+            else => {
+                self.beginClose(conn);
+
+                return;
+            },
+        };
+
+        if (conn.filled > 0) {
+            const fits = data.len <= conn.buf.len - conn.filled;
+            if (fits) {
+                @memcpy(conn.buf[conn.filled..][0..data.len], data);
+                conn.filled += data.len;
+            }
+            self.putWsBuf(cqe);
+
+            if (!fits) {
+                self.beginClose(conn);
+
+                return;
+            }
+
+            self.pumpWs(conn, on_frame);
+
+            return;
+        }
+
+        const result = ws_pump.pumpRing(
+            conn.fd,
+            data,
+            self.ws_payload_buf,
+            conn.send_buf,
+            on_frame,
+        );
+        const leftover = data[result.consumed..];
+        const fits = leftover.len <= conn.buf.len;
+
+        if (fits) @memcpy(conn.buf[0..leftover.len], leftover);
+        conn.filled = if (fits) leftover.len else 0;
+        self.putWsBuf(cqe);
+
+        self.afterPumpWs(conn, result.staged, result.close or !fits);
+    }
+
+    /// Send the staged replies, close, or wait for more frames.
+    fn afterPumpWs(self: *Worker, conn: *Conn, staged: usize, close: bool) void {
+        conn.staged = staged;
+        conn.staged_off = 0;
+
+        if (close) {
+            self.beginClose(conn);
+
+            return;
+        }
+
+        if (conn.staged > 0) {
+            self.submitSend(conn);
 
             return;
         }
@@ -554,6 +762,13 @@ const Worker = struct {
             consumed += request_len;
             conn.continue_sent = false;
 
+            // WebSocket.serve was called: the bytes after this request are frames.
+            if (ws_pending.take()) |pending| {
+                conn.ws = pending.on_frame;
+
+                break;
+            }
+
             if (!req_head.keep_alive) {
                 keep_alive = false;
 
@@ -570,6 +785,11 @@ const Worker = struct {
                 conn.buf[consumed..conn.filled],
             );
             conn.filled -= consumed;
+        }
+
+        // Just upgraded: switch buf from the HTTP size to the WebSocket size.
+        if (conn.ws != null and !resizeForWs(self.allocator, conn, self.ws_recv_buf_size)) {
+            return .close;
         }
 
         return if (keep_alive) .keep_alive else .close;
@@ -778,6 +998,23 @@ fn connAlloc(allocator: std.mem.Allocator, fd: std.posix.fd_t, recv_size: usize)
     return conn;
 }
 
+/// Resize buf for a connection that just upgraded to WebSocket, keeping the
+/// frame bytes already received.
+///
+/// Return:
+/// - true when buf has the new size
+/// - false when the received bytes do not fit or the allocation failed
+fn resizeForWs(allocator: std.mem.Allocator, conn: *Conn, size: usize) bool {
+    if (conn.buf.len == size) return true;
+    if (conn.filled > size) return false;
+
+    conn.buf = allocator.realloc(conn.buf, size) catch |err| switch (err) {
+        error.OutOfMemory => return false,
+    };
+
+    return true;
+}
+
 fn connFree(allocator: std.mem.Allocator, conn: *Conn) void {
     if (conn.send_heap) allocator.free(conn.send_buf);
 
@@ -839,6 +1076,7 @@ fn workerMain(ctx: WorkerCtx) void {
     defer cache.uninstallWorker(&resp_cache);
 
     const recv_size = ctx.config.recvBufSize();
+    const ws_size = ctx.config.wsRecvBufSize();
     const listener_fd = listener.socket.handle;
 
     const slots = slab.mapZeroedSlots(?*Conn, MAX_FD) catch |err| switch (err) {
@@ -859,6 +1097,15 @@ fn workerMain(ctx: WorkerCtx) void {
     };
     defer ctx.allocator.free(body_buf);
 
+    const ws_payload_buf = ctx.allocator.alloc(u8, ws_size) catch |err| switch (err) {
+        error.OutOfMemory => {
+            failSetup(&ctx);
+
+            return;
+        },
+    };
+    defer ctx.allocator.free(ws_payload_buf);
+
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
 
@@ -874,6 +1121,8 @@ fn workerMain(ctx: WorkerCtx) void {
         .handler_timeout_ms = ctx.config.handler_timeout_ms,
         .max_request_body = ctx.config.max_request_body,
         .large_body_recv_buf = ctx.config.large_body_recv_buf,
+        .ws_recv_buf_size = ws_size,
+        .ws_payload_buf = ws_payload_buf,
     };
     worker.ring = initRing() catch |err| switch (err) {
         else => {
@@ -883,6 +1132,18 @@ fn workerMain(ctx: WorkerCtx) void {
         },
     };
     defer worker.ring.deinit();
+
+    // Best effort: without buffer rings, WebSocket falls back to plain recv.
+    worker.ws_bufs = IoUring.BufferGroup.init(
+        &worker.ring,
+        ctx.allocator,
+        WS_RING_BGID,
+        WS_RING_BUF_SIZE,
+        WS_RING_BUF_COUNT,
+    ) catch |err| switch (err) {
+        else => null,
+    };
+    defer if (worker.ws_bufs) |*group| group.deinit(ctx.allocator);
     defer worker.deinitConns();
 
     worker.service(ctx.stop);
@@ -1066,6 +1327,7 @@ fn testWorker(
         .body_buf = body_buf,
         .arena = arena,
         .recv_buf_size = TEST_CONN_BUF,
+        .ws_payload_buf = body_buf,
     };
 }
 
@@ -1207,6 +1469,119 @@ fn testCacheConfig() Config {
         .response_cache = true,
         .cache_max_entries = 8,
         .cache_max_value_bytes = 1024,
+    };
+}
+
+const websocket = @import("../websocket.zig");
+
+const WS_UPGRADE_REQUEST =
+    "GET /ws HTTP/1.1\r\n" ++
+    "Upgrade: websocket\r\n" ++
+    "Connection: Upgrade\r\n" ++
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+
+const WS_UPGRADE_RESPONSE =
+    "HTTP/1.1 101 Switching Protocols\r\n" ++
+    "Upgrade: websocket\r\n" ++
+    "Connection: Upgrade\r\n" ++
+    "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+
+/// Masked "Hello" text frame from RFC 6455 section 5.7.
+const WS_MASKED_HELLO = [_]u8{
+    0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d,
+    0x7f, 0x9f, 0x4d, 0x51, 0x58,
+};
+
+/// Masked close frame with no payload.
+const WS_MASKED_CLOSE = [_]u8{ 0x88, 0x80, 1, 2, 3, 4 };
+
+fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
+    websocket.sendFD(fd, @enumFromInt(opcode), payload) catch |err| switch (err) {
+        error.ZixHttp1_WebSocketSend_BrokenPipe,
+        error.ZixHttp1_WebSocketSend_HeadBuild,
+        => {},
+    };
+}
+
+fn wsHandler(req: *Request, _: *Response, _: *Context) anyerror!void {
+    try websocket.serve(req.fd, req.header("sec-websocket-key").?, testWsEcho);
+}
+
+/// Wait for one completion and return it.
+fn testOneCqe(ring: *IoUring) !linux.io_uring_cqe {
+    try waitOnce(ring);
+
+    var cqes: [1]linux.io_uring_cqe = undefined;
+    const count = ring.copy_cqes(&cqes, 1) catch |err| switch (err) {
+        else => return error.TestRingCopyFailed,
+    };
+    if (count != 1) return error.TestRingNoCompletion;
+
+    return cqes[0];
+}
+
+/// A worker with a ring, a WebSocket buffer ring, and one WebSocket
+/// connection on fd in its slot table.
+const TestWsRing = struct {
+    worker: Worker,
+    slots: []?*Conn,
+    conn: *Conn,
+
+    fn init(fd: std.posix.fd_t, body_buf: []u8, arena: *std.heap.ArenaAllocator) !?TestWsRing {
+        var worker = testWorker(okHandler, std.testing.allocator, body_buf, arena);
+        worker.ring = testRing() orelse return null;
+
+        const slots = try std.testing.allocator.alloc(?*Conn, @as(usize, @intCast(fd)) + 1);
+        @memset(slots, null);
+        worker.slots = slots;
+
+        const conn = connAlloc(std.testing.allocator, fd, 64).?;
+        conn.ws = testWsEcho;
+        slots[@intCast(fd)] = conn;
+
+        return .{
+            .worker = worker,
+            .slots = slots,
+            .conn = conn,
+        };
+    }
+
+    /// Register the buffer ring. Call once the struct is at its final address.
+    fn initBufs(self: *TestWsRing) bool {
+        self.worker.ws_bufs = IoUring.BufferGroup.init(
+            &self.worker.ring,
+            std.testing.allocator,
+            WS_RING_BGID,
+            WS_RING_BUF_SIZE,
+            4,
+        ) catch |err| switch (err) {
+            else => {
+                std.log.info("buffer ring unavailable ({s}), test skipped", .{@errorName(err)});
+
+                return false;
+            },
+        };
+
+        return true;
+    }
+
+    fn deinit(self: *TestWsRing) void {
+        const live = self.slots[@intCast(self.conn.fd)] != null;
+        if (live) connFree(std.testing.allocator, self.conn);
+        if (self.worker.ws_bufs) |*group| group.deinit(std.testing.allocator);
+        self.worker.ring.deinit();
+        std.testing.allocator.free(self.slots);
+    }
+};
+
+/// A ring for the WebSocket tests, or null when the kernel has none.
+fn testRing() ?IoUring {
+    return initRing() catch |err| switch (err) {
+        else => {
+            std.log.info("io_uring unavailable ({s}), test skipped", .{@errorName(err)});
+
+            return null;
+        },
     };
 }
 
@@ -1859,5 +2234,409 @@ test "zix http1: uring, serves gzip through sendNegotiated" {
 
     try std.testing.expectEqual(ConnOutcome.close, outcome);
     try expectGzipResponse(send_buf[0..conn.staged]);
+}
+
+test "zix http1: uring, dispatch promotes an upgrade to WebSocket" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var conn_buf: [4096]u8 = undefined;
+    const bytes = WS_UPGRADE_REQUEST ++ WS_MASKED_HELLO;
+    @memcpy(conn_buf[0..bytes.len], bytes);
+
+    var send_buf: [1024]u8 = undefined;
+    var conn = testConn(fds[1], &conn_buf, &send_buf);
+    conn.filled = bytes.len;
+
+    var body_buf: [4096]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(wsHandler, std.testing.allocator, &body_buf, &arena);
+    worker.ws_recv_buf_size = conn_buf.len;
+    const outcome = worker.dispatch(&conn);
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, outcome);
+    try std.testing.expect(conn.ws != null);
+    try std.testing.expectEqual(WS_MASKED_HELLO.len, conn.filled);
+    try std.testing.expectEqualStrings(WS_UPGRADE_RESPONSE, send_buf[0..conn.staged]);
+}
+
+test "zix http1: uring, pumpWs stages the echo as one ring send" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    var ring = testRing() orelse return;
+    defer ring.deinit();
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var conn_buf: [64]u8 = undefined;
+    const bytes = WS_MASKED_HELLO ++ WS_MASKED_HELLO;
+    @memcpy(conn_buf[0..bytes.len], &bytes);
+
+    var send_buf: [64]u8 = undefined;
+    var conn = testConn(fds[1], &conn_buf, &send_buf);
+    conn.filled = bytes.len;
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(okHandler, std.testing.allocator, &body_buf, &arena);
+    worker.ring = ring;
+    defer ring = worker.ring;
+
+    worker.pumpWs(&conn, testWsEcho);
+    try waitOnce(&worker.ring);
+
+    var out: [64]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+    const echo = [_]u8{ 0x81, 5 } ++ "Hello".*;
+
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+    try std.testing.expectEqual(echo.len * 2, conn.inflight);
+    try std.testing.expectEqualStrings(&(echo ++ echo), response);
+}
+
+test "zix http1: uring, pumpWs closes after a close frame" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    var ring = testRing() orelse return;
+    defer ring.deinit();
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var conn_buf: [64]u8 = undefined;
+    @memcpy(conn_buf[0..WS_MASKED_CLOSE.len], &WS_MASKED_CLOSE);
+
+    var send_buf: [64]u8 = undefined;
+    var conn = testConn(fds[1], &conn_buf, &send_buf);
+    conn.filled = WS_MASKED_CLOSE.len;
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(okHandler, std.testing.allocator, &body_buf, &arena);
+    worker.ring = ring;
+    defer ring = worker.ring;
+
+    worker.pumpWs(&conn, testWsEcho);
+
+    try std.testing.expect(conn.closing);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x88, 0 }, send_buf[0..conn.staged]);
+}
+
+test "zix http1: uring, pumpWs keeps a partial frame and stages nothing" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    var ring = testRing() orelse return;
+    defer ring.deinit();
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var conn_buf: [64]u8 = undefined;
+    @memcpy(conn_buf[0..4], WS_MASKED_HELLO[0..4]);
+
+    var send_buf: [64]u8 = undefined;
+    var conn = testConn(fds[1], &conn_buf, &send_buf);
+    conn.filled = 4;
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(okHandler, std.testing.allocator, &body_buf, &arena);
+    worker.ring = ring;
+    defer ring = worker.ring;
+
+    worker.pumpWs(&conn, testWsEcho);
+
+    try std.testing.expectEqual(@as(usize, 4), conn.filled);
+    try std.testing.expectEqual(@as(usize, 0), conn.staged);
+    try std.testing.expect(!conn.closing);
+}
+
+test "zix http1: uring, WebSocket hangup sends no HTTP answer" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    var ring = testRing() orelse return;
+    defer ring.deinit();
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(okHandler, std.testing.allocator, &body_buf, &arena);
+    worker.ring = ring;
+    defer ring = worker.ring;
+
+    const slots = try std.testing.allocator.alloc(?*Conn, @as(usize, @intCast(fds[1])) + 1);
+    defer std.testing.allocator.free(slots);
+    @memset(slots, null);
+    worker.slots = slots;
+
+    const conn = connAlloc(std.testing.allocator, fds[1], 64).?;
+    conn.ws = testWsEcho;
+    conn.filled = 3;
+    slots[@intCast(fds[1])] = conn;
+
+    var cqe = std.mem.zeroes(linux.io_uring_cqe);
+    cqe.res = 0;
+    worker.handleRecv(cqe, .{
+        .op = .recv,
+        .gen = conn.gen,
+        .fd = fds[1],
+    });
+    try waitOnce(&worker.ring);
+
+    var out: [64]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqual(@as(usize, 0), response.len);
+    try std.testing.expect(slots[@intCast(fds[1])] == null);
+}
+
+test "zix http1: uring, WebSocket recv echoes from the buffer ring" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var setup = (try TestWsRing.init(fds[1], &body_buf, &arena)) orelse return;
+    defer setup.deinit();
+    if (!setup.initBufs()) return;
+
+    setup.worker.armRecv(setup.conn);
+    try testWriteAll(fds[0], &WS_MASKED_HELLO);
+
+    const cqe = try testOneCqe(&setup.worker.ring);
+
+    try std.testing.expect((cqe.flags & linux.IORING_CQE_F_BUFFER) != 0);
+
+    setup.worker.handleRecv(cqe, unpackUserData(cqe.user_data));
+    _ = try testOneCqe(&setup.worker.ring);
+
+    var out: [16]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqualStrings(&([_]u8{ 0x81, 5 } ++ "Hello".*), response);
+    try std.testing.expectEqual(@as(usize, 0), setup.conn.filled);
+}
+
+test "zix http1: uring, buffer ring keeps a trailing partial frame" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var setup = (try TestWsRing.init(fds[1], &body_buf, &arena)) orelse return;
+    defer setup.deinit();
+    if (!setup.initBufs()) return;
+
+    setup.worker.armRecv(setup.conn);
+    try testWriteAll(fds[0], &(WS_MASKED_HELLO ++ WS_MASKED_HELLO[0..4].*));
+
+    const cqe = try testOneCqe(&setup.worker.ring);
+    setup.worker.handleRecv(cqe, unpackUserData(cqe.user_data));
+
+    try std.testing.expectEqual(@as(usize, 4), setup.conn.filled);
+    try std.testing.expectEqualSlices(u8, WS_MASKED_HELLO[0..4], setup.conn.buf[0..4]);
+}
+
+test "zix http1: uring, buffer ring joins a carried partial frame" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var setup = (try TestWsRing.init(fds[1], &body_buf, &arena)) orelse return;
+    defer setup.deinit();
+    if (!setup.initBufs()) return;
+
+    @memcpy(setup.conn.buf[0..4], WS_MASKED_HELLO[0..4]);
+    setup.conn.filled = 4;
+
+    setup.worker.armRecv(setup.conn);
+    try testWriteAll(fds[0], WS_MASKED_HELLO[4..]);
+
+    const cqe = try testOneCqe(&setup.worker.ring);
+    setup.worker.handleRecv(cqe, unpackUserData(cqe.user_data));
+    _ = try testOneCqe(&setup.worker.ring);
+
+    var out: [16]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqualStrings(&([_]u8{ 0x81, 5 } ++ "Hello".*), response);
+    try std.testing.expectEqual(@as(usize, 0), setup.conn.filled);
+}
+
+test "zix http1: uring, buffer ring ENOBUFS re-arms instead of closing" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var setup = (try TestWsRing.init(fds[1], &body_buf, &arena)) orelse return;
+    defer setup.deinit();
+    if (!setup.initBufs()) return;
+
+    var cqe = std.mem.zeroes(linux.io_uring_cqe);
+    cqe.res = -@as(i32, @intFromEnum(linux.E.NOBUFS));
+    setup.worker.handleRecv(cqe, .{
+        .op = .recv,
+        .gen = setup.conn.gen,
+        .fd = fds[1],
+    });
+
+    try std.testing.expect(!setup.conn.closing);
+    try std.testing.expect(setup.slots[@intCast(fds[1])] != null);
+}
+
+test "zix http1: uring, upgrade resizes buf to ws_recv_buf" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    @memcpy(conn.buf[0..WS_UPGRADE_REQUEST.len], WS_UPGRADE_REQUEST);
+    conn.filled = WS_UPGRADE_REQUEST.len;
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(wsHandler, std.testing.allocator, &body_buf, &arena);
+    worker.ws_recv_buf_size = 64;
+    const outcome = worker.dispatch(conn);
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqual(@as(usize, 64), conn.buf.len);
+}
+
+test "zix http1: uring, upgrade closes when buffered frames pass ws_recv_buf" {
+    if (comptime builtin.target.os.tag != .linux) {
+        std.log.info("URING is Linux-only, test skipped", .{});
+
+        return;
+    }
+
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    const bytes = WS_UPGRADE_REQUEST ++ WS_MASKED_HELLO;
+    @memcpy(conn.buf[0..bytes.len], bytes);
+    conn.filled = bytes.len;
+
+    var body_buf: [64]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var worker = testWorker(wsHandler, std.testing.allocator, &body_buf, &arena);
+    worker.ws_recv_buf_size = 4;
+
+    try std.testing.expectEqual(ConnOutcome.close, worker.dispatch(conn));
+}
+
+test "zix http1: uring, resizeForWs keeps the received bytes" {
+    const conn = connAlloc(std.testing.allocator, -1, 32).?;
+    defer connFree(std.testing.allocator, conn);
+
+    @memcpy(conn.buf[0..3], "abc");
+    conn.filled = 3;
+
+    try std.testing.expect(resizeForWs(std.testing.allocator, conn, 8));
+    try std.testing.expectEqual(@as(usize, 8), conn.buf.len);
+    try std.testing.expectEqualStrings("abc", conn.buf[0..3]);
+}
+
+test "zix http1: uring, resizeForWs refuses bytes past the new size" {
+    const conn = connAlloc(std.testing.allocator, -1, 32).?;
+    defer connFree(std.testing.allocator, conn);
+
+    conn.filled = 9;
+
+    try std.testing.expect(!resizeForWs(std.testing.allocator, conn, 8));
+    try std.testing.expectEqual(@as(usize, 32), conn.buf.len);
 }
 
