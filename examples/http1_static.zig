@@ -36,6 +36,8 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const builtin = @import("builtin");
+
 // --------------------------------------------------------- //
 
 const IP:[]const u8 = "127.0.0.1";
@@ -43,7 +45,8 @@ const PORT:u16 = 9032;
 const WORKERS:usize = 0;
 const KERNEL_BACKLOG:u31 = 1024;
 const MAX_RECV_BUF:usize = 16 * 1024;
-const DISPATCH_MODEL:zix.Http1.DispatchModel = .ASYNC;
+const DISPATCH_MODEL:zix.Http1.DispatchModel =
+    if (builtin.os.tag == .linux) .URING else .ASYNC;
 
 const PUBLIC_DIR:[]const u8 = "./public";
 const SECRET_PREFIX:[]const u8 = "/secret";
