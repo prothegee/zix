@@ -101,6 +101,11 @@ test {
     _ = @import("tcp/http1/websocket/pump.zig");
     _ = @import("tcp/http1/websocket/send.zig");
     _ = @import("tcp/http1/websocket/upgrade.zig");
+    _ = @import("tcp/http2/FrameHeader.zig");
+    _ = @import("tcp/http2/control.zig");
+    _ = @import("tcp/http2/frame.zig");
+    _ = @import("tcp/http2/reader.zig");
+    _ = @import("tcp/http2/writer.zig");
     _ = @import("utils/Multipart.zig");
     _ = @import("utils/MultipartField.zig");
     _ = @import("utils/cache/ResponseCache.zig");
