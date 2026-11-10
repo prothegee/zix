@@ -61,6 +61,7 @@ fn connArgs(config: Config, handler: HandlerFn, stream: std.Io.net.Stream) ConnA
         .large_body_recv_buf = config.large_body_recv_buf,
         .max_recv_buf = config.recvBufSize(),
         .max_request_body = config.max_request_body,
+        .ws_recv_buf = config.wsRecvBufSize(),
         .max_response_headers = config.max_response_headers.value(),
         .public_dir = config.public_dir,
         .compress = config.compress,
@@ -160,6 +161,7 @@ test "zix http1: async, connArgs carries the request knobs" {
     config.max_recv_buf = 2 * 1024 * 1024;
     config.max_request_body = 3 * 1024 * 1024;
     config.max_response_headers = .LARGE;
+    config.ws_recv_buf = 32 * 1024;
 
     const args = connArgs(config, mockHandler, try testStream());
 
@@ -169,6 +171,7 @@ test "zix http1: async, connArgs carries the request knobs" {
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), args.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 3 * 1024 * 1024), args.max_request_body);
     try std.testing.expectEqual(@as(usize, 64), args.max_response_headers);
+    try std.testing.expectEqual(@as(usize, 32 * 1024), args.ws_recv_buf);
 }
 
 test "zix http1: async, connArgs carries the compression knobs" {
