@@ -33,6 +33,7 @@ const std = @import("std");
 const HandlerFn = @import("handler.zig").HandlerFn;
 const ConnRegistry = @import("ConnRegistry.zig");
 const BUF_SIZE = @import("ServeOpts.zig").BUF_SIZE;
+const WS_RECV_BUF_DEFAULT = @import("ServeOpts.zig").WS_RECV_BUF_DEFAULT;
 const Logger = @import("../../logger/Logger.zig");
 
 // --------------------------------------------------------- //
@@ -48,6 +49,7 @@ send_date_header: bool = true,
 large_body_recv_buf: usize = 0,
 max_recv_buf: usize = BUF_SIZE,
 max_request_body: usize = 2 * 1024 * 1024,
+ws_recv_buf: usize = WS_RECV_BUF_DEFAULT,
 max_response_headers: usize = 16, // TODO: check max header config
 public_dir: []const u8 = "",
 logger: ?*Logger = null,
@@ -83,6 +85,7 @@ test "zix http1: ConnArgs, applies defaults" {
     try std.testing.expectEqual(BUF_SIZE, args.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 16), args.max_response_headers);
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), args.max_request_body);
+    try std.testing.expectEqual(WS_RECV_BUF_DEFAULT, args.ws_recv_buf);
     try std.testing.expect(args.send_date_header);
     try std.testing.expect(!args.compress);
     try std.testing.expect(!args.cache_response);
