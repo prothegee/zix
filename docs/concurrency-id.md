@@ -49,7 +49,8 @@ Handler tasks (one per active connection):
 **Kapan menggunakan:**
 - Target non-Linux apa pun: `.EPOLL` dan `.URING` ditolak di sana, jadi ini model yang dipilih.
 - SSE dan WebSocket: satu stream terbuka hanya memakai satu task, bukan slot worker event loop.
-- Perlu `concurrent_limit` eksplisit (deployment dengan sumber daya terbatas).
+- Perlu `async_limit` eksplisit (deployment dengan sumber daya terbatas).
+  `concurrent_limit` tidak berlaku: ia hanya membatasi `io.concurrent()`.
 - `dispatch_model = .ASYNC` di config server.
 - `workers` diabaikan (selalu tepat satu accept thread).
 
@@ -66,7 +67,7 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
 **Batas konkurensi manual** (`examples/http1_manual_concurrent.zig`):
 ```zig
 var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
-    .concurrent_limit = std.Io.Limit.limited(4),
+    .async_limit = std.Io.Limit.limited(4),
 });
 defer threaded.deinit();
 
