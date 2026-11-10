@@ -48,6 +48,7 @@ const header = @import("../header.zig");
 const log = @import("../log.zig");
 const parser = @import("../parser.zig");
 const reader = @import("../reader.zig");
+const static = @import("../static.zig");
 const RespSink = @import("../RespSink.zig");
 const writer = @import("../writer.zig");
 const ResponseCache = @import("../../../utils/cache/ResponseCache.zig");
@@ -829,6 +830,7 @@ fn workerMain(ctx: WorkerCtx) void {
     head.setDateHeader(ctx.config.send_date_header);
     header.setMaxResponseHeaders(ctx.config.max_response_headers.value());
     compress.installWorker(ctx.config);
+    static.setStatic(ctx.config.public_dir, io);
 
     // Per-worker response cache. It lives on the worker stack, so the pointer
     // installed for this thread stays valid until this worker returns.
