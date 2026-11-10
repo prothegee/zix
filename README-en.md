@@ -1125,6 +1125,10 @@ websocat    "ws://localhost:9028/ws"
 
 The per-frame callback has no per-connection context, so a room-based app keeps its own registry keyed by fd (see the example below).
 
+**Frame size**: `ws_recv_buf` (default 16 KiB) sets the buffer of a WebSocket connection and the largest frame a client may send. It is independent of `max_recv_buf`: a connection switches to `ws_recv_buf` when it upgrades, so raising `max_recv_buf` for uploads does not grow WebSocket connections. A larger frame is answered with close `1009` and the connection ends. On `.URING` frames are read through a per-worker provided-buffer ring, so an idle WebSocket holds no recv buffer.
+
+**Errors**: `serve` returns `ZixHttp1_WebSocket_*` (`KeyTooLong`, `NoSpaceLeft`, `BrokenPipe`, `HeadBuild`) and `sendFD` returns `ZixHttp1_WebSocketSend_*` (`BrokenPipe`, `HeadBuild`). WebSocket over TLS (`serveTls`) is not ported to `zix.Http1` yet.
+
 **Combining HTTP, static, and WebSocket in one server**: register all handler types together, routing handles dispatch. Unmatched routes fall through to static serving:
 
 ```zig
@@ -1143,7 +1147,7 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
 **Examples:**
 - [examples/http1_websocket.zig](examples/http1_websocket.zig) - `/ws` echo plus `/ws/:room-id` broadcast rooms
 
-**Build-once broadcast fanout**: `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` serializes the frame a single time and writes the same bytes to every fd in a caller-maintained room, so a broadcast costs one serialization no matter how many members it reaches. A failed write to a dead peer is skipped (the EPOLL engine reaps that fd on its next event), and the large-payload path builds the header once and writes the payload without copying it into a staging buffer.
+**Build-once broadcast fanout**: `zix.Http1.WebSocket.broadcast(conns, opcode, payload)` serializes the frame a single time and writes the same bytes to every fd in a caller-maintained room, so a broadcast costs one serialization no matter how many members it reaches. A failed write to a dead peer is skipped (the engine closes that fd on its next event), and the large-payload path builds the header once and writes the payload without copying it into a staging buffer.
 
 **When to use:** use WebSocket for bidirectional, low-latency push (chat, presence, live dashboards, game state). Pair it with `.ASYNC` so long-lived connections never pin a pool thread, and reach for the build-once `broadcast` when one message fans out to a room. If the data flow is one-way server-to-client, prefer SSE: it is simpler and reconnects natively in the browser.
 
