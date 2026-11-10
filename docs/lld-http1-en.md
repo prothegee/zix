@@ -22,7 +22,7 @@ Plain struct with defaults, no allocations at construction. Runtime-read fields:
 | `handler_timeout_ms` | armed before every dispatch in all models |
 | `max_recv_buf` | per-connection buffer size on every model: .EPOLL / .URING slots (`ConnTable.alloc`), the .ASYNC pool-thread pair (`threadConnBufs`) |
 | `large_body_recv_buf` | `SO_RCVBUF` on the large-body (upload) path only, all models, 0 = kernel default |
-| `ws_recv_buf` | WebSocket per-connection buffer size, 0 falls back to `max_recv_buf`. .EPOLL sizes the recv buffer, .URING sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch |
+| `ws_recv_buf` | WebSocket connection buffer and largest frame, default 16 KiB, 0 falls back to 16 KiB, independent of `max_recv_buf`. All models: the connection buffer is resized at upgrade, the unmask scratch is per worker (.EPOLL, .URING) or per pool thread (.ASYNC) |
 | `send_date_header` | managed write helpers: include or omit the `Date` header |
 | `tls` | selects the TLS serve path when non-null (native https), else cleartext |
 | `logger` | `logSystem` lifecycle lines |
@@ -95,13 +95,13 @@ isExpired():        tl_deadline_ns != 0 and wallClockNs(tl_deadline_io) >= tl_de
 ### Thread-local WebSocket handoff
 
 ```
-threadlocal tl_ws_pending: ?WsPending = null    // { fd, on_frame }
+threadlocal tl_pending: ?WebSocketPending = null    // { fd, on_frame }, websocket/pending.zig
 
-requestWebSocket(fd, cb): tl_ws_pending = .{ fd, cb }   // called by WebSocket.serve
-takeWebSocket():          read + clear                  // called by the engine after every dispatch
+pending.request(fd, cb): tl_pending = .{ fd, cb }   // called by WebSocket.serve
+pending.take():          read + clear               // called by the engine after every handler
 ```
 
-`serveConn` / `serveConnOne` clear the handoff and close the connection (promotion is EPOLL-only). The EPOLL parse loop stores the callback into `conn.ws` and switches the connection to frame pumping.
+`serveConn` (.ASYNC) runs `pump.serveBlocking` on the taken handoff until the peer leaves, then ends the connection. The .EPOLL and .URING parse loops store the callback into `conn.ws`, resize `conn.buf` to `ws_recv_buf`, and switch the connection to frame pumping.
 
 ### RespSink: per-event response coalescing
 
@@ -310,7 +310,7 @@ Conn = {
 1. private listener (reuse_address) -> setNonBlock(listener_fd)
 2. epoll_create1(CLOEXEC), CTL_ADD listener (EPOLLIN)
 3. per-worker scratch (smp_allocator): body_buf sized from the recv-slot knob
-   (ws_recv_buf, else max_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
+   (max_recv_buf), ws_payload_buf (ws_recv_buf), out_buf EPOLL_OUT_BUF_SIZE (64 KB)
 4. event loop, EPOLL_MAX_EVENTS = 4096 per epoll_wait:
       listener event       -> acceptAll
       HUP/ERR              -> close
@@ -432,7 +432,7 @@ Multishot POLLIN watch for a foreign fd (a driver socket) on the worker's ring, 
 
 #### WebSocket on the ring
 
-A per-worker `IoUring.BufferGroup` (provided-buffer ring) serves WebSocket recvs (Phase 4b): the kernel hands a buffer over only when a frame arrives, so an idle connection ties up no recv buffer, the memory-scaling win at high connection counts. `wsHandleBuf` parses a whole-frame batch in place out of the selected buffer (zero copy) and copies only a trailing partial frame into `conn.buf`. A kernel without buffer-ring support leaves `ws_bufs` null, and WebSocket falls back to the plain recv-into-`conn.buf` path.
+A per-worker `IoUring.BufferGroup` (provided-buffer ring) serves WebSocket recvs (Phase 4b): the kernel hands a buffer over only when a frame arrives, so an idle connection ties up no recv buffer, the memory-scaling win at high connection counts. `pumpWsSelected` parses a whole-frame batch in place out of the selected buffer (zero copy) and copies only a trailing partial frame into `conn.buf`. An `ENOBUFS` completion re-arms the recv instead of closing. A kernel without buffer-ring support leaves `ws_bufs` null, and WebSocket falls back to the plain recv-into-`conn.buf` path.
 
 #### finishClose(): ring teardown (ADR-041)
 
@@ -455,7 +455,11 @@ The handler is baked into the type so `run()` takes no argument and dispatch is 
 
 ---
 
-## websocket.zig: RFC 6455 codec + engine pump
+## websocket/: RFC 6455 codec + engine pump
+
+`websocket.zig` is the public namespace (`zix.Http1.WebSocket`). The pieces live under `websocket/`: `opcode.zig`, `frame_fn.zig`, `WsFrame.zig`, `WsParseResult.zig`, `WsPumpResult.zig`, `WsRingPumpResult.zig`, `WsSendSink.zig`, `WebSocketPending.zig`, `frame.zig`, `upgrade.zig`, `send.zig`, `pump.zig`, and `pending.zig`.
+
+At upgrade the engine resizes the connection buffer to `ws_recv_buf` (`resizeForWs` on .EPOLL and .URING, a separate per-thread pair on .ASYNC). Frame bytes that came with the handshake are kept. If they do not fit, the connection closes.
 
 ### Frame format constants
 
@@ -472,7 +476,9 @@ max server frame header 10 bytes
 2. byte 0: FIN + opcode, byte 1: MASK + 7-bit length
 3. extended length (2 or 8 bytes) when marked
 4. mask key when MASK set
-5. payload capped at payload_buf.len:
+5. payload longer than payload_buf.len -> error.ZixHttp1_WebSocketFrame_PayloadTooLarge
+   (checked once the length is known, before the payload arrives)
+   otherwise:
       masked   -> XOR-unmask into payload_buf
       unmasked -> zero-copy slice into buf
 6. return { frame, consumed } or null when bytes are still missing
@@ -486,7 +492,7 @@ The masked path unmasks with a 16-wide `@Vector(16, u8)` XOR against the 4-byte 
 
 ### acceptKey() / upgrade()
 
-`acceptKey` concatenates the client key with the RFC 6455 GUID, SHA-1, base64 into a caller `[64]u8` (`error.ZixKeyTooLong` past 128 input bytes). `upgrade` writes the full `101 Switching Protocols` block through `core.writeAllFD` (sink-aware, so under EPOLL it stages with the other responses).
+`acceptKey` concatenates the client key with the RFC 6455 GUID, SHA-1, base64 into a caller `[64]u8` (`ZixHttp1_WebSocketFrame_KeyTooLong` past 128 input bytes). `upgrade` writes the full `101 Switching Protocols` block through `writer.writeAllFD` (sink-aware, so under .EPOLL and .URING it stages with the other responses).
 
 ### send() and SendSink
 
@@ -494,14 +500,15 @@ The masked path unmasks with a 16-wide `@Vector(16, u8)` XOR against the 4-byte 
 
 ```
 send(fd, opcode, payload):
-  sink active -> stage header then payload         (error.BrokenPipe if sink failed)
+  sink active and sink.fd == fd -> stage header then payload
+                                   (ZixHttp1_WebSocketSend_BrokenPipe if sink failed)
   payload + header <= 4096 -> build one buffer, one writeAllFD
   larger -> write header then payload separately   (avoids a big stack copy)
 ```
 
 ### serve()
 
-`acceptKey` + `upgrade` + `core.requestWebSocket(fd, on_frame)`. Called from inside an http1 handler. The engine honors the promotion under `.EPOLL` only.
+`acceptKey` + `upgrade` + `pending.request(fd, on_frame)`. Called from inside an http1 handler. The engine takes the promotion right after the handler returns, under `.ASYNC`, `.EPOLL`, and `.URING`.
 
 ### pump()
 
@@ -512,6 +519,7 @@ loop over data:
   text/binary -> on_frame(fd, opcode, payload)
   ping        -> send pong (payload echoed)
   close       -> send close, consume, stop with close = true
+  too large   -> send close 1009, stop with close = true
   pong/continuation/other -> ignored
 flush sink
 return { consumed, close: close or sink.failed }
