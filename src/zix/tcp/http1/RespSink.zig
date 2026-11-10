@@ -54,24 +54,17 @@ off: usize = 0,
 const Self = @This();
 
 // --------------------------------------------------------- //
-// Public:
-
-/// ZIX Http1 response sink error
-pub const Error = error {
-    ZixHttp1_RespSink_HeadBuild,
-};
-
-// --------------------------------------------------------- //
 // Private:
 
-/// Send bytes that are not staying in buf: through the spill sink when one is installed (https,
-/// where the fd is a sentinel and every write has to become a TLS record), straight to the
-/// descriptor otherwise. A write that does not land marks the sink failed, which the caller
-/// reads as a broken peer.
+/// Send bytes that are not staying in buf straight to the descriptor. A write
+/// that does not land marks the sink failed, which the caller reads as a
+/// broken peer.
+///
+/// Note:
+/// - TLS is not ported yet. With TLS, these bytes go through a spill sink
+///   instead, because the fd is a sentinel and every write must become a TLS
+///   record.
 fn writeOut(self: *Self, bytes: []const u8) void {
-    std.log.info("TODO: self.spill as sink and write", .{});
-    // if write the bytes failed, set failed to true
-
     writer.writeAllDirectFD(self.fd, bytes) catch |err| switch (err) {
         error.ZixHttp1_Writer_BrokenPipe,
         error.ZixHttp1_Writer_HeadBuild,
@@ -79,8 +72,45 @@ fn writeOut(self: *Self, bytes: []const u8) void {
     };
 }
 
+/// Grow buf to hold at least need bytes when backed by a growable allocator.
+/// Returns false when growth is unavailable (no allocator) or would exceed
+/// grow_cap, so the caller falls back to a direct flush. Never shrinks, so a
+/// grown per-connection buffer is reused by later requests on that fd.
+fn grow(self: *Self, need: usize) bool {
+    const gpa = self.grow_allocator orelse return false;
+    if (need <= self.buf.len) return true;
+    if (need > self.grow_cap) return false;
+
+    var new_len = @max(self.buf.len, 1) * 2;
+    while (new_len < need) new_len *= 2;
+    if (new_len > self.grow_cap) new_len = self.grow_cap;
+
+    if (!self.buf_owned) {
+        const grown = gpa.alloc(u8, new_len) catch |err| switch (err) {
+            error.OutOfMemory => return false,
+        };
+        @memcpy(grown[0..self.len], self.buf[0..self.len]);
+        self.buf = grown;
+        self.buf_owned = true;
+
+        return true;
+    }
+
+    const grown = gpa.realloc(self.buf, new_len) catch |err| switch (err) {
+        error.OutOfMemory => return false,
+    };
+    self.buf = grown;
+
+    return true;
+}
+
 // --------------------------------------------------------- //
 // Public:
+
+/// ZIX Http1 response sink error
+pub const Error = error {
+    ZixHttp1_RespSink_HeadBuild,
+};
 
 /// Fold a captured zero-copy replay back into the staged batch: a later
 /// response in the same batch means the send must carry both in order, so
@@ -183,38 +213,6 @@ pub fn commitSimple(
     self.len = head.HEADER_BUF_SIZE + body_len;
 }
 
-/// Grow buf to hold at least need bytes when backed by a growable allocator.
-/// Returns false when growth is unavailable (no allocator) or would exceed
-/// grow_cap, so the caller falls back to a direct flush. Never shrinks, so a
-/// grown per-connection buffer is reused by later requests on that fd.
-fn grow(self: *Self, need: usize) bool {
-    const gpa = self.grow_allocator orelse return false;
-    if (need <= self.buf.len) return true;
-    if (need > self.grow_cap) return false;
-
-    var new_len = @max(self.buf.len, 1) * 2;
-    while (new_len < need) new_len *= 2;
-    if (new_len > self.grow_cap) new_len = self.grow_cap;
-
-    if (!self.buf_owned) {
-        const grown = gpa.alloc(u8, new_len) catch |err| switch (err) {
-            error.OutOfMemory => return false,
-        };
-        @memcpy(grown[0..self.len], self.buf[0..self.len]);
-        self.buf = grown;
-        self.buf_owned = true;
-
-        return true;
-    }
-
-    const grown = gpa.realloc(self.buf, new_len) catch |err| switch (err) {
-        error.OutOfMemory => return false,
-    };
-    self.buf = grown;
-
-    return true;
-}
-
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 // Test:
@@ -296,5 +294,22 @@ test "zix http1: RespSink, materializes a direct replay without a cache" {
 
     try std.testing.expectEqual(@as(usize, 0), sink.direct.len);
     try std.testing.expectEqualStrings("xyz", sink.buf[0..sink.len]);
+}
+
+test "zix http1: RespSink, failed write marks the sink failed" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    _ = std.posix.system.close(fds[1]);
+
+    var buf: [4]u8 = undefined;
+    var sink = Self{
+        .fd = fds[0],
+        .buf = &buf,
+    };
+
+    sink.append("01234567");
+
+    try std.testing.expect(sink.failed);
 }
 
