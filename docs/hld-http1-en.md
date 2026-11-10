@@ -179,7 +179,7 @@ The full field reference (meaning, trade-offs, when to change) lives in [`docs/z
 
 Note: under `.ASYNC` the connection loop borrows the pool thread's receive + body buffer pair (`core.threadConnBufs`), each `max_recv_buf` bytes, reused by every connection that thread serves. `max_recv_buf` therefore sizes the per-connection buffer under every dispatch model (a direct `core.serveConn` caller that leaves `ServeOpts.max_recv_buf` at 0 gets `core.BUF_SIZE` = 16 KB). `large_body_recv_buf` sets `SO_RCVBUF` on the large-body (upload) path only, leaving small-request cells on the kernel default. `tls` opts into native https: when non-null the server serves HTTP/1.1 over TLS on a gated path, otherwise cleartext. The `compress`, `compression_min_size`, and `compression_max_out` fields (the last renamed from `max_gzip_out`) are read at runtime under every dispatch model: a handler opts in with `res.sendNegotiated`. A handler that needs one coding explicitly calls `zix.utils.compression.encode` and sets `Content-Encoding` itself. A declared Content-Length past `max_request_body` is refused with `413` before the body is read (0 disables the check), and a chunked body is bounded by the receive buffer instead, since it declares no length up front.
 
-Note: `ws_recv_buf` sizes the per-connection WebSocket buffer. Under `.EPOLL` it sizes the recv buffer; under `.URING` it sizes the frame-accumulation buffer (`conn.buf`) and the unmask scratch, independent of the small request `max_recv_buf`. `0` falls back to `max_recv_buf`. Set it larger than `max_recv_buf` to give a WebSocket connection more room to accumulate a deep pipelined burst before the engine compacts and re-reads on a fill.
+Note: `ws_recv_buf` (default 16 KiB) sizes the buffer of a WebSocket connection and is the largest accepted frame. It is independent of `max_recv_buf`: a connection switches its buffer to `ws_recv_buf` when it upgrades, under every dispatch model, and the unmask scratch has the same size (per worker on `.EPOLL` and `.URING`, per pool thread on `.ASYNC`). `0` falls back to 16 KiB. Raising `max_recv_buf` for uploads does not grow WebSocket connections.
 
 Note: `send_date_header` defaults to `true` for RFC 7231 compliance. Set `false` on hot paths where the client does not consume `Date` to drop the header (37 bytes per response). The managed write helpers honor the flag.
 
@@ -406,10 +406,11 @@ sequenceDiagram
 - `WebSocket.serve(fd, key, on_frame)` computes the accept key, writes `101 Switching Protocols`, and requests promotion via a thread-local handoff slot that the engine reads right after the handler returns.
 - Ping is auto-ponged and close is auto-echoed by the engine. The callback only ever sees text and binary frames.
 - Frames sent during one pump pass coalesce into a single `write()`.
-- Promotion is honored under `.EPOLL` only. Under `.ASYNC` the handoff is cleared and the connection ends after the handler returns.
-- Over TLS (`config.tls`, the thread-per-connection path), call `WebSocket.serveTls(fd, key, on_frame)` instead (ADR-055): the `101` and every frame encrypt through the ADR-054 stream sink, and the https thread runs the frame loop inline over the TLS session. Rooms / broadcast are cleartext-only (per-session encryption), so wss is per-connection.
+- Promotion is honored under `.ASYNC` (blocking loop), `.EPOLL` (event loop pump), and `.URING` (staged pump, one ring send per pass).
+- A frame larger than `ws_recv_buf` is answered with close `1009` and the connection ends.
+- `WebSocket.serveTls` (wss) is not ported to `zix.Http1` yet. TLS is a separate step.
 
-See `examples/http1_websocket.zig` (cleartext) and `examples/tls/tls_http1_ws.zig` (wss).
+See `examples/http1_websocket.zig` (cleartext). The wss example waits for the TLS step.
 
 ---
 
