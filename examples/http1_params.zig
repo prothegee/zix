@@ -32,13 +32,16 @@
 const std = @import("std");
 const zix = @import("zix");
 
+const builtin = @import("builtin");
+
 // --------------------------------------------------------- //
 
 const IP:[]const u8 = "127.0.0.1";
 const PORT:u16 = 9022;
 const WORKERS:usize = 0;
 const KERNEL_BACKLOG:u31 = 1024;
-const DISPATCH_MODEL:zix.Http1.DispatchModel = .ASYNC;
+const DISPATCH_MODEL:zix.Http1.DispatchModel =
+    if (builtin.os.tag == .linux) .URING else .ASYNC;
 
 // --------------------------------------------------------- //
 
