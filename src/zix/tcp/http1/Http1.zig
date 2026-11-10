@@ -41,6 +41,7 @@ pub const DispatchModel = @import("../../shared/dispatch.zig").Model;
 pub const HandlerFn = @import("handler.zig").HandlerFn;
 pub const isExpired = @import("handler.zig").isExpired;
 pub const setStatic = @import("static.zig").setStatic;
+pub const WebSocket = @import("websocket.zig");
 
 pub const Route = router.Route;
 pub const Router = router.Router;
@@ -73,6 +74,14 @@ test "zix http1: Http1, exposes the engine types" {
     _ = @This().Request;
     _ = @This().Response;
     _ = @This().Context;
+}
+
+test "zix http1: Http1, exposes the WebSocket namespace" {
+    _ = @This().WebSocket.serve;
+    _ = @This().WebSocket.sendFD;
+    _ = @This().WebSocket.broadcast;
+    _ = @This().WebSocket.Opcode;
+    _ = @This().WebSocket.WsFrameFn;
 }
 
 test "zix http1: Http1, HandlerFn takes the request trio" {
