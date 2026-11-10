@@ -32,6 +32,7 @@
 const std = @import("std");
 const Config = @import("Config.zig");
 const HandlerFn = @import("handler.zig").HandlerFn;
+const StaticCacheRegistry = @import("../../utils/static/StaticCacheRegistry.zig");
 const OS = @import("builtin").target.os.tag;
 const dispatch_async = @import("dispatch/async.zig");
 const dispatch_epoll = @import("dispatch/epoll.zig");
@@ -56,6 +57,69 @@ fn gateConfig(config: Config) void {
     if (config.port == 0) {
         std.log.err("ZIX Http1 config.port can't be zero", .{});
     }
+}
+
+/// Fail fast when public_dir is set but cannot be entered, instead of a 404
+/// for every file at runtime.
+fn gatePublicDir(config: Config) Error!void {
+    if (config.public_dir.len == 0) return;
+
+    const opened = std.Io.Dir.cwd().openDir(config.io, config.public_dir, .{});
+    const dir = opened catch |err| switch (err) {
+        error.FileNotFound => return Error.ZixHttp1_Server_PublicDirNotFound,
+        error.NotDir => return Error.ZixHttp1_Server_PublicDirNotADirectory,
+        else => return Error.ZixHttp1_Server_PublicDirUnreadable,
+    };
+
+    dir.close(config.io);
+}
+
+/// Log one static cache warning through the configured logger.
+fn warnStatic(config: Config, comptime message: []const u8) void {
+    if (config.logger) |logger| {
+        logger.system(.WARN, "http1", message, .{});
+
+        return;
+    }
+
+    std.log.warn(message, .{});
+}
+
+/// Install the process static cache when public_dir and a TTL are set.
+///
+/// Note:
+/// - A failed install is a warning, not an error: static files are still
+///   served, each request re-opens its file.
+///
+/// Return:
+/// - bool (true when this call built the table and owns its shutdown)
+fn installStaticCache(config: Config) bool {
+    if (config.public_dir.len == 0) return false;
+
+    const installed = StaticCacheRegistry.shared.install(
+        config.public_dir_cache_max_entries,
+        config.public_dir_cache_ttl_ms,
+    ) catch |err| switch (err) {
+        error.ZixUtils_StaticCacheRegistry_OutOfMemory,
+        error.ZixUtils_StaticCacheRegistry_MapFailed,
+        => {
+            warnStatic(config, "static cache not installed, each static request opens its file");
+
+            return false;
+        },
+    };
+
+    return switch (installed) {
+        .INSTALLED => true,
+        .MISMATCHED => {
+            warnStatic(config, "static cache already installed with other settings, kept");
+
+            return false;
+        },
+        .DISABLED,
+        .ALREADY_INSTALLED,
+        => false,
+    };
 }
 
 fn dispatchError(err: dispatch_async.Error) Error {
@@ -149,6 +213,12 @@ pub const Error = error {
     ZixHttp1_Server_EpollSetupFailed,
     /// E.Q.: error.ZixHttp1_Uring_SetupFailed
     ZixHttp1_Server_UringSetupFailed,
+    /// config.public_dir does not exist
+    ZixHttp1_Server_PublicDirNotFound,
+    /// config.public_dir is not a directory
+    ZixHttp1_Server_PublicDirNotADirectory,
+    /// config.public_dir cannot be opened (permission or other)
+    ZixHttp1_Server_PublicDirUnreadable,
 };
 
 pub fn init(comptime handler: HandlerFn, config: Config) Self {
@@ -171,7 +241,12 @@ pub fn run(self: *const Self) Error!void {
 
     std.log.info("TODO: gateDispatchModel", .{});
 
-    std.log.info("TODO: gatePublicDir", .{});
+    try gatePublicDir(self.config);
+
+    // Only the server that built the table closes it. A server that shares
+    // it must not close files another server is still serving.
+    const owns_static = installStaticCache(self.config);
+    defer if (owns_static) StaticCacheRegistry.shared.shutdown(self.config.io);
 
     std.log.info("TODO: gateTLS", .{});
 
@@ -301,5 +376,55 @@ test "zix http1: Server, URING outside Linux is not supported" {
     const server = testServer(.URING);
 
     try std.testing.expectError(Error.ZixHttp1_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http1: Server, gatePublicDir empty is accepted" {
+    try gatePublicDir(testServer(.ASYNC).config);
+}
+
+test "zix http1: Server, gatePublicDir missing directory is PublicDirNotFound" {
+    var config = testServer(.ASYNC).config;
+    config.public_dir = "no-such-public-dir-for-zix-tests";
+
+    try std.testing.expectError(Error.ZixHttp1_Server_PublicDirNotFound, gatePublicDir(config));
+}
+
+test "zix http1: Server, gatePublicDir file is PublicDirNotADirectory" {
+    var config = testServer(.ASYNC).config;
+    config.public_dir = "build.zig";
+
+    try std.testing.expectError(
+        Error.ZixHttp1_Server_PublicDirNotADirectory,
+        gatePublicDir(config),
+    );
+}
+
+test "zix http1: Server, gatePublicDir existing directory is accepted" {
+    var config = testServer(.ASYNC).config;
+    config.public_dir = "src";
+
+    try gatePublicDir(config);
+}
+
+test "zix http1: Server, installStaticCache without public_dir is false" {
+    try std.testing.expect(!installStaticCache(testServer(.ASYNC).config));
+}
+
+test "zix http1: Server, installStaticCache ttl 0 is false" {
+    var config = testServer(.ASYNC).config;
+    config.public_dir = "src";
+
+    try std.testing.expect(!installStaticCache(config));
+    try std.testing.expect(StaticCacheRegistry.shared.instance() == null);
+}
+
+test "zix http1: Server, installStaticCache owns the table it builds" {
+    var config = testServer(.ASYNC).config;
+    config.public_dir = "src";
+    config.public_dir_cache_ttl_ms = 1000;
+    defer StaticCacheRegistry.shared.shutdown(std.testing.io);
+
+    try std.testing.expect(installStaticCache(config));
+    try std.testing.expect(!installStaticCache(config));
 }
 
