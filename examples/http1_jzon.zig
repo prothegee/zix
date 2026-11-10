@@ -37,6 +37,7 @@ const std = @import("std");
 const zix = @import("zix");
 
 const jzon = zix.jzon;
+const builtin = @import("builtin");
 
 // --------------------------------------------------------- //
 
@@ -45,7 +46,8 @@ const PORT:u16 = 9033;
 const WORKERS:usize = 0;
 const KERNEL_BACKLOG:u31 = 1024;
 const MAX_RECV_BUF:usize = 16 * 1024;
-const DISPATCH_MODEL:zix.Http1.DispatchModel = .ASYNC;
+const DISPATCH_MODEL:zix.Http1.DispatchModel =
+    if (builtin.os.tag == .linux) .URING else .ASYNC;
 
 /// Room for the largest answer any route here renders. A render that does not fit
 /// fails, so this number is the whole response budget.
