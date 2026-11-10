@@ -134,6 +134,7 @@ pub fn connEntry(args: ConnArgs) void {
             .large_body_recv_buf = args.large_body_recv_buf,
             .max_recv_buf = args.max_recv_buf,
             .max_request_body = args.max_request_body,
+            .ws_recv_buf = args.ws_recv_buf,
         },
         args.io,
     );
