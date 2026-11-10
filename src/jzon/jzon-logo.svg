@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+<!-- Author/Designer: Prana Ron / @prothegee -->
+<!-- License:CC BY-ND (https://creativecommons.org/licenses/by-nd/4.0/) -->
+<svg
+   viewBox="0 0 600 200"
+   version="1.1"
+   id="svg12"
+   sodipodi:docname="jzon-logo.svg"
+   inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs12">
+    <inkscape:path-effect
+       effect="fillet_chamfer"
+       id="path-effect30"
+       is_visible="true"
+       lpeversion="1"
+       nodesatellites_param="F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1"
+       radius="0"
+       unit="px"
+       method="auto"
+       mode="F"
+       chamfer_steps="1"
+       flexible="false"
+       use_knot_distance="true"
+       apply_no_radius="true"
+       apply_with_radius="true"
+       only_selected="false"
+       hide_knots="false" />
+  </defs>
+  <sodipodi:namedview
+     id="namedview12"
+     pagecolor="#505050"
+     bordercolor="#ffffff"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="1"
+     inkscape:deskcolor="#505050"
+     inkscape:zoom="0.90774291"
+     inkscape:cx="228.03813"
+     inkscape:cy="-11.567152"
+     inkscape:window-width="1920"
+     inkscape:window-height="1048"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg12"
+     showguides="true" />
+  <style
+     id="style1">
+    .letter { 
+      font-family: Arial, Helvetica, sans-serif; 
+      font-weight: bold; 
+      fill: #F7A41D; 
+    }
+  </style>
+  <!-- Huruf J -->
+  <text
+     x="37.592873"
+     y="148.21587"
+     class="letter"
+     font-size="169.035px"
+     id="text1"
+     style="display:none;stroke-width:1.05647"
+     inkscape:label="J">J</text>
+  <!-- Huruf Z dari logo Zig (ikon) -->
+  <!-- Huruf O -->
+  <text
+     x="305.2829"
+     y="148.05998"
+     class="letter"
+     font-size="166.329px"
+     id="text11"
+     style="display:none;stroke-width:1.03956"
+     inkscape:label="O">O</text>
+  <!-- Huruf N -->
+  <text
+     x="416.16718"
+     y="149.91582"
+     class="letter"
+     font-size="171.506px"
+     id="text12"
+     style="display:none;stroke-width:1.07191"
+     inkscape:label="N">N</text>
+  <g
+     id="g162"
+     style="display:none">
+    <path
+       id="polygon9-1"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022"
+       d="m 80.06225,66.267829 26.41412,-32.795866 -1.39021,25.844295 z"
+       sodipodi:nodetypes="cccc" />
+    <path
+       id="polygon10-1"
+       style="fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="m 105.86295,33.531545 13.97956,-0.05959 h 16.6826 v 66.855705 49.82655 l -7.09383,8.21932 -6.86036,8.04364 -69.096413,-3.7e-4 19.463036,-16.73644 6.951085,-13.9027 26.051712,3.6e-4 V 66.267829 H 80.062252 Z"
+       sodipodi:nodetypes="cccccccccccccc" />
+    <path
+       id="polygon11-0"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022"
+       d="m 79.888628,135.77802 24.661492,20.85343 -51.075613,9.78572 z"
+       sodipodi:nodetypes="cccc" />
+    <path
+       id="polygon1"
+       style="fill:#f7a41d"
+       transform="matrix(1.390217,0,0,1.390217,105.86409,3.7075767)"
+       d="M 46,21.405874 28,44.979096 19,30 Z"
+       sodipodi:nodetypes="cccc" />
+    <path
+       id="polygon2"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="m 144.79017,66.267829 h -8.3413 v 69.510191 h 12.51195 l -15.29238,6.95126 -11.12174,23.68789 H 105.86409 V 33.471963 h 63.94999 l -18.07282,16.112775 z"
+       sodipodi:nodetypes="ccccccccccc" />
+    <polygon
+       points="31,95 12,117 4,106 "
+       id="polygon3"
+       transform="matrix(1.390217,0,0,1.390217,105.86409,3.7075767)"
+       style="fill:#f7a41d;fill-opacity:1" />
+    <path
+       id="polygon4"
+       style="fill:#f7a41d"
+       transform="matrix(1.390217,0,0,1.390217,105.86409,3.7075767)"
+       d="M 62,36 37,45.015359 56,21.435883 Z"
+       sodipodi:nodetypes="cccc" />
+    <path
+       id="polygon5"
+       style="fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="M 260.17819,66.267829 H 157.30213 L 183.71625,48.194521 V 33.471963 h 76.46194 z"
+       sodipodi:nodetypes="cccccc" />
+    <polygon
+       points="97,117 90,104 116,95 "
+       id="polygon6"
+       transform="matrix(1.390217,0,0,1.390217,105.86409,3.7075767)"
+       style="fill:#f7a41d;fill-opacity:1" />
+    <polygon
+       points="42,117 42,95 116,95 100,104 97,117 "
+       shape-rendering="crispEdges"
+       id="polygon7"
+       transform="matrix(1.390217,0,0,1.390217,105.86409,3.7075767)"
+       style="fill:#f7a41d;fill-opacity:1" />
+    <path
+       id="polygon8"
+       style="fill:#f7a41d;stroke-width:1.39022"
+       d="M 110.03474,198.33796 246.27602,33.471963 314.39665,3.7075767 178.15538,166.41717 Z"
+       sodipodi:nodetypes="ccccc" />
+    <path
+       id="polygon9"
+       style="fill:#f7a41d;stroke-width:1.39022"
+       d="m 300.49448,59.316258 -25.02391,6.951571 25.84377,-32.795866 z"
+       sodipodi:nodetypes="cccc" />
+    <path
+       id="polygon10"
+       style="fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="M 287.98253,66.267829 H 275.47057 L 289.37274,53.75539 301.31434,33.471963 H 318.5673 V 166.41717 h -65.3402 l 19.46304,-16.73681 6.95108,-13.90234 h 8.34131 z"
+       sodipodi:nodetypes="ccccccccccc" />
+    <path
+       id="polygon11"
+       style="fill:#f7a41d;stroke-width:1.39022"
+       d="m 279.64122,135.77802 6.95109,20.85343 -33.36521,9.78572 z"
+       sodipodi:nodetypes="cccc" />
+    <polygon
+       points="28,44 19,30 46,22 "
+       id="polygon1-4"
+       transform="matrix(1.390217,0,0,1.390217,301.26076,3.7075767)"
+       style="display:inline;fill:#f7a41d;fill-opacity:1" />
+    <path
+       id="polygon2-0"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="m 317.16659,135.77802 h 27.19089 l -25.9497,10.77181 -0.46442,19.86734 h -16.6826 V 33.471963 h 71.03248 l -12.44399,16.112775 -12.57992,16.683091 h -30.10274 z"
+       sodipodi:nodetypes="ccccccccccc" />
+    <polygon
+       points="4,106 31,95 12,117 "
+       id="polygon3-3"
+       transform="matrix(1.390217,0,0,1.390217,301.26076,3.7075767)"
+       style="display:inline;fill:#f7a41d;fill-opacity:1" />
+    <path
+       id="polygon9-0"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022"
+       d="m 370.25469,33.471963 26.79779,25.844295 -53.21192,6.951085 z"
+       sodipodi:nodetypes="cccc" />
+    <path
+       id="polygon10-5"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="M 415.1253,33.471963 V 166.41717 H 305.62525 l 19.46304,-16.73681 6.95108,-13.90234 h 52.50116 V 66.267343 H 343.84056 L 357.74273,53.75539 370.25469,33.471963 Z"
+       sodipodi:nodetypes="ccccccccccc" />
+    <path
+       id="polygon11-6"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022"
+       d="m 332.03937,135.77802 51.11094,20.85343 -77.52506,9.78572 z"
+       sodipodi:nodetypes="cccc" />
+    <path
+       id="polygon8-4"
+       style="fill:#f7a41d;stroke-width:1.39022"
+       d="m 428.39547,33.471422 -43.79309,-0.0066 93.354,133.082448 36.65343,0.004 z"
+       sodipodi:nodetypes="ccccc" />
+    <path
+       id="polygon10-6"
+       style="fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="m 514.66059,166.47154 -34.88161,-1.7e-4 4.83512,-16.3387 -8.87959,-14.35465 h 8.3413 l 3.5e-4,-69.510677 v -5.136199 l -3.2e-4,-7.375754 13.90214,-20.283427 h 16.68261 z"
+       sodipodi:nodetypes="ccccccccccc" />
+    <path
+       id="polygon2-7"
+       style="display:inline;fill:#f7a41d;stroke-width:1.39022;shape-rendering:crispEdges"
+       d="m 512.2657,142.72928 -11.12174,23.68789 h -16.6826 l -0.33761,-99.981522 -0.0955,-32.963685 64.38306,4.52e-4 -13.9312,18.83746 -11.09271,13.957954 h -10.48138 v 69.510191"
+       sodipodi:nodetypes="cccccccccc" />
+  </g>
+  <path
+     id="polygon9-1-9"
+     style="display:inline;fill:#f7a41d;stroke-width:1.39022"
+     d="M 313.45312,2.6845706 245.33203,32.450195 h -62.55859 v 0.03516 l -26.375,32.732422 -0.0391,0.02734 h 0.0176 l -0.0176,0.02148 0.0605,-0.02148 h 61.81055 L 109.0918,197.31543 l 68.12109,-31.91992 0.0449,-0.0547 h 62.51367 l 26.41407,-30.58594 h -63.31641 z m 70.20508,29.7578124 0.006,0.0078 H 371.34975 300.3185 v 0.06641 l -25.79102,32.728516 h 12.51172 v 69.509761 h -8.3418 l -26.41406,30.64063 h 39.98633 l 25.8457,-30.64063 h -0.49218 V 65.245117 h 28.70312 30.41992 l 27.66602,-32.800781 z m -214.78711,0.002 -0.0176,0.0059 H 135.582 118.89841 104.91989 v 0.05859 L 79.119141,65.245117 H 104.91992 V 134.75488 H 78.945313 l -26.408203,30.63282 -0.0039,0.006 h -0.002 v 0.002 l 0.0098,-0.002 52.3789,0.002 h 16.6836 0.0234 l 5.5586,-6.51758 20.83203,-24.12305 H 135.58203 V 99.305659 65.245117 h 8.26563 l 0.0273,-0.06445 24.98242,-32.71875 0.0137,-0.01172 h -0.004 z m 247.25586,0.002 -32.52929,38.564453 v 63.744134 h -40.1836 -13.58398 l -25.84571,30.64063 h 13.63868 96.55859 V 75.954101 l 62.83203,89.570319 36.65235,0.004 -0.0527,-0.0801 h 0.10352 V 65.245117 h 8.72656 l 11.09375,-13.957031 13.93164,-18.837891 h -64.38477 l 0.0586,20.269532 -0.01,0.01367 v 7.375 5.136719 53.152344 L 427.45117,32.448242 Z" />
+  <path
+     style="display:none;fill:#f7a41d;fill-opacity:1;stroke:#000000;stroke-width:1;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;paint-order:markers stroke fill"
+     d="M -7.167,150.496 H 610.16696"
+     id="path13"
+     sodipodi:insensitive="true" />
+  <path
+     style="display:none;fill:#f7a41d;fill-opacity:1;stroke:#000000;stroke-width:1;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;paint-order:stroke markers fill"
+     d="M -7.167,31.496 H 610.16696"
+     id="path13-7"
+     sodipodi:insensitive="true" />
+  <path
+     style="display:none;fill:#f7a41d;fill-opacity:1;stroke:#000000;stroke-width:1;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;paint-order:markers stroke fill"
+     d="M 278.205,162.04226 443.15384,-25.432641"
+     id="path30"
+     sodipodi:insensitive="true" />
+</svg>
