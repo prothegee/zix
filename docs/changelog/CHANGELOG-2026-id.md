@@ -183,6 +183,8 @@ __**Update:**__
       manual. `/path/user/` (id kosong) sekarang jatuh ke route prefix (200).
     - `http1_static_cached` dan `http1_static` di-porting. Upload tetap di
       `http1_upload`, jadi `http1_static` tidak punya route upload.
+    - `http1_websocket` di-porting: echo `/ws` dan room `/ws/:room-id`. Contoh ini
+      mengatur `ws_recv_buf`, bukan menaikkan `max_recv_buf`.
 
 - Static serving `zix.Http1` di-porting (`public_dir`), di `.ASYNC`, `.EPOLL`,
   dan `.URING`:
@@ -201,6 +203,26 @@ __**Update:**__
       atau `ZixHttp1_Server_PublicDirUnreadable` (sebelumnya `ZixPublicDirNotFound`,
       `ZixPublicDirNotADirectory`, `ZixPublicDirUnreadable`).
     - `zix.Http1.setStatic` diekspor lagi.
+
+- `zix.Http1.WebSocket` di-porting, di `.ASYNC`, `.EPOLL`, dan `.URING`:
+    - `serve`, `sendFD`, `broadcast`, `Opcode`, dan `WsFrameFn` tetap dengan nama
+      yang sama. Codec, upgrade, send, handoff pending, dan pump dipecah di bawah
+      `tcp/http1/websocket/`.
+    - Breaking: `serve` mengembalikan `ZixHttp1_WebSocket_KeyTooLong`,
+      `ZixHttp1_WebSocket_NoSpaceLeft`, `ZixHttp1_WebSocket_BrokenPipe`, atau
+      `ZixHttp1_WebSocket_HeadBuild`, dan `sendFD` mengembalikan
+      `ZixHttp1_WebSocketSend_BrokenPipe` atau `ZixHttp1_WebSocketSend_HeadBuild`
+      (sebelumnya `error.ZixKeyTooLong` dan `error.BrokenPipe`).
+    - `.URING` membaca frame WebSocket lewat provided-buffer ring per worker,
+      jadi WebSocket yang idle tidak menahan recv buffer. Kernel tanpa buffer ring
+      kembali ke recv biasa.
+    - Breaking: `ws_recv_buf` terpisah dari `max_recv_buf` dan default-nya 16 KiB
+      (sebelumnya 0, jatuh ke `max_recv_buf`, dan `.EPOLL` serta `.URING` memberi
+      setiap koneksi ukuran terbesar dari keduanya). Koneksi mengganti buffer-nya
+      ke `ws_recv_buf` saat upgrade, di ketiga model, dan `ws_recv_buf` juga menjadi
+      frame terbesar yang diterima. Menaikkan `max_recv_buf` untuk upload tidak lagi
+      membesarkan koneksi WebSocket.
+    - `WebSocket.serveTls` belum di-porting. TLS adalah langkah terpisah.
 
 - `zix.Http1.isExpired()` diekspor. Fungsi ini membaca deadline yang dipasang dari
   `handler_timeout_ms`, dan deadline yang sama sekarang mengisi `ctx.deadline`.
@@ -266,6 +288,12 @@ __**Fix:**__
 - Decoder brotli bisa panic pada stream rusak dengan distance melewati 32 bit atau
   kata dictionary yang melewati panjang meta-block. Keduanya sekarang ditolak
   sebagai `ZixUtils_Brotli_Malformed`.
+
+- Frame WebSocket yang lebih besar dari frame buffer dipotong, dan sisa payload-nya
+  dibaca sebagai frame baru. Sekarang dijawab close `1009` dan koneksi berakhir.
+
+- `WebSocket.sendFD` ke koneksi lain, dipanggil dari frame callback, ditahan di
+  sink koneksi yang sedang di-pump. Sekarang dikirim ke fd tujuan.
 
 - `jzon.lastFailure()` bisa menampilkan field dari kegagalan sebelumnya setelah parse
   berikutnya gagal tanpa menyebut field. Setiap jalur JSON sekarang mencatat kegagalan
