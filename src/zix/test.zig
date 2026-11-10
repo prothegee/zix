@@ -85,6 +85,7 @@ test {
     _ = @import("tcp/http1/reader.zig");
     _ = @import("tcp/http1/router.zig");
     _ = @import("tcp/http1/serve.zig");
+    _ = @import("tcp/http1/static.zig");
     _ = @import("tcp/http1/writer.zig");
     _ = @import("utils/Multipart.zig");
     _ = @import("utils/MultipartField.zig");
@@ -130,6 +131,9 @@ test {
     _ = @import("utils/http/content.zig");
     _ = @import("utils/http/encoding.zig");
     _ = @import("utils/http/method.zig");
+    _ = @import("utils/http/Range.zig");
+    _ = @import("utils/http/RangeSpec.zig");
+    _ = @import("utils/http/range_header.zig");
     _ = @import("utils/http/status.zig");
     _ = @import("utils/media_type.zig");
     _ = @import("utils/peer_address.zig");
@@ -138,6 +142,17 @@ test {
     _ = @import("utils/pwhash/pbkdf2.zig");
     _ = @import("utils/pwhash/scrypt.zig");
     _ = @import("utils/socket/pair.zig");
+    _ = @import("utils/static/StaticCache.zig");
+    _ = @import("utils/static/StaticCacheRegistry.zig");
+    _ = @import("utils/static/StaticHit.zig");
+    _ = @import("utils/static/StaticSibling.zig");
+    _ = @import("utils/static/StaticSlot.zig");
+    _ = @import("utils/static/StaticVariant.zig");
+    _ = @import("utils/static/cache_descriptor.zig");
+    _ = @import("utils/static/cache_header.zig");
+    _ = @import("utils/static/cache_path.zig");
+    _ = @import("utils/static/install_result.zig");
+    _ = @import("utils/static/static.zig");
     _ = @import("utils/check/string.zig");
 }
 
