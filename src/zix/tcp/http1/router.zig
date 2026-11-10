@@ -35,6 +35,7 @@ const Request = @import("Request.zig");
 const Response = @import("Response.zig");
 const Context = @import("Context.zig");
 const PathParam = @import("PathParam.zig");
+const static = @import("static.zig");
 
 // --------------------------------------------------------- //
 // Private:
@@ -288,8 +289,8 @@ pub fn Router(comptime routes: []const Route) type {
                 return handler(req, res, ctx);
             }
 
-            // TODO: static file fallback from public_dir before the 404.
-            std.log.info("TODO: static.serve", .{});
+            // Pass 4: a file under public_dir, when one is configured.
+            if (static.fallback(req.head, req.fd)) return;
 
             res.setStatus(.NOT_FOUND);
 
