@@ -32,7 +32,7 @@
 const std = @import("std");
 const zix = @import("zix");
 
-const builtint = @import("builtin");
+const builtin = @import("builtin");
 
 // --------------------------------------------------------- //
 
@@ -40,7 +40,7 @@ const IP:[]const u8 = "127.0.0.1";
 const PORT:u16 = 9015;
 const WORKERS:usize = 0;
 const DISPATCH_MODEL:zix.Http1.DispatchModel =
-    if (builtint.os.tag == .linux) .URING else .ASYNC;
+    if (builtin.os.tag == .linux) .URING else .ASYNC;
 
 // --------------------------------------------------------- //
 
