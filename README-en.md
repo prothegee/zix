@@ -299,6 +299,8 @@ patched, so the supply chain is the Zig toolchain plus this repository.
 
 __*1. Full protocol stack under one roof:*__
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 Tcp (raw), Udp, Uds (Unix domain sockets), Http1 (HTTP/1.1), Http2 (h2c), Http3 (HTTP/3 over QUIC), Webrtc (data channels and media), Grpc
 (gRPC over h2c), Fix (FIX 4.x), plus Channel and Logger.
 
@@ -309,6 +311,8 @@ different conventions.
 <br>
 
 __*2. Client libraries across the stack:*__
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 Every engine ships its matching client: the gRPC client, and raw `zix.Tcp`, `zix.Udp`, `zix.Uds`, and `zix.Fix` clients.
 
@@ -369,6 +373,8 @@ Engine-owned WebSocket on `zix.Http1` (RFC 6455, ping auto-ponged, close auto-ec
 
 __*9. Multiplexed gRPC (h2c):*__
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 Multiplexed async epoll with a resumable HTTP/2 state machine, comptime-cached HPACK reply blocks, big initial window, buffered reads, max_streams=128 to avoid REFUSED_STREAM bursts. Context timeouts (handler_timeout_ms, Route.timeout_ms, ctx.isExpired()).
 
 > All four RPC types (unary, server streaming, client streaming, bidirectional)
@@ -380,6 +386,8 @@ terminator or sidecar required.
 
 __*10. FIX 4.x:*__
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 FixContext, a MsgType struct (47 constants), session-oriented routing, trading examples.
 
 > Domain-specific financial messaging as a citizen of the engine, not bolted onto raw
@@ -388,6 +396,8 @@ TCP.
 <br>
 
 __*11. Channel (typed concurrency and IPC primitive):*__
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 A generic bounded `Channel(T)` with `send` / `recv` / `close` and drain-after-close semantics, usable for in-process fan-out, worker pools, and inter-process coordination.
 
@@ -421,6 +431,8 @@ Opt-in, per-worker submission-queue backpressure on `zix.Http1` under `.URING`. 
 
 __*15. Pure-Zig TLS (https, h2, wss):*__
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 TLS 1.3 with a TLS 1.2 floor, on `std.crypto`, no OpenSSL. Opt-in and additive: `zix.Http1` serves https/1.1, `zix.Http2` and `zix.Grpc` serve h2 over TLS (ALPN h2), and SSE and WebSocket run over TLS (wss) on the thread-per-connection path. Server certificates are ECDSA P-256, Ed25519, or RSA, configured by a user-owned `Tls.Context` (validated curves / ciphers, HSTS). A verifying native client (`zix.Tls.Client`) checks the chain and hostname.
 
 > Encrypted transport is a config gate in front of the unchanged cleartext engines, not a separate server, so the same handler serves http and https.
@@ -429,6 +441,8 @@ TLS 1.3 with a TLS 1.2 floor, on `std.crypto`, no OpenSSL. Opt-in and additive: 
 
 __*16. HTTP/3 over QUIC, pure-Zig:*__
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 `zix.Http3` serves HTTP/3 (RFC 9114) over QUIC (RFC 9000 / 9001 / 9002), built from the RFCs on `std.crypto`: packet protection, the TLS 1.3 handshake over CRYPTO streams, loss recovery, QPACK, and per-core dispatch on the `zix.Udp` substrate. Same comptime `Router` and `Tls.Context` as the TCP engines.
 
 > The newest HTTP transport ships in-tree with no C QUIC library, sharing the router and TLS config already used for HTTP/1 and HTTP/2.
@@ -436,6 +450,8 @@ __*16. HTTP/3 over QUIC, pure-Zig:*__
 <br>
 
 __*17. WebRTC peer, pure-Zig:*__
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 `zix.Webrtc` answers a browser over WebRTC: ICE-lite (RFC 8445) over STUN, DTLS 1.2 (RFC 6347), SCTP data channels (RFC 9260 / 8831 / 8832), SDP offer and answer, and optional SRTP media forwarding (RFC 3711 / 5764), all on one UDP port and all written from the RFCs on `std.crypto`. Media is forwarded, never decoded: there is no codec in the engine.
 
@@ -477,7 +493,7 @@ Tests run with no external tools: a 69-protocol runner driving hand-rolled nativ
 
 __*22. Static file serving with range support:*__
 
-`public_dir` on all three HTTP engines serves unmatched routes as files before the 404 fallback, with a traversal-safe path check, and a multipart upload companion (`public_dir_upload`) on `zix.Http1`. Range requests (RFC 7233, 206 / 416) are served on `zix.Http1` and `zix.Http2`, whole-file only on `zix.Http3`.
+`public_dir` on all three HTTP engines serves unmatched routes as files before the 404 fallback, with a traversal-safe path check, and a multipart upload companion (`public_dir_upload`) on `zix.Http1`. Range requests (RFC 7233, 206 / 416) are served on `zix.Http1` and `zix.Http2`, whole-file only on `zix.Http3`. On zix 0.6.x only `zix.Http1` is ported so far.
 
 Set `public_dir_cache_ttl_ms` above 0 to keep a resolved file open with its response header prerendered, so a repeat request costs a hash lookup instead of an open plus a stat, and a precompressed `.br` or `.gz` sibling is picked up from disk once instead of probed per request. It is off by default, and on `zix.Http3` it is what enables static serving at all (see [Configuration](./docs/zix-config-en.md)).
 
@@ -547,6 +563,8 @@ Routes are comptime-baked into the server type on `zix.Http1`, so no allocator i
 
 ### UDP
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 | Scope | Allocator | Lifetime |
 | :- | :- | :- |
 | Client record list | `config.allocator` (caller-owned) | Server process lifetime |
@@ -558,6 +576,8 @@ Routes are comptime-baked into the server type on `zix.Http1`, so no allocator i
 The raw path (`zix.Udp.Raw`,) allocates its recv / send batches and worker-thread array from `config.allocator` once at startup, not per packet, so the arena caveat does not bind there.
 
 ### HTTP/2 and gRPC
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 HTTP/2 and gRPC `.EPOLL` / `.URING` mux both pool stream slots per worker, so resident stream memory tracks concurrent streams rather than `max_streams` per connection. The thread-path model (`.ASYNC`) keeps a heap-allocated per-connection stream array (stack allocation of `max_streams` `Stream` structs would overflow the thread stack). Handlers receive the same `req`/`res`/`ctx` trio as every other engine (ADR-063): `ctx.allocator` is a per-request arena backed by a fixed stack buffer (no heap call), reset per request, not per connection.
 
@@ -695,11 +715,11 @@ pub fn homeHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.
     try res.send("hello from zix");
 }
 
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/", .handler = homeHandler },
     }).dispatch, .{
-        .io             = process.io,
+        .io             = init.io,
         .ip             = "127.0.0.1",
         .port           = 9000,
         .dispatch_model = .ASYNC,
@@ -709,12 +729,12 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-Manual I/O (explicit concurrency limit via `concurrent_limit`, `.ASYNC` dispatch):
+Manual I/O (explicit concurrency limit via `async_limit`, `.ASYNC` dispatch):
 ```zig
 pub fn main() !void {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
-        .concurrent_limit = std.Io.Limit.limited(4), // pin to 4 concurrent tasks
-        // .concurrent_limit = .unlimited             // let runtime decide
+        .async_limit = std.Io.Limit.limited(4), // pin the io.async() pool to 4 threads
+        // .async_limit = .unlimited             // let runtime decide
     });
     defer threaded.deinit();
 
@@ -741,9 +761,11 @@ pub fn main() !void {
 - [examples/http1_query.zig](examples/http1_query.zig) - the QUERY method (RFC 10008)
 - [examples/http1_middleware.zig](examples/http1_middleware.zig)
 - [examples/http1_cache.zig](examples/http1_cache.zig)
+- [examples/http1_sse.zig](examples/http1_sse.zig) - Server-Sent Events through `res.sendStream`
+- [examples/http1_compression.zig](examples/http1_compression.zig) - `res.sendNegotiated` plus forced gzip, deflate, and br routes
 - [examples/http1_manual_concurrent.zig](examples/http1_manual_concurrent.zig) - explicit concurrency control via `Io.Threaded`
 
-**When to use:** start here for any plain HTTP service. Auto I/O (default) is the simplest path and lets the runtime size its own thread pool. Switch to manual I/O with `concurrent_limit` only when you must cap concurrency explicitly: constrained memory, a fixed worker budget, or deterministic load tests.
+**When to use:** start here for any plain HTTP service. Auto I/O (default) is the simplest path and lets the runtime size its own thread pool. Switch to manual I/O with `async_limit` only when you must cap concurrency explicitly: constrained memory, a fixed worker budget, or deterministic load tests. `.ASYNC` dispatches through `io.async()`, so `async_limit` is the cap (`concurrent_limit` only caps `io.concurrent()`). When the pool is full, `io.async()` runs the connection inline on the accept loop, so up to `async_limit + 1` connections run at once. `.EPOLL` and `.URING` do not read this limit, they use `workers`.
 
 <br>
 
@@ -872,14 +894,14 @@ const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .U
 
 **`.ASYNC` (single accept, `io.async()` dispatch):**
 
-One accept thread dispatches each connection via `io.async()`. `workers` is ignored. Preferred for SSE and WebSocket (a long-lived connection costs a task, not a worker slot). Also suitable for explicit `concurrent_limit`. This is the only model available on every platform.
+One accept thread dispatches each connection via `io.async()`. `workers` is ignored. Preferred for SSE and WebSocket (a long-lived connection costs a task, not a worker slot). Also suitable for an explicit `async_limit`. This is the only model available on every platform.
 
 ```zig
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/", .handler = homeHandler },
     }).dispatch, .{
-        .io = process.io,
+        .io = init.io,
         .dispatch_model = .ASYNC, // required: .ASYNC, .EPOLL, or .URING
         // workers = 0 -> cpu_count workers for .EPOLL / .URING, ignored by .ASYNC
     });
@@ -893,7 +915,7 @@ Each worker owns a private `SO_REUSEPORT` listener and one `epoll` instance. The
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .dispatch_model = .EPOLL,
     .workers        = 0, // 0 = cpu_count workers (default)
 });
@@ -907,7 +929,7 @@ Same thread-per-core, shared-nothing topology as `.EPOLL` (one `SO_REUSEPORT` li
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .dispatch_model = .URING,
     .workers        = 0, // 0 = cpu_count workers (default)
 });
@@ -949,7 +971,7 @@ Two independent timeout layers, both disabled by default (`0`):
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/slow", .handler = slowHandler },
 }).dispatch, .{
-    .io                 = process.io,
+    .io                 = init.io,
     .ip                 = "127.0.0.1",
     .port               = 9000,
     .dispatch_model     = .ASYNC,
@@ -1034,7 +1056,7 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     // origin check -> basic auth -> handler
     .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .ip             = "127.0.0.1",
     .port           = 9008,
     .dispatch_model = .ASYNC,
@@ -1081,11 +1103,11 @@ fn onFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
     zix.Http1.WebSocket.sendFD(fd, @enumFromInt(opcode), payload) catch return;
 }
 
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/ws", .handler = wsHandler },
     }).dispatch, .{
-        .io             = process.io,
+        .io             = init.io,
         .ip             = "127.0.0.1",
         .port           = 9028,
         .dispatch_model = .ASYNC,
@@ -1111,7 +1133,7 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/api",       .handler = apiHandler,  .kind = .PREFIX },
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
 }).dispatch, .{
-    .io         = process.io,
+    .io         = init.io,
     .ip         = "127.0.0.1",
     .port       = 9008,
     .public_dir = "./public", // static files for unmatched routes
@@ -1159,7 +1181,7 @@ pub fn eventsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zi
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/events", .handler = eventsHandler },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .dispatch_model = .ASYNC, // preferred for SSE: long-lived connections do not hold pool threads
 });
 ```
@@ -1177,7 +1199,7 @@ curl -N http://localhost:9010/events
 
 ### Static Files & Upload
 
-Set `public_dir` in the `zix.Http1` server config to enable static file serving. `server.run()` returns `error.ZixPublicDirNotFound` if the directory does not exist. Use a `createInitDirs` helper to create all required directories before `Server.init`:
+Set `public_dir` in the `zix.Http1` server config to enable static file serving. `server.run()` returns `error.ZixHttp1_Server_PublicDirNotFound` if the directory does not exist (`PublicDirNotADirectory` and `PublicDirUnreadable` for the other two cases). Use a `createInitDirs` helper to create all required directories before `Server.init`:
 
 ```zig
 fn createInitDirs(io: std.Io) void {
@@ -1185,13 +1207,13 @@ fn createInitDirs(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, "./public/u") catch {};
 }
 
-pub fn main(process: std.process.Init) !void {
-    createInitDirs(process.io); // idempotent, safe on every start
+pub fn main(init: std.process.Init) !void {
+    createInitDirs(init.io); // idempotent, safe on every start
 
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/upload", .handler = uploadHandler },
     }).dispatch, .{
-        .io                = process.io,
+        .io                = init.io,
         .ip                = "127.0.0.1",
         .port              = 9005,
         .dispatch_model    = .ASYNC,
@@ -1201,8 +1223,9 @@ pub fn main(process: std.process.Init) !void {
 ```
 
 - Unmatched routes fall through to static serving from `public_dir`.
-- Range requests (`Range: bytes=...`) -> `206 Partial Content` (RFC 7233).
-- Directory traversal (`..`) is rejected.
+- Range requests (`Range: bytes=...`) -> `206 Partial Content` (RFC 7233). A valid range past the end of the file -> `416`. A malformed header is ignored and the whole file is sent.
+- Directory traversal (`..`), an absolute path, and a directory are rejected.
+- Served under `.ASYNC`, `.EPOLL`, and `.URING`.
 
 **Upload**: parse the multipart body in a handler, optionally rename before saving:
 
@@ -1235,7 +1258,7 @@ curl -X POST "http://localhost:9005/upload" \
 - [examples/http1_static.zig](examples/http1_static.zig) - static serving and range requests
 - [examples/http1_upload.zig](examples/http1_upload.zig) - raw and multipart upload
 - [examples/http1_static_cached.zig](examples/http1_static_cached.zig) - the same fallback with `public_dir_cache_ttl_ms` set, showing the cached path and `.br` / `.gz` sibling pickup
-- [examples/tls/http3_static.zig](examples/tls/http3_static.zig) - static serving over HTTP/3, where the cache is what makes it possible at all
+- [examples/tls/http3_static.zig](examples/tls/http3_static.zig) - static serving over HTTP/3, where the cache is what makes it possible at all (TBD: not ported to zix 0.6.x yet)
 
 **When to use:** enable `public_dir` to serve a built frontend, assets, or downloads from the same server, with range requests handled for you. Use the multipart path for user uploads when you control the storage target. With `public_dir_cache_ttl_ms` set, a cleartext response hands the file to the kernel with `sendfile`, so the bytes never enter user space. A CDN is still the right answer for bulk file distribution across regions: this is for convenience and co-located assets.
 
@@ -1441,6 +1464,8 @@ See `docs/zix-config-en.md` for the field reference.
 
 ### HTTP/2
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 `zix.Http2` is an HTTP/2 server in its own right: h2c (cleartext) by default, or h2 over TLS when a `Tls.Context` is attached (ALPN negotiates h2, which browsers require for HTTP/2). It is also the h2c transport that `zix.Grpc` runs on.
 
 **When to use:** reach for `zix.Http2` directly when you need raw HTTP/2 framing (h2c or h2-over-TLS) without gRPC semantics, for example an h2 endpoint for a browser or an h2 client. For ordinary web traffic `zix.Http1` leads the benchmarks, and for RPC use `zix.Grpc` (which rides this engine).
@@ -1570,6 +1595,8 @@ See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for full documentation includin
 
 ### TLS (https / h2)
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 The Http1 and Http2 servers serve cleartext by default. Attach a `zix.Tls.Context` to opt into TLS on a gated path, leaving the cleartext engines untouched. The context loads the cert / key and validates the policy once at startup, then every connection reuses it. For Http2 and gRPC the `.EPOLL` / `.URING` models terminate TLS in the dispatch worker and multiplex many connections per core, so https does not spawn a thread per connection.
 
 ```zig
@@ -1606,6 +1633,8 @@ The two paths are required, the rest default to a secure posture (TLS 1.2 floor,
 <br>
 
 ### Raw TCP
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 `zix.Tcp` is a raw TCP stream server and client. The handler is baked into the server type at `init` and `io` is a config field, so `run()` takes no argument (). The per-connection handler owns the stream and runs under `.ASYNC` / `.EPOLL`. For the completion-based `.URING` ring there is a separate per-frame callback path, `initFramed`. Default frame format: 4-byte big-endian length prefix.
 
@@ -1694,6 +1723,8 @@ var client = try zix.Tcp.Client.connectArgs(.{ .ip = "127.0.0.1", .port = 9300 }
 <br>
 
 ### FIX 4.x
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 `zix.Fix` is a FIX 4.x session layer server and client. SOH-delimited (0x01) framing. Session handling (Logon/Logout/Heartbeat) is built in. Application messages are dispatched to a comptime router or echoed when no routes are registered.
 
@@ -1800,6 +1831,8 @@ try client.logout(io);
 
 ### UDS (Unix Domain Sockets)
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 Same-host IPC over a Unix stream socket. The server accepts connections and dispatches each as a concurrent task. Both sides use a 4-byte length-prefixed frame format.
 
 ```zig
@@ -1859,6 +1892,8 @@ try server.run();
 
 ### Channel
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 Typed, fiber-safe in-process message passing. A buffered ring queue that connects producer and consumer tasks (OS threads or `io.concurrent` fibers) within the same process.
 
 ```zig
@@ -1904,6 +1939,8 @@ For design details see [`docs/hld-channel-en.md`](docs/hld-channel-en.md).
 <br>
 
 ### UDP
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 Two modes. The typed `zix.Udp.Server(Packet)` is a type-safe messaging server: the user defines their own `extern struct` packet, and zix handles endianness, size validation, and concurrency. The raw `zix.Udp.Raw(handler)` serves variable-length datagrams with no fixed struct, with `recvmmsg` / `sendmmsg` batching and per-core SO_REUSEPORT workers.
 
@@ -2004,6 +2041,8 @@ pub fn main(process: std.process.Init) !void {
 
 ### HTTP/3
 
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
+
 HTTP/3 runs over QUIC, which runs over UDP, so `zix.Http3` sits on the same `zix.Udp` datagram substrate above, not on the TCP / TLS stack. It is a pure-Zig HTTP/3 server over QUIC (RFC 9114 / 9000 / 9001 / 9002). The QUIC transport, packet protection, TLS 1.3 handshake glue, and QPACK header compression are all written from the RFCs and proven byte-exact against the RFC worked examples. TLS 1.3 is folded into the QUIC handshake (there is no cleartext mode and no TLS record layer), configured by the same `zix.Tls.Context` as the TCP engines, so an ECDSA P-256, Ed25519, or RSA cert all work.
 
 Routes are a comptime table (`zix.Http3.Router`), the same shape as `zix.Http1` / `zix.Http2`, dispatched on the decoded request path.
@@ -2063,6 +2102,8 @@ See [`docs/hld-http3-en.md`](docs/hld-http3-en.md) and [`docs/lld-http3-en.md`](
 <br>
 
 ### WebRTC
+
+> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
 `zix.Webrtc` is a WebRTC peer, which is what lets a browser reach the server over something other than HTTP or WebSocket: unreliable delivery, a per-channel ordering choice, and audio and video. Everything arrives on one UDP port and is sorted by its first byte (RFC 7983): ICE connectivity checks carried over STUN, the DTLS 1.2 handshake, the SCTP association and its data channels, and optionally SRTP media. All of it is written from the RFCs, with `std.crypto` underneath and no OpenSSL.
 
@@ -2148,11 +2189,11 @@ fn createLogDir(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, "./logs") catch {};
 }
 
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    createLogDir(process.io);
+    createLogDir(init.io);
 
     var logger = try zix.Logger.init(arena.allocator(), .{
         .save_path      = "./logs",
@@ -2170,7 +2211,7 @@ pub fn main(process: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/", .handler = homeHandler },
     }).dispatch, .{
-        .io             = process.io,
+        .io             = init.io,
         .ip             = "127.0.0.1",
         .port           = 9000,
         .dispatch_model = .ASYNC,
