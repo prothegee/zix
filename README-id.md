@@ -299,6 +299,8 @@ di-pin, atau terus di-patch, jadi supply chain-nya adalah Zig toolchain plus rep
 
 __*1. Stack protokol lengkap dalam satu tempat:*__
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 Tcp (raw), Udp, Uds (Unix domain sockets), Http1 (HTTP/1.1), Http2 (h2c), Http3 (HTTP/3 melalui QUIC), Webrtc (data channel dan
 media), Grpc (gRPC melalui h2c), Fix (FIX 4.x), plus Channel dan Logger.
 
@@ -309,6 +311,8 @@ konvensi yang berbeda.
 <br>
 
 __*2. Library client di seluruh stack:*__
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 Setiap engine mengirimkan client yang cocok: client gRPC, dan client `zix.Tcp`, `zix.Udp`, `zix.Uds`, dan `zix.Fix` mentah.
 
@@ -369,6 +373,8 @@ WebSocket yang dikelola engine pada `zix.Http1` (RFC 6455, ping auto-pong, close
 
 __*9. Multiplexed gRPC (h2c):*__
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 Multiplexed async epoll dengan resumable HTTP/2 state machine, blok reply HPACK yang di-cache saat comptime, initial window besar, buffered reads, max_streams=128 untuk menghindari REFUSED_STREAM burst. Context timeout (handler_timeout_ms, Route.timeout_ms, ctx.isExpired()).
 
 > Keempat tipe RPC (unary, server streaming, client streaming, bidirectional)
@@ -380,6 +386,8 @@ terminator atau sidecar.
 
 __*10. FIX 4.x:*__
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 FixContext, sebuah struct MsgType (47 konstanta), routing berbasis session, contoh trading.
 
 > Pesan finansial domain-specific sebagai warga engine, bukan ditempelkan ke raw
@@ -388,6 +396,8 @@ TCP.
 <br>
 
 __*11. Channel (primitive konkurensi dan IPC bertipe):*__
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 `Channel(T)` bounded generik dengan `send` / `recv` / `close` dan semantik drain-after-close, dapat dipakai untuk fan-out in-process, worker pool, dan koordinasi antar-proses.
 
@@ -421,6 +431,8 @@ Backpressure submission-queue per-worker yang opt-in pada `zix.Http1` di bawah `
 
 __*15. TLS pure-Zig (https, h2, wss):*__
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 TLS 1.3 dengan floor TLS 1.2, di atas `std.crypto`, tanpa OpenSSL. Opt-in dan additive: `zix.Http1` menyajikan https/1.1, `zix.Http2` dan `zix.Grpc` menyajikan h2 di atas TLS (ALPN h2), dan SSE serta WebSocket berjalan di atas TLS (wss) pada jalur thread-per-koneksi. Sertifikat server bisa ECDSA P-256, Ed25519, atau RSA, dikonfigurasi oleh `Tls.Context` milik pemanggil (curve / cipher tervalidasi, HSTS). Client native yang memverifikasi (`zix.Tls.Client`) memeriksa chain dan hostname.
 
 > Transport terenkripsi adalah gate config di depan engine cleartext yang tak berubah, bukan server terpisah, jadi handler yang sama menyajikan http dan https.
@@ -429,6 +441,8 @@ TLS 1.3 dengan floor TLS 1.2, di atas `std.crypto`, tanpa OpenSSL. Opt-in dan ad
 
 __*16. HTTP/3 di atas QUIC, pure-Zig:*__
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 `zix.Http3` menyajikan HTTP/3 (RFC 9114) di atas QUIC (RFC 9000 / 9001 / 9002), dibangun dari RFC di atas `std.crypto`: packet protection, handshake TLS 1.3 di atas CRYPTO stream, loss recovery, QPACK, dan dispatch per-core di atas substrat `zix.Udp`. `Router` comptime dan `Tls.Context` yang sama dengan engine TCP.
 
 > Transport HTTP terbaru hadir in-tree tanpa C QUIC library, berbagi router dan config TLS yang sudah dipakai untuk HTTP/1 dan HTTP/2.
@@ -436,6 +450,8 @@ __*16. HTTP/3 di atas QUIC, pure-Zig:*__
 <br>
 
 __*17. Peer WebRTC, pure-Zig:*__
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 `zix.Webrtc` menjawab browser lewat WebRTC: ICE-lite (RFC 8445) di atas STUN, DTLS 1.2 (RFC 6347), data channel SCTP (RFC 9260 / 8831 / 8832), offer dan answer SDP, serta forwarding media SRTP opsional (RFC 3711 / 5764), semuanya di satu port UDP dan semuanya ditulis dari RFC di atas `std.crypto`. Media diteruskan, tidak pernah didekode: tidak ada codec di dalam engine.
 
@@ -477,7 +493,7 @@ Test berjalan tanpa tool eksternal: runner 69-protokol yang menggerakkan client 
 
 __*22. Static file serving dengan dukungan range:*__
 
-`public_dir` pada ketiga engine HTTP menyajikan route yang tak cocok sebagai file sebelum fallback 404, dengan pemeriksaan path aman-traversal, dan companion upload multipart (`public_dir_upload`) pada `zix.Http1`. Range request (RFC 7233, 206 / 416) disajikan pada `zix.Http1` dan `zix.Http2`, hanya file utuh pada `zix.Http3`.
+`public_dir` pada ketiga engine HTTP menyajikan route yang tak cocok sebagai file sebelum fallback 404, dengan pemeriksaan path aman-traversal, dan companion upload multipart (`public_dir_upload`) pada `zix.Http1`. Range request (RFC 7233, 206 / 416) disajikan pada `zix.Http1` dan `zix.Http2`, hanya file utuh pada `zix.Http3`. Di zix 0.6.x baru `zix.Http1` yang sudah di-port.
 
 Atur `public_dir_cache_ttl_ms` di atas 0 agar file yang sudah di-resolve tetap terbuka dengan header responsnya sudah dirender, sehingga request berikutnya hanya membayar satu hash lookup alih-alih open plus stat, dan sibling terkompresi `.br` atau `.gz` di-resolve sekali dari disk alih-alih diprobe per request. Default-nya mati, dan pada `zix.Http3` inilah yang mengaktifkan penyajian static sama sekali (lihat [Configuration](./docs/zix-config-id.md)).
 
@@ -547,6 +563,8 @@ Rute dibakukan comptime ke dalam tipe server pada `zix.Http1`, jadi tidak perlu 
 
 ### UDP
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 | Cakupan | Allocator | Masa hidup |
 | :- | :- | :- |
 | Daftar rekaman client | `config.allocator` (milik pemanggil) | Masa hidup proses server |
@@ -558,6 +576,8 @@ Rute dibakukan comptime ke dalam tipe server pada `zix.Http1`, jadi tidak perlu 
 Jalur raw (`zix.Udp.Raw`,) mengalokasikan recv / send batch dan array worker-thread-nya dari `config.allocator` sekali saat startup, bukan per paket, jadi caveat arena tidak berlaku di sana.
 
 ### HTTP/2 dan gRPC
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 Mux `.EPOLL` / `.URING` HTTP/2 dan gRPC sama-sama memakai pool slot stream per worker, jadi memori stream residen mengikuti stream konkuren, bukan `max_streams` per koneksi. Model thread-path (`.ASYNC`) tetap memakai array stream per-koneksi yang dialokasikan heap (alokasi stack dari `max_streams` struct `Stream` akan meluap stack thread). Handler menerima trio `req`/`res`/`ctx` yang sama seperti engine lainnya (ADR-063): `ctx.allocator` adalah arena per-permintaan yang didukung buffer stack tetap (tanpa pemanggilan heap), direset per permintaan, bukan per koneksi.
 
@@ -695,11 +715,11 @@ pub fn homeHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zix.
     try res.send("hello from zix");
 }
 
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/", .handler = homeHandler },
     }).dispatch, .{
-        .io             = process.io,
+        .io             = init.io,
         .ip             = "127.0.0.1",
         .port           = 9000,
         .dispatch_model = .ASYNC,
@@ -709,12 +729,12 @@ pub fn main(process: std.process.Init) !void {
 }
 ```
 
-Manual I/O (batas konkurensi eksplisit via `concurrent_limit`, dispatch `.ASYNC`):
+Manual I/O (batas konkurensi eksplisit via `async_limit`, dispatch `.ASYNC`):
 ```zig
 pub fn main() !void {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{
-        .concurrent_limit = std.Io.Limit.limited(4), // pin ke 4 tugas concurrent
-        // .concurrent_limit = .unlimited             // biarkan runtime memutuskan
+        .async_limit = std.Io.Limit.limited(4), // pin pool io.async() ke 4 thread
+        // .async_limit = .unlimited             // biarkan runtime memutuskan
     });
     defer threaded.deinit();
 
@@ -741,9 +761,11 @@ pub fn main() !void {
 - [examples/http1_query.zig](examples/http1_query.zig) - method QUERY (RFC 10008)
 - [examples/http1_middleware.zig](examples/http1_middleware.zig)
 - [examples/http1_cache.zig](examples/http1_cache.zig)
+- [examples/http1_sse.zig](examples/http1_sse.zig) - Server-Sent Events lewat `res.sendStream`
+- [examples/http1_compression.zig](examples/http1_compression.zig) - `res.sendNegotiated` plus route gzip, deflate, dan br yang dipaksa
 - [examples/http1_manual_concurrent.zig](examples/http1_manual_concurrent.zig) - kontrol konkurensi eksplisit via `Io.Threaded`
 
-**Kapan digunakan:** mulai dari sini untuk layanan HTTP biasa. Auto I/O (default) adalah jalur paling sederhana dan membiarkan runtime mengukur thread pool-nya sendiri. Beralih ke manual I/O dengan `concurrent_limit` hanya saat kamu harus membatasi konkurensi secara eksplisit: memori terbatas, anggaran worker tetap, atau load test deterministik.
+**Kapan digunakan:** mulai dari sini untuk layanan HTTP biasa. Auto I/O (default) adalah jalur paling sederhana dan membiarkan runtime mengukur thread pool-nya sendiri. Beralih ke manual I/O dengan `async_limit` hanya saat konkurensi harus dibatasi secara eksplisit: memori terbatas, anggaran worker tetap, atau load test deterministik. `.ASYNC` mendispatch lewat `io.async()`, jadi batasnya adalah `async_limit` (`concurrent_limit` hanya membatasi `io.concurrent()`). Saat pool penuh, `io.async()` menjalankan koneksi secara inline di accept loop, jadi paling banyak `async_limit + 1` koneksi berjalan bersamaan. `.EPOLL` dan `.URING` tidak membaca batas ini, keduanya memakai `workers`.
 
 <br>
 
@@ -872,14 +894,14 @@ const DISPATCH_MODEL: zix.Http1.DispatchModel = if (builtin.os.tag == .linux) .U
 
 **`.ASYNC` (accept tunggal, dispatch `io.async()`):**
 
-Satu accept thread mendispatch setiap koneksi via `io.async()`. `workers` diabaikan. Diutamakan untuk SSE dan WebSocket (koneksi long-lived hanya memakai satu task, bukan slot worker). Cocok juga untuk `concurrent_limit` eksplisit. Ini satu-satunya model yang tersedia di semua platform.
+Satu accept thread mendispatch setiap koneksi via `io.async()`. `workers` diabaikan. Diutamakan untuk SSE dan WebSocket (koneksi long-lived hanya memakai satu task, bukan slot worker). Cocok juga untuk `async_limit` eksplisit. Ini satu-satunya model yang tersedia di semua platform.
 
 ```zig
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/", .handler = homeHandler },
     }).dispatch, .{
-        .io = process.io,
+        .io = init.io,
         .dispatch_model = .ASYNC, // wajib: .ASYNC, .EPOLL, atau .URING
         // workers = 0 -> cpu_count worker untuk .EPOLL / .URING, diabaikan oleh .ASYNC
     });
@@ -889,7 +911,7 @@ pub fn main(process: std.process.Init) !void {
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .dispatch_model = .ASYNC,
 });
 ```
@@ -902,7 +924,7 @@ Setiap worker memiliki `SO_REUSEPORT` listener dan satu `epoll` instance tersend
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .dispatch_model = .EPOLL,
     .workers        = 0, // 0 = cpu_count worker (default)
 });
@@ -916,7 +938,7 @@ Topologi thread-per-core, shared-nothing yang sama dengan `.EPOLL` (satu `SO_REU
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/", .handler = homeHandler },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .dispatch_model = .URING,
     .workers        = 0, // 0 = cpu_count worker (default)
 });
@@ -958,7 +980,7 @@ Dua lapisan timeout independen, keduanya dinonaktifkan secara default (`0`):
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/slow", .handler = slowHandler },
 }).dispatch, .{
-    .io                 = process.io,
+    .io                 = init.io,
     .ip                 = "127.0.0.1",
     .port               = 9000,
     .dispatch_model     = .ASYNC,
@@ -1043,7 +1065,7 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     // pengecekan origin -> basic auth -> handler
     .{ .path = "/private", .handler = withOriginCheck(withBasicAuth(privateHandler)) },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .ip             = "127.0.0.1",
     .port           = 9008,
     .dispatch_model = .ASYNC,
@@ -1090,11 +1112,11 @@ fn onFrame(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
     zix.Http1.WebSocket.sendFD(fd, @enumFromInt(opcode), payload) catch return;
 }
 
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/ws", .handler = wsHandler },
     }).dispatch, .{
-        .io             = process.io,
+        .io             = init.io,
         .ip             = "127.0.0.1",
         .port           = 9028,
         .dispatch_model = .ASYNC,
@@ -1120,7 +1142,7 @@ var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/api",       .handler = apiHandler,  .kind = .PREFIX },
     .{ .path = "/ws/:room-id", .handler = wsHandler, .kind = .PARAM },
 }).dispatch, .{
-    .io         = process.io,
+    .io         = init.io,
     .ip         = "127.0.0.1",
     .port       = 9008,
     .public_dir = "./public", // file statis untuk rute yang tidak cocok
@@ -1168,7 +1190,7 @@ pub fn eventsHandler(req: *zix.Http1.Request, res: *zix.Http1.Response, ctx: *zi
 var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
     .{ .path = "/events", .handler = eventsHandler },
 }).dispatch, .{
-    .io             = process.io,
+    .io             = init.io,
     .dispatch_model = .ASYNC, // diutamakan untuk SSE: koneksi long-lived tidak menahan pool thread
 });
 ```
@@ -1186,7 +1208,7 @@ curl -N http://localhost:9010/events
 
 ### File Statis & Unggah
 
-Atur `public_dir` di config server `zix.Http1` untuk mengaktifkan static file serving. `server.run()` mengembalikan `error.ZixPublicDirNotFound` jika direktori tidak ada. Gunakan helper `createInitDirs` untuk membuat semua direktori yang diperlukan sebelum `Server.init`:
+Atur `public_dir` di config server `zix.Http1` untuk mengaktifkan static file serving. `server.run()` mengembalikan `error.ZixHttp1_Server_PublicDirNotFound` jika direktori tidak ada (`PublicDirNotADirectory` dan `PublicDirUnreadable` untuk dua kasus lainnya). Gunakan helper `createInitDirs` untuk membuat semua direktori yang diperlukan sebelum `Server.init`:
 
 ```zig
 fn createInitDirs(io: std.Io) void {
@@ -1194,13 +1216,13 @@ fn createInitDirs(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, "./public/u") catch {};
 }
 
-pub fn main(process: std.process.Init) !void {
-    createInitDirs(process.io); // idempoten, aman dipanggil setiap start
+pub fn main(init: std.process.Init) !void {
+    createInitDirs(init.io); // idempoten, aman dipanggil setiap start
 
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/upload", .handler = uploadHandler },
     }).dispatch, .{
-        .io                = process.io,
+        .io                = init.io,
         .ip                = "127.0.0.1",
         .port              = 9005,
         .dispatch_model    = .ASYNC,
@@ -1210,8 +1232,9 @@ pub fn main(process: std.process.Init) !void {
 ```
 
 - Rute yang tidak cocok diteruskan ke static serving dari `public_dir`.
-- Range request (`Range: bytes=...`) -> `206 Partial Content` (RFC 7233).
-- Directory traversal (`..`) ditolak.
+- Range request (`Range: bytes=...`) -> `206 Partial Content` (RFC 7233). Range valid yang melewati akhir file -> `416`. Header yang rusak diabaikan dan file utuh dikirim.
+- Directory traversal (`..`), path absolut, dan direktori ditolak.
+- Berjalan di `.ASYNC`, `.EPOLL`, dan `.URING`.
 
 **Unggah**: parse body multipart di dalam handler, opsional ganti nama sebelum menyimpan:
 
@@ -1242,7 +1265,7 @@ curl -X POST "http://localhost:9005/upload" \
 
 **Contoh:**
 - [examples/http1_static_cached.zig](examples/http1_static_cached.zig) - fallback yang sama dengan `public_dir_cache_ttl_ms` diatur, memperlihatkan jalur cache dan pengambilan sibling `.br` / `.gz`
-- [examples/tls/http3_static.zig](examples/tls/http3_static.zig) - penyajian static di atas HTTP/3, di mana cache-lah yang membuatnya mungkin sama sekali
+- [examples/tls/http3_static.zig](examples/tls/http3_static.zig) - penyajian static di atas HTTP/3, di mana cache-lah yang membuatnya mungkin sama sekali (TBD: belum di-port ke zix 0.6.x)
 - [examples/http1_static.zig](examples/http1_static.zig) - static serving dan range request
 - [examples/http1_upload.zig](examples/http1_upload.zig) - unggah raw dan multipart
 
@@ -1450,6 +1473,8 @@ Lihat `docs/zix-config-id.md` untuk referensi field.
 
 ### HTTP/2
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 `zix.Http2` adalah server HTTP/2 yang berdiri sendiri: h2c (cleartext) secara default, atau h2 over TLS saat sebuah `Tls.Context` dipasang (ALPN menegosiasikan h2, yang diwajibkan browser untuk HTTP/2). Ia juga merupakan transport h2c yang dijalankan oleh `zix.Grpc`.
 
 **Kapan digunakan:** jangkau `zix.Http2` secara langsung saat kamu butuh framing HTTP/2 mentah (h2c atau h2-over-TLS) tanpa semantik gRPC, misalnya endpoint h2 untuk browser atau client h2. Untuk trafik web biasa `zix.Http1` memimpin benchmark, dan untuk RPC pakai `zix.Grpc` (yang berjalan di atas engine ini).
@@ -1579,6 +1604,8 @@ Lihat [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) untuk dokumentasi lengkap ter
 
 ### TLS (https / h2)
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu tiap koneksi memakainya ulang. Untuk Http2 dan gRPC, model `.EPOLL` / `.URING` menterminasi TLS di dispatch worker dan memultipleks banyak koneksi per core, jadi https tidak men-spawn thread per koneksi.
 
 ```zig
@@ -1615,6 +1642,8 @@ Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutama
 <br>
 
 ### Raw TCP
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 `zix.Tcp` adalah server dan client TCP stream mentah. Handler dibakukan ke dalam tipe server pada `init` dan `io` adalah field config, sehingga `run()` tidak menerima argumen (). Handler per-connection memiliki stream dan berjalan di bawah `.ASYNC` / `.EPOLL`. Untuk ring `.URING` yang completion-based ada jalur callback per-frame terpisah, `initFramed`. Format frame default: length prefix big-endian 4 byte.
 
@@ -1703,6 +1732,8 @@ var client = try zix.Tcp.Client.connectArgs(.{ .ip = "127.0.0.1", .port = 9300 }
 <br>
 
 ### FIX 4.x
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 `zix.Fix` adalah server dan client lapisan sesi FIX 4.x. Framing SOH-delimited (0x01). Penanganan sesi (Logon/Logout/Heartbeat) sudah built-in. Pesan aplikasi didispatch ke router comptime atau di-echo ketika tidak ada rute yang terdaftar.
 
@@ -1809,6 +1840,8 @@ try client.logout(io);
 
 ### UDS (Unix Domain Sockets)
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 IPC dalam host yang sama melalui Unix stream socket. Server menerima koneksi dan mendispatch masing-masing sebagai tugas concurrent. Kedua sisi menggunakan format frame dengan length prefix 4 byte.
 
 ```zig
@@ -1868,6 +1901,8 @@ try server.run();
 
 ### Channel
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 Pengiriman pesan dalam proses yang aman untuk fiber dan bertipe. Antrian ring buffer yang menghubungkan tugas producer dan consumer (OS thread atau fiber `io.concurrent`) dalam proses yang sama.
 
 ```zig
@@ -1913,6 +1948,8 @@ Untuk detail desain lihat [`docs/hld-channel-id.md`](docs/hld-channel-id.md).
 <br>
 
 ### UDP
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 Dua mode. Typed `zix.Udp.Server(Packet)` adalah server messaging yang aman tipe: pengguna mendefinisikan `extern struct` paket mereka sendiri, dan zix menangani endianness, validasi ukuran, dan konkurensi. Raw `zix.Udp.Raw(handler)` melayani datagram variable-length tanpa struct tetap, dengan batching `recvmmsg` / `sendmmsg` dan worker SO_REUSEPORT per-core.
 
@@ -2013,6 +2050,8 @@ pub fn main(process: std.process.Init) !void {
 
 ### HTTP/3
 
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
+
 HTTP/3 berjalan di atas QUIC, yang berjalan di atas UDP, jadi `zix.Http3` berada pada substrat datagram `zix.Udp` yang sama di atas, bukan pada stack TCP / TLS. Ini adalah server HTTP/3 pure-Zig di atas QUIC (RFC 9114 / 9000 / 9001 / 9002). Transport QUIC, packet protection, glue handshake TLS 1.3, dan kompresi header QPACK semuanya ditulis dari RFC dan dibuktikan byte-exact terhadap worked example RFC. TLS 1.3 dilipat ke dalam handshake QUIC (tidak ada mode cleartext dan tidak ada TLS record layer), dikonfigurasi oleh `zix.Tls.Context` yang sama seperti engine TCP, jadi cert ECDSA P-256, Ed25519, atau RSA semuanya bekerja.
 
 Route adalah table comptime (`zix.Http3.Router`), berbentuk sama seperti `zix.Http1` / `zix.Http2`, di-dispatch pada path request terdekode.
@@ -2072,6 +2111,8 @@ Lihat [`docs/hld-http3-id.md`](docs/hld-http3-id.md) dan [`docs/lld-http3-id.md`
 <br>
 
 ### WebRTC
+
+> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
 `zix.Webrtc` adalah peer WebRTC, yang memungkinkan browser menjangkau server lewat sesuatu selain HTTP atau WebSocket: pengiriman tidak reliabel, pilihan urutan per channel, serta audio dan video. Semuanya datang di satu port UDP lalu dipilah dari byte pertamanya (RFC 7983): ICE connectivity check yang dibawa lewat STUN, handshake DTLS 1.2, association SCTP beserta data channel-nya, dan opsional media SRTP. Semuanya ditulis dari RFC, dengan `std.crypto` di bawahnya dan tanpa OpenSSL.
 
@@ -2157,11 +2198,11 @@ fn createLogDir(io: std.Io) void {
     std.Io.Dir.cwd().createDirPath(io, "./logs") catch {};
 }
 
-pub fn main(process: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    createLogDir(process.io);
+    createLogDir(init.io);
 
     var logger = try zix.Logger.init(arena.allocator(), .{
         .save_path      = "./logs",
@@ -2179,7 +2220,7 @@ pub fn main(process: std.process.Init) !void {
     var server = zix.Http1.Server.init(zix.Http1.Router(&[_]zix.Http1.Route{
         .{ .path = "/", .handler = homeHandler },
     }).dispatch, .{
-        .io             = process.io,
+        .io             = init.io,
         .ip             = "127.0.0.1",
         .port           = 9000,
         .dispatch_model = .ASYNC,
