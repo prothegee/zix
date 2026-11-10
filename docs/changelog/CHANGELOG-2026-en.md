@@ -167,8 +167,36 @@ __**Update:**__
     - `http1_logger` is new: `zix.Logger` attached to the server with console and file output.
     - `http1_xtra_headers`, `http1_middleware`, `http1_query`, and `http1_timeout_resp`
       are ported.
+    - `http1_manual_concurrent`, `http1_sse`, `http1_cache`, and `http1_compression`
+      are ported.
+    - `http1_manual_concurrent` caps the io with `async_limit`, not `concurrent_limit`.
+      `.ASYNC` dispatches through `io.async()`, and `concurrent_limit` only caps
+      `io.concurrent()`, so the old limit had no effect.
+    - `http1_sse` embeds its HTML page, so it runs from any directory.
+    - `http1_cache` uses `res.sendFromCache` and `res.sendCached`.
+    - `http1_compression` uses `res.sendNegotiated` and `zix.utils.compression.encode`.
     - `http1_paths` routes through `zix.Http1.Router` (`.PARAM` and `.PREFIX`) instead of
       a manual dispatch. `/path/user/` (empty id) now falls to the prefix route (200).
+    - `http1_static_cached` and `http1_static` are ported. Upload stays in
+      `http1_upload`, so `http1_static` has no upload route.
+
+- `zix.Http1` static serving is ported (`public_dir`), under `.ASYNC`, `.EPOLL`,
+  and `.URING`:
+    - An unmatched path is served from `public_dir` before the 404, with MIME
+      from the extension.
+    - The static cache (`public_dir_cache_ttl_ms`, `public_dir_cache_max_entries`)
+      keeps files open, prerenders the 200 header, and picks `.br` and `.gz`
+      siblings. It is split under `utils/static/`.
+    - On Linux the body goes out through `sendfile`. Other targets copy.
+    - Range parsing lives in `utils/http/range_header.zig`, with `Range` and
+      `RangeSpec`.
+    - A valid Range past the end of the file now answers `416` (was a `200` with
+      the whole file). A malformed Range is still ignored.
+    - `Server.run` checks `public_dir` and returns
+      `ZixHttp1_Server_PublicDirNotFound`, `ZixHttp1_Server_PublicDirNotADirectory`,
+      or `ZixHttp1_Server_PublicDirUnreadable` (was `ZixPublicDirNotFound`,
+      `ZixPublicDirNotADirectory`, `ZixPublicDirUnreadable`).
+    - `zix.Http1.setStatic` is exported again.
 
 - `zix.Http1.isExpired()` is exported. It reads the deadline armed from
   `handler_timeout_ms`, and the same deadline now fills `ctx.deadline`.
