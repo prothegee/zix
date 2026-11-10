@@ -39,6 +39,8 @@ handler_timeout_ms: u32 = 0,
 large_body_recv_buf: usize = 0,
 max_recv_buf: usize = BUF_SIZE,
 max_request_body: usize = 2 * 1024 * 1024,
+/// WebSocket frame buffer, set when a connection upgrades.
+ws_recv_buf: usize = WS_RECV_BUF_DEFAULT,
 
 // --------------------------------------------------------- //
 // Public:
@@ -46,6 +48,10 @@ max_request_body: usize = 2 * 1024 * 1024,
 /// Default shared per-connection scratch size: the blocking-loop receive
 /// buffer, the chunked-body reader, and the TLS payload buffers all use it.
 pub const BUF_SIZE: usize = 1 * 1024;
+
+/// Default WebSocket frame buffer: room for a long chat message, independent
+/// of max_recv_buf.
+pub const WS_RECV_BUF_DEFAULT: usize = 16 * 1024;
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -59,6 +65,7 @@ test "zix http1: ServeOpts, applies defaults" {
     try std.testing.expectEqual(@as(u32, 0), opts.handler_timeout_ms);
     try std.testing.expectEqual(@as(usize, 0), opts.large_body_recv_buf);
     try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), opts.max_request_body);
+    try std.testing.expectEqual(WS_RECV_BUF_DEFAULT, opts.ws_recv_buf);
 }
 
 test "zix http1: ServeOpts, accepts an explicit buffer size" {
