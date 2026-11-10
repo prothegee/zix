@@ -13,7 +13,7 @@
 //!
 //! ### note:
 //!
-//! Cleartext HTTP/1.1 only. TLS, WebSocket, and SSE are not part of this
+//! Cleartext HTTP/1.1 and WebSocket. TLS and SSE are not part of this
 //! model yet. A connection is served on one worker from
 //! accept to close. A response larger than the staging cap falls back to the
 //! blocking writer.
@@ -50,6 +50,10 @@ const reader = @import("../reader.zig");
 const static = @import("../static.zig");
 const RespSink = @import("../RespSink.zig");
 const writer = @import("../writer.zig");
+const ws_pending = @import("../websocket/pending.zig");
+const ws_pump = @import("../websocket/pump.zig");
+const WsFrameFn = @import("../websocket/frame_fn.zig").WsFrameFn;
+const WS_RECV_BUF_DEFAULT = @import("../ServeOpts.zig").WS_RECV_BUF_DEFAULT;
 const ResponseCache = @import("../../../utils/cache/ResponseCache.zig");
 
 // --------------------------------------------------------- //
@@ -97,6 +101,9 @@ const Conn = struct {
     write_pending_len: usize = 0,
     write_pending_off: usize = 0,
     write_pending_close: bool = false,
+    /// Set once a handler promoted the connection to WebSocket. From then on
+    /// buf holds frame bytes, not requests.
+    ws: ?WsFrameFn = null,
 };
 
 /// What every connection needs from the worker, without the listener state.
@@ -111,6 +118,10 @@ const Session = struct {
     /// SO_RCVBUF set when a body larger than the receive buffer is drained. 0 keeps
     /// the kernel default.
     large_body_recv_buf: usize = 0,
+    /// Connection buffer size after a WebSocket upgrade, from config.ws_recv_buf.
+    ws_recv_buf: usize = WS_RECV_BUF_DEFAULT,
+    /// Per-worker unmask scratch, ws_recv_buf bytes. Sets the largest frame.
+    ws_payload_buf: []u8 = &.{},
 };
 
 /// One worker's setup, passed by value to the spawned thread.
@@ -181,6 +192,23 @@ fn connAlloc(allocator: std.mem.Allocator, fd: std.posix.fd_t, buf_size: usize) 
     conn.* = .{ .fd = fd, .buf = buf };
 
     return conn;
+}
+
+/// Resize buf for a connection that just upgraded to WebSocket, keeping the
+/// frame bytes already received.
+///
+/// Return:
+/// - true when buf has the new size
+/// - false when the received bytes do not fit or the allocation failed
+fn resizeForWs(allocator: std.mem.Allocator, conn: *Conn, size: usize) bool {
+    if (conn.buf.len == size) return true;
+    if (conn.filled > size) return false;
+
+    conn.buf = allocator.realloc(conn.buf, size) catch |err| switch (err) {
+        error.OutOfMemory => return false,
+    };
+
+    return true;
 }
 
 fn connFree(allocator: std.mem.Allocator, conn: *Conn) void {
@@ -601,6 +629,12 @@ fn serveInner(
         consumed += request_len;
         conn.continue_sent = false;
 
+        // WebSocket.serve was called: the bytes after this request are frames.
+        if (ws_pending.take()) |pending| {
+            conn.ws = pending.on_frame;
+            break;
+        }
+
         if (!head.keep_alive) {
             keep_alive = false;
             break;
@@ -616,6 +650,11 @@ fn serveInner(
             conn.buf[consumed..conn.filled],
         );
         conn.filled -= consumed;
+    }
+
+    // Just upgraded: switch buf from the HTTP size to the WebSocket size.
+    if (conn.ws != null and !resizeForWs(session.allocator, conn, session.ws_recv_buf)) {
+        return .close;
     }
 
     return if (keep_alive) .keep_alive else .close;
@@ -646,13 +685,82 @@ fn serveReadable(
     const outcome = serveInner(conn, body_buf, session, arena, do_read);
     if (sink.failed) return .close;
 
-    return flushStaged(
+    const flushed = flushStaged(
         conn,
         sink.buf[sink.off..sink.len],
         outcome,
         epfd,
         session.allocator,
     );
+    if (flushed == .close) return .close;
+
+    const on_frame = conn.ws orelse return flushed;
+    if (conn.write_pending_len > conn.write_pending_off) return flushed;
+
+    // Just upgraded and the 101 is on the wire. Frames sent with the handshake
+    // are already in buf, so pump them now. Frames are not responses, so they
+    // must not land in the response sink.
+    writer.tl_resp_sink = null;
+
+    return serveWs(conn, on_frame, session.ws_payload_buf, out_buf);
+}
+
+/// One readable event on a WebSocket connection. Pumps what buf holds, then
+/// reads to EAGAIN, pumping after each read so a partial frame never blocks
+/// the next one.
+///
+/// Return:
+/// - .keep_alive when more frames may arrive
+/// - .close on hangup, a close frame, a failed write, or a frame that cannot
+///   fit in buf
+fn serveWs(
+    conn: *Conn,
+    on_frame: WsFrameFn,
+    payload_buf: []u8,
+    out_buf: []u8,
+) ConnOutcome {
+    while (true) {
+        if (conn.filled > 0) {
+            const result = ws_pump.pump(
+                conn.fd,
+                conn.buf[0..conn.filled],
+                payload_buf,
+                out_buf,
+                on_frame,
+            );
+            if (result.close) return .close;
+
+            if (result.consumed > 0) {
+                const rest = conn.filled - result.consumed;
+
+                std.mem.copyForwards(
+                    u8,
+                    conn.buf[0..rest],
+                    conn.buf[result.consumed..conn.filled],
+                );
+                conn.filled = rest;
+            }
+
+            if (conn.filled >= conn.buf.len) return .close;
+        }
+
+        const rc = std.posix.system.read(
+            conn.fd,
+            conn.buf[conn.filled..].ptr,
+            conn.buf.len - conn.filled,
+        );
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const received: usize = @intCast(rc);
+                if (received == 0) return .close;
+
+                conn.filled += received;
+            },
+            .AGAIN => return .keep_alive,
+            .INTR => continue,
+            else => return .close,
+        }
+    }
 }
 
 fn acceptAll(
@@ -718,6 +826,7 @@ fn workerMain(ctx: WorkerCtx) void {
     defer cache.uninstallWorker(&resp_cache);
 
     const recv_size = worker.config.recvBufSize();
+    const ws_size = worker.config.wsRecvBufSize();
     const listener_fd = worker.listener.socket.handle;
     if (!setNonBlock(listener_fd)) {
         failSetup(&worker);
@@ -763,6 +872,14 @@ fn workerMain(ctx: WorkerCtx) void {
     };
     defer worker.allocator.free(out_buf);
 
+    const ws_payload_buf = worker.allocator.alloc(u8, ws_size) catch |err| switch (err) {
+        error.OutOfMemory => {
+            failSetup(&worker);
+            return;
+        },
+    };
+    defer worker.allocator.free(ws_payload_buf);
+
     var arena = std.heap.ArenaAllocator.init(worker.allocator);
     defer arena.deinit();
 
@@ -773,6 +890,8 @@ fn workerMain(ctx: WorkerCtx) void {
         .handler_timeout_ms = worker.config.handler_timeout_ms,
         .max_request_body = worker.config.max_request_body,
         .large_body_recv_buf = worker.config.large_body_recv_buf,
+        .ws_recv_buf = ws_size,
+        .ws_payload_buf = ws_payload_buf,
     };
 
     var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
@@ -814,6 +933,8 @@ fn workerMain(ctx: WorkerCtx) void {
                     epfd,
                     &arena,
                 )
+            else if (conn.ws) |on_frame|
+                serveWs(conn, on_frame, session.ws_payload_buf, out_buf)
             else
                 serveReadable(
                     conn,
@@ -1117,6 +1238,41 @@ fn testCacheConfig() Config {
         .cache_max_entries = 8,
         .cache_max_value_bytes = 1024,
     };
+}
+
+const websocket = @import("../websocket.zig");
+
+const WS_UPGRADE_REQUEST =
+    "GET /ws HTTP/1.1\r\n" ++
+    "Upgrade: websocket\r\n" ++
+    "Connection: Upgrade\r\n" ++
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+
+const WS_UPGRADE_RESPONSE =
+    "HTTP/1.1 101 Switching Protocols\r\n" ++
+    "Upgrade: websocket\r\n" ++
+    "Connection: Upgrade\r\n" ++
+    "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+
+/// Masked "Hello" text frame from RFC 6455 section 5.7.
+const WS_MASKED_HELLO = [_]u8{
+    0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d,
+    0x7f, 0x9f, 0x4d, 0x51, 0x58,
+};
+
+/// Masked close frame with no payload.
+const WS_MASKED_CLOSE = [_]u8{ 0x88, 0x80, 1, 2, 3, 4 };
+
+fn testWsEcho(fd: std.posix.fd_t, opcode: u8, payload: []const u8) void {
+    websocket.sendFD(fd, @enumFromInt(opcode), payload) catch |err| switch (err) {
+        error.ZixHttp1_WebSocketSend_BrokenPipe,
+        error.ZixHttp1_WebSocketSend_HeadBuild,
+        => {},
+    };
+}
+
+fn wsHandler(req: *Request, _: *Response, _: *Context) anyerror!void {
+    try websocket.serve(req.fd, req.header("sec-websocket-key").?, testWsEcho);
 }
 
 test "zix http1: epoll, answers one request" {
@@ -1827,5 +1983,252 @@ test "zix http1: epoll, serves gzip through sendNegotiated" {
     const response = testReadAvailable(fds[0], &out);
 
     try expectGzipResponse(response);
+}
+
+test "zix http1: epoll, upgrade pumps a frame sent with the handshake" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    try testWriteAll(fds[0], &(WS_UPGRADE_REQUEST.* ++ WS_MASKED_HELLO));
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ws_payload_buf: [64]u8 = undefined;
+    var session = testSession(std.testing.allocator, 0);
+    session.handler = wsHandler;
+    session.ws_payload_buf = &ws_payload_buf;
+
+    const outcome = serveReadable(
+        conn,
+        &body_buf,
+        &out_buf,
+        &session,
+        -1,
+        &arena,
+        true,
+    );
+
+    var out: [512]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, outcome);
+    try std.testing.expect(conn.ws != null);
+    try std.testing.expectEqualStrings(
+        &(WS_UPGRADE_RESPONSE.* ++ [_]u8{ 0x81, 5 } ++ "Hello".*),
+        response,
+    );
+}
+
+test "zix http1: epoll, serveWs echoes pipelined frames in one call" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    try testWriteAll(fds[0], &(WS_MASKED_HELLO ++ WS_MASKED_HELLO));
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var payload_buf: [64]u8 = undefined;
+    var out_buf: [64]u8 = undefined;
+    const outcome = serveWs(conn, testWsEcho, &payload_buf, &out_buf);
+
+    var out: [64]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+    const echo = [_]u8{ 0x81, 5 } ++ "Hello".*;
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqualStrings(&(echo ++ echo), response);
+    try std.testing.expectEqual(@as(usize, 0), conn.filled);
+}
+
+test "zix http1: epoll, serveWs keeps a partial frame for the next event" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    try testWriteAll(fds[0], WS_MASKED_HELLO[0..4]);
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var payload_buf: [64]u8 = undefined;
+    var out_buf: [64]u8 = undefined;
+    const first = serveWs(conn, testWsEcho, &payload_buf, &out_buf);
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, first);
+    try std.testing.expectEqual(@as(usize, 4), conn.filled);
+
+    try testWriteAll(fds[0], WS_MASKED_HELLO[4..]);
+    const second = serveWs(conn, testWsEcho, &payload_buf, &out_buf);
+
+    var out: [64]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, second);
+    try std.testing.expectEqualStrings(&([_]u8{ 0x81, 5 } ++ "Hello".*), response);
+}
+
+test "zix http1: epoll, serveWs closes on a close frame" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    try testWriteAll(fds[0], &WS_MASKED_CLOSE);
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var payload_buf: [64]u8 = undefined;
+    var out_buf: [64]u8 = undefined;
+    const outcome = serveWs(conn, testWsEcho, &payload_buf, &out_buf);
+
+    var out: [16]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqual(ConnOutcome.close, outcome);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x88, 0 }, response);
+}
+
+test "zix http1: epoll, serveWs answers 1009 to a frame too large" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    try testWriteAll(fds[0], &WS_MASKED_HELLO);
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var payload_buf: [2]u8 = undefined;
+    var out_buf: [64]u8 = undefined;
+    const outcome = serveWs(conn, testWsEcho, &payload_buf, &out_buf);
+
+    var out: [16]u8 = undefined;
+    const response = testReadAvailable(fds[0], &out);
+
+    try std.testing.expectEqual(ConnOutcome.close, outcome);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x88, 2, 0x03, 0xF1 }, response);
+}
+
+test "zix http1: epoll, serveWs closes when the peer hangs up" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    _ = std.posix.system.close(fds[0]);
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var payload_buf: [64]u8 = undefined;
+    var out_buf: [64]u8 = undefined;
+
+    try std.testing.expectEqual(
+        ConnOutcome.close,
+        serveWs(conn, testWsEcho, &payload_buf, &out_buf),
+    );
+}
+
+test "zix http1: epoll, upgrade resizes buf to ws_recv_buf" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    try testWriteAll(fds[0], WS_UPGRADE_REQUEST);
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ws_payload_buf: [64]u8 = undefined;
+    var session = testSession(std.testing.allocator, 0);
+    session.handler = wsHandler;
+    session.ws_recv_buf = 64;
+    session.ws_payload_buf = &ws_payload_buf;
+
+    const outcome = serveReadable(
+        conn,
+        &body_buf,
+        &out_buf,
+        &session,
+        -1,
+        &arena,
+        true,
+    );
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, outcome);
+    try std.testing.expectEqual(@as(usize, 64), conn.buf.len);
+}
+
+test "zix http1: epoll, upgrade closes when buffered frames pass ws_recv_buf" {
+    const fds = try testPair();
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    try std.testing.expect(setNonBlock(fds[1]));
+    try testWriteAll(fds[0], &(WS_UPGRADE_REQUEST.* ++ WS_MASKED_HELLO));
+
+    const conn = connAlloc(std.testing.allocator, fds[1], TEST_CONN_BUF).?;
+    defer connFree(std.testing.allocator, conn);
+
+    var body_buf: [1024]u8 = undefined;
+    var out_buf: [1024]u8 = undefined;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ws_payload_buf: [4]u8 = undefined;
+    var session = testSession(std.testing.allocator, 0);
+    session.handler = wsHandler;
+    session.ws_recv_buf = 4;
+    session.ws_payload_buf = &ws_payload_buf;
+
+    const outcome = serveReadable(
+        conn,
+        &body_buf,
+        &out_buf,
+        &session,
+        -1,
+        &arena,
+        true,
+    );
+
+    try std.testing.expectEqual(ConnOutcome.close, outcome);
+}
+
+test "zix http1: epoll, resizeForWs keeps the received bytes" {
+    const conn = connAlloc(std.testing.allocator, -1, 32).?;
+    defer connFree(std.testing.allocator, conn);
+
+    @memcpy(conn.buf[0..3], "abc");
+    conn.filled = 3;
+
+    try std.testing.expect(resizeForWs(std.testing.allocator, conn, 8));
+    try std.testing.expectEqual(@as(usize, 8), conn.buf.len);
+    try std.testing.expectEqualStrings("abc", conn.buf[0..3]);
+}
+
+test "zix http1: epoll, resizeForWs refuses bytes past the new size" {
+    const conn = connAlloc(std.testing.allocator, -1, 32).?;
+    defer connFree(std.testing.allocator, conn);
+
+    conn.filled = 9;
+
+    try std.testing.expect(!resizeForWs(std.testing.allocator, conn, 8));
+    try std.testing.expectEqual(@as(usize, 32), conn.buf.len);
 }
 
