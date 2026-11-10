@@ -81,6 +81,36 @@ const EXAMPLES = .{
         "http1",
     },
     .{
+        "zix-example-http1_manual_concurrent",
+        "examples/http1_manual_concurrent.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_sse",
+        "examples/http1_sse.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_cache",
+        "examples/http1_cache.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_compression",
+        "examples/http1_compression.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_static_cached",
+        "examples/http1_static_cached.zig",
+        "http1",
+    },
+    .{
+        "zix-example-http1_static",
+        "examples/http1_static.zig",
+        "http1",
+    },
+    .{
         "zix-example-http1_upload",
         "examples/http1_upload.zig",
         "http1",
