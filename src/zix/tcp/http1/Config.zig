@@ -34,6 +34,7 @@ const DispatchModel = @import("../../shared/dispatch.zig").Model;
 const Logger = @import("../../logger/Logger.zig");
 const HeaderSize = @import("header.zig").Size;
 const BUF_SIZE = @import("ServeOpts.zig").BUF_SIZE;
+const WS_RECV_BUF_DEFAULT = @import("ServeOpts.zig").WS_RECV_BUF_DEFAULT;
 
 // --------------------------------------------------------- //
 // Fields:
@@ -66,6 +67,10 @@ max_request_body: usize = 2 * 1024 * 1024,
 /// SO_RCVBUF in bytes, set only when a body larger than max_recv_buf is
 /// drained. 0 keeps the kernel default and its autotuning.
 large_body_recv_buf: usize = 0,
+/// Per-connection buffer in bytes for WebSocket frames. A connection switches
+/// to this size when it upgrades, so it is also the largest accepted frame.
+/// Independent of max_recv_buf. 0 falls back to 16 KiB.
+ws_recv_buf: usize = WS_RECV_BUF_DEFAULT,
 /// Add the Date header to every response.
 send_date_header: bool = true,
 /// Cap on custom headers a handler may add per response (Response.addHeader).
@@ -104,6 +109,14 @@ const Self = @This();
 /// - usize (max_recv_buf, or BUF_SIZE when max_recv_buf is 0)
 pub fn recvBufSize(self: Self) usize {
     return if (self.max_recv_buf == 0) BUF_SIZE else self.max_recv_buf;
+}
+
+/// The buffer size a WebSocket connection uses after the upgrade.
+///
+/// Return:
+/// - usize (ws_recv_buf, or WS_RECV_BUF_DEFAULT when ws_recv_buf is 0)
+pub fn wsRecvBufSize(self: Self) usize {
+    return if (self.ws_recv_buf == 0) WS_RECV_BUF_DEFAULT else self.ws_recv_buf;
 }
 
 // --------------------------------------------------------- //
@@ -151,6 +164,7 @@ test "zix http1: Config, request knobs use their defaults" {
     try std.testing.expectEqual(@as(u32, 0), config.handler_timeout_ms);
     try std.testing.expectEqual(@as(usize, 4 * 1024), config.max_recv_buf);
     try std.testing.expectEqual(@as(usize, 0), config.large_body_recv_buf);
+    try std.testing.expectEqual(@as(usize, 16 * 1024), config.ws_recv_buf);
     try std.testing.expect(config.send_date_header);
     try std.testing.expectEqual(HeaderSize.MINIMAL, config.max_response_headers);
 }
@@ -206,5 +220,26 @@ test "zix http1: Config, recvBufSize falls back on zero" {
     config.max_recv_buf = 0;
 
     try std.testing.expectEqual(BUF_SIZE, config.recvBufSize());
+}
+
+test "zix http1: Config, wsRecvBufSize returns ws_recv_buf" {
+    var config = testConfig();
+    config.ws_recv_buf = 64 * 1024;
+
+    try std.testing.expectEqual(@as(usize, 64 * 1024), config.wsRecvBufSize());
+}
+
+test "zix http1: Config, wsRecvBufSize falls back on zero" {
+    var config = testConfig();
+    config.ws_recv_buf = 0;
+
+    try std.testing.expectEqual(WS_RECV_BUF_DEFAULT, config.wsRecvBufSize());
+}
+
+test "zix http1: Config, wsRecvBufSize ignores a larger max_recv_buf" {
+    var config = testConfig();
+    config.max_recv_buf = 4 * 1024 * 1024;
+
+    try std.testing.expectEqual(WS_RECV_BUF_DEFAULT, config.wsRecvBufSize());
 }
 
