@@ -179,6 +179,8 @@ __**Update:**__
       a manual dispatch. `/path/user/` (empty id) now falls to the prefix route (200).
     - `http1_static_cached` and `http1_static` are ported. Upload stays in
       `http1_upload`, so `http1_static` has no upload route.
+    - `http1_websocket` is ported: `/ws` echo and `/ws/:room-id` rooms. It sets
+      `ws_recv_buf` instead of raising `max_recv_buf`.
 
 - `zix.Http1` static serving is ported (`public_dir`), under `.ASYNC`, `.EPOLL`,
   and `.URING`:
@@ -197,6 +199,26 @@ __**Update:**__
       or `ZixHttp1_Server_PublicDirUnreadable` (was `ZixPublicDirNotFound`,
       `ZixPublicDirNotADirectory`, `ZixPublicDirUnreadable`).
     - `zix.Http1.setStatic` is exported again.
+
+- `zix.Http1.WebSocket` is ported, under `.ASYNC`, `.EPOLL`, and `.URING`:
+    - `serve`, `sendFD`, `broadcast`, `Opcode`, and `WsFrameFn` keep their names.
+      The codec, upgrade, send, pending handoff, and pumps are split under
+      `tcp/http1/websocket/`.
+    - Breaking: `serve` returns `ZixHttp1_WebSocket_KeyTooLong`,
+      `ZixHttp1_WebSocket_NoSpaceLeft`, `ZixHttp1_WebSocket_BrokenPipe`, or
+      `ZixHttp1_WebSocket_HeadBuild`, and `sendFD` returns
+      `ZixHttp1_WebSocketSend_BrokenPipe` or `ZixHttp1_WebSocketSend_HeadBuild`
+      (was `error.ZixKeyTooLong` and `error.BrokenPipe`).
+    - `.URING` reads WebSocket frames through a per-worker provided-buffer ring,
+      so an idle WebSocket holds no recv buffer. A kernel without buffer rings
+      falls back to plain recv.
+    - Breaking: `ws_recv_buf` is independent of `max_recv_buf` and defaults to
+      16 KiB (was 0, falling back to `max_recv_buf`, and `.EPOLL` and `.URING`
+      sized every connection with the larger of the two). A connection switches
+      its buffer to `ws_recv_buf` when it upgrades, on all three models, and
+      `ws_recv_buf` is also the largest accepted frame. Raising `max_recv_buf`
+      for uploads no longer grows WebSocket connections.
+    - `WebSocket.serveTls` is not ported yet. TLS is a separate step.
 
 - `zix.Http1.isExpired()` is exported. It reads the deadline armed from
   `handler_timeout_ms`, and the same deadline now fills `ctx.deadline`.
@@ -259,6 +281,13 @@ __**Fix:**__
 - The brotli decoder could panic on a malformed stream with a distance past 32
   bits or a dictionary word past the meta-block length. Both are now rejected as
   `ZixUtils_Brotli_Malformed`.
+
+- A WebSocket frame larger than the frame buffer was cut, and the rest of its
+  payload was read as new frames. It now answers close `1009` and the
+  connection ends.
+
+- `WebSocket.sendFD` to another connection, called from a frame callback, was
+  staged into the connection being pumped. It now goes to the target fd.
 
 - `jzon.lastFailure()` could show the field of an earlier failure after a later parse
   failed without naming a field. Every JSON path now records the new failure:
