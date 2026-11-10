@@ -37,6 +37,7 @@ const compress = @import("compress.zig");
 const head = @import("head.zig");
 const header = @import("header.zig");
 const serve = @import("serve.zig");
+const static = @import("static.zig");
 const Config = @import("Config.zig");
 const ConnArgs = @import("ConnArgs.zig");
 const ConnEntry = @import("ConnEntry.zig");
@@ -103,8 +104,7 @@ pub fn connDeadline(io: std.Io, timeout_ms: u32) std.Io.Clock.Timestamp {
 
 pub fn connEntry(args: ConnArgs) void {
     head.setDateHeader(args.send_date_header);
-    // TODO: install the static-serve root from args.public_dir when the
-    // static module is ported.
+    static.setStatic(args.public_dir, args.io);
     header.setMaxResponseHeaders(args.max_response_headers);
     handler.setAccessLogger(args.logger);
     compress.setCompression(args.compress, args.compression_min_size, args.compression_max_out);
