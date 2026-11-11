@@ -200,32 +200,46 @@ Tag = `(field_number << 3) | wire_type`. Setiap encoder menulis tag, lalu nilain
 
 ---
 
-## frame.zig
+## frame/
 
-### build* / send*
+### prefix.zig
 
-Fungsi `build*` mengenkode frame ke buffer pemanggil dan mengembalikan jumlah byte, `send*` membungkusnya dengan `writeAllFD`.
+`[compress: 1 byte][msg_len: 4 byte, big-endian]`, `PREFIX_LEN` = 5. Byte compress yang bukan nol dibaca sebagai terkompresi. Body yang lebih pendek dari 5 byte adalah `TooShort`.
+
+### build.zig / send.zig
+
+Fungsi `build*` mengenkode frame ke buffer pemanggil dan mengembalikan jumlah byte. Fungsi `send*` membangun frame di buffer stack lalu menulisnya dengan `writeAllFD`.
 
 ```zig
-pub fn buildGrpcHeaders(out, stream_id, content_type) usize     // HEADERS awal, tanpa END_STREAM
-pub fn buildGrpcDataHeader(out, stream_id, msg_len) usize       // header DATA 9-byte + prefix gRPC 5-byte (pemanggil append payload)
-pub fn buildGrpcTrailer(out, stream_id, grpc_status, msg) usize // trailer HEADERS, END_STREAM
-pub fn buildGrpcError(out, stream_id, grpc_status, msg) usize   // HEADERS trailers-only, END_STREAM
+pub fn buildGrpcHeaders(out, stream_id, content_type) Error!usize            // HEADERS awal, tanpa END_STREAM
+pub fn buildGrpcHeadersGzip(out, stream_id, content_type) Error!usize        // sama, plus grpc-encoding: gzip
+pub fn buildGrpcDataHeader(out, stream_id, msg_len, compress) Error!usize    // DATA_HEAD_LEN: header DATA 9-byte + prefix 5-byte (pemanggil append payload)
+pub fn buildGrpcTrailer(out, stream_id, grpc_status, msg) Error!usize        // trailer HEADERS, END_STREAM
+pub fn buildGrpcError(out, stream_id, grpc_status, msg) Error!usize          // HEADERS trailers-only, END_STREAM
 ```
 
-### Blok reply cache
+- `HEADERS_FRAME_SCRATCH` (header frame + `HPACK_ENCODE_SCRATCH`) selalu muat untuk frame HEADERS yang dibangun di sini.
+- Blok yang melewati scratch HPACK, atau `out` yang terlalu kecil, adalah `BufferFull`. `msg_len` yang melewati `MAX_DATA_MSG_LEN` (u24 maksimum dikurangi prefix) adalah `Overflow`.
+- Error `send*` diterjemahkan ke `ZixHttp2_GrpcSend_*` di setiap fungsi publik.
+
+### reply_block.zig
 
 Dua blok header jalur panas yang konstan dienkode HPACK sekali di comptime:
 
 ```zig
 pub const GRPC_CONTENT_TYPE = "application/grpc+proto";
-const HEADERS_PROTO_BLOCK = ...;  // :status 200 + content-type application/grpc+proto
-const TRAILER_OK_BLOCK = ...;     // grpc-status 0
+pub const HEADERS_PROTO_BLOCK: []const u8 = ...;  // :status 200 + content-type application/grpc+proto
+pub const TRAILER_OK_BLOCK: []const u8 = ...;     // grpc-status 0
 ```
 
-`buildGrpcHeaders` memakai `HEADERS_PROTO_BLOCK` saat `content_type == GRPC_CONTENT_TYPE`, dan `buildGrpcTrailer` memakai `TRAILER_OK_BLOCK` saat `grpc_status == 0` dan pesan kosong. Keduanya lewat `emitCachedHeaders`, yang men-stamp header frame 9-byte (dengan stream id dan flags) dan `memcpy` blok cache - tanpa menjalankan encoder HPACK. Content-type atau status lain jatuh kembali ke encoder dinamis.
+`buildGrpcHeaders` memakai `HEADERS_PROTO_BLOCK` saat `content_type == GRPC_CONTENT_TYPE`, dan `buildGrpcTrailer` memakai `TRAILER_OK_BLOCK` saat `grpc_status == 0` dan pesan kosong. Keduanya men-stamp header frame 9-byte dan menyalin blok cache, tanpa menjalankan encoder HPACK. Content-type atau status lain menjalankan encoder.
 
-Blok diproduksi dengan menjalankan `HpackEncoder` asli di comptime, jadi byte-nya identik dengan keluaran dinamis. Ini menuntut `HpackEncoder.writeString` menandai hasil Huffman sebagai `?usize` (kalau tidak, comptime meruntuhkan optional saat cabang error secara statik tak terjangkau).
+Blok berasal dari `HpackEncoder` asli yang dijalankan di comptime, jadi byte-nya identik dengan keluaran dinamis.
+
+### gzip.zig
+
+- `decompressGrpcBody`: menelusuri setiap prefix + pesan. Pesan dengan flag 1 di-gunzip penuh (`streamRemaining`), flag 0 disalin. Setiap prefix keluaran ber-flag 0. Sisa kurang dari 5 byte setelah pesan terakhir diabaikan.
+- `compressGrpcMessage`: gzip pada `level_1`. Window dan state compressor diambil dari `std.heap.smp_allocator`. `out_buf` sebesar `data.len + GZIP_FRAMING_HEADROOM` selalu muat.
 
 ---
 
