@@ -65,7 +65,8 @@ max_streams: u32 = 128,
 max_frame_size: u32 = 16384,
 /// HPACK scratch buffer size per connection, in bytes.
 max_header_scratch: usize = 4096,
-/// Largest request body buffered per stream, in bytes. A larger body is cut.
+/// Largest request body buffered per stream, in bytes (.EPOLL and .URING).
+/// A larger body is rejected with 413, never cut.
 max_body: usize = 16384,
 /// Enable the per-worker response cache.
 response_cache: bool = false,
