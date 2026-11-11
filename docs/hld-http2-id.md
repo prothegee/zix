@@ -94,8 +94,11 @@ graph TD
 
     Http2 --> core["core.zig\nblocking h2c loop\nserveConn + Router"]
     Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
-    Http2 --> frame["frame.zig\nframe codec + control-frame senders\nsendResponseFD / sendResponseEncodedFD"]
-    Http2 --> hpack["hpack.zig\nstatic table + Huffman\ndecoder + encoder + respHeaderBlock"]
+    Http2 --> frame["frame.zig + FrameHeader.zig\nframe constants + header codec"]
+    Http2 --> writer["writer.zig\nwriteAllFD + sendResponseFD / sendResponseEncodedFD"]
+    Http2 --> reader["reader.zig\nrecvExact + readFrameHeader"]
+    Http2 --> control["control.zig\ncontrol-frame senders"]
+    Http2 --> hpack["hpack/\nstatic table + Huffman + integer\ndecoder + encoder + respHeaderBlock"]
     Http2 --> config["config.zig\nHttp2ServerConfig"]
     Http2 --> server["server.zig\nServer + dispatch_model switch"]
     Http2 --> static["static.zig\nfallback public_dir\nHEADERS + frame DATA yang dibatasi"]
@@ -106,12 +109,18 @@ graph TD
 
     dispatch --> core
     dispatch --> mux
-    mux --> frame
+    mux --> writer
+    mux --> control
     mux --> hpack
-    core --> frame
+    core --> reader
+    core --> writer
+    core --> control
     core --> hpack
-    static --> frame
-    static --> hpack
+    static --> writer
+    writer --> frame
+    writer --> hpack
+    reader --> frame
+    control --> writer
     static --> static_cache["utils/static_cache.zig\ncache file terbuka bersama"]
 ```
 
@@ -131,7 +140,7 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (tanpa `.PARAM` pada tahap ini) |
 | `zix.Http2.Router` | fn | `Router(comptime routes) type`, mengembalikan tipe dengan `dispatch` yang cocok persis dengan `HandlerFn` (bisa langsung dipakai sebagai handler `Server.init`); path tak cocok mendapat 404 `text/plain` |
 | `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, view zero-copy atas header/body stream yang di-decode, plus `header(name)` dan `queryParam(name)` |
-| `zix.Http2.Response` | struct | Builder tipis atas `frame.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, semuanya `!void`. `sent: bool` menjaga auto-500 |
+| `zix.Http2.Response` | struct | Builder tipis atas `writer.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, semuanya `!void`. `sent: bool` menjaga auto-500 |
 | `zix.Http2.Context` | struct | `fd`, `sid`, `deadline_ns` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
 | `zix.Http2.ServeOpts` | struct | Opsi serve per-connection yang dibangun dari config |
 | `zix.Http2.serveConn` | fn | `serveConn(handler, fd, opts, io)`: entry point koneksi blocking langsung |
@@ -212,8 +221,8 @@ try server.run();
 - `Server.init` menerima `handler: HandlerFn` runtime (ADR-063), dibangun via `Router(&[_]Route{...}).dispatch`. Route sendiri tetap comptime (dibakukan ke dalam tipe router), tapi server tidak lagi membakukan tabel route ke dalam tipenya sendiri, sehingga `Server` adalah satu struct konkret, bukan generik.
 - Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM), via `core.invokeHandler` yang membangun trio lalu men-dispatch. `req.method`, `req.headers`, dan `req.body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
 - `ctx.allocator` adalah stack arena per-request (`FixedBufferAllocator`, tanpa pemanggilan heap), `ctx.io` membawa `std.Io` koneksi, dan `ctx.deadline_ns` / `isExpired()` mencakup timeout Layer B (lihat `handler_timeout_ms` di atas).
-- Handler mengembalikan `anyerror!void`. Saat error, `invokeHandler` otomatis menyelesaikan satu 500 (`frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), tapi hanya ketika `!res.sent`, sehingga response yang sudah terkirim sebagian tidak pernah rusak.
-- Response keluar melalui `Response.send` / `sendJson` / `sendText` / `sendNoContent`, builder tipis atas writer `frame.sendResponseFD` / `sendResponseEncodedFD` yang sama seperti sebelumnya (wire byte-identical, ADR-063 hanya mengubah apa yang membungkus pemanggilan). Body besar berumur proses tetap memakai escape hatch `mux.sendResponseStreamFD` mentah secara langsung (dipacu oleh flow control), tidak dibungkus oleh `Response`.
+- Handler mengembalikan `anyerror!void`. Saat error, `invokeHandler` otomatis menyelesaikan satu 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), tapi hanya ketika `!res.sent`, sehingga response yang sudah terkirim sebagian tidak pernah rusak.
+- Response keluar melalui `Response.send` / `sendJson` / `sendText` / `sendNoContent`, builder tipis atas writer `writer.sendResponseFD` / `sendResponseEncodedFD` yang sama seperti sebelumnya (wire byte-identical, ADR-063 hanya mengubah apa yang membungkus pemanggilan). Body besar berumur proses tetap memakai escape hatch `mux.sendResponseStreamFD` mentah secara langsung (dipacu oleh flow control), tidak dibungkus oleh `Response`.
 - Engine memetakan path ke handler melalui `Router(routes).dispatch` sebelum pemanggilan (EXACT lalu PREFIX terpanjang, path tak cocok mencoba fallback static di bawah lalu mendapat 404 `text/plain`), sehingga handler tidak mem-parse atau mencocokkan path itu sendiri.
 
 ---
@@ -243,8 +252,8 @@ flowchart TD
 - Frame DATA dibatasi oleh `SETTINGS_MAX_FRAME_SIZE` milik **peer**, bukan `max_frame_size` server ini. Keduanya nilai berbeda: `max_frame_size` adalah yang server ini iklankan akan diterimanya, dan mengukur frame keluar dengan nilai itu justru yang dijawab peer patuh dengan `FRAME_SIZE_ERROR`. Nilai peer datang dari mux, dari frame SETTINGS di tengah koneksi, atau dari header base64 `HTTP2-Settings` pada upgrade h2c.
 - Range (RFC 7233) disajikan: 206 untuk range yang terpenuhi, 416 dengan `Content-Range: bytes */length` untuk range well-formed yang melewati akhir file, dan header malformed diabaikan sehingga file utuh yang dikirim, sesuai bagian 3.1. Header multi-range dijawab range pertama saja.
 - Kedua jalur dibangun, yang di-cache maupun yang tidak, jadi `public_dir` berperilaku sama baik `public_dir_cache_ttl_ms` diatur maupun tidak. Bila diatur, request berulang berbiaya satu lookup hash alih-alih open plus stat, dan sibling `.br` / `.gz` di-resolve sekali saat insert alih-alih diprobe per request. Setiap header varian yang di-cache membawa `Vary: Accept-Encoding`.
-- Zero copy (`sendfile`) selalu ditolak di engine ini, termasuk cleartext, karena hook coalescing mux (`frame.write_hook`) terpasang di setiap batch dan write socket langsung akan menaruh body mendahului frame yang sudah di-stage. Body dipotong dari snapshot resident sebagai gantinya.
-- Pengiriman static memakai jalur `frame.sendResponseFD` tanpa metering yang sama seperti `Response.send`, bukan `mux.sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
+- Zero copy (`sendfile`) selalu ditolak di engine ini, termasuk cleartext, karena hook coalescing mux (`writer.write_hook`) terpasang di setiap batch dan write socket langsung akan menaruh body mendahului frame yang sudah di-stage. Body dipotong dari snapshot resident sebagai gantinya.
+- Pengiriman static memakai jalur `writer.sendResponseFD` tanpa metering yang sama seperti `Response.send`, bukan `mux.sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
 - `public_dir_upload` tidak ditawarkan di sini. `zix.Http2` tidak punya konvensi handler upload, tidak seperti `zix.Http1`.
 
 ---
@@ -279,9 +288,9 @@ Pelanggaran protokol (stream id 0 di tempat yang ilegal, frame kelewat besar, pr
 
 ## HPACK
 
-`hpack.zig` adalah codec HPACK lengkap tanpa dependensi eksternal.
+`hpack/` adalah codec HPACK lengkap tanpa dependensi eksternal, satu file per concern (tabel, Huffman, prefix integer, dynamic table, decoder, encoder, response block).
 
-- Request decoder: static table 61-entri plus dynamic table (hingga 128 entri) yang didukung buffer berumur koneksi (`dyn_buf`, 8 KB) dengan eviction terbatas ukuran dan compaction in-place. Nilai indexed dan literal disalin ke scratch per-stream milik pemanggil, sehingga slice header hasil decode tetap stabil bahkan setelah scratch dipakai ulang untuk stream berikutnya. String ber-kode Huffman di-decode secara on the fly.
+- Request decoder: static table 61-entri plus dynamic table (hingga 128 entri) yang didukung buffer berumur koneksi (`DynamicTable.buf`, 8 KB) dengan eviction terbatas ukuran dan compaction in-place. Nilai indexed dan literal disalin ke scratch per-stream milik pemanggil, sehingga slice header hasil decode tetap stabil bahkan setelah scratch dipakai ulang untuk stream berikutnya. String ber-kode Huffman di-decode secara on the fly.
 - Response encoder: stateless (static table plus literal-without-indexing, tidak pernah dynamic table atau size update), sehingga suatu blok header identik secara byte pada setiap koneksi.
 - `respHeaderBlock`: meng-encode `[:status, content-type, content-encoding, content-length]`. Karena encoder-nya stateless, prefix `[:status, content-type, content-encoding]` di-cache per triple berbeda (cache append-only dengan lock-free-read) dan hanya `content-length` yang bervariasi yang di-encode ulang per pemanggilan, sehingga jalur response panas melewati scan static-table berulang dan encode Huffman dari content-type yang sama.
 
@@ -305,7 +314,7 @@ Menyetel `config.tls` (sebuah `*Tls.Context`) opt-in ke HTTP/2 di atas TLS (TLS 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. Satu epoll worker `SO_REUSEPORT` per core melakukan terminasi TLS di tempat via session yang resumable (`tcp/tls/tls_session.zig`) dan mem-multiplex banyak koneksi per worker, tanpa socketpair dan tanpa thread per koneksi. Mux h2 yang resumable mengonsumsi plaintext hasil dekripsi, dan frame balasannya dienkripsi kembali menjadi TLS record melalui frame write hook thread-local. Ciphertext keluar yang tidak muat di-stage per koneksi dan di-flush pada EPOLLOUT berikutnya, sehingga klien lambat tidak pernah memarkir worker.
 - `.ASYNC`: `tls_serve.runTls`. Sebuah accept loop menyerahkan setiap koneksi ke worker thread-nya sendiri, yang menjalankan terminator bersama (`tcp/tls/h2_terminator.zig`) dengan driver inline-mux yang menggerakkan mux resumable yang sama langsung di atas stream hasil dekripsi (satu thread per koneksi, tanpa socketpair). Jalur ini juga menyajikan TLS 1.2.
 
-Write hook (`frame.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `frame.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
+Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `writer.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
 
 ---
 
@@ -313,7 +322,7 @@ Write hook (`frame.write_hook`) adalah mekanisme bersama: mux menulis plaintext 
 
 `config.logger` hanya menerima baris lifecycle server (notice listening, fallback io_uring, fallback non-Linux) via `logger.system()`. Saat null, baris lifecycle dicetak ke stderr hanya pada Debug build dan diam pada release build.
 
-Access logging per-stream adalah tanggung jawab engine, bukan handler. Saat `config.logger` diisi, engine menulis satu record `[http2:access]` setelah setiap stream yang dilayani, mengambil status dan jumlah byte dari `Response`. Handler yang membingkai byte-nya sendiri lewat `frame.sendResponseFD` tetap tercatat, tetapi jumlah byte-nya terbaca 0, sehingga handler seperti itu boleh memanggil `logger.access()` sendiri di titik ukuran sebenarnya diketahui.
+Access logging per-stream adalah tanggung jawab engine, bukan handler. Saat `config.logger` diisi, engine menulis satu record `[http2:access]` setelah setiap stream yang dilayani, mengambil status dan jumlah byte dari `Response`. Handler yang membingkai byte-nya sendiri lewat `writer.sendResponseFD` tetap tercatat, tetapi jumlah byte-nya terbaca 0, sehingga handler seperti itu boleh memanggil `logger.access()` sendiri di titik ukuran sebenarnya diketahui.
 
 ---
 
@@ -325,7 +334,7 @@ Access logging per-stream adalah tanggung jawab engine, bukan handler. Saat `con
 | Frame payload + array stream (.ASYNC) | `smp_allocator`: satu payload buffer plus `max_streams` slot `Stream` inline (masing-masing membawa buffer body dan header-scratch-nya sendiri) | Koneksi |
 | MuxConn per-connection (.EPOLL/.URING) | `smp_allocator`: read accumulator (floor `max_recv_buf`) plus array pointer `*MuxStream` selebar `max_streams` dan flag slot | Koneksi |
 | State stream terbuka (.EPOLL/.URING) | pool `MuxStream` thread-local per-worker (free-list), buffer `max_body` dan `max_header_scratch` tiap slot dipakai ulang lintas peminjaman | Stream konkuren (dikembalikan ke pool saat close) |
-| Dynamic table HPACK | inline di decoder koneksi (`dyn_buf`, 8 KB) | Koneksi |
+| Dynamic table HPACK | inline di decoder koneksi (`DynamicTable.buf`, 8 KB) | Koneksi |
 | Response cache per-worker (opt-in) | `smp_allocator`, `cache_max_entries` * `cache_max_value_bytes` per worker | Worker thread |
 | Alokasi handler | `ctx.allocator`: stack `FixedBufferAllocator` (`CTX_ARENA_BYTES`, tanpa pemanggilan heap), direset per request | Request |
 | Cache file static (opt-in) | satu mapping demand-paged yang dipakai bersama semua worker dan semua engine HTTP dalam proses, `public_dir_cache_max_entries` slot berisi file terbuka, ukurannya, dan header yang sudah dirender | Proses |
