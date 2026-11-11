@@ -67,20 +67,20 @@ flowchart TD
     W --> WAIT["epoll_wait (drain up to 512 events)"]
     WAIT --> EV{"event fd?"}
     EV -->|listener| ACCEPT["acceptAll\naccept4 NONBLOCK to EAGAIN\nMuxConn.init, register in epoll"]
-    EV -->|connection| READ["beginCoalesce\nmux.onReadable(routes, conn)\nendCoalesce (one write per batch)"]
+    EV -->|connection| READ["beginCoalesce\nprocess.onReadable(routes, conn)\nendCoalesce (one write per batch)"]
     ACCEPT --> WAIT
     READ --> WAIT
 ```
 
 - Setiap worker memiliki listener pribadi, instance epoll pribadi, dan `ConnTable` ter-index fd. Kernel menyeimbangkan koneksi baru di antara listener `SO_REUSEPORT` per-worker, sehingga tidak ada accept thread, tidak ada queue bersama, dan tidak ada handoff fd antar thread.
-- Satu worker menggerakkan banyak koneksi non-blocking melalui state machine h2 yang resumable di `mux.zig`, satu `MuxConn` per fd, sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread.
+- Satu worker menggerakkan banyak koneksi non-blocking melalui state machine h2 yang resumable di `mux/`, satu `MuxConn` per fd, sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread.
 - Setiap frame yang ditulis oleh readable batch (HEADERS plus DATA per stream, dikali jumlah stream dalam batch) di-coalesce menjadi satu `write()` melalui sink per-worker (`beginCoalesce` / `endCoalesce`), alih-alih satu write per frame.
 - `workers` adalah jumlah mux worker (0 = cpu count). Handler berjalan inline pada worker, jadi harus tetap terbatas: handler yang lama memblokir koneksi lain pada worker itu.
 - Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
 
 ### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
 
-Topologi shared-nothing, satu-listener-per-worker yang sama dengan `.EPOLL`, tetapi completion-based: satu multishot accept dan satu recv per koneksi disubmit sebagai SQE dan dipanen sebagai CQE (ADR-037 Phase 4). Setiap recv mengisi read accumulator koneksi, lalu `mux.processRing` menggerakkan state machine yang resumable yang sama. Handler tetap menulis balasannya langsung ke fd (non-blocking), di-batch oleh coalescing sink yang sama.
+Topologi shared-nothing, satu-listener-per-worker yang sama dengan `.EPOLL`, tetapi completion-based: satu multishot accept dan satu recv per koneksi disubmit sebagai SQE dan dipanen sebagai CQE (ADR-037 Phase 4). Setiap recv mengisi read accumulator koneksi, lalu `process.processRing` menggerakkan state machine yang resumable yang sama. Handler tetap menulis balasannya langsung ke fd (non-blocking), di-batch oleh coalescing sink yang sama.
 
 `.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Itu capability gap saat runtime di Linux. Di luar Linux model-nya ditolak langsung dengan `error.ZixDispatchModelUnsupported`.
 
@@ -95,7 +95,8 @@ graph TD
     Http2 --> core["serve.zig + upgrade.zig + Stream.zig + stream_*\nblocking h2c loop\nserveConn"]
     Http2 --> handler["handler.zig + cache.zig\nHandlerFn + invokeHandler\nresponse cache"]
     Http2 --> router["router.zig\nRouter + Route"]
-    Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
+    Http2 --> mux["mux/\nresumable MuxConn state machine\nframe loop + flow control + stream pool"]
+    Http2 --> shared["send_best_effort.zig + frame_payload.zig + peer_settings.zig\nshared by serve and mux"]
     Http2 --> frame["frame.zig + FrameHeader.zig\nframe constants + header codec"]
     Http2 --> writer["writer.zig\nwriteAllFD + sendResponseFD / sendResponseEncodedFD"]
     Http2 --> reader["reader.zig\nrecvExact + readFrameHeader"]
@@ -115,6 +116,10 @@ graph TD
     mux --> writer
     mux --> control
     mux --> hpack
+    mux --> handler
+    mux --> shared
+    core --> shared
+    shared --> control
     core --> reader
     core --> writer
     core --> control
@@ -226,7 +231,7 @@ try server.run();
 - Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM), via `handler.invokeHandler` yang membangun trio lalu men-dispatch. `req.method`, `req.headers`, dan `req.body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
 - `ctx.allocator` adalah stack arena per-request (`FixedBufferAllocator`, tanpa pemanggilan heap), `ctx.io` membawa `std.Io` koneksi, dan `ctx.deadline` / `isExpired()` mencakup timeout Layer B (lihat `handler_timeout_ms` di atas).
 - Handler mengembalikan `anyerror!void`. Saat error, `invokeHandler` otomatis menyelesaikan satu 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), tapi hanya jika belum ada yang ditulis (bukan `res.sent` dan bukan `writer.respondedFD()`), sehingga response yang sudah terkirim sebagian tidak pernah rusak.
-- Response keluar melalui `Response.send` / `sendJson` / `sendText` / `sendNoContent`, builder tipis atas writer `writer.sendResponseFD` / `sendResponseEncodedFD` yang sama seperti sebelumnya (wire byte-identical, ADR-063 hanya mengubah apa yang membungkus pemanggilan). Body besar berumur proses tetap memakai escape hatch `mux.sendResponseStreamFD` mentah secara langsung (dipacu oleh flow control), tidak dibungkus oleh `Response`.
+- Response keluar melalui `Response.send` / `sendJson` / `sendText` / `sendNoContent`, builder tipis atas writer `writer.sendResponseFD` / `sendResponseEncodedFD` yang sama seperti sebelumnya (wire byte-identical, ADR-063 hanya mengubah apa yang membungkus pemanggilan). Body besar berumur proses tetap memakai escape hatch `sendResponseStreamFD` mentah (`mux/send_stream.zig`) secara langsung (dipacu oleh flow control), tidak dibungkus oleh `Response`.
 - Engine memetakan path ke handler melalui `Router(routes).dispatch` sebelum pemanggilan (EXACT lalu PREFIX terpanjang, path tak cocok mencoba fallback static di bawah lalu mendapat 404 `text/plain`), sehingga handler tidak mem-parse atau mencocokkan path itu sendiri.
 
 ---
@@ -257,15 +262,15 @@ flowchart TD
 - Response 206 yang blok HEADERS-nya tidak muat di scratch encode jatuh ke file utuh sebagai 200. Bila blok 200 pun tidak muat, stream ditutup dengan RST_STREAM `INTERNAL_ERROR`.
 - Range (RFC 7233) disajikan: 206 untuk range yang terpenuhi, 416 dengan `Content-Range: bytes */length` untuk range well-formed yang melewati akhir file, dan header malformed diabaikan sehingga file utuh yang dikirim, sesuai bagian 3.1. Header multi-range dijawab range pertama saja.
 - Kedua jalur dibangun, yang di-cache maupun yang tidak, jadi `public_dir` berperilaku sama baik `public_dir_cache_ttl_ms` diatur maupun tidak. Bila diatur, request berulang berbiaya satu lookup hash alih-alih open plus stat, dan sibling `.br` / `.gz` di-resolve sekali saat insert alih-alih diprobe per request. Response HTTP/2 tidak membawa `Vary: Accept-Encoding`, baik dari cache maupun tidak.
-- Zero copy (`sendfile`) dipakai di Linux selama frame ditulis langsung ke socket. Saat hook batching mux masuk, zero copy harus ditolak selama batch di-stage, kalau tidak body mendahului frame yang sudah di-stage. Body lalu dipotong dari snapshot resident sebagai gantinya.
-- Pengiriman static memakai write frame `writer` tanpa metering yang sama seperti `Response.send`, bukan `mux.sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
+- Zero copy (`sendfile`) dipakai di Linux selama frame ditulis langsung ke socket. Saat hook batching masuk bersama model dispatch Linux (mux sendiri tidak pernah memasangnya), zero copy harus ditolak selama batch di-stage, kalau tidak body mendahului frame yang sudah di-stage. Body lalu dipotong dari snapshot resident sebagai gantinya.
+- Pengiriman static memakai write frame `writer` tanpa metering yang sama seperti `Response.send`, bukan `sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
 - `public_dir_upload` tidak ditawarkan di sini. `zix.Http2` tidak punya konvensi handler upload, tidak seperti `zix.Http1`.
 
 ---
 
 ## State Machine Multiplexed
 
-Model `.EPOLL` / `.URING` menggerakkan `mux.zig`, satu `MuxConn` per fd. Read accumulator (`rbuf`, dilacak oleh `rstart` / `rend`) bertahan lintas readable event dan menahan frame parsial sampai sisanya tiba, sehingga worker dapat me-resume koneksi di tengah frame dan menggerakkan banyak koneksi dari satu thread.
+Model `.EPOLL` / `.URING` menggerakkan `mux/` (`process.onReadable` atau `process.processRing`, lalu `frame_loop.run`), satu `MuxConn` per fd. Read accumulator (`rbuf`, dilacak oleh `rstart` / `rend`) bertahan lintas readable event dan menahan frame parsial sampai sisanya tiba, sehingga worker dapat me-resume koneksi di tengah frame dan menggerakkan banyak koneksi dari satu thread.
 
 Sebuah koneksi maju melalui fase-fase preface, lalu sebuah frame loop:
 
@@ -287,7 +292,7 @@ Di dalam fase `.h2` frame loop membaca header 9-byte, menunggu payload penuh tib
 - WINDOW_UPDATE: tumbuhkan send window koneksi atau stream dan resume response body yang terparkir.
 - RST_STREAM: lepaskan stream slot. PING: balas dengan ACK. GOAWAY: tutup koneksi.
 
-Pelanggaran protokol (stream id 0 di tempat yang ilegal, frame kelewat besar, preface yang buruk) mengirim GOAWAY atau RST_STREAM. `serve.serveLoop` blocking menjalankan protokol yang sama di atas blocking read dengan array stream per-connection alih-alih slot ter-pool.
+Pelanggaran protokol (stream id 0 di tempat yang ilegal, frame kelewat besar, preface yang buruk) mengirim GOAWAY atau RST_STREAM. `serve.serveLoop` blocking menjalankan protokol yang sama di atas blocking read dengan array stream per-connection alih-alih slot ter-pool. Kedua jalur memakai bersama sender best-effort (`send_best_effort.zig`), strip padding (`frame_payload.zig`), dan pertukaran SETTINGS (`peer_settings.zig`).
 
 ---
 
@@ -305,9 +310,9 @@ Pelanggaran protokol (stream id 0 di tempat yang ilegal, frame kelewat besar, pr
 
 Flow control sisi-kirim mengikuti RFC 7540 6.9. Setiap `MuxConn` membawa send window level-koneksi, dan setiap stream terbuka membawa send window-nya sendiri, keduanya dimulai pada 65535 (disesuaikan dengan initial window yang diiklankan peer).
 
-- `pumpBody` mengirim DATA yang dibatasi oleh `min(connection window, stream window, max_frame_size)`. Yang tidak muat diparkir pada stream (`pending_body`, `pending_end`) dan stream slot tetap dipinjam. END_STREAM menumpang pada frame terakhir hanya setelah seluruh body keluar.
+- `pumpBody` (`mux/flow.zig`) mengirim DATA yang dibatasi oleh `min(connection window, stream window, max frame size peer)`. Yang tidak muat diparkir pada stream (`pending_body`, `pending_end`) dan stream slot tetap dipinjam. END_STREAM menumpang pada frame terakhir hanya setelah seluruh body keluar.
 - Sebuah WINDOW_UPDATE me-resume kerja yang terparkir: `resumeStream` untuk grant level-stream, `resumeAll` untuk grant level-koneksi. Slot dibebaskan setelah body-nya terkuras penuh.
-- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)` adalah entry publik. Body-nya direferensikan, bukan disalin, jadi harus hidup lebih lama dari stream (cache berumur proses, bukan scratch buffer per-request). Tanpa connection context aktif (jalur serve non-mux blocking) ia jatuh kembali ke pengiriman langsung tanpa metering.
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)` adalah entry publik. Body-nya direferensikan, bukan disalin, jadi harus hidup lebih lama dari stream (cache berumur proses, bukan scratch buffer per-request). Tanpa connection context aktif (jalur serve non-mux blocking) ia jatuh kembali ke pengiriman langsung tanpa metering. Blok header respons yang tidak muat me-reset stream dengan `INTERNAL_ERROR` dan tidak mengirim DATA.
 - DATA masuk mengembalikan WINDOW_UPDATE untuk koneksi maupun stream agar peer terus mengirim.
 
 ---
@@ -319,7 +324,7 @@ Menyetel `config.tls` (sebuah `*Tls.Context`) opt-in ke HTTP/2 di atas TLS (TLS 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. Satu epoll worker `SO_REUSEPORT` per core melakukan terminasi TLS di tempat via session yang resumable (`tcp/tls/tls_session.zig`) dan mem-multiplex banyak koneksi per worker, tanpa socketpair dan tanpa thread per koneksi. Mux h2 yang resumable mengonsumsi plaintext hasil dekripsi, dan frame balasannya dienkripsi kembali menjadi TLS record melalui frame write hook thread-local. Ciphertext keluar yang tidak muat di-stage per koneksi dan di-flush pada EPOLLOUT berikutnya, sehingga klien lambat tidak pernah memarkir worker.
 - `.ASYNC`: `tls_serve.runTls`. Sebuah accept loop menyerahkan setiap koneksi ke worker thread-nya sendiri, yang menjalankan terminator bersama (`tcp/tls/h2_terminator.zig`) dengan driver inline-mux yang menggerakkan mux resumable yang sama langsung di atas stream hasil dekripsi (satu thread per koneksi, tanpa socketpair). Jalur ini juga menyajikan TLS 1.2.
 
-Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `writer.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
+Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `writer.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Hook itu masuk bersama model dispatch Linux, `mux/` hanya menulis lewat `writer`. Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
 
 ---
 
