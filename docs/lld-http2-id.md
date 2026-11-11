@@ -150,7 +150,7 @@ Flow control sisi-kirim. `active_conn` adalah threadlocal yang mengikat pengirim
 - `resumeAll(conn)`: setelah window koneksi tumbuh, me-resume setiap stream yang terparkir.
 - `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: entry respons ber-flow-control. Tanpa `active_conn`, fd lain, atau tanpa slot yang cocok ia jatuh kembali ke `writer.sendResponseEncodedFD` (langsung, tanpa meter). Selain itu ia menulis HEADERS (`response_block.respHeaderBlock`, `content-length` selalu ada, END_STREAM pada HEADERS untuk body kosong) lalu `pumpBody(..., true)`. Blok header yang tidak muat me-reset stream dengan `INTERNAL_ERROR` dan tidak mengirim DATA. Body direferensikan, bukan disalin, jadi harus hidup lebih lama dari stream (cache berumur proses).
 
-Note: hook batching frame (`writer.write_hook`) dan sink coalescing tidak ada di `mux/`. Mux lama tidak pernah memasang hook itu, `dispatch/common.zig` yang memasangnya di sekitar setiap batch readable, jadi keduanya masuk bersama model dispatch Linux.
+Note: hook batching frame (`writer.write_hook`) dan sink coalescing tidak ada di `mux/`. Worker `.EPOLL` / `.URING` memasang hook itu di sekitar setiap batch readable lewat `coalesce.zig`.
 
 ---
 
@@ -209,7 +209,7 @@ max_size: usize = 4096,
 
 `frame.zig` memegang konstanta (`FRAME_TYPE_*`, `FLAG_*`, `ERR_*`, `SETTINGS_*`, `PREFACE`, `FRAME_HEADER_LEN` 9, `DEFAULT_MAX_FRAME_SIZE` 16384, `HPACK_ENCODE_SCRATCH` 512, `SEND_STAGE_BODY_MAX` 4096) dan codec header. `FrameHeader.zig` adalah `{ length: u24, frame_type: u8, flags: u8, stream_id: u31 }`. `parseFrameHeader` / `encodeFrameHeader` tidak melakukan I/O (untuk write ter-buffer atau ter-stage).
 
-`writer.zig` adalah sisi write. `writeAllFD` menandai stream sudah dijawab (`tl_responded`) dan memanggil `writeAllDirectFD`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. `write_hook` threadlocal (jalur seal TLS, atau sink coalescing) masuk bersama model dispatch Linux: `writeAllFD` akan menyerahkan plaintext ke hook saat diset, dan `writeAllDirectFD` tetap menjadi jalur flush milik hook itu sendiri, jadi flush coalescing tidak masuk ulang ke hook. `writeFrameHeaderFD` mengenkode dan menulis satu header.
+`writer.zig` adalah sisi write. `writeAllFD` menandai stream sudah dijawab (`tl_responded`) dan memanggil `writeAllDirectFD`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. Saat `write_hook` dan `write_hook_ctx` threadlocal sama-sama diset (sink coalescing saat ini, jalur seal TLS nanti), `writeAllFD` dan write pasangan vectored menyerahkan byte ke hook. `writeAllDirectFD` tidak pernah memakai hook, jadi ia menjadi jalur flush milik hook itu sendiri dan flush tidak masuk ulang ke hook. `writeFrameHeaderFD` mengenkode dan menulis satu header.
 
 `sendResponseFD` -> `sendResponseEncodedFD` (juga di `writer.zig`) adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body di atau di bawah `SEND_STAGE_BODY_MAX` (4 KiB) keluar sebagai satu staged write, yang lebih besar sebagai satu vectored write per chunk DATA (blok HEADERS menumpang chunk pertama, write hook menerima tiap pasangan sebagai dua append). Body besar yang mungkin melebihi window peer memakai `mux/send_stream.sendResponseStreamFD` sebagai gantinya.
 
@@ -308,11 +308,9 @@ Fallback `public_dir` (ADR-064). `Router.dispatch` memanggil `fallback(req, ctx)
 | `encodeUnsatisfiable` | meng-encode blok 416 dengan `Content-Range: bytes */length` |
 | `answer` | memilih segment, meng-encode blok, lalu memanggil `sendFramed`. Blok 206 yang tidak muat jatuh ke file utuh sebagai 200. Bila blok 200 pun tidak muat, stream ditutup dengan RST_STREAM `INTERNAL_ERROR` (`resetStream`) |
 | `sendFramed` | satu frame HEADERS, lalu frame DATA yang masing-masing dibatasi `max_frame_size`, yang terakhir berflag END_STREAM. Body resident dipotong dari byte-nya sendiri, selain itu `utils/static/static.sendBody` mengirim range-nya |
-| `zeroCopyAllowed` | true di Linux untuk fd asli (`fd >= 0`), false di platform lain. Saat ini frame ditulis langsung ke socket, jadi `sendfile` tidak bisa mendahului frame HEADERS-nya sendiri |
+| `zeroCopyAllowed` | true di Linux untuk fd asli (`fd >= 0`) selama `writer.write_hook` tidak diset, false di platform lain. Hook yang diset men-stage frame, jadi `sendfile` akan mendahuluinya |
 
 `Source` membawa `{ file, size, content_type, content_encoding, bytes }` dan `Segment` membawa `{ offset, length, status, content_range }`, sehingga file dari cache maupun tanpa cache, dan 200 maupun 206, berbagi satu jalur framing. `Content-Length` membawa panjang segment, bukan ukuran file, kalau tidak client menunggu byte yang tidak pernah datang. File kosong menutup stream pada HEADERS tanpa frame DATA sama sekali.
-
-Note: hook batching frame masuk bersama model dispatch Linux (bukan bersama `mux/`) dan men-stage frame di buffer. `zeroCopyAllowed` harus menolak selama hook itu terpasang, kalau tidak body mendahului frame yang sudah di-stage.
 
 Parsing Range dipakai bersama engine lain: `utils/http/range_header.zig`. `parseSpec` (membaca header) dan `resolve` (clamp terhadap panjang yang diketahui) sengaja dipisah, karena satu hasil nullable tidak bisa membedakan "abaikan header" dari "jawab 416".
 
@@ -328,27 +326,41 @@ Parsing Range dipakai bersama engine lain: `utils/http/range_header.zig`. `parse
 
 Lalu `installStaticCache` memasang static cache proses saat `public_dir` dan TTL diatur (install yang gagal hanya berupa warning). Hanya server yang membangun tabel itu yang menutupnya saat `run()` selesai.
 
-Switch model memetakan `.ASYNC` ke `dispatch/async.zig` (lalu `serve.serveConn`), `.EPOLL` ke `dispatch/epoll.zig`, dan `.URING` ke `dispatch/uring.zig`. Baru `dispatch/async.zig` yang di-port. Error-nya diterjemahkan oleh `dispatchError` (`ZixHttp2_Async_*` -> `ZixHttp2_Server_ResolveFailed`, `ListenFailed`, `AcceptFailed`). `.EPOLL` dan `.URING` mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported` sampai dispatch Linux masuk. Cabang `config.tls != null` (`tls_mux.runTlsMux` untuk `.EPOLL` / `.URING`, selain itu `tls_serve.runTls`) juga belum ada di `Server.zig`.
+Switch model memetakan `.ASYNC` ke `dispatch/async.zig` (lalu `serve.serveConn`), `.EPOLL` ke `dispatch/epoll.zig`, dan `.URING` ke `dispatch/uring.zig`. Error setiap model diterjemahkan oleh fungsinya sendiri: `dispatchError` (`ZixHttp2_Async_*` -> `ZixHttp2_Server_ResolveFailed`, `ListenFailed`, `AcceptFailed`), `dispatchEpollError` dan `dispatchUringError` (`ResolveFailed` dan `ListenFailed` tetap namanya, member lain -> `ZixHttp2_Server_EpollSetupFailed` atau `UringSetupFailed`). Cabang `config.tls != null` (`tls_mux.runTlsMux` untuk `.EPOLL` / `.URING`, selain itu `tls_serve.runTls`) juga belum ada di `Server.zig`.
 
 `Http2.zig` adalah namespace `zix.Http2`. Ia me-re-export tipe dan fungsi publik dari file masing-masing dan mempertahankan nama lama `HpackEntry` (tipe yang sama dengan `Header`), `DEFAULT_WINDOW_SIZE`, dan `MAX_PAYLOAD`.
 
 ### dispatch/async.zig
 
-`run(config, handler)` me-resolve `config.ip`, listen dengan `reuse_address` dan `kernel_backlog`, mencatat baris listening lewat `log.logSystem`, lalu menyerahkan setiap stream yang di-accept ke `io.async(connEntry, ...)`. Peer yang putus sebelum accept (`ConnectionAborted`) dilewati, kegagalan accept lainnya mengembalikan `ZixHttp2_Async_AcceptFailed`. `serveOpts(config)` memetakan `Config` ke `ServeOpts`. `connEntry` menyetel access logger, memegang response cache milik pool thread (`utils/cache/async.zig`, ukurannya dari `cache.effectiveCacheEntries`), menjalankan `serve.serveConn`, lalu menutup stream dan melepas cache. `async_cache.reclaim()` membebaskan cache per-thread saat accept loop berakhir.
+`run(config, handler)` me-resolve `config.ip`, listen dengan `reuse_address` dan `kernel_backlog`, mencatat baris listening lewat `log.logSystem`, lalu menyerahkan setiap stream yang di-accept ke `io.async(connEntry, ...)`. Peer yang putus sebelum accept (`ConnectionAborted`) dilewati, kegagalan accept lainnya mengembalikan `ZixHttp2_Async_AcceptFailed`. `Config.serveOpts()` memetakan `Config` ke `ServeOpts`. `connEntry` menyetel access logger, memegang response cache milik pool thread (`utils/cache/async.zig`, ukurannya dari `cache.effectiveCacheEntries`), menjalankan `serve.serveConn`, lalu menutup stream dan melepas cache. `async_cache.reclaim()` membebaskan cache per-thread saat accept loop berakhir.
 
 ### dispatch/epoll.zig
 
-`ConnTable` adalah map fd -> `*MuxConn` privat per-worker, ber-indeks berdasarkan fd atas `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged), tidak dibagi antar worker. `acceptAll` menguras `accept4(NONBLOCK | CLOEXEC)` sampai EAGAIN, mengeset `TCP_NODELAY` dan busy-poll opsional, membangun `MuxConn`, dan meregistrasi `EPOLL.IN | RDHUP`. `epollMuxWorkerFn(routes)` mem-pin ke sebuah CPU, membuka listener `SO_REUSEPORT` privat plus instance epoll-nya sendiri dan response cache opsional, dan menjalankan `epoll_wait` (hingga 512 event): listener menggerakkan `acceptAll`, fd koneksi menjalankan `beginCoalesce` -> `process.onReadable` -> `endCoalesce` (tutup saat kegagalan write batch). `runEpoll` men-spawn `worker_count = workers` (0 = jumlah CPU tersedia) thread dan men-join mereka.
+`run(config, handler)` me-resolve `config.ip`, lalu mem-bind `workers` listener (0 = `cpu_affinity.availableCpuCount()`) di thread pemanggil dengan `reuse_address`, sesuai urutan worker, sehingga bind yang gagal mengembalikan `ZixHttp2_Epoll_ListenFailed` sebelum ada yang dilayani dan listener i adalah indeks i dari grup `SO_REUSEPORT`. Dengan `reuseport_cbpf` ia memanggil `reuseport.attachCpuSteering` sekali pada listener pertama, penolakan menjadi baris WARN. Lalu ia men-spawn satu thread per listener dengan `worker_stack_size_bytes`, mencatat baris listening, dan men-join. Flag `stop` dan `failed` bersama membuat worker yang gagal setup mengakhiri run dengan `ZixHttp2_Epoll_SetupFailed`.
+
+`workerMain` mem-pin ke slot CPU-nya (`cpu_affinity.pinToCpu`), menyetel access logger, memasang response cache worker (`cache.installWorker`), membuat listener non-blocking, membuka instance epoll-nya, dan memetakan slot table `[]?*MuxConn` ber-indeks fd di atas `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged). `epoll_wait` menguras hingga 512 event dengan timeout 1 s agar loop melihat `stop`, dan poll sekali lagi tanpa tidur setelah pass yang sibuk. Listener menggerakkan `acceptAll`, yang menguras `accept4(NONBLOCK | CLOEXEC)` sampai EAGAIN, mengeset `TCP_NODELAY` dan `SO_BUSY_POLL` (`busy_poll_us`), membangun `MuxConn`, dan meregistrasi `EPOLL.IN | RDHUP`. Fd koneksi menjalankan `serveEvent`: HUP atau ERR menutup, selain itu `beginCoalesce` -> `process.onReadable` -> `endCoalesce` (write batch yang gagal menutup). Saat keluar, setiap koneksi yang tersisa dibebaskan dan ditutup.
 
 ### dispatch/uring.zig
 
-Bentuk io_uring dari loop yang sama (ADR-037 Phase 4). `initUringRing` meminta `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` dan jatuh kembali ke ring tanpa flag. Sebuah worker meng-arm multishot accept, memegang tabel slot `[]?*UringConn` ber-indeks fd, dan menandai tiap `user_data` dengan `gen: u24` agar recv CQE basi untuk fd yang dipakai ulang dibuang (`lookup`). `armRecv` mengompaksi akumulator lalu mem-posting satu `prep_recv` ke `rbuf[rend..]` (satu recv in-flight per koneksi), dan `handleRecv` memajukan `rend`, menjalankan `beginCoalesce` -> `process.processRing` -> `endCoalesce`, lalu meng-arm ulang. Respons pergi direct-to-fd pada socket non-blocking (tanpa reply cork yang dikirim via ring). `runUring` menyelidiki ring saat startup dan jatuh kembali ke `runEpoll` saat io_uring tidak tersedia.
+Bentuk io_uring dari worker yang sama, dengan `run` yang sama (bind berurutan, CBPF opsional, ukuran stack, flag `stop` / `failed`). `initRing` meminta `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` dan jatuh kembali ke ring tanpa flag. Tidak ada fallback ke `.EPOLL`: worker yang tidak bisa membangun ring-nya mengakhiri run dengan `ZixHttp2_Uring_SetupFailed`. `waitOnce` menunggu dengan batas 1 s (`IORING_ENTER_EXT_ARG`) bila kernel mendukung, agar loop melihat `stop`.
 
-### dispatch/common.zig
+Sebuah worker meng-arm multishot accept (di-arm ulang pada pass berikutnya bila SQ penuh), memegang slot table `[]?*RingConn` ber-indeks fd, dan menandai tiap `user_data` dengan `op`, `gen: u24`, dan fd, agar recv CQE basi untuk fd yang dipakai ulang dibuang (`lookup`). `handleAccept` mengeset `TCP_NODELAY`, `SO_BUSY_POLL`, dan `O_NONBLOCK` (balasan langsung lalu menunggu `POLL.OUT` alih-alih memblokir worker), membangun `MuxConn`, dan meng-arm satu recv. `armRecv` mengompaksi akumulator lalu mem-posting satu `prep_recv` ke `rbuf[rend..]` (satu recv in-flight per koneksi). `handleRecv` menutup pada 0 (setelah `hangupGoaway`) atau error, selain itu memajukan `rend`, menjalankan `beginCoalesce` -> `process.processRing` -> `endCoalesce`, lalu meng-arm ulang.
 
-`serveOpts(cfg)` memetakan `Config` (`Config.zig`) ke `ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus field cache dan `public_dir`). Ia juga memuat `setNoDelay`, `setBusyPoll`, `pinToCpu` dan `getAvailableCpuCount` (keduanya sadar cgroup-mask), dan `effectiveCacheEntries` (menghormati `cache_max_total_bytes`).
+### coalesce.zig dan CoalesceSink.zig
 
-Sink write-coalescing adalah primitif batching untuk mux cleartext: `MuxCoalesceSink` (threadlocal 64 KiB, satu per worker) dipasang sebagai `writer.write_hook` oleh `beginCoalesce(fd)` dan dibongkar oleh `endCoalesce()`. Selama terpasang, setiap frame yang mux tulis dalam satu batch readable (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) di-stage ke satu buffer dan keluar sebagai satu write, sehingga batch banyak-stream menjadi satu segmen alih-alih satu segmen kecil per frame di bawah `TCP_NODELAY`. Ia flush saat penuh dan menulis frame kelewat besar langsung tembus, jadi kebenaran tidak pernah bergantung pada ukuran buffer. `endCoalesce` mengembalikan apakah sebuah write gagal selama batch.
+`CoalesceSink` adalah write buffer untuk satu batch readable: `fd`, `len`, `failed`, dan `buf` 64 KiB. `append` men-stage byte, flush dulu bila tidak muat, dan menulis potongan yang lebih besar dari seluruh buffer langsung tembus setelah flush itu, sehingga urutan wire terjaga dan tidak ada ukuran yang terlalu besar. `flush` menulis byte yang di-stage. Keduanya menulis lewat `writer.writeAllDirectFD`, dan write yang gagal mengeset `failed`.
+
+`coalesce.zig` memiliki satu sink threadlocal per worker. `beginCoalesce(fd)` me-reset-nya dan memasangnya sebagai `writer.write_hook`, sehingga setiap frame yang mux tulis dalam batch itu (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) di-stage ke satu buffer dan keluar sebagai satu write, alih-alih satu segmen kecil per frame di bawah `TCP_NODELAY`. `endCoalesce()` melepas hook, flush, dan mengembalikan apakah ada write yang gagal.
+
+### multiplexers/
+
+Helper Linux yang dipakai bersama oleh model `.EPOLL` / `.URING` setiap engine:
+
+| File | Peran |
+| :- | :- |
+| `slab.zig` | slot table kernel-zeroed dan demand-paged (`mapZeroedSlots` / `unmapSlots`) |
+| `reuseport.zig` | `attachCpuSteering(fd, group_size)`: program classic BPF `ld cpu, mod N, ret A` lewat `SO_ATTACH_REUSEPORT_CBPF`. Mengembalikan false saat kernel menolaknya |
+| `cpu_affinity.zig` | `availableCpuCount()` (affinity mask, sadar cgroup dan taskset) dan `pinToCpu(worker_id)`, yang mendaftar setiap physical core sekali sebelum sibling SMT mana pun (topologi sysfs) dan mempertahankan urutan mask tanpanya |
 
 ### tls_mux.zig
 
