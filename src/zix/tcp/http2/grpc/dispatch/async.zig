@@ -36,8 +36,8 @@ const cache = @import("../cache.zig");
 const h2_cache = @import("../../cache.zig");
 const log = @import("../log.zig");
 const serve = @import("../serve.zig");
+const CacheSize = @import("../../../../utils/cache/CacheSize.zig");
 const Config = @import("../Config.zig");
-const Http1Config = @import("../../../http1/Config.zig");
 const ServeOpts = @import("../ServeOpts.zig");
 
 // --------------------------------------------------------- //
@@ -47,38 +47,30 @@ const ServeOpts = @import("../ServeOpts.zig");
 /// or the cache could not be built.
 ///
 /// Note:
-/// - The shared async cache is sized from an Http1 Config. Only its cache
-///   size fields are read, so the address fields are left empty.
 /// - A held cache is kept from being freed until releaseCache() runs.
 ///
 /// Param:
 /// opts - ServeOpts (cache knobs of this connection)
-/// io - std.Io (the worker io)
 ///
 /// Return:
 /// - bool (true when the connection holds the cache and must call releaseCache)
-fn installCache(opts: ServeOpts, io: std.Io) bool {
+fn installCache(opts: ServeOpts) bool {
     if (!opts.response_cache) {
         cache.setCache(null, 0);
 
         return false;
     }
 
-    const entries = h2_cache.effectiveCacheEntries(
-        opts.cache_max_entries,
-        opts.cache_max_value_bytes,
-        opts.cache_max_total_bytes,
-    );
-    const config: Http1Config = .{
-        .io = io,
-        .ip = "",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = entries,
-        .cache_max_value_bytes = opts.cache_max_value_bytes,
+    const size: CacheSize = .{
+        .max_entries = h2_cache.effectiveCacheEntries(
+            opts.cache_max_entries,
+            opts.cache_max_value_bytes,
+            opts.cache_max_total_bytes,
+        ),
+        .max_value_bytes = opts.cache_max_value_bytes,
     };
 
-    if (async_cache.acquire(config)) |resp_cache| {
+    if (async_cache.acquire(size)) |resp_cache| {
         cache.setCache(resp_cache, opts.cache_ttl_ms);
     } else {
         cache.setCache(null, 0);
@@ -107,7 +99,7 @@ fn ConnEntry(comptime RouterType: type) type {
         /// Return:
         /// - void
         fn serveOne(stream: std.Io.net.Stream, opts: ServeOpts, io: std.Io) void {
-            const cache_held = installCache(opts, io);
+            const cache_held = installCache(opts);
             defer if (cache_held) releaseCache();
 
             defer stream.close(io);
@@ -298,7 +290,7 @@ const InstallProbe = struct {
     ttl_ms: u32 = 0,
 
     fn run(self: *InstallProbe, opts: ServeOpts) void {
-        self.held = installCache(opts, std.testing.io);
+        self.held = installCache(opts);
         self.installed = cache.tl_cache != null;
         self.ttl_ms = cache.cacheTtl();
 
