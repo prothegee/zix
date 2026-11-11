@@ -39,7 +39,7 @@
 const std = @import("std");
 const CacheEntry = @import("CacheEntry.zig");
 const CacheRegistry = @import("CacheRegistry.zig");
-const Config = @import("../../tcp/http1/Config.zig");
+const CacheSize = @import("CacheSize.zig");
 const ResponseCache = @import("ResponseCache.zig");
 
 // --------------------------------------------------------- //
@@ -64,13 +64,13 @@ threadlocal var tl_tried: bool = false;
 threadlocal var tl_generation: u64 = 0;
 
 /// Build this thread's cache for `current` and register it.
-fn build(config: Config, current: u64) ?*ResponseCache {
+fn build(size: CacheSize, current: u64) ?*ResponseCache {
     const allocator = std.heap.smp_allocator;
     const resp_cache = allocator.create(ResponseCache) catch |err| switch (err) {
         error.OutOfMemory => return null,
     };
 
-    resp_cache.* = ResponseCache.init(allocator, config) catch |err| switch (err) {
+    resp_cache.* = ResponseCache.init(allocator, size) catch |err| switch (err) {
         error.ZixUtils_ResponseCache_OutOfMemory,
         error.ZixUtils_ResponseCache_MapFailed,
         => {
@@ -116,12 +116,12 @@ fn build(config: Config, current: u64) ?*ResponseCache {
 ///   cannot map its slab serves uncached instead of retrying.
 ///
 /// Param:
-/// config - Config (cache_max_entries and cache_max_value_bytes size the cache)
+/// size - CacheSize (slot count and per-slot byte cap of this thread's cache)
 ///
 /// Return:
 /// - *ResponseCache (this thread's cache)
 /// - null when the cache could not be built, meaning serve uncached
-pub fn acquire(config: Config) ?*ResponseCache {
+pub fn acquire(size: CacheSize) ?*ResponseCache {
     _ = active.fetchAdd(1, .seq_cst);
 
     const current = generation.load(.seq_cst);
@@ -135,7 +135,7 @@ pub fn acquire(config: Config) ?*ResponseCache {
     if (tl_tried) return null;
 
     tl_tried = true;
-    tl_cache = build(config, current);
+    tl_cache = build(size, current);
 
     return tl_cache;
 }
@@ -190,14 +190,10 @@ pub fn reclaim() usize {
 // --------------------------------------------------------- //
 // Test:
 
-fn testConfig(entries: u32, value_bytes: u32) Config {
+fn testSize(entries: u32, value_bytes: u32) CacheSize {
     return .{
-        .io = std.testing.io,
-        .ip = "127.0.0.1",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = entries,
-        .cache_max_value_bytes = value_bytes,
+        .max_entries = entries,
+        .max_value_bytes = value_bytes,
     };
 }
 
@@ -213,23 +209,23 @@ const Probe = struct {
     fn touch(seen: *std.atomic.Value(usize)) void {
         defer release();
 
-        if (acquire(testConfig(4, 512)) != null) _ = seen.fetchAdd(1, .acq_rel);
+        if (acquire(testSize(4, 512)) != null) _ = seen.fetchAdd(1, .acq_rel);
     }
 };
 
 /// Acquires on a fresh thread, so it builds in the current generation.
 const NewerProbe = struct {
     fn run(out: *?*ResponseCache) void {
-        out.* = acquire(testConfig(8, 1024));
+        out.* = acquire(testSize(8, 1024));
         release();
     }
 };
 
 test "zix utils cache: async, acquire reuses one cache per thread" {
-    const first = acquire(testConfig(8, 1024)).?;
+    const first = acquire(testSize(8, 1024)).?;
     release();
 
-    const second = acquire(testConfig(8, 1024)).?;
+    const second = acquire(testSize(8, 1024)).?;
     release();
 
     try std.testing.expectEqual(first, second);
@@ -237,7 +233,7 @@ test "zix utils cache: async, acquire reuses one cache per thread" {
 }
 
 test "zix utils cache: async, acquired cache stores and hits" {
-    const resp_cache = acquire(testConfig(8, 1024)).?;
+    const resp_cache = acquire(testSize(8, 1024)).?;
     defer _ = reclaim();
     defer release();
 
@@ -253,7 +249,7 @@ test "zix utils cache: async, failed build is not retried in a generation" {
     tl_tried = true;
     tl_generation = generation.load(.seq_cst);
 
-    try std.testing.expect(acquire(testConfig(8, 1024)) == null);
+    try std.testing.expect(acquire(testSize(8, 1024)) == null);
     release();
 
     try std.testing.expectEqual(@as(usize, 0), registeredCount());
@@ -261,7 +257,7 @@ test "zix utils cache: async, failed build is not retried in a generation" {
 }
 
 test "zix utils cache: async, reclaim frees now without an active connection" {
-    _ = acquire(testConfig(8, 1024)).?;
+    _ = acquire(testSize(8, 1024)).?;
     release();
 
     try std.testing.expectEqual(@as(usize, 1), reclaim());
@@ -269,7 +265,7 @@ test "zix utils cache: async, reclaim frees now without an active connection" {
 }
 
 test "zix utils cache: async, reclaim twice frees nothing the second time" {
-    _ = acquire(testConfig(8, 1024)).?;
+    _ = acquire(testSize(8, 1024)).?;
     release();
 
     try std.testing.expectEqual(@as(usize, 1), reclaim());
@@ -277,7 +273,7 @@ test "zix utils cache: async, reclaim twice frees nothing the second time" {
 }
 
 test "zix utils cache: async, reclaim waits for an active connection" {
-    const resp_cache = acquire(testConfig(8, 1024)).?;
+    const resp_cache = acquire(testSize(8, 1024)).?;
 
     try std.testing.expectEqual(@as(usize, 0), reclaim());
     try std.testing.expectEqual(@as(usize, 1), registeredCount());
@@ -292,8 +288,8 @@ test "zix utils cache: async, reclaim waits for an active connection" {
 }
 
 test "zix utils cache: async, last release frees only after every hold ends" {
-    _ = acquire(testConfig(8, 1024)).?;
-    _ = acquire(testConfig(8, 1024)).?;
+    _ = acquire(testSize(8, 1024)).?;
+    _ = acquire(testSize(8, 1024)).?;
 
     try std.testing.expectEqual(@as(usize, 0), reclaim());
 
@@ -305,13 +301,13 @@ test "zix utils cache: async, last release frees only after every hold ends" {
 }
 
 test "zix utils cache: async, acquire after reclaim builds a new generation" {
-    _ = acquire(testConfig(8, 1024)).?;
+    _ = acquire(testSize(8, 1024)).?;
     release();
     _ = reclaim();
 
     const before = generation.load(.seq_cst);
 
-    _ = acquire(testConfig(8, 1024)).?;
+    _ = acquire(testSize(8, 1024)).?;
     defer _ = reclaim();
     defer release();
 
@@ -325,17 +321,17 @@ test "zix utils cache: async, failed build is retried in a new generation" {
     tl_tried = true;
     tl_generation = generation.load(.seq_cst);
 
-    try std.testing.expect(acquire(testConfig(8, 1024)) == null);
+    try std.testing.expect(acquire(testSize(8, 1024)) == null);
     release();
     _ = reclaim();
 
-    try std.testing.expect(acquire(testConfig(8, 1024)) != null);
+    try std.testing.expect(acquire(testSize(8, 1024)) != null);
     release();
     try std.testing.expectEqual(@as(usize, 1), reclaim());
 }
 
 test "zix utils cache: async, reclaim keeps a newer generation" {
-    const held = acquire(testConfig(8, 1024)).?;
+    const held = acquire(testSize(8, 1024)).?;
 
     try std.testing.expectEqual(@as(usize, 0), reclaim());
 
