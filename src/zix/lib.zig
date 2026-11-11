@@ -92,6 +92,9 @@ pub const Http1 = @import("tcp/http1/Http1.zig");
 /// ZIX Http2
 pub const Http2 = @import("tcp/http2/Http2.zig");
 
+/// ZIX Grpc
+pub const Grpc = @import("tcp/http2/grpc/Grpc.zig");
+
 /// ZIX Utils
 pub const utils = @import("utils/Utils.zig");
 
@@ -123,6 +126,11 @@ test "zix: jzon, export has the package semver fields" {
 test "zix: Http2, exports the h2c server" {
     try std.testing.expect(@hasDecl(Http2, "Server"));
     try std.testing.expect(@hasDecl(Http2.Server, "run"));
+}
+
+test "zix: Grpc, exports the gRPC server" {
+    try std.testing.expect(@hasDecl(Grpc, "Server"));
+    try std.testing.expect(@hasDecl(Grpc.Server, "init"));
 }
 
 test "zix: utils, exports the compression facade" {
