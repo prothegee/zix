@@ -126,7 +126,7 @@ graph TD
     reader --> frame
     control --> writer
     types --> writer
-    static --> static_cache["utils/static_cache.zig\ncache file terbuka bersama"]
+    static --> static_cache["utils/static/StaticCache.zig\ncache file terbuka bersama"]
 ```
 
 ---
@@ -178,10 +178,11 @@ kernel_backlog: u31   = 1024,
 workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux worker. Diabaikan oleh .ASYNC
 worker_stack_size_bytes: usize = 512 * 1024,
 busy_poll_us:   u32   = 0,     // window spin SO_BUSY_POLL (.EPOLL/.URING), 0 = tidak diset
+reuseport_cbpf: bool  = false, // arahkan koneksi ke listener di CPU-nya (.EPOLL/.URING), opt-in
 max_streams:    u32   = 128,   // SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan
 max_frame_size: u32   = 16384, // SETTINGS_MAX_FRAME_SIZE yang diiklankan
-max_header_scratch: usize = 4096,       // scratch decode HPACK per koneksi
-max_body:       usize = 16384, // body request maksimum yang di-buffer per stream (body di atas ini di-shed dengan 413)
+max_header_scratch: usize = 4096,       // scratch decode HPACK per koneksi (.EPOLL/.URING)
+max_body:       usize = 16384, // body request maksimum yang di-buffer per stream (.EPOLL/.URING), body di atas ini di-shed dengan 413
 max_recv_buf:   usize = 32 * 1024,      // floor read-buffer per-connection (.EPOLL/.URING)
 tls_write_buf_initial_bytes: usize = 16 * 1024,
 response_cache: bool  = false, // response cache per-worker (ADR-036), semua model
@@ -193,7 +194,7 @@ tls:            ?*Tls.Context = null,   // non-null menyajikan h2 di atas TLS (A
 logger:         ?*Logger = null,        // baris lifecycle saja, lihat bagian Logging
 ```
 
-Catatan: `workers` adalah jumlah mux worker pada `.EPOLL` / `.URING` (0 = cpu count), dan meng-oversubscribe-nya hanya menambah churn scheduler. `.ASYNC` mengabaikannya. `max_recv_buf` adalah floor: read accumulator mux diukur sebesar nilai yang lebih besar antara ia dan satu frame maksimum, sehingga floor yang lebih besar memangkas `read()` dan compaction buffer untuk frame besar. `tls` opt-in ke h2 di atas TLS: saat non-null server menyajikan pada jalur TLS ter-gate (model dispatch cleartext tidak tersentuh), dan untuk HTTP/2 ALPN context sebaiknya menyertakan `.H2`. Field `response_cache` dan `cache_*` mengonfigurasi cache per-worker yang opt-in (ADR-036), dibaca saat runtime pada `.EPOLL` dan `.URING`.
+Catatan: `workers` adalah jumlah mux worker pada `.EPOLL` / `.URING` (0 = cpu count), dan meng-oversubscribe-nya hanya menambah churn scheduler. `.ASYNC` mengabaikannya, dan juga mengabaikan `max_body` serta `max_header_scratch`: loop blocking-nya memberi setiap stream buffer tetap (body 64 KiB, header scratch 4 KiB, `Stream.zig`). `max_recv_buf` adalah floor: read accumulator mux diukur sebesar nilai yang lebih besar antara ia dan satu frame maksimum, sehingga floor yang lebih besar memangkas `read()` dan compaction buffer untuk frame besar. `tls` opt-in ke h2 di atas TLS: saat non-null server menyajikan pada jalur TLS ter-gate (model dispatch cleartext tidak tersentuh), dan untuk HTTP/2 ALPN context sebaiknya menyertakan `.H2`. Field `response_cache` dan `cache_*` mengonfigurasi cache per-worker yang opt-in (ADR-036), dibaca saat runtime pada `.EPOLL` dan `.URING`.
 
 `handler_timeout_ms` (ADR-063) adalah deadline global: diseed ke `Context.deadline` saat dispatch, 0 berarti tanpa deadline. Handler bisa memperketat atau menghapus deadline-nya sendiri via `ctx.setTimeout` / `withDeadline`, dicek dengan `ctx.isExpired()` di antara langkah-langkah (engine tidak pernah menginterupsi handler yang sedang berjalan, ini opt-in).
 
@@ -238,10 +239,10 @@ try server.run();
 flowchart TD
     A["router: tidak ada route cocok"] --> B{"ctx.public_dir diisi?"}
     B -->|tidak| Z["404 Not Found"]
-    B -->|ya| C{"path mengandung '..'?"}
+    B -->|ya| C{"path tidak aman?\n'..', absolut, root '/', melebihi PUBLIC_PATH_MAX"}
     C -->|ya| Z
     C -->|tidak| D["negosiasi encoding, resolve file"]
-    D -->|tidak ada| Z
+    D -->|tidak ada atau direktori| Z
     D -->|ketemu| E{"ada header Range?"}
     E -->|tidak ada atau malformed| F["200, file utuh"]
     E -->|terpenuhi| G["206 dengan Content-Range"]
@@ -253,10 +254,11 @@ flowchart TD
 
 - Satu frame HEADERS membawa status, content type, `content-length`, `accept-ranges`, dan `content-range` bila response-nya 206. File kosong menutup stream pada HEADERS tanpa DATA sama sekali.
 - Frame DATA dibatasi oleh `SETTINGS_MAX_FRAME_SIZE` milik **peer**, bukan `max_frame_size` server ini. Keduanya nilai berbeda: `max_frame_size` adalah yang server ini iklankan akan diterimanya, dan mengukur frame keluar dengan nilai itu justru yang dijawab peer patuh dengan `FRAME_SIZE_ERROR`. Nilai peer datang dari mux, dari frame SETTINGS di tengah koneksi, atau dari header base64 `HTTP2-Settings` pada upgrade h2c.
+- Response 206 yang blok HEADERS-nya tidak muat di scratch encode jatuh ke file utuh sebagai 200. Bila blok 200 pun tidak muat, stream ditutup dengan RST_STREAM `INTERNAL_ERROR`.
 - Range (RFC 7233) disajikan: 206 untuk range yang terpenuhi, 416 dengan `Content-Range: bytes */length` untuk range well-formed yang melewati akhir file, dan header malformed diabaikan sehingga file utuh yang dikirim, sesuai bagian 3.1. Header multi-range dijawab range pertama saja.
-- Kedua jalur dibangun, yang di-cache maupun yang tidak, jadi `public_dir` berperilaku sama baik `public_dir_cache_ttl_ms` diatur maupun tidak. Bila diatur, request berulang berbiaya satu lookup hash alih-alih open plus stat, dan sibling `.br` / `.gz` di-resolve sekali saat insert alih-alih diprobe per request. Setiap header varian yang di-cache membawa `Vary: Accept-Encoding`.
-- Zero copy (`sendfile`) selalu ditolak di engine ini, termasuk cleartext, karena hook coalescing mux (`writer.write_hook`) terpasang di setiap batch dan write socket langsung akan menaruh body mendahului frame yang sudah di-stage. Body dipotong dari snapshot resident sebagai gantinya.
-- Pengiriman static memakai jalur `writer.sendResponseFD` tanpa metering yang sama seperti `Response.send`, bukan `mux.sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
+- Kedua jalur dibangun, yang di-cache maupun yang tidak, jadi `public_dir` berperilaku sama baik `public_dir_cache_ttl_ms` diatur maupun tidak. Bila diatur, request berulang berbiaya satu lookup hash alih-alih open plus stat, dan sibling `.br` / `.gz` di-resolve sekali saat insert alih-alih diprobe per request. Response HTTP/2 tidak membawa `Vary: Accept-Encoding`, baik dari cache maupun tidak.
+- Zero copy (`sendfile`) dipakai di Linux selama frame ditulis langsung ke socket. Saat hook batching mux masuk, zero copy harus ditolak selama batch di-stage, kalau tidak body mendahului frame yang sudah di-stage. Body lalu dipotong dari snapshot resident sebagai gantinya.
+- Pengiriman static memakai write frame `writer` tanpa metering yang sama seperti `Response.send`, bukan `mux.sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
 - `public_dir_upload` tidak ditawarkan di sini. `zix.Http2` tidak punya konvensi handler upload, tidak seperti `zix.Http1`.
 
 ---
@@ -325,7 +327,7 @@ Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext
 
 `config.logger` hanya menerima baris lifecycle server (notice listening, fallback io_uring, fallback non-Linux) via `logger.system()`. Saat null, baris lifecycle dicetak ke stderr hanya pada Debug build dan diam pada release build.
 
-Access logging per-stream adalah tanggung jawab engine, bukan handler. Saat `config.logger` diisi, engine menulis satu record `[http2:access]` setelah setiap stream yang dilayani, mengambil status dan jumlah byte dari `Response`. Handler yang membingkai byte-nya sendiri lewat `writer.sendResponseFD` tetap tercatat, tetapi jumlah byte-nya terbaca 0, sehingga handler seperti itu boleh memanggil `logger.access()` sendiri di titik ukuran sebenarnya diketahui.
+Access logging per-stream adalah tanggung jawab engine, bukan handler. Saat `config.logger` diisi, engine menulis satu record `[http2:access]` setelah setiap stream yang dilayani, mengambil status dan jumlah byte dari `Response`. Handler yang membingkai byte-nya sendiri lewat `writer.sendResponseFD` tetap tercatat, tetapi jumlah byte-nya terbaca 0, sehingga handler seperti itu boleh memanggil `logger.access()` sendiri di titik ukuran sebenarnya diketahui. File yang disajikan fallback static tercatat dengan cara yang sama, dengan jumlah byte 0.
 
 ---
 
@@ -350,10 +352,10 @@ Mux `.EPOLL` / `.URING` meminjam tiap stream slot dari pool thread-local per-wor
 
 | Batas | Perilaku |
 | :- | :- |
-| Body request per stream | Di-buffer hingga `max_body` (default 16 KB). Body yang melewati kapasitas buffer di-shed dengan 413 dan END_STREAM, jadi handler tidak pernah melihat slice terpotong dan body korup tidak pernah di-dispatch. Hanya window koneksi yang dikredit untuk byte yang dibuang, menjaga koneksi tetap dapat dipakai untuk stream lainnya |
+| Body request per stream | `.EPOLL` / `.URING`: di-buffer hingga `max_body` (default 16 KB). `.ASYNC`: tetap 64 KiB per stream (`Stream.BODY_BUF_SIZE`). Body yang melewati kapasitas buffer di-shed dengan 413 dan END_STREAM, jadi handler tidak pernah melihat slice terpotong dan body korup tidak pernah di-dispatch. Hanya window koneksi yang dikredit untuk byte yang dibuang, menjaga koneksi tetap dapat dipakai untuk stream lainnya |
 | Stream konkuren | Diiklankan sebagai `max_streams` (`SETTINGS_MAX_CONCURRENT_STREAMS`). Stream yang dibuka melebihi itu dijawab dengan `REFUSED_STREAM`, jadi nilai yang diiklankan minimal harus sebesar jumlah concurrent-stream peer |
 | Upgrade h2c (.EPOLL/.URING) | Disajikan minimal pada jalur mux: `101` lalu connection preface, request yang dibawa pada stream 1 tidak dilayani. Klien prior-knowledge (kasus h2c yang umum) tidak terpengaruh. Model blocking `.ASYNC` melayani request stream-1 hasil upgrade |
-| Scratch blok header | `max_header_scratch` per koneksi (default 4 KB). Set header yang meluapkannya dijawab dengan `COMPRESSION_ERROR` dan RST_STREAM |
+| Scratch blok header | `.EPOLL` / `.URING`: `max_header_scratch` per koneksi (default 4 KB). `.ASYNC`: tetap 4 KiB per stream (`Stream.HEADER_SCRATCH_SIZE`). Set header yang meluapkannya dijawab dengan `COMPRESSION_ERROR` dan RST_STREAM |
 | Ukuran frame | Frame yang lebih besar dari `max_frame_size` plus slack adalah `FRAME_SIZE_ERROR` dan menutup koneksi dengan GOAWAY. DATA keluar diukur dengan nilai yang diiklankan peer, tidak pernah dengan nilai ini |
 | File static | `public_dir` menyajikan file utuh dan range tunggal. Header multi-range dijawab range pertama saja, dan tidak ada companion `public_dir_upload` di engine ini |
 | TLS | h2 di atas TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, pada perf band-nya sendiri. `.EPOLL` / `.URING` melakukan terminasi di worker epoll-mux event-driven, `.ASYNC` per koneksi di worker thread. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
