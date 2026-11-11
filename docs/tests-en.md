@@ -152,9 +152,13 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http2/grpc/status.zig` | `refAllDecls` + behavioral: OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
+| `tcp/http2/grpc/status.zig` | each code maps to its canonical value, each canonical value maps back to its code, OK is the zero value, unknown code past 16 / max u8 keeps its value |
 | `tcp/http2/grpc/frame.zig` | `refAllDecls` + behavioral: `readGrpcPrefix` / `writeGrpcPrefix` roundtrip, compress flag preserved, message length preserved, `sendGrpcError` includes `content-type` header |
-| `tcp/http2/grpc/proto.zig` | `refAllDecls` + behavioral: `encodeVarint` / `decodeVarint` roundtrip, `encodeString` produces LEN wire type, `encodeInt32` produces VARINT wire type, `encodeDouble` / `decodeDouble` roundtrip (positive and negative values), `MessageReader` iterates all fields |
+| `tcp/http2/grpc/proto/wire_type.zig` | ids match the protobuf encoding |
+| `tcp/http2/grpc/proto/varint.zig` | 1 is one byte, 300 is two bytes, max u64 is `MAX_LEN` bytes, round trip across sizes, decode stops at the first final byte, encode into empty buf / past the buf BufferFull, empty / truncated input UnexpectedEOF, 10th byte past bit 0 / 11 bytes Overflow |
+| `tcp/http2/grpc/proto/field.zig` | string encodes tag, length, and bytes, empty string zero length, int32 150 varint field, negative int32 10 value bytes, double round trip positive / negative, string / int32 / double / empty buf BufferFull |
+| `tcp/http2/grpc/proto/ProtoField.zig` | holds a varint field, payload points into the source |
+| `tcp/http2/grpc/proto/MessageReader.zig` | empty buf null, reads a string / varint / double / I32 field, reads fields in order, LEN past the buf / max u64 LEN / short I64 / short I32 / cut varint UnexpectedEOF, group wire type UnknownWireType, tag past 64 bits Overflow, field number past u32 FieldNumberTooLarge |
 | `tcp/http2/grpc/timeout.zig` | `refAllDecls` + behavioral: H/M/S/m/u/n units convert correctly, single-char returns null, empty returns null |
 | `tcp/http2/grpc/core.zig` | `refAllDecls` + behavioral: `parsePath` valid and invalid inputs, `detectContentType` proto/json/unknown, `GrpcContext.recvMessage` empty body returns null, `Route.timeout_ms` defaults to zero, `GrpcContext.isExpired` null/past/future deadline, `GrpcServeOpts.handler_timeout_ms` defaults to zero, Router dispatches to matching handler |
 | `tcp/http2/grpc/config.zig` | `refAllDecls` + behavioral: `GrpcServerConfig` required fields and defaults (handler_timeout_ms=0), `GrpcClientConfig` required fields |
