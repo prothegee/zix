@@ -35,7 +35,7 @@ graph LR
 | `src/zix/tcp/http2/grpc/server.zig` | `init(Router, config)`, `GrpcServer(Router)`: `run()` checks the port and the model, then calls the per-model file under `dispatch/` |
 | `src/zix/tcp/http2/grpc/log.zig` | `logSystem`: server lines to the logger (tag `grpc`) or to `std.log` |
 | `src/zix/tcp/http2/grpc/mux/` | multiplexed non-blocking path for `.EPOLL` / `.URING`: `MuxConn.zig`, `stream_pool.zig`, `settings_frame.zig`, `stage_frame.zig`, `tcp_cork.zig`, `mux_dispatch.zig`, `mux_upgrade.zig`, `frame_loop.zig`, `process.zig` (`onReadable`, `processRing`) |
-| `src/zix/tcp/http2/grpc/dispatch/` | per-model dispatch files: `async.zig` (`.ASYNC`). `epoll.zig` and `uring.zig` are not ported yet |
+| `src/zix/tcp/http2/grpc/dispatch/` | per-model dispatch files: `async.zig` (`.ASYNC`), `epoll.zig` (`.EPOLL`), `uring.zig` (`.URING`) |
 | `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: blocking TLS handler path (per-connection) |
 | `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: multiplexed TLS dispatch path |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
@@ -324,7 +324,7 @@ When the handler calls `res.finish(status, msg)` without sending any data, the s
 | `.EPOLL` | per worker | multiplexed event loop (Linux only) | highest throughput, see below |
 | `.URING` | per worker | multiplexed io_uring loop (Linux only) | same shape as `.EPOLL`, completion-based |
 
-Only `.ASYNC` is ported. `.EPOLL` and `.URING` are not ported yet: `run()` returns `ZixHttp2_GrpcServer_DispatchModel_NotSupported` for them on every platform, so pick `.ASYNC`. The multiplexed path they will drive is ported (`mux/`). The design below is what they will run.
+All three models are ported. `.EPOLL` and `.URING` run on Linux only: off Linux, `run()` returns `ZixHttp2_GrpcServer_DispatchModel_NotSupported` before anything is bound. Both drive the multiplexed path under `mux/`. `.URING` has no fallback to `.EPOLL`: a kernel without io_uring ends the run with `ZixHttp2_GrpcServer_UringSetupFailed`.
 
 `.URING` is the same shared-nothing multiplexed design on the io_uring ring: completion-based instead of readiness-based, `workers` workers (0 = cpu_count), Linux-only.
 
