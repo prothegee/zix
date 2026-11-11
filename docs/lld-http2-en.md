@@ -320,7 +320,17 @@ Range parsing is shared with the other engines: `utils/http/range_header.zig`. `
 
 ## dispatch/ and tls_mux.zig
 
-`server.zig` holds the public `Http2Server` type and a thin `run()` switch: `.ASYNC` keeps the accept-thread structure (`common.ConnTask` plus `common.dispatchConn`) and calls `serve.serveConn`, `.EPOLL` calls `epoll.runEpoll`, `.URING` calls `uring.runUring`, and `config.tls != null` routes `.EPOLL` / `.URING` to `tls_mux.runTlsMux`, everything else to `tls_serve.runTls`. Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
+`Server.zig` is the public `zix.Http2.Server` (fields `config` and `handler` at file scope). `run()` runs three gates, then the model switch:
+
+1. `gatePort`: port 0 returns `ZixHttp2_Server_PortNotConfigured`.
+2. `gateDispatchModel`: `.IOCP` and `.KQUEUE` always, `.EPOLL` and `.URING` off Linux, return `ZixHttp2_Server_DispatchModel_NotSupported` (ADR-065). It runs before anything is set up, so a rejected config leaves nothing behind.
+3. `gatePublicDir`: a set `public_dir` that cannot be opened returns `ZixHttp2_Server_PublicDirNotFound`, `PublicDirNotADirectory`, or `PublicDirUnreadable`.
+
+Then `installStaticCache` installs the process static cache when `public_dir` and a TTL are set (a failed install is only a warning). Only the server that built the table shuts it down when `run()` returns.
+
+The model switch maps `.ASYNC` to `dispatch/async.zig` (then `serve.serveConn`), `.EPOLL` to `dispatch/epoll.zig`, and `.URING` to `dispatch/uring.zig`. Those files are not ported yet, so every arm returns `ZixHttp2_Server_DispatchModel_NotSupported` for now. The `config.tls != null` branch (`tls_mux.runTlsMux` for `.EPOLL` / `.URING`, `tls_serve.runTls` otherwise) is not in `Server.zig` yet either.
+
+`Http2.zig` is the `zix.Http2` namespace. It re-exports the public types and functions from their own files and keeps the old names `HpackEntry` (the same type as `Header`), `DEFAULT_WINDOW_SIZE`, and `MAX_PAYLOAD`.
 
 ### dispatch/epoll.zig
 
