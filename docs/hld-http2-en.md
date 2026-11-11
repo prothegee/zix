@@ -94,8 +94,11 @@ graph TD
 
     Http2 --> core["core.zig\nblocking h2c loop\nserveConn + Router"]
     Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
-    Http2 --> frame["frame.zig\nframe codec + control-frame senders\nsendResponseFD / sendResponseEncodedFD"]
-    Http2 --> hpack["hpack.zig\nstatic table + Huffman\ndecoder + encoder + respHeaderBlock"]
+    Http2 --> frame["frame.zig + FrameHeader.zig\nframe constants + header codec"]
+    Http2 --> writer["writer.zig\nwriteAllFD + sendResponseFD / sendResponseEncodedFD"]
+    Http2 --> reader["reader.zig\nrecvExact + readFrameHeader"]
+    Http2 --> control["control.zig\ncontrol-frame senders"]
+    Http2 --> hpack["hpack/\nstatic table + Huffman + integer\ndecoder + encoder + respHeaderBlock"]
     Http2 --> config["config.zig\nHttp2ServerConfig"]
     Http2 --> server["server.zig\nServer + dispatch_model switch"]
     Http2 --> static["static.zig\npublic_dir fallback\nHEADERS + capped DATA frames"]
@@ -106,12 +109,18 @@ graph TD
 
     dispatch --> core
     dispatch --> mux
-    mux --> frame
+    mux --> writer
+    mux --> control
     mux --> hpack
-    core --> frame
+    core --> reader
+    core --> writer
+    core --> control
     core --> hpack
-    static --> frame
-    static --> hpack
+    static --> writer
+    writer --> frame
+    writer --> hpack
+    reader --> frame
+    control --> writer
     static --> static_cache["utils/static_cache.zig\nshared open-file cache"]
 ```
 
@@ -131,7 +140,7 @@ Access via `const zix = @import("zix");`
 | `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (no `.PARAM` this pass) |
 | `zix.Http2.Router` | fn | `Router(comptime routes) type`, returns a type whose `dispatch` matches `HandlerFn` exactly (usable directly as the `Server.init` handler); unmatched paths get a 404 `text/plain` |
 | `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, zero-copy view over the stream's decoded headers/body, plus `header(name)` and `queryParam(name)` |
-| `zix.Http2.Response` | struct | Thin builder over `frame.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, all `!void`. `sent: bool` guards the auto-500 |
+| `zix.Http2.Response` | struct | Thin builder over `writer.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, all `!void`. `sent: bool` guards the auto-500 |
 | `zix.Http2.Context` | struct | `fd`, `sid`, `deadline_ns` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
 | `zix.Http2.ServeOpts` | struct | Per-connection serve options built from the config |
 | `zix.Http2.serveConn` | fn | `serveConn(handler, fd, opts, io)`: direct blocking connection entry point |
@@ -212,8 +221,8 @@ try server.run();
 - `Server.init` takes a runtime `handler: HandlerFn` (ADR-063), built via `Router(&[_]Route{...}).dispatch`. Routes themselves stay comptime (baked into the router type), but the server no longer bakes the route table into its own type, so `Server` is one concrete struct, not a generic.
 - The handler is called once per completed stream (END_HEADERS plus END_STREAM), via `core.invokeHandler` which builds the trio and dispatches. `req.method`, `req.headers`, and `req.body` all point into per-stream buffers and are valid only for the duration of the call.
 - `ctx.allocator` is a per-request stack arena (`FixedBufferAllocator`, no heap call), `ctx.io` carries the connection's `std.Io`, and `ctx.deadline_ns` / `isExpired()` cover Layer B timeouts (see `handler_timeout_ms` above).
-- The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`frame.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when `!res.sent`, so a partially sent response is never corrupted.
-- Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `frame.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `mux.sendResponseStreamFD` escape hatch directly (paced by flow control), not wrapped by `Response`.
+- The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when `!res.sent`, so a partially sent response is never corrupted.
+- Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `writer.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `mux.sendResponseStreamFD` escape hatch directly (paced by flow control), not wrapped by `Response`.
 - The engine resolves the path to a handler through `Router(routes).dispatch` before the call (EXACT then longest-PREFIX match, unmatched paths try the static fallback below and then get 404 `text/plain`), so the handler does not parse or match the path itself.
 
 ---
@@ -243,8 +252,8 @@ flowchart TD
 - DATA frames are capped at the **peer's** `SETTINGS_MAX_FRAME_SIZE`, not at this server's `max_frame_size`. The two are different values: `max_frame_size` is what this server advertises it will accept, and sizing outbound frames by it is what a conforming peer answers with `FRAME_SIZE_ERROR`. The peer value arrives from the mux, from SETTINGS frames mid-connection, or from the base64 `HTTP2-Settings` header on an h2c upgrade.
 - Range (RFC 7233) is served: 206 for a satisfiable range, 416 with `Content-Range: bytes */length` for a well-formed range past the end, and a malformed header is ignored so the whole file is sent, which is what section 3.1 asks for. A multi-range header answers the first range only.
 - Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set. With it set, a repeat request costs a hash lookup instead of an open plus a stat, and `.br` / `.gz` siblings are resolved once at insert instead of probed per request. Every cached variant header carries `Vary: Accept-Encoding`.
-- Zero copy (`sendfile`) is always refused on this engine, cleartext included, because the mux coalescing hook (`frame.write_hook`) is installed on every batch and a direct socket write would put the body ahead of frames already staged. The body is cut from a resident snapshot instead.
-- Static sends use the same unmetered `frame.sendResponseFD` path `Response.send` uses, not the window-paced `mux.sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
+- Zero copy (`sendfile`) is always refused on this engine, cleartext included, because the mux coalescing hook (`writer.write_hook`) is installed on every batch and a direct socket write would put the body ahead of frames already staged. The body is cut from a resident snapshot instead.
+- Static sends use the same unmetered `writer.sendResponseFD` path `Response.send` uses, not the window-paced `mux.sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
 - `public_dir_upload` is not offered here. `zix.Http2` has no upload handler convention, unlike `zix.Http1`.
 
 ---
@@ -279,9 +288,9 @@ A protocol violation (stream id 0 where illegal, an oversize frame, a bad prefac
 
 ## HPACK
 
-`hpack.zig` is a full HPACK codec with no external dependency.
+`hpack/` is a full HPACK codec with no external dependency, one file per concern (tables, Huffman, prefix integers, dynamic table, decoder, encoder, response block).
 
-- Request decoder: the 61-entry static table plus a dynamic table (up to 128 entries) backed by a connection-lifetime buffer (`dyn_buf`, 8 KB) with size-bounded eviction and in-place compaction. Indexed and literal values are copied into the caller's per-stream scratch, so decoded header slices stay stable even after the scratch is reused for the next stream. Huffman-coded strings are decoded on the fly.
+- Request decoder: the 61-entry static table plus a dynamic table (up to 128 entries) backed by a connection-lifetime buffer (`DynamicTable.buf`, 8 KB) with size-bounded eviction and in-place compaction. Indexed and literal values are copied into the caller's per-stream scratch, so decoded header slices stay stable even after the scratch is reused for the next stream. Huffman-coded strings are decoded on the fly.
 - Response encoder: stateless (static table plus literal-without-indexing, never the dynamic table or a size update), so a given header block is byte-identical on every connection.
 - `respHeaderBlock`: encodes `[:status, content-type, content-encoding, content-length]`. Because the encoder is stateless, the `[:status, content-type, content-encoding]` prefix is cached per distinct triple (an append-only, lock-free-read cache) and only the varying `content-length` is re-encoded per call, so a hot response path skips the repeated static-table scans and the Huffman encode of the same content-type.
 
@@ -305,7 +314,7 @@ Setting `config.tls` (a `*Tls.Context`) opts into HTTP/2 over TLS (TLS 1.3 with 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. One `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker, with no socketpair and no thread per connection. The resumable h2 mux consumes the decrypted plaintext, and its reply frames are encrypted back into TLS records through the thread-local frame write hook. Outbound ciphertext that does not fit is staged per connection and flushed on the next EPOLLOUT, so a slow client never parks the worker.
 - `.ASYNC`: `tls_serve.runTls`. An accept loop hands each connection to its own worker thread, which runs the shared terminator (`tcp/tls/h2_terminator.zig`) with an inline-mux driver that drives the same resumable mux directly over the decrypted stream (one thread per connection, no socketpair). This path also serves TLS 1.2.
 
-The write hook (`frame.write_hook`) is the shared mechanism: the mux writes plaintext through `frame.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
+The write hook (`writer.write_hook`) is the shared mechanism: the mux writes plaintext through `writer.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
 
 ---
 
@@ -313,7 +322,7 @@ The write hook (`frame.write_hook`) is the shared mechanism: the mux writes plai
 
 `config.logger` receives server lifecycle lines only (listening notices, io_uring fallback, non-Linux fallback) via `logger.system()`. When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds.
 
-Per-stream access logging is the engine's, not the handler's. When `config.logger` is set the engine writes one `[http2:access]` record after every served stream, taking the status and byte count off the `Response`. A handler that frames its own bytes through `frame.sendResponseFD` is still recorded, but its byte count reads 0, so such a handler may call `logger.access()` itself where the real size is known.
+Per-stream access logging is the engine's, not the handler's. When `config.logger` is set the engine writes one `[http2:access]` record after every served stream, taking the status and byte count off the `Response`. A handler that frames its own bytes through `writer.sendResponseFD` is still recorded, but its byte count reads 0, so such a handler may call `logger.access()` itself where the real size is known.
 
 ---
 
@@ -325,7 +334,7 @@ Per-stream access logging is the engine's, not the handler's. When `config.logge
 | Frame payload + stream array (.ASYNC) | `smp_allocator`: one payload buffer plus `max_streams` inline `Stream` slots (each carries its own body and header-scratch buffers) | Connection |
 | Per-connection MuxConn (.EPOLL/.URING) | `smp_allocator`: read accumulator (`max_recv_buf` floor) plus a `max_streams`-wide `*MuxStream` pointer array and slot flags | Connection |
 | Open stream state (.EPOLL/.URING) | per-worker thread-local `MuxStream` pool (free-list), each slot's `max_body` and `max_header_scratch` buffers reused across borrows | Concurrent stream (returned to the pool on close) |
-| HPACK dynamic table | inline in the connection's decoder (`dyn_buf`, 8 KB) | Connection |
+| HPACK dynamic table | inline in the connection's decoder (`DynamicTable.buf`, 8 KB) | Connection |
 | Per-worker response cache (opt-in) | `smp_allocator`, `cache_max_entries` * `cache_max_value_bytes` per worker | Worker thread |
 | Handler allocations | `ctx.allocator`: a stack `FixedBufferAllocator` (`CTX_ARENA_BYTES`, no heap call), reset per request | Request |
 | Static file cache (opt-in) | one demand-paged mapping shared by every worker and every HTTP engine in the process, `public_dir_cache_max_entries` slots holding an open file, its size, and its prerendered header | Process |
