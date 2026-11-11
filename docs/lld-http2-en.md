@@ -13,13 +13,13 @@ The resumable h2c state machine for `.EPOLL` / `.URING`, one file per concern:
 | file | holds |
 | :- | :- |
 | `MuxStream.zig` | one pooled stream: headers, body, send window, parked body |
-| `MuxConn.zig` | per-fd state: read buffer, HPACK decoder, slots, windows. Slot claim, find, release |
+| `MuxConn.zig` | per-fd state: read buffer, HPACK decoder, slots, windows, `upgrade_slot` (stream 1 of an h2c upgrade, waiting for the preface). Slot claim, find, release |
 | `stream_pool.zig` | per-worker threadlocal freelist of `MuxStream`: `acquire`, `release` |
 | `conn_outcome.zig` | `ConnOutcome`: `keep_alive` or `close` |
 | `mux_phase.zig` | `MuxPhase`: `await_preface`, `await_upgrade`, `await_preface2`, `h2` |
 | `flow.zig` | send-side flow control: `pumpBody`, `resumeStream`, `resumeAll` |
 | `send_stream.zig` | `active_conn` and `sendResponseStreamFD` |
-| `mux_upgrade.zig` | `handleUpgrade`: the h2c upgrade on the mux path (101 only) |
+| `mux_upgrade.zig` | `handleUpgrade`: the h2c upgrade on the mux path (opens stream 1, 101). `serveUpgradeStream`: answers stream 1 after the preface |
 | `mux_dispatch.zig` | `dispatchWhole`, `hangupGoaway` |
 | `frame_loop.zig` | `run`: one whole frame at a time, one `on*` function per frame type |
 | `process.zig` | preface phases, `onReadable` (`.EPOLL`), `processRing` (`.URING`) |
@@ -93,9 +93,10 @@ The key allocation strategy. A worker drives many connections from one thread, a
 
 `process` is the handshake phase machine, then the frame loop:
 
-- `await_preface`: need 3 bytes. If they are not `"PRI"`, set `await_upgrade` and call `mux_upgrade.handleUpgrade`. Else need the 24-byte `PREFACE`, validate it (GOAWAY `PROTOCOL_ERROR` and close when it is wrong), send server SETTINGS (`peer_settings.sendServerSettings`), set `h2`.
-- `await_upgrade`: `handleUpgrade` (accumulate to `\r\n\r\n`, reply `400` when `upgrade.isH2cUpgrade` is false, `101` when it is true, then `await_preface2`, and the stream-1 request is not served). A head that fills `rbuf` closes.
-- `await_preface2`: after the `101`, validate the preface, send SETTINGS, set `h2`.
+- `await_preface`: need 3 bytes. If they are not `"PRI"`, set `await_upgrade`. Else need the 24-byte `PREFACE`, validate it (GOAWAY `PROTOCOL_ERROR` and close when it is wrong), send server SETTINGS (`peer_settings.sendServerSettings`), set `h2`.
+- `await_upgrade`: `handleUpgrade` (accumulate to `\r\n\r\n`, reply `400` when `upgrade.isH2cUpgrade` is false). An h2c head is read with `upgrade.parseHead`, its `HTTP2-Settings` go through `peer_settings.apply`, and stream 1 is opened with `:method`, `:path`, `:scheme` copied into the stream scratch (the head bytes in `rbuf` are reused later). A request line past the scratch, or no free slot, replies `400` and closes. Then `101`, `last_stream_id = 1`, `upgrade_slot` set, `await_preface2`. A head that fills `rbuf` closes.
+- `await_preface2`: after the `101`, validate the preface, send SETTINGS, set `h2`, then `serveUpgradeStream` answers stream 1 (`mux_dispatch.dispatchWhole`) before any frame that follows.
+- The phases fall through, so an upgrade head, the preface, and frames read together are handled in one pass.
 - `h2`: `frame_loop.run`.
 
 `onReadable` (`.EPOLL`) loops: `compact`, close when `rbuf` is still full, `read` into `rbuf[rend..]` (WouldBlock -> `keep_alive`, an error -> `close`, 0 -> `hangupGoaway` then `close`), then `process`, repeating until EAGAIN. Level-triggered epoll re-fires if more arrives. `processRing` (`.URING`) is the same processing pass with no read loop: the ring owns the recv and re-arms it after this returns.
@@ -227,7 +228,7 @@ Shared request processing and the blocking connection path, split by responsibil
 | :- | :- |
 | `ServeOpts.zig` | per-connection serving knobs |
 | `serve.zig` | `serveConn`: preface or upgrade, then one frame at a time |
-| `upgrade.zig` + `UpgradeHead.zig` | HTTP/1.1 half of the h2c upgrade (`accept`, answers 101). `isH2cUpgrade`, `HEAD_END`, `BAD_REQUEST`, `SWITCHING_PROTOCOLS` are public, the mux upgrade reuses them |
+| `upgrade.zig` + `UpgradeHead.zig` | HTTP/1.1 half of the h2c upgrade (`accept`, answers 101). `isH2cUpgrade`, `parseHead`, `HEAD_END`, `BAD_REQUEST`, `SWITCHING_PROTOCOLS` are public, the mux upgrade reuses them |
 | `Stream.zig` | one request stream: decoded headers and body |
 | `stream_state.zig` | `StreamState` (RFC 7540 section 5.1) |
 | `stream_slot.zig` | stream table `claim`, `find`, `requestInFlight` |
