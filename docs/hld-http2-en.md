@@ -41,7 +41,7 @@ Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enu
 
 `run()` checks in this order before it serves: `config.port` (0 returns `ZixHttp2_Server_PortNotConfigured`), the dispatch model, then `public_dir` (`ZixHttp2_Server_PublicDir*`). A rejected config leaves no listener and no static cache behind.
 
-Note: the dispatch model files are not ported yet. Until they land, `run()` returns `ZixHttp2_Server_DispatchModel_NotSupported` for every model after these checks pass.
+Note: only `.ASYNC` is wired. `.EPOLL` and `.URING` land with the Linux dispatch. Until then `run()` returns `ZixHttp2_Server_DispatchModel_NotSupported` for them after these checks pass.
 
 ### .ASYNC: Thread-per-connection over the blocking core
 
