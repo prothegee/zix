@@ -32,6 +32,7 @@
 const std = @import("std");
 const DispatchModel = @import("../../shared/dispatch.zig").Model;
 const Logger = @import("../../logger/Logger.zig");
+const ServeOpts = @import("ServeOpts.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -92,6 +93,32 @@ public_dir_cache_ttl_ms: u32 = 0,
 public_dir_cache_max_entries: u32 = 256,
 
 const Self = @This();
+
+// --------------------------------------------------------- //
+// Public:
+
+/// Map the server Config onto the per-connection serve options.
+///
+/// Return:
+/// - ServeOpts
+pub fn serveOpts(self: Self) ServeOpts {
+    return .{
+        .max_streams = self.max_streams,
+        .max_frame_size = self.max_frame_size,
+        .max_header_scratch = self.max_header_scratch,
+        .max_body = self.max_body,
+        .logger = self.logger,
+        .conn_read_buf_min = self.max_recv_buf,
+        .tls_write_buf_initial = self.tls_write_buf_initial_bytes,
+        .response_cache = self.response_cache,
+        .cache_max_entries = self.cache_max_entries,
+        .cache_max_value_bytes = self.cache_max_value_bytes,
+        .cache_ttl_ms = self.cache_ttl_ms,
+        .cache_max_total_bytes = self.cache_max_total_bytes,
+        .handler_timeout_ms = self.handler_timeout_ms,
+        .public_dir = self.public_dir,
+    };
+}
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -181,5 +208,76 @@ test "zix http2: Config, static serving defaults off" {
     try std.testing.expectEqualStrings("", config.public_dir);
     try std.testing.expectEqual(@as(u32, 0), config.public_dir_cache_ttl_ms);
     try std.testing.expectEqual(@as(u32, 256), config.public_dir_cache_max_entries);
+}
+
+test "zix http2: Config, serveOpts carries the stream and frame knobs" {
+    var config = testConfig();
+    config.max_streams = 8;
+    config.max_frame_size = 32 * 1024;
+    config.max_header_scratch = 8192;
+    config.max_body = 1 << 20;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expectEqual(@as(usize, 8), opts.max_streams);
+    try std.testing.expectEqual(@as(u32, 32 * 1024), opts.max_frame_size);
+    try std.testing.expectEqual(@as(usize, 8192), opts.max_header_scratch);
+    try std.testing.expectEqual(@as(usize, 1 << 20), opts.max_body);
+}
+
+test "zix http2: Config, serveOpts carries the buffer knobs" {
+    var config = testConfig();
+    config.max_recv_buf = 64 * 1024;
+    config.tls_write_buf_initial_bytes = 4096;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expectEqual(@as(usize, 64 * 1024), opts.conn_read_buf_min);
+    try std.testing.expectEqual(@as(usize, 4096), opts.tls_write_buf_initial);
+}
+
+test "zix http2: Config, serveOpts carries the cache knobs" {
+    var config = testConfig();
+    config.response_cache = true;
+    config.cache_max_entries = 64;
+    config.cache_max_value_bytes = 4096;
+    config.cache_ttl_ms = 5000;
+    config.cache_max_total_bytes = 1 << 16;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expect(opts.response_cache);
+    try std.testing.expectEqual(@as(u32, 64), opts.cache_max_entries);
+    try std.testing.expectEqual(@as(u32, 4096), opts.cache_max_value_bytes);
+    try std.testing.expectEqual(@as(u32, 5000), opts.cache_ttl_ms);
+    try std.testing.expectEqual(@as(usize, 1 << 16), opts.cache_max_total_bytes);
+}
+
+test "zix http2: Config, serveOpts carries the handler timeout" {
+    var config = testConfig();
+    config.handler_timeout_ms = 250;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expectEqual(@as(u32, 250), opts.handler_timeout_ms);
+}
+
+test "zix http2: Config, serveOpts carries the public dir" {
+    var config = testConfig();
+    config.public_dir = "public";
+
+    const opts = config.serveOpts();
+
+    try std.testing.expectEqualStrings("public", opts.public_dir);
+}
+
+test "zix http2: Config, serveOpts keeps the defaults" {
+    const opts = testConfig().serveOpts();
+    const expected: ServeOpts = .{};
+
+    try std.testing.expectEqual(expected.max_streams, opts.max_streams);
+    try std.testing.expectEqual(expected.max_body, opts.max_body);
+    try std.testing.expect(!opts.response_cache);
+    try std.testing.expect(opts.logger == null);
 }
 
