@@ -200,32 +200,46 @@ Tag = `(field_number << 3) | wire_type`. Each encoder writes the tag, then the v
 
 ---
 
-## frame.zig
+## frame/
 
-### build* / send*
+### prefix.zig
 
-`build*` functions encode a frame into a caller buffer and return the byte count, `send*` wrap them with `writeAllFD`.
+`[compress: 1 byte][msg_len: 4 bytes, big-endian]`, `PREFIX_LEN` = 5. Any non-zero compress byte reads as compressed. A body shorter than 5 bytes is `TooShort`.
+
+### build.zig / send.zig
+
+`build*` encode a frame into a caller buffer and return the byte count. `send*` build into a stack buffer and write it with `writeAllFD`.
 
 ```zig
-pub fn buildGrpcHeaders(out, stream_id, content_type) usize     // initial HEADERS, no END_STREAM
-pub fn buildGrpcDataHeader(out, stream_id, msg_len) usize       // 9-byte DATA header + 5-byte gRPC prefix (caller appends payload)
-pub fn buildGrpcTrailer(out, stream_id, grpc_status, msg) usize // trailer HEADERS, END_STREAM
-pub fn buildGrpcError(out, stream_id, grpc_status, msg) usize   // trailers-only HEADERS, END_STREAM
+pub fn buildGrpcHeaders(out, stream_id, content_type) Error!usize            // initial HEADERS, no END_STREAM
+pub fn buildGrpcHeadersGzip(out, stream_id, content_type) Error!usize        // same, plus grpc-encoding: gzip
+pub fn buildGrpcDataHeader(out, stream_id, msg_len, compress) Error!usize    // DATA_HEAD_LEN: 9-byte DATA header + 5-byte prefix (caller appends payload)
+pub fn buildGrpcTrailer(out, stream_id, grpc_status, msg) Error!usize        // trailer HEADERS, END_STREAM
+pub fn buildGrpcError(out, stream_id, grpc_status, msg) Error!usize          // trailers-only HEADERS, END_STREAM
 ```
 
-### Cached reply blocks
+- `HEADERS_FRAME_SCRATCH` (frame header + `HPACK_ENCODE_SCRATCH`) always fits a HEADERS frame built here.
+- A block past the HPACK scratch, or an `out` too small, is `BufferFull`. A `msg_len` past `MAX_DATA_MSG_LEN` (u24 max minus the prefix) is `Overflow`.
+- `send*` errors are translated to `ZixHttp2_GrpcSend_*` at each public function.
+
+### reply_block.zig
 
 The two constant hot-path header blocks are HPACK-encoded once at comptime:
 
 ```zig
 pub const GRPC_CONTENT_TYPE = "application/grpc+proto";
-const HEADERS_PROTO_BLOCK = ...;  // :status 200 + content-type application/grpc+proto
-const TRAILER_OK_BLOCK = ...;     // grpc-status 0
+pub const HEADERS_PROTO_BLOCK: []const u8 = ...;  // :status 200 + content-type application/grpc+proto
+pub const TRAILER_OK_BLOCK: []const u8 = ...;     // grpc-status 0
 ```
 
-`buildGrpcHeaders` takes `HEADERS_PROTO_BLOCK` when `content_type == GRPC_CONTENT_TYPE`, and `buildGrpcTrailer` takes `TRAILER_OK_BLOCK` when `grpc_status == 0` and the message is empty. Both go through `emitCachedHeaders`, which stamps the 9-byte frame header (with the stream id and flags) and `memcpy`s the cached block - no HPACK encoder run. Any other content-type or status falls back to the dynamic encoder.
+`buildGrpcHeaders` takes `HEADERS_PROTO_BLOCK` when `content_type == GRPC_CONTENT_TYPE`, and `buildGrpcTrailer` takes `TRAILER_OK_BLOCK` when `grpc_status == 0` and the message is empty. Both stamp the 9-byte frame header and copy the cached block, with no HPACK encoder run. Any other content-type or status runs the encoder.
 
-The blocks are produced by running the real `HpackEncoder` at comptime, so they are byte-identical to the dynamic output. This requires `HpackEncoder.writeString` to type the Huffman result as `?usize` (otherwise comptime collapses the optional when the error branch is statically unreachable).
+The blocks come from the real `HpackEncoder` run at comptime, so they are byte-identical to the dynamic output.
+
+### gzip.zig
+
+- `decompressGrpcBody`: walks every prefix + message. A message with flag 1 is gunzipped in full (`streamRemaining`), flag 0 is copied. Every output prefix has flag 0. Fewer than 5 bytes left after the last message are ignored.
+- `compressGrpcMessage`: gzip at `level_1`. The window and the compressor state come from `std.heap.smp_allocator`. `out_buf` of `data.len + GZIP_FRAMING_HEADROOM` always fits.
 
 ---
 
