@@ -133,6 +133,7 @@ test {
     _ = @import("tcp/http2/grpc/proto/varint.zig");
     _ = @import("tcp/http2/grpc/proto/wire_type.zig");
     _ = @import("tcp/http2/grpc/status.zig");
+    _ = @import("tcp/http2/grpc/timeout.zig");
     _ = @import("tcp/http2/hpack/DynamicTable.zig");
     _ = @import("tcp/http2/hpack/Header.zig");
     _ = @import("tcp/http2/hpack/HpackDecoder.zig");
