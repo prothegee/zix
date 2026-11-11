@@ -169,10 +169,7 @@ fn acceptInner(
 
     if (!isH2cUpgrade(head)) return rejectBadRequest(fd);
 
-    var result = requestLine(head);
-    if (headerValue(head, "http2-settings")) |value| {
-        result.settings = decodeSettings(value, settings_buf);
-    }
+    const result = parseHead(head, settings_buf);
 
     try writer.writeAllFD(fd, SWITCHING_PROTOCOLS);
 
@@ -237,6 +234,26 @@ pub fn isH2cUpgrade(head: []const u8) bool {
     const upgrade_value = headerValue(head, "upgrade") orelse return false;
 
     return std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_value, " "), "h2c");
+}
+
+/// Read the method, target, and HTTP2-Settings of an h2c upgrade head.
+///
+/// Note:
+/// - No I/O. The caller already checked isH2cUpgrade.
+///
+/// Param:
+/// head - []const u8 (request line and headers, ending in an empty line)
+/// settings_buf - []u8 (holds the decoded HTTP2-Settings payload)
+///
+/// Return:
+/// - UpgradeHead (borrows head and settings_buf)
+pub fn parseHead(head: []const u8, settings_buf: []u8) UpgradeHead {
+    var result = requestLine(head);
+    if (headerValue(head, "http2-settings")) |value| {
+        result.settings = decodeSettings(value, settings_buf);
+    }
+
+    return result;
 }
 
 /// Read an HTTP/1.1 request that asks for h2c and answer 101.
@@ -357,6 +374,27 @@ test "zix http2: upgrade, requestLine without spaces falls back" {
 
     try std.testing.expectEqualStrings("GET", head.method);
     try std.testing.expectEqualStrings("/", head.path);
+}
+
+test "zix http2: upgrade, parseHead reads method, target, and settings" {
+    var settings_buf: [64]u8 = undefined;
+    const head = parseHead(TEST_HEAD, &settings_buf);
+
+    try std.testing.expectEqualStrings("GET", head.method);
+    try std.testing.expectEqualStrings("/items?page=2", head.path);
+    try std.testing.expect(head.settings.len > 0);
+}
+
+test "zix http2: upgrade, parseHead without HTTP2-Settings leaves settings empty" {
+    var settings_buf: [64]u8 = undefined;
+    const head = parseHead(
+        "POST /form HTTP/1.1\r\nUpgrade: h2c\r\n\r\n",
+        &settings_buf,
+    );
+
+    try std.testing.expectEqualStrings("POST", head.method);
+    try std.testing.expectEqualStrings("/form", head.path);
+    try std.testing.expectEqual(@as(usize, 0), head.settings.len);
 }
 
 test "zix http2: upgrade, accept answers 101" {
