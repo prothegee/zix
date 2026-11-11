@@ -121,6 +121,12 @@ test {
     _ = @import("tcp/http2/dispatch/async.zig");
     _ = @import("tcp/http2/dispatch/epoll.zig");
     _ = @import("tcp/http2/dispatch/uring.zig");
+    _ = @import("tcp/http2/grpc/proto/MessageReader.zig");
+    _ = @import("tcp/http2/grpc/proto/ProtoField.zig");
+    _ = @import("tcp/http2/grpc/proto/field.zig");
+    _ = @import("tcp/http2/grpc/proto/varint.zig");
+    _ = @import("tcp/http2/grpc/proto/wire_type.zig");
+    _ = @import("tcp/http2/grpc/status.zig");
     _ = @import("tcp/http2/hpack/DynamicTable.zig");
     _ = @import("tcp/http2/hpack/Header.zig");
     _ = @import("tcp/http2/hpack/HpackDecoder.zig");
