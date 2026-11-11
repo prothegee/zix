@@ -72,7 +72,7 @@ A cell is left blank when it does not apply (a required handle like `io` has no 
 | tls_port | 0 | companion https bind port for the dual listener (ADR-060) | one worker fleet serves cleartext + TLS | set with tls to serve both from one server | 0 keeps single-listener behavior | | requires tls set, must differ from port |
 | logger | null | optional logger for lifecycle lines | | attach for server logging | | | per-request access logging is the handler's job |
 
-## HTTP/2 (`Http2ServerConfig`)
+## HTTP/2 (`zix.Http2` config)
 
 h2c cleartext by default, h2-over-TLS when `tls` is set.
 
