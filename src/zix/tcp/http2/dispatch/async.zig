@@ -43,32 +43,6 @@ const HandlerFn = handler.HandlerFn;
 // --------------------------------------------------------- //
 // Private:
 
-/// Map the server Config onto the per-connection serve options.
-///
-/// Param:
-/// config - Config (server configuration)
-///
-/// Return:
-/// - ServeOpts
-fn serveOpts(config: Config) ServeOpts {
-    return .{
-        .max_streams = config.max_streams,
-        .max_frame_size = config.max_frame_size,
-        .max_header_scratch = config.max_header_scratch,
-        .max_body = config.max_body,
-        .logger = config.logger,
-        .conn_read_buf_min = config.max_recv_buf,
-        .tls_write_buf_initial = config.tls_write_buf_initial_bytes,
-        .response_cache = config.response_cache,
-        .cache_max_entries = config.cache_max_entries,
-        .cache_max_value_bytes = config.cache_max_value_bytes,
-        .cache_ttl_ms = config.cache_ttl_ms,
-        .cache_max_total_bytes = config.cache_max_total_bytes,
-        .handler_timeout_ms = config.handler_timeout_ms,
-        .public_dir = config.public_dir,
-    };
-}
-
 /// Install this pool thread's response cache, or clear it when caching is off
 /// or the cache could not be built.
 ///
@@ -172,7 +146,7 @@ pub const Error = error {
 /// - Error.ZixHttp2_Async_AcceptFailed when accept fails for good
 pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
     const io = config.io;
-    const opts = serveOpts(config);
+    const opts = config.serveOpts();
     const address = std.Io.net.IpAddress.resolve(
         io,
         config.ip,
@@ -326,77 +300,6 @@ const InstallProbe = struct {
         if (self.held) releaseCache();
     }
 };
-
-test "zix http2: async, serveOpts carries the stream and frame knobs" {
-    var config = testConfig();
-    config.max_streams = 8;
-    config.max_frame_size = 32 * 1024;
-    config.max_header_scratch = 8192;
-    config.max_body = 1 << 20;
-
-    const opts = serveOpts(config);
-
-    try std.testing.expectEqual(@as(usize, 8), opts.max_streams);
-    try std.testing.expectEqual(@as(u32, 32 * 1024), opts.max_frame_size);
-    try std.testing.expectEqual(@as(usize, 8192), opts.max_header_scratch);
-    try std.testing.expectEqual(@as(usize, 1 << 20), opts.max_body);
-}
-
-test "zix http2: async, serveOpts carries the buffer knobs" {
-    var config = testConfig();
-    config.max_recv_buf = 64 * 1024;
-    config.tls_write_buf_initial_bytes = 4096;
-
-    const opts = serveOpts(config);
-
-    try std.testing.expectEqual(@as(usize, 64 * 1024), opts.conn_read_buf_min);
-    try std.testing.expectEqual(@as(usize, 4096), opts.tls_write_buf_initial);
-}
-
-test "zix http2: async, serveOpts carries the cache knobs" {
-    var config = testConfig();
-    config.response_cache = true;
-    config.cache_max_entries = 64;
-    config.cache_max_value_bytes = 4096;
-    config.cache_ttl_ms = 5000;
-    config.cache_max_total_bytes = 1 << 16;
-
-    const opts = serveOpts(config);
-
-    try std.testing.expect(opts.response_cache);
-    try std.testing.expectEqual(@as(u32, 64), opts.cache_max_entries);
-    try std.testing.expectEqual(@as(u32, 4096), opts.cache_max_value_bytes);
-    try std.testing.expectEqual(@as(u32, 5000), opts.cache_ttl_ms);
-    try std.testing.expectEqual(@as(usize, 1 << 16), opts.cache_max_total_bytes);
-}
-
-test "zix http2: async, serveOpts carries the handler timeout" {
-    var config = testConfig();
-    config.handler_timeout_ms = 250;
-
-    const opts = serveOpts(config);
-
-    try std.testing.expectEqual(@as(u32, 250), opts.handler_timeout_ms);
-}
-
-test "zix http2: async, serveOpts carries the public dir" {
-    var config = testConfig();
-    config.public_dir = "public";
-
-    const opts = serveOpts(config);
-
-    try std.testing.expectEqualStrings("public", opts.public_dir);
-}
-
-test "zix http2: async, serveOpts keeps the defaults" {
-    const opts = serveOpts(testConfig());
-    const expected: ServeOpts = .{};
-
-    try std.testing.expectEqual(expected.max_streams, opts.max_streams);
-    try std.testing.expectEqual(expected.max_body, opts.max_body);
-    try std.testing.expect(!opts.response_cache);
-    try std.testing.expect(opts.logger == null);
-}
 
 test "zix http2: async, installCache off clears the cache" {
     var probe: InstallProbe = .{};
