@@ -15,7 +15,7 @@
 graph LR
     Z[zix.Grpc] --> H[zix.Http2]
     H --> T[std.Io / std.posix]
-    Z --> P[proto.zig codec]
+    Z --> P[proto/ codec]
     Z --> S[status.zig]
     Z --> TO[timeout.zig]
 ```
@@ -35,8 +35,8 @@ graph LR
 | `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: jalur dispatch TLS multiplex |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
 | `src/tcp/http2/grpc/frame.zig` | struct `GrpcPrefix`, `readGrpcPrefix`, `writeGrpcPrefix`, helper frame `send*`/`build*` (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), blok reply cache comptime |
-| `src/tcp/http2/grpc/proto.zig` | konstanta tipe wire `WT_*`, `encodeVarint`, `decodeVarint`, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` |
-| `src/tcp/http2/grpc/status.zig` | enum `GrpcStatus` (u8), OK=0 sampai UNAUTHENTICATED=16 |
+| `src/zix/tcp/http2/grpc/proto/` | `wire_type.zig` (konstanta tipe wire `WT_*`), `varint.zig` (`encodeVarint`, `decodeVarint`, `MAX_LEN`), `field.zig` (`encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`), `ProtoField.zig`, `MessageReader.zig` |
+| `src/zix/tcp/http2/grpc/status.zig` | enum `GrpcStatus` (u8), OK=0 sampai UNAUTHENTICATED=16 |
 | `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: parser header grpc-timeout |
 
 ## API Publik
@@ -363,24 +363,24 @@ flowchart TD
 
 ## Codec Protobuf Minimal
 
-`proto.zig` menyediakan konstanta tipe wire dan primitif encode/decode untuk proto3. Tidak diperlukan compiler berkas `.proto` maupun kode yang di-generate untuk skema sederhana.
+`proto/` menyediakan konstanta tipe wire dan primitif encode/decode untuk proto3. Tidak diperlukan compiler berkas `.proto` maupun kode yang di-generate untuk skema sederhana.
 
 | Fungsi | Catatan |
 | :- | :- |
-| `encodeVarint(buf, value)` | encode u64 menjadi 1-10 byte, mengembalikan byte yang ditulis |
-| `decodeVarint(buf)` | mengembalikan `{value: u64, consumed: usize}` atau error |
-| `encodeString(field_number, s, buf)` | tipe wire LEN (2), mengembalikan byte yang ditulis |
-| `encodeInt32(field_number, val, buf)` | tipe wire VARINT (0), mengembalikan byte yang ditulis |
-| `encodeDouble(field_number, val, buf)` | tipe wire I64 (1), IEEE 754 little-endian 8 byte, mengembalikan byte yang ditulis |
+| `encodeVarint(buf, value)` | encode u64 menjadi 1-10 byte, mengembalikan byte yang ditulis, `BufferFull` bila buf terlalu kecil |
+| `decodeVarint(buf)` | mengembalikan `Decoded { value: u64, consumed: usize }`, `UnexpectedEOF` bila buf habis di tengah varint, `Overflow` bila melewati 64 bit |
+| `encodeString(field_number, s, buf)` | tipe wire LEN (2), mengembalikan byte yang ditulis, `BufferFull` bila buf terlalu kecil |
+| `encodeInt32(field_number, val, buf)` | tipe wire VARINT (0), mengembalikan byte yang ditulis, `BufferFull` bila buf terlalu kecil |
+| `encodeDouble(field_number, val, buf)` | tipe wire I64 (1), IEEE 754 little-endian 8 byte, mengembalikan byte yang ditulis, `BufferFull` bila buf terlalu kecil |
 | `decodeDouble(payload)` | membaca `*const [8]u8`, mengembalikan `f64` |
 | `MessageReader.init(buf)` | membungkus buffer pesan yang telah diserialisasi |
-| `MessageReader.next()` | mengembalikan `?ProtoField` dengan `field_number`, `wire_type`, `payload` |
+| `MessageReader.next()` | mengembalikan `?ProtoField` dengan `field_number`, `wire_type`, `payload`, `value_u64` (null di akhir pesan), error bila field terpotong, tipe wire tidak dikenal, atau nomor field melewati u32 |
 
 Contoh encoding `HelloRequest { string name = 1; }`:
 
 ```zig
 var out: [256]u8 = undefined;
-const n = zix.Grpc.encodeString(1, "world", &out);
+const n = try zix.Grpc.encodeString(1, "world", &out);
 // kirim out[0..n] sebagai payload pesan gRPC
 ```
 
