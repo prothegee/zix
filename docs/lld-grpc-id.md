@@ -253,6 +253,16 @@ Blok berasal dari `HpackEncoder` asli yang dijalankan di comptime, jadi byte-nya
 
 ---
 
+## Config.zig
+
+Record config server. `io`, `ip`, `port`, dan `dispatch_model` wajib, field lain punya default (lihat tabel field di hld).
+
+- `max_recv_buf` default 64 KiB (Http2 memakai 32 KiB).
+- `compress` dan `handler_timeout_ms` hanya untuk gRPC. Http2 tidak punya `compress`.
+- `tls` dan `tls_port` belum di-port.
+
+---
+
 ## server.zig dan dispatch/
 
 ### Dispatch (run)
