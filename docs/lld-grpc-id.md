@@ -2,7 +2,7 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-grpc-id.md`](hld-grpc-id.md) dan ADR-031.
 
-Model blocking (`.ASYNC`) memakai satu jalur koneksi (`serve.serveConn` -> `serveLoop`). Model multiplex (`.EPOLL`, `.URING`) memakai jalur terpisah yang non-blocking di bawah `mux/` (`process.onReadable`, `process.processRing`). Mux sudah di-port, berkas dispatch `.EPOLL` dan `.URING` yang menjalankannya belum di-port.
+Model blocking (`.ASYNC`) memakai satu jalur koneksi (`serve.serveConn` -> `serveLoop`). Model multiplex (`.EPOLL`, `.URING`) memakai jalur terpisah yang non-blocking di bawah `mux/` (`process.onReadable`, `process.processRing`). `dispatch/epoll.zig` dan `dispatch/uring.zig` yang menjalankannya.
 
 Setiap fungsi internal yang bergantung pada tabel route di bawah ini tetap menerima `comptime RouterType: type` (ADR-063), bukan `handler: HandlerFn` runtime yang diratakan seperti padanan Http2. Ini disengaja: engine membaca `Route.is_server_streaming` dari `RouterType.route_slice` sebelum memanggil handler, untuk memilih dispatch sync-inline vs task-spawn, dan pointer `HandlerFn` polos tidak bisa membawa metadata itu. Lihat bagian Pola Handler di `docs/hld-grpc-id.md` untuk biaya terukur kehilangan metadata itu.
 
@@ -331,8 +331,10 @@ Hanya fungsi. `init(comptime RouterType, config)` mengembalikan `GrpcServer(Rout
 `run` mengecek, berurutan:
 
 1. `config.port == 0` -> `ZixHttp2_GrpcServer_PortNotConfigured`.
-2. model dispatch: `.ASYNC` berjalan. `.EPOLL`, `.URING`, `.IOCP`, dan `.KQUEUE` -> `ZixHttp2_GrpcServer_DispatchModel_NotSupported` (`.EPOLL` dan `.URING` belum di-port).
-3. `dispatch_async.run(RouterType, config)`. Error-nya diterjemahkan oleh `dispatchError`: `ZixHttp2_GrpcAsync_ResolveFailed`, `ListenFailed`, `AcceptFailed` -> `ZixHttp2_GrpcServer_ResolveFailed`, `ListenFailed`, `AcceptFailed`.
+2. model dispatch: `.ASYNC` berjalan di semua platform, `.EPOLL` dan `.URING` berjalan di Linux. `.EPOLL` / `.URING` di luar Linux, `.IOCP`, dan `.KQUEUE` -> `ZixHttp2_GrpcServer_DispatchModel_NotSupported`.
+3. `run(RouterType, config)` milik model itu. Error-nya diterjemahkan ke set server:
+   - `dispatchError` (`.ASYNC`): `ResolveFailed`, `ListenFailed`, `AcceptFailed` tetap bernama sama.
+   - `dispatchEpollError` / `dispatchUringError`: `ResolveFailed` dan `ListenFailed` tetap bernama sama. `OutOfMemory`, `SpawnFailed`, `SetupFailed`, `Unsupported` (dan `WaitFailed` untuk `.URING`) -> `ZixHttp2_GrpcServer_EpollSetupFailed` / `UringSetupFailed`.
 
 ### dispatch/async.zig
 
@@ -346,7 +348,28 @@ Hanya fungsi. `init(comptime RouterType, config)` mengembalikan `GrpcServer(Rout
 
 ### dispatch/epoll.zig dan dispatch/uring.zig
 
-Belum di-port. Keduanya nanti menjalankan `mux/process.zig` (`onReadable` untuk `.EPOLL`, `processRing` untuk `.URING`).
+Struktur sama dengan `dispatch/epoll.zig` / `uring.zig` milik http2. Keduanya `run(comptime RouterType, config)`:
+
+1. me-resolve `config.ip`, lalu bind satu listener `reuse_address` per worker di thread pemanggil, berurutan sesuai worker (`workers`, 0 = jumlah CPU yang tersedia). Bind yang gagal kembali sebelum apa pun melayani.
+2. memasang CPU steering `reuseport_cbpf` ke grup bila diminta. Kernel yang menolaknya mencatat warning dan memakai hash default.
+3. spawn satu worker per listener dengan `worker_stack_size_bytes`. Router diikat oleh `WorkerEntry(RouterType)` (epoll) atau `Worker(RouterType)` (uring), karena `std.Thread.spawn` menerima fungsi biasa.
+4. join semua worker. Worker yang tidak bisa memulai loop-nya menyetel `failed` dan `stop`, jadi seluruh grup berhenti dan `run` mengembalikan `SetupFailed`.
+
+Tiap worker mem-pin dirinya ke satu CPU (`cpu_affinity.pinToCpu`), memasang response cache sendiri (`cache.installWorker`, dibebaskan saat kembali), dan menyimpan tabel slot ber-indeks fd (`slab.mapZeroedSlots`, `MAX_FD` = 65536). Fd di luar tabel ditutup. Fd yang di-accept mendapat TCP_NODELAY dan, bila `busy_poll_us` diisi, SO_BUSY_POLL. Loop menunggu paling lama 1 detik tiap kali, jadi ia melihat `stop`.
+
+`.EPOLL` (level-triggered):
+
+- event listener menjalankan `acceptAll`: `accept4` sampai EAGAIN, satu `MuxConn` per fd, didaftarkan untuk `EPOLLIN | EPOLLRDHUP`.
+- event koneksi menjalankan `serveEvent`: `EPOLLHUP` / `EPOLLERR` menutupnya, selain itu `process.onReadable` membaca, memproses, dan mem-flush stage dalam satu write. `.close` membatalkan pendaftaran, membebaskan, dan menutup fd.
+
+`.URING`:
+
+- satu ring per worker (single issuer, deferred task run, 16 Ki entry CQ, turun ke ring polos). Tidak ada fallback ke `.EPOLL`.
+- multishot accept. Re-arm yang hilang karena SQ penuh diulang di putaran berikutnya (`accept_pending`).
+- `user_data` membawa op (`accept`, `recv`, `send`), generation 24-bit, dan fd, jadi completion untuk koneksi lama di fd yang dipakai ulang dibuang.
+- completion recv menjalankan `process.processRing`, lalu mengirim `conn.stage` lewat ring. Hanya satu recv atau satu send yang berjalan per koneksi, jadi read buffer dan stage tidak pernah disentuh selama kernel memegangnya. Send parsial mengirim ulang sisanya.
+- hang-up di tengah request men-stage GOAWAY (`mux_dispatch.hangupGoaway`) dan koneksi ditutup setelah send itu selesai (`closing`). Error send langsung menutup.
+- saat berhenti, ring dibongkar sebelum koneksi, jadi tidak ada send yang masih membaca stage yang sudah dibebaskan.
 
 ---
 
