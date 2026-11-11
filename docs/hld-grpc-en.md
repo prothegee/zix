@@ -20,14 +20,17 @@ graph LR
     Z --> TO[timeout.zig]
 ```
 
-`zix.Grpc` builds on top of `zix.Http2`. The gRPC frame loop (`serveGrpcConn`) replicates the h2c stream loop from `zix.Http2.serveConn`, both dispatch the same `req`/`res`/`ctx` trio shape (ADR-063), but gRPC's engine additionally reads `Route.is_server_streaming` before invoking the handler to support streaming without inter-thread queues (see Handler Pattern).
+`zix.Grpc` builds on top of `zix.Http2`. The gRPC frame loop (`serveConn`) replicates the h2c stream loop from `zix.Http2.serveConn`, both dispatch the same `req`/`res`/`ctx` trio shape (ADR-063), but gRPC's engine additionally reads `Route.is_server_streaming` before invoking the handler to support streaming without inter-thread queues (see Handler Pattern).
 
 ## Source Layout
 
 | File | Role |
 | :- | :- |
 | `src/tcp/http2/grpc/Grpc.zig` | namespace: all public re-exports |
-| `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `GrpcRequest`, `GrpcResponse`, `HandlerFn`, `Router`, `serveGrpcConn` (blocking models), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplexed `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
+| `src/zix/tcp/http2/grpc/Context.zig`, `Request.zig`, `Response.zig` | per-call trio: request messages, reply verbs, deadline, cache verbs |
+| `src/zix/tcp/http2/grpc/handler.zig`, `router.zig` | `HandlerFn`, the one handler call site, the `rpc` log line, `Route`, `Router`, `routeIsStreaming` |
+| `src/zix/tcp/http2/grpc/serve.zig`, `stream_dispatch.zig`, `DispatchTask.zig` | blocking connection loop (`serveConn`), inline unary dispatch, server-streaming task |
+| `src/zix/tcp/http2/grpc/` (helpers) | `path.zig` + `GrpcPath.zig` (`parsePath`, `headerPath`), `content_type.zig` (`detectContentType`), `encoding.zig` (gzip headers), `deadline.zig` (`computeDeadline`), `cache.zig`, `window.zig`, `ServeOpts.zig`, `Stream.zig`, `stream_slot.zig`, `ReplyStage.zig`, `ConnReader.zig`, `ConnMutex.zig` |
 | `src/zix/tcp/http2/grpc/Config.zig` | server `Config` (`GrpcServerConfig`) |
 | `src/tcp/http2/grpc/server.zig` | `GrpcServer`: thin `run()` switch that dispatches to the per-model files under `dispatch/` (and to the TLS serve paths when `cfg.tls != null`) |
 | `src/tcp/http2/grpc/dispatch/` | per-model dispatch files: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplexed `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (shared helpers) |
@@ -47,7 +50,7 @@ graph LR
 | `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Request` | `{ path, headers }` view, `header(name)`, `recvMessage()`. Thin delegating wrapper over `Context`, zero internal logic moved |
 | `zix.Grpc.Response` | `sendHeaders()`, `sendMessage()`, `finish()`, `serveCached()`, `sendCached()`. Thin delegating wrapper over `Context`, byte-identical wire |
-| `zix.Grpc.Context` | `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
+| `zix.Grpc.Context` | `deadline: ?std.Io.Clock.Timestamp`, `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
 | `zix.Grpc.HandlerFn` | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio). A returned error closes a still-open call with `grpc-status 13` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | comptime type: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (sends UNIMPLEMENTED if no route matches). `Server.init` takes the Router TYPE itself, not `.dispatch`, because the engine reads `Route.is_server_streaming` off `route_slice` before dispatch |
@@ -56,7 +59,7 @@ graph LR
 | `zix.Grpc.DispatchModel` | ASYNC=0 (portable), EPOLL=1 (Linux-only), URING=2 (Linux-only), required with no default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
-| `zix.Grpc.ServeOpts` | `GrpcServeOpts`: per-connection options passed to `serveConn` |
+| `zix.Grpc.ServeOpts` | per-connection options passed to `serveConn`, built by `ServerConfig.serveOpts()` |
 | `zix.Grpc.Path` | `package_service: []const u8`, `method: []const u8` |
 | `zix.Grpc.Prefix` | `compress: bool`, `msg_len: u32` |
 | `zix.Grpc.readPrefix` | `fn(body: []const u8) Error!Prefix` (`ZixHttp2_GrpcPrefix_TooShort` when body is under 5 bytes) |
@@ -70,7 +73,6 @@ graph LR
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) Error!u64` (nanoseconds, `ZixHttp2_GrpcTimeout_*` on a bad value) |
 | `zix.Grpc.serveConn` | `fn(comptime RouterType, fd, opts, io) void`: direct connection entry point |
 | `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
-| `zix.Grpc.wallClockNs` | `fn() u64`: current wall-clock time in nanoseconds (CLOCK_REALTIME). Used to override `ctx.deadline_ns` at runtime. |
 
 ## GrpcServerConfig Fields
 
@@ -136,7 +138,7 @@ Key rules:
 
 ## Context Timeout
 
-Three inputs determine `ctx.deadline_ns` at dispatch time:
+Three inputs determine `ctx.deadline` at dispatch time:
 
 | Input | Where | Notes |
 | :- | :- | :- |
@@ -144,7 +146,7 @@ Three inputs determine `ctx.deadline_ns` at dispatch time:
 | `Route.timeout_ms` | comptime route table | per-route default (0 = use global cap) |
 | `grpc-timeout` header | client request | parsed by `parseTimeout` (takes effect if tighter) |
 
-`ctx.deadline_ns: ?u64` is the tightest of all three (CLOCK_REALTIME nanoseconds). `null` means no deadline. `Router.dispatch` applies `Route.timeout_ms` after the global deadline is set, so per-route timeout only tightens, never loosens.
+`ctx.deadline: ?std.Io.Clock.Timestamp` is the tightest of all three (wall clock, read through `ctx.io`, same as Http1 and Http2). `null` means no deadline. `Router.dispatch` applies `Route.timeout_ms` after the global deadline is set, so per-route timeout only tightens, never loosens.
 
 Handlers check the deadline explicitly:
 
@@ -166,9 +168,9 @@ fn slowHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.C
 Handler deadline override pattern (canonical):
 
 ```zig
-ctx.deadline_ns = wallClockNs() + 60 * std.time.ns_per_s; // extend to 60 s from now
-ctx.deadline_ns = null; // disable for this call
-// or via the helpers: ctx.setTimeout(60_000); ctx.withDeadline(deadline_ns);
+ctx.setTimeout(60_000); // extend to 60 s from now
+ctx.deadline = null; // disable for this call
+// or with an explicit timestamp: ctx.* = ctx.withDeadline(timestamp);
 ```
 
 Risks on override:
@@ -341,7 +343,7 @@ flowchart TD
     A[GrpcServer.run] --> B{dispatch_model}
     B -->|ASYNC| C[single accept thread\nio.async per conn]
     B -->|EPOLL| EP[N workers\nSO_REUSEPORT listener\n+ epoll each]
-    C --> F[serveGrpcConn blocking]
+    C --> F[serveConn blocking]
     D --> F
     E --> F
     EP --> MX[grpcMuxOnReadable\nresumable per-conn state]
@@ -401,7 +403,7 @@ A reverse proxy stays an alternative when TLS offload, routing, or sharing a por
 | :- | :- |
 | `examples/grpc_server.zig` | dispatch model picked per target (URING on Linux, ASYNC elsewhere): SayHello, Echo, and StreamSum handlers, port 9032 |
 | `examples/grpc_client.zig` | unary call and manual streaming demo, port 8083 |
-| `examples/grpc_timeout.zig` | context timeout demo: handler_timeout_ms, Route.timeout_ms, ctx.isExpired(), ctx.deadline_ns override, port 8084 |
+| `examples/grpc_timeout.zig` | context timeout demo: handler_timeout_ms, Route.timeout_ms, ctx.isExpired(), ctx.setTimeout override, port 8084 |
 | `examples/grpc_location_server.zig` | location.Location/SendLocationAndSave, dispatch model picked per target, port 9038 |
 | `examples/grpc_location_client.zig` | location service client: encodes double fields, decodes bool response |
 | `examples/grpc_multi_server.zig` | ASYNC, helloworld.Greeter + location.Location on one port (10102), logger wired |
