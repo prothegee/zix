@@ -153,7 +153,12 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 | Modul | Cakupan |
 | :- | :- |
 | `tcp/http2/grpc/status.zig` | setiap kode sesuai nilai kanoniknya, setiap nilai kanonik kembali ke kodenya, OK adalah nilai nol, kode tak dikenal di atas 16 / u8 maksimum mempertahankan nilainya |
-| `tcp/http2/grpc/frame.zig` | `refAllDecls` + perilaku: round-trip `readGrpcPrefix` / `writeGrpcPrefix`, flag compress tersimpan, panjang pesan tersimpan, `sendGrpcError` menyertakan header `content-type` |
+| `tcp/http2/grpc/frame/GrpcPrefix.zig` | menyimpan field-nya, menampung panjang pesan terbesar |
+| `tcp/http2/grpc/frame/prefix.zig` | round-trip mempertahankan panjang pesan / flag compress, panjang big-endian, panjang u32 maksimum round-trip, byte flag bukan nol dibaca terkompresi, hanya membaca 5 byte pertama, 4 byte / body kosong TooShort |
+| `tcp/http2/grpc/frame/reply_block.zig` | `HEADERS_PROTO_BLOCK` didekode menjadi status 200 dan content-type default, `TRAILER_OK_BLOCK` didekode menjadi grpc-status 0, keduanya sama dengan encoder dinamis |
+| `tcp/http2/grpc/frame/build.zig` | HEADERS dengan END_HEADERS, tipe default menyalin blok cache, tipe lain didekode menjadi status dan tipe, HEADERS gzip membawa grpc-encoding gzip, panjang DATA menghitung prefix, prefix memuat panjang pesan, compress memasang flag 1, `MAX_DATA_MSG_LEN` mengisi u24, trailer OK menyalin blok cache, trailer membawa status dan pesan, pesan kosong tanpa grpc-message, status u8 maksimum dienkode 255, error membawa status 200 dan content-type, error mengakhiri stream, out terlalu kecil / blok melewati scratch BufferFull, panjang melewati `MAX_DATA_MSG_LEN` Overflow |
+| `tcp/http2/grpc/frame/send.zig` | frame HEADERS tertulis, DATA menulis prefix lalu pesan, pesan kosong hanya mengirim head, trailer mengakhiri stream, error menyertakan header `content-type`, pesan melewati scratch BufferFull, peer tertutup BrokenPipe |
+| `tcp/http2/grpc/frame/gzip.zig` | round-trip memulihkan pesan, prefix hasil dekompresi ber-flag 0, pesan besar round-trip utuh, pesan kosong round-trip, pesan tanpa kompresi diteruskan, pesan campuran tetap berurutan, body kosong / sisa pendek tidak menulis apa pun, pesan melewati body / panjang u32 maksimum TruncatedBody, gzip rusak DecompressFailed, out terlalu kecil BufferTooSmall, keluaran diawali magic gzip, headroom muat untuk data tak terkompresi, out terlalu kecil CompressFailed |
 | `tcp/http2/grpc/proto/wire_type.zig` | id sesuai encoding protobuf |
 | `tcp/http2/grpc/proto/varint.zig` | 1 menjadi satu byte, 300 menjadi dua byte, u64 maksimum menjadi `MAX_LEN` byte, round-trip lintas ukuran, decode berhenti di byte akhir pertama, encode ke buf kosong / melewati buf BufferFull, input kosong / terpotong UnexpectedEOF, byte ke-10 melewati bit 0 / 11 byte Overflow |
 | `tcp/http2/grpc/proto/field.zig` | string meng-encode tag, panjang, dan byte, string kosong panjang nol, int32 150 field varint, int32 negatif 10 byte nilai, round-trip double positif / negatif, string / int32 / double / buf kosong BufferFull |
@@ -862,8 +867,8 @@ Port: 18220-18221.
 
 | Pengujian | Yang diverifikasi |
 | :- | :- |
-| `readGrpcPrefix` dengan 4 byte | menghasilkan `error.ZixTooShort` |
-| `readGrpcPrefix` dengan slice kosong | menghasilkan `error.ZixTooShort` |
+| `readGrpcPrefix` dengan 4 byte | menghasilkan `error.ZixHttp2_GrpcPrefix_TooShort` |
+| `readGrpcPrefix` dengan slice kosong | menghasilkan `error.ZixHttp2_GrpcPrefix_TooShort` |
 | `GrpcContext.recvMessage` body lebih pendek dari prefix | body memiliki 3 byte (butuh 5 untuk prefix): menghasilkan null |
 | `GrpcContext.recvMessage` msg_len melebihi body | prefix mengklaim 100 byte tetapi body hanya memiliki 5: menghasilkan null |
 | `parsePath` string kosong | menghasilkan null |
