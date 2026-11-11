@@ -26,18 +26,20 @@ graph LR
 
 | Berkas | Peran |
 | :- | :- |
-| `src/tcp/http2/grpc/Grpc.zig` | namespace: semua re-export publik |
+| `src/zix/tcp/http2/grpc/Grpc.zig` | namespace: semua re-export publik |
 | `src/zix/tcp/http2/grpc/Context.zig`, `Request.zig`, `Response.zig` | trio per call: pesan request, verb balasan, deadline, verb cache |
 | `src/zix/tcp/http2/grpc/handler.zig`, `router.zig` | `HandlerFn`, satu-satunya tempat handler dipanggil, baris log `rpc`, `Route`, `Router`, `routeIsStreaming` |
 | `src/zix/tcp/http2/grpc/serve.zig`, `stream_dispatch.zig`, `DispatchTask.zig` | connection loop blocking (`serveConn`), dispatch unary inline, task server-streaming |
 | `src/zix/tcp/http2/grpc/` (helper) | `path.zig` + `GrpcPath.zig` (`parsePath`, `headerPath`), `content_type.zig` (`detectContentType`), `encoding.zig` (header gzip), `deadline.zig` (`computeDeadline`), `cache.zig`, `window.zig`, `ServeOpts.zig`, `Stream.zig`, `stream_slot.zig`, `ReplyStage.zig`, `ConnReader.zig`, `ConnMutex.zig` |
 | `src/zix/tcp/http2/grpc/Config.zig` | `Config` server (`GrpcServerConfig`) |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: `run()` switch tipis yang men-dispatch ke berkas per-model di bawah `dispatch/` (dan ke jalur serve TLS saat `cfg.tls != null`) |
-| `src/tcp/http2/grpc/dispatch/` | berkas dispatch per-model: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplex `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (helper bersama) |
+| `src/zix/tcp/http2/grpc/server.zig` | `init(Router, config)`, `GrpcServer(Router)`: `run()` mengecek port dan model, lalu memanggil berkas per-model di bawah `dispatch/` |
+| `src/zix/tcp/http2/grpc/log.zig` | `logSystem`: baris server ke logger (tag `grpc`) atau ke `std.log` |
+| `src/zix/tcp/http2/grpc/mux/` | jalur multiplex non-blocking untuk `.EPOLL` / `.URING`: `MuxConn.zig`, `stream_pool.zig`, `settings_frame.zig`, `stage_frame.zig`, `tcp_cork.zig`, `mux_dispatch.zig`, `mux_upgrade.zig`, `frame_loop.zig`, `process.zig` (`onReadable`, `processRing`) |
+| `src/zix/tcp/http2/grpc/dispatch/` | berkas dispatch per-model: `async.zig` (`.ASYNC`). `epoll.zig` dan `uring.zig` belum di-port |
 | `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: jalur handler TLS blocking (per koneksi) |
 | `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: jalur dispatch TLS multiplex |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
-| `src/zix/tcp/http2/grpc/frame/` | `GrpcPrefix.zig`, `prefix.zig` (`readGrpcPrefix`, `writeGrpcPrefix`, `PREFIX_LEN`), `reply_block.zig` (blok reply cache comptime), `build.zig` (`buildGrpcHeaders`, `buildGrpcHeadersGzip`, `buildGrpcDataHeader`, `buildGrpcTrailer`, `buildGrpcError`), `send.zig` (`sendGrpcHeadersFD`, `sendGrpcDataFD`, `sendGrpcTrailerFD`, `sendGrpcErrorFD`), `gzip.zig` (`compressGrpcMessage`, `decompressGrpcBody`) |
+| `src/zix/tcp/http2/grpc/frame/` | `GrpcPrefix.zig`, `prefix.zig` (`readGrpcPrefix`, `writeGrpcPrefix`, `PREFIX_LEN`), `reply_block.zig` (blok reply cache comptime), `builder.zig` (`buildGrpcHeaders`, `buildGrpcHeadersGzip`, `buildGrpcDataHeader`, `buildGrpcTrailer`, `buildGrpcError`), `send.zig` (`sendGrpcHeadersFD`, `sendGrpcDataFD`, `sendGrpcTrailerFD`, `sendGrpcErrorFD`), `gzip.zig` (`compressGrpcMessage`, `decompressGrpcBody`) |
 | `src/zix/tcp/http2/grpc/proto/` | `wire_type.zig` (konstanta tipe wire `WT_*`), `varint.zig` (`encodeVarint`, `decodeVarint`, `MAX_LEN`), `field.zig` (`encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`), `ProtoField.zig`, `MessageReader.zig` |
 | `src/zix/tcp/http2/grpc/status.zig` | enum `GrpcStatus` (u8), OK=0 sampai UNAUTHENTICATED=16 |
 | `src/zix/tcp/http2/grpc/timeout.zig` | `parseTimeout`: parser header grpc-timeout, `MAX_DIGITS` |
@@ -47,7 +49,7 @@ graph LR
 | Simbol | Catatan |
 | :- | :- |
 | `zix.Grpc.Server` | `init(Router(&routes), config)`, `deinit()`, `run()!void` (ADR-063: satu pengecualian dari `init(handler, config)` keluarga engine, lihat Pola Handler di bawah) |
-| `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
+| `zix.Grpc.Client` | belum di-port. `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Request` | view `{ path, headers }`, `header(name)`, `recvMessage()`. Wrapper delegasi tipis atas `Context`, tanpa logika internal yang dipindah |
 | `zix.Grpc.Response` | `sendHeaders()`, `sendMessage()`, `finish()`, `serveCached()`, `sendCached()`. Wrapper delegasi tipis atas `Context`, wire byte-identical |
 | `zix.Grpc.Context` | `deadline: ?std.Io.Clock.Timestamp`, `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
@@ -55,7 +57,7 @@ graph LR
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | tipe comptime: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok). `Server.init` menerima TIPE Router itu sendiri, bukan `.dispatch`, karena engine membaca `Route.is_server_streaming` dari `route_slice` sebelum dispatch |
 | `zix.Grpc.ServerConfig` | lihat field konfigurasi di bawah |
-| `zix.Grpc.ClientConfig` | `ip`, `port` |
+| `zix.Grpc.ClientConfig` | belum di-port. `ip`, `port` |
 | `zix.Grpc.DispatchModel` | ASYNC=0 (portabel), EPOLL=1 (hanya Linux), URING=2 (hanya Linux), wajib tanpa default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
@@ -72,7 +74,7 @@ graph LR
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) Error!u64` (nanodetik, `ZixHttp2_GrpcTimeout_*` untuk nilai yang salah) |
 | `zix.Grpc.serveConn` | `fn(comptime RouterType, fd, opts, io) void`: titik masuk koneksi langsung |
-| `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
+| `zix.Grpc.ClientResponse` | belum di-port. `union(enum) { data: []const u8, status: GrpcStatus }` |
 
 ## Field GrpcServerConfig
 
@@ -322,11 +324,13 @@ Saat handler memanggil `res.finish(status, msg)` tanpa mengirim data apa pun, se
 | `.EPOLL` | per worker | event loop multiplex (hanya Linux) | throughput tertinggi, lihat di bawah |
 | `.URING` | per worker | loop io_uring multiplex (hanya Linux) | bentuk sama dengan `.EPOLL`, berbasis completion |
 
-`.EPOLL` spesifik Linux. Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported` setelah mencatat model mana yang ditolak, jadi pakai `.ASYNC` di sana. `.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring (`runUring`, ADR-037 Phase 4): berbasis completion bukan readiness, worker `workers` (0 = cpu_count), hanya Linux, dan ditolak di luar Linux dengan cara yang sama. Saat io_uring sendiri tidak tersedia di host Linux, `.URING` melipat ke loop `.EPOLL` dengan notice yang dicatat.
+Baru `.ASYNC` yang di-port. `.EPOLL` dan `.URING` belum di-port: `run()` mengembalikan `ZixHttp2_GrpcServer_DispatchModel_NotSupported` untuk keduanya di semua platform, jadi pakai `.ASYNC`. Jalur multiplex yang nanti mereka jalankan sudah di-port (`mux/`). Desain di bawah adalah yang nanti mereka jalankan.
+
+`.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring: berbasis completion, bukan readiness, `workers` worker (0 = cpu_count), hanya Linux.
 
 ### `.EPOLL` bersifat multiplex dan shared-nothing
 
-`.EPOLL` tidak memarkir satu thread per koneksi. Ia menjalankan `workers` thread worker (0 = jumlah cpu), masing-masing memiliki listener `SO_REUSEPORT` privat, instance epoll sendiri, dan tabel koneksi privat ber-indeks fd. Kernel menyeimbangkan koneksi baru ke listener tiap worker, jadi tidak ada accept thread, tidak ada antrian bersama, dan tidak ada handoff fd lintas-thread. Satu worker menjalankan banyak koneksi non-blocking melalui state machine HTTP/2 yang resumable (`GrpcMuxConn`), sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread. `epoll_wait` tiap worker menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan (ADR-032). Desain tingkat rendahnya ada di `lld-grpc-id.md`.
+`.EPOLL` tidak memarkir satu thread per koneksi. Ia menjalankan `workers` thread worker (0 = jumlah cpu), masing-masing memiliki listener `SO_REUSEPORT` privat, instance epoll sendiri, dan tabel koneksi privat ber-indeks fd. Kernel menyeimbangkan koneksi baru ke listener tiap worker, jadi tidak ada accept thread, tidak ada antrian bersama, dan tidak ada handoff fd lintas-thread. Satu worker menjalankan banyak koneksi non-blocking melalui state machine HTTP/2 yang resumable (`MuxConn`), sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread. `epoll_wait` tiap worker menguras hingga `EPOLL_MAX_EVENTS` (512) event siap per pemanggilan (ADR-032). Desain tingkat rendahnya ada di `lld-grpc-id.md`.
 
 Dua konsekuensi berbeda dari model lain:
 
@@ -346,7 +350,7 @@ flowchart TD
     C --> F[serveConn blocking]
     D --> F
     E --> F
-    EP --> MX[grpcMuxOnReadable\nstate per-conn resumable]
+    EP --> MX[process.onReadable\nstate per-conn resumable]
     F --> G{h2c preface?}
     G -->|PRI| H[h2c direct]
     G -->|GET/POST| I[h2c upgrade]
@@ -358,7 +362,7 @@ flowchart TD
     L -->|is_server_streaming=true| LS[spawn thread]
     LI --> M[HandlerFn: trio req/res/ctx]
     LS --> M
-    MX -->|tiap frame lengkap| MI[muxDispatch inline\nreply di-stage ke cork]
+    MX -->|tiap frame lengkap| MI[mux_dispatch inline\nreply di-stage ke cork]
     MI --> M
     M --> N[res.finish mengirim trailers]
 ```
