@@ -328,9 +328,13 @@ Range parsing is shared with the other engines: `utils/http/range_header.zig`. `
 
 Then `installStaticCache` installs the process static cache when `public_dir` and a TTL are set (a failed install is only a warning). Only the server that built the table shuts it down when `run()` returns.
 
-The model switch maps `.ASYNC` to `dispatch/async.zig` (then `serve.serveConn`), `.EPOLL` to `dispatch/epoll.zig`, and `.URING` to `dispatch/uring.zig`. Those files are not ported yet, so every arm returns `ZixHttp2_Server_DispatchModel_NotSupported` for now. The `config.tls != null` branch (`tls_mux.runTlsMux` for `.EPOLL` / `.URING`, `tls_serve.runTls` otherwise) is not in `Server.zig` yet either.
+The model switch maps `.ASYNC` to `dispatch/async.zig` (then `serve.serveConn`), `.EPOLL` to `dispatch/epoll.zig`, and `.URING` to `dispatch/uring.zig`. Only `dispatch/async.zig` is ported. Its errors are translated by `dispatchError` (`ZixHttp2_Async_*` -> `ZixHttp2_Server_ResolveFailed`, `ListenFailed`, `AcceptFailed`). `.EPOLL` and `.URING` return `ZixHttp2_Server_DispatchModel_NotSupported` until the Linux dispatch lands. The `config.tls != null` branch (`tls_mux.runTlsMux` for `.EPOLL` / `.URING`, `tls_serve.runTls` otherwise) is not in `Server.zig` yet either.
 
 `Http2.zig` is the `zix.Http2` namespace. It re-exports the public types and functions from their own files and keeps the old names `HpackEntry` (the same type as `Header`), `DEFAULT_WINDOW_SIZE`, and `MAX_PAYLOAD`.
+
+### dispatch/async.zig
+
+`run(config, handler)` resolves `config.ip`, listens with `reuse_address` and `kernel_backlog`, logs the listening line through `log.logSystem`, and hands every accepted stream to `io.async(connEntry, ...)`. A peer that drops before accept (`ConnectionAborted`) is skipped, any other accept failure returns `ZixHttp2_Async_AcceptFailed`. `serveOpts(config)` maps `Config` to `ServeOpts`. `connEntry` sets the access logger, holds the pool thread's response cache (`utils/cache/async.zig`, sized by `cache.effectiveCacheEntries`), runs `serve.serveConn`, then closes the stream and releases the cache. `async_cache.reclaim()` frees the per-thread caches when the accept loop ends.
 
 ### dispatch/epoll.zig
 
