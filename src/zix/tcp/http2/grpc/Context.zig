@@ -556,7 +556,7 @@ pub fn sendCached(
 const builtin = @import("builtin");
 const pair = @import("../../../utils/socket/pair.zig");
 const FrameHeader = @import("../FrameHeader.zig");
-const Http1Config = @import("../../http1/Config.zig");
+const CacheSize = @import("../../../utils/cache/CacheSize.zig");
 const ResponseCache = @import("../../../utils/cache/ResponseCache.zig");
 
 const TEST_FD: std.posix.fd_t = if (builtin.os.tag == .windows)
@@ -644,16 +644,10 @@ fn walkStaged(buf: []const u8) StagedFrames {
     return out;
 }
 
-fn testCacheConfig() Http1Config {
-    return .{
-        .io = std.testing.io,
-        .ip = "127.0.0.1",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = 16,
-        .cache_max_value_bytes = 256,
-    };
-}
+const TEST_SIZE: CacheSize = .{
+    .max_entries = 16,
+    .max_value_bytes = 256,
+};
 
 test "zix http2 grpc: Context, init keeps fd, stream id, and body" {
     const ctx = Self.init(std.testing.io, std.testing.allocator, TEST_FD, 7, "abc");
@@ -994,7 +988,7 @@ test "zix http2 grpc: Context, serveCached without a cache is a miss" {
 }
 
 test "zix http2 grpc: Context, serveCached with an empty path is a miss" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     cache.setCache(&resp_cache, 1000);
@@ -1006,7 +1000,7 @@ test "zix http2 grpc: Context, serveCached with an empty path is a miss" {
 }
 
 test "zix http2 grpc: Context, sendCached stores and serveCached replays" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     cache.setCache(&resp_cache, 1000);
