@@ -50,6 +50,9 @@ fn innerError(err: writer.Error) Error {
 
     return switch (err) {
         error.ZixHttp2_Writer_BrokenPipe => Error.ZixHttp2_Control_BrokenPipe,
+        error.ZixHttp2_Writer_UnexpectedEOF => Error.ZixHttp2_Control_UnexpectedEOF,
+        error.ZixHttp2_Writer_Overflow => Error.ZixHttp2_Control_Overflow,
+        error.ZixHttp2_Writer_BufferFull => Error.ZixHttp2_Control_BufferFull,
     };
 }
 
@@ -83,6 +86,9 @@ fn sendU32FrameFD(
 pub const Error = error {
     ZixHttp2_Control_BrokenPipe,
     ZixHttp2_Control_TooManySettings,
+    ZixHttp2_Control_UnexpectedEOF,
+    ZixHttp2_Control_Overflow,
+    ZixHttp2_Control_BufferFull,
 };
 
 /// Send a SETTINGS frame with the given parameters.
