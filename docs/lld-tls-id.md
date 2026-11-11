@@ -135,7 +135,7 @@ WebSocket dibangun di atas stream sink yang sama untuk write half dan menambah r
 
 ## tcp/http2/tls_serve.zig dan tcp/http2/grpc/tls_serve.zig
 
-Ini jalur `.ASYNC`. `runTls` membaca `config.tls.?`, menjalankan accept loop, dan menyerahkan tiap koneksi ke worker thread-nya sendiri, yang memanggil `serveConnTls` dengan `MuxDriver(routes)`. `drive` milik driver yang berbeda: Http2 menjalankan `mux.processRing` di atas `mux.MuxConn`, Grpc menjalankan `core.grpcMuxProcessRing` di atas `GrpcMuxConn` lalu `flushStage` untuk cork balasan yang di-stage. Keduanya menyegel frame ke record TLS lewat `frame.write_hook`, state machine resumable yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak ada race write per-stream. Model dispatch `.EPOLL` / `.URING` justru memakai `tls_mux.zig` multipleks di bawah.
+Ini jalur `.ASYNC`. `runTls` membaca `config.tls.?`, menjalankan accept loop, dan menyerahkan tiap koneksi ke worker thread-nya sendiri, yang memanggil `serveConnTls` dengan `MuxDriver(routes)`. `drive` milik driver yang berbeda: Http2 menjalankan `mux.processRing` di atas `mux.MuxConn`, Grpc menjalankan `core.grpcMuxProcessRing` di atas `GrpcMuxConn` lalu `flushStage` untuk cork balasan yang di-stage. Keduanya menyegel frame ke record TLS lewat `writer.write_hook`, state machine resumable yang sama dengan model cleartext `.EPOLL` / `.URING`, jadi tidak ada race write per-stream. Model dispatch `.EPOLL` / `.URING` justru memakai `tls_mux.zig` multipleks di bawah.
 
 ## tcp/tls/tls_session.zig (session server TLS 1.3 resumable)
 
@@ -143,7 +143,7 @@ Linchpin dari jalur multipleks (ADR-052). Session server TLS 1.3 sans-blocking-I
 
 ## tcp/http2/tls_mux.zig dan tcp/http2/grpc/tls_mux.zig (dispatch multipleks)
 
-Jalur `.EPOLL` / `.URING` (ADR-052). `runTlsMux` men-spawn satu worker per core, masing-masing dengan listener `SO_REUSEPORT` dan instance epoll sendiri. Slab `TlsConn` (di-index oleh fd) memegang `tls_session.Session`, mux h2 / gRPC, dan buffer ciphertext keluar yang di-stage yang meng-arm `EPOLLOUT` saat `EAGAIN` untuk backpressure. `onReadable` membaca ciphertext, memanggil `session.feed`, mengirim flight handshake, dan pada outcome established memberi plaintext terdekripsi ke mux (`processRing` / `grpcMuxProcessRing`), yang frame-nya disegel kembali ke record lewat `frame.write_hook` yang menunjuk `hookWrite`. Satu worker memultipleks banyak koneksi, jadi konkurensi tinggi tidak men-spawn thread per koneksi.
+Jalur `.EPOLL` / `.URING` (ADR-052). `runTlsMux` men-spawn satu worker per core, masing-masing dengan listener `SO_REUSEPORT` dan instance epoll sendiri. Slab `TlsConn` (di-index oleh fd) memegang `tls_session.Session`, mux h2 / gRPC, dan buffer ciphertext keluar yang di-stage yang meng-arm `EPOLLOUT` saat `EAGAIN` untuk backpressure. `onReadable` membaca ciphertext, memanggil `session.feed`, mengirim flight handshake, dan pada outcome established memberi plaintext terdekripsi ke mux (`processRing` / `grpcMuxProcessRing`), yang frame-nya disegel kembali ke record lewat `writer.write_hook` yang menunjuk `hookWrite`. Satu worker memultipleks banyak koneksi, jadi konkurensi tinggi tidak men-spawn thread per koneksi.
 
 ## tls12_*.zig
 
