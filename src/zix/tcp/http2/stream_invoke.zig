@@ -35,23 +35,32 @@ const control = @import("control.zig");
 const frame = @import("frame.zig");
 const handler = @import("handler.zig");
 const stream_body = @import("stream_body.zig");
+const Header = @import("hpack/Header.zig");
 const Request = @import("Request.zig");
 const ServeOpts = @import("ServeOpts.zig");
 const Stream = @import("Stream.zig");
 
 // --------------------------------------------------------- //
-// Private:
+// Public:
 
-/// Build the request view over a stream's decoded headers and body.
+/// Build the request view over decoded headers and a body.
 ///
 /// Note:
 /// - The two pseudo-headers have distinct lengths (":path" 5, ":method" 7),
 ///   so the scan switches on length first and compares at most once.
-fn buildRequest(stream: *const Stream) Request {
+/// - A missing :method reads as GET, a missing :path reads as "/".
+///
+/// Param:
+/// headers - []const Header (the stream's decoded headers)
+/// body - []const u8 (the stream's body bytes)
+///
+/// Return:
+/// - Request (borrows headers and body, valid while the stream is)
+pub fn buildRequest(headers: []const Header, body: []const u8) Request {
     var method: []const u8 = "GET";
     var raw_path: []const u8 = "/";
 
-    for (stream.headerList()) |header| {
+    for (headers) |header| {
         switch (header.name.len) {
             5 => if (std.mem.eql(u8, header.name, ":path")) {
                 raw_path = header.value;
@@ -69,13 +78,10 @@ fn buildRequest(stream: *const Stream) Request {
         .method = method,
         .path = split.path,
         .query = split.query,
-        .headers = stream.headerList(),
-        .body = stream.bodyBytes(),
+        .headers = headers,
+        .body = body,
     };
 }
-
-// --------------------------------------------------------- //
-// Public:
 
 /// Invoke the handler for a stream whose END_STREAM has arrived, unless its
 /// body does not match the content-length it declared.
@@ -120,7 +126,7 @@ pub fn invokeWhole(
         return;
     }
 
-    var req = buildRequest(stream);
+    var req = buildRequest(stream.headerList(), stream.bodyBytes());
 
     handler.invokeHandler(handler_fn, &req, fd, stream.id, io, opts, peer_max_frame_size);
 }
@@ -178,7 +184,7 @@ test "zix http2: stream_invoke, buildRequest reads pseudo-headers" {
     addHeader(stream, ":path", "/items?page=2");
     _ = stream.appendBody("abc");
 
-    const req = buildRequest(stream);
+    const req = buildRequest(stream.headerList(), stream.bodyBytes());
 
     try std.testing.expectEqualStrings("POST", req.method);
     try std.testing.expectEqualStrings("/items", req.path);
@@ -190,7 +196,7 @@ test "zix http2: stream_invoke, buildRequest without pseudo-headers falls back" 
     const stream = try testStream(1);
     defer std.testing.allocator.destroy(stream);
 
-    const req = buildRequest(stream);
+    const req = buildRequest(stream.headerList(), stream.bodyBytes());
 
     try std.testing.expectEqualStrings("GET", req.method);
     try std.testing.expectEqualStrings("/", req.path);
