@@ -95,6 +95,15 @@ pub const DEFAULT_INITIAL_WINDOW: u32 = 65535;
 /// Default SETTINGS_MAX_FRAME_SIZE (RFC 7540 section 6.5.2).
 pub const DEFAULT_MAX_FRAME_SIZE: u32 = 16384;
 
+/// HPACK encode scratch for one response HEADERS block.
+pub const HPACK_ENCODE_SCRATCH: usize = 512;
+
+/// Body-size cutoff for staging a whole response into one write. At or below
+/// this the body is copied next to its frame headers. Above it the body leaves
+/// without a copy as the payload half of a vectored write. Loopback-measured
+/// crossover: the staged copy is faster below 4 KiB, the vectored send past it.
+pub const SEND_STAGE_BODY_MAX: usize = 4096;
+
 /// Parse a 9-byte frame header. No I/O.
 ///
 /// Note:
