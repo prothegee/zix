@@ -89,6 +89,9 @@ pub const Logger = @import("logger/Logger.zig");
 /// ZIX Http1
 pub const Http1 = @import("tcp/http1/Http1.zig");
 
+/// ZIX Http2
+pub const Http2 = @import("tcp/http2/Http2.zig");
+
 /// ZIX Utils
 pub const utils = @import("utils/Utils.zig");
 
@@ -115,6 +118,11 @@ test "zix: jzon, export carries the package version" {
 
 test "zix: jzon, export has the package semver fields" {
     try std.testing.expect(@hasDecl(jzon.VERSION, "MAJOR"));
+}
+
+test "zix: Http2, exports the h2c server" {
+    try std.testing.expect(@hasDecl(Http2, "Server"));
+    try std.testing.expect(@hasDecl(Http2.Server, "run"));
 }
 
 test "zix: utils, exports the compression facade" {
