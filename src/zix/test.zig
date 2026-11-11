@@ -101,7 +101,11 @@ test {
     _ = @import("tcp/http1/websocket/pump.zig");
     _ = @import("tcp/http1/websocket/send.zig");
     _ = @import("tcp/http1/websocket/upgrade.zig");
+    _ = @import("tcp/http2/Config.zig");
+    _ = @import("tcp/http2/Context.zig");
     _ = @import("tcp/http2/FrameHeader.zig");
+    _ = @import("tcp/http2/Request.zig");
+    _ = @import("tcp/http2/Response.zig");
     _ = @import("tcp/http2/control.zig");
     _ = @import("tcp/http2/hpack/DynamicTable.zig");
     _ = @import("tcp/http2/hpack/Header.zig");
