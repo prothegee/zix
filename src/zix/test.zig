@@ -114,6 +114,7 @@ test {
     _ = @import("tcp/http2/cache.zig");
     _ = @import("tcp/http2/control.zig");
     _ = @import("tcp/http2/declared.zig");
+    _ = @import("tcp/http2/dispatch/async.zig");
     _ = @import("tcp/http2/hpack/DynamicTable.zig");
     _ = @import("tcp/http2/hpack/Header.zig");
     _ = @import("tcp/http2/hpack/HpackDecoder.zig");
@@ -128,6 +129,7 @@ test {
     _ = @import("tcp/http2/frame.zig");
     _ = @import("tcp/http2/frame_payload.zig");
     _ = @import("tcp/http2/handler.zig");
+    _ = @import("tcp/http2/log.zig");
     _ = @import("tcp/http2/peer_settings.zig");
     _ = @import("tcp/http2/mux/MuxConn.zig");
     _ = @import("tcp/http2/mux/MuxStream.zig");
