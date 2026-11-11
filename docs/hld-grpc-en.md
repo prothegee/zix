@@ -15,7 +15,7 @@
 graph LR
     Z[zix.Grpc] --> H[zix.Http2]
     H --> T[std.Io / std.posix]
-    Z --> P[proto.zig codec]
+    Z --> P[proto/ codec]
     Z --> S[status.zig]
     Z --> TO[timeout.zig]
 ```
@@ -35,8 +35,8 @@ graph LR
 | `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: multiplexed TLS dispatch path |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
 | `src/tcp/http2/grpc/frame.zig` | `GrpcPrefix` struct, `readGrpcPrefix`, `writeGrpcPrefix`, `send*`/`build*` frame helpers (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), comptime cached reply blocks |
-| `src/tcp/http2/grpc/proto.zig` | `WT_*` wire type constants, `encodeVarint`, `decodeVarint`, `encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`, `MessageReader` |
-| `src/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (u8), OK=0 to UNAUTHENTICATED=16 |
+| `src/zix/tcp/http2/grpc/proto/` | `wire_type.zig` (`WT_*` wire type constants), `varint.zig` (`encodeVarint`, `decodeVarint`, `MAX_LEN`), `field.zig` (`encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`), `ProtoField.zig`, `MessageReader.zig` |
+| `src/zix/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (u8), OK=0 to UNAUTHENTICATED=16 |
 | `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: grpc-timeout header parser |
 
 ## Public API
@@ -363,24 +363,24 @@ flowchart TD
 
 ## Minimal Protobuf Codec
 
-`proto.zig` provides wire-type constants and encode/decode primitives for proto3. No `.proto` file compiler or generated code is required for simple schemas.
+`proto/` provides wire-type constants and encode/decode primitives for proto3. No `.proto` file compiler or generated code is required for simple schemas.
 
 | Function | Notes |
 | :- | :- |
-| `encodeVarint(buf, value)` | encodes u64 as 1-10 bytes, returns bytes written |
-| `decodeVarint(buf)` | returns `{value: u64, consumed: usize}` or error |
-| `encodeString(field_number, s, buf)` | LEN wire type (2), returns bytes written |
-| `encodeInt32(field_number, val, buf)` | VARINT wire type (0), returns bytes written |
-| `encodeDouble(field_number, val, buf)` | I64 wire type (1), 8-byte little-endian IEEE 754, returns bytes written |
+| `encodeVarint(buf, value)` | encodes u64 as 1-10 bytes, returns bytes written, `BufferFull` when buf is too small |
+| `decodeVarint(buf)` | returns `Decoded { value: u64, consumed: usize }`, `UnexpectedEOF` when buf ends mid-varint, `Overflow` past 64 bits |
+| `encodeString(field_number, s, buf)` | LEN wire type (2), returns bytes written, `BufferFull` when buf is too small |
+| `encodeInt32(field_number, val, buf)` | VARINT wire type (0), returns bytes written, `BufferFull` when buf is too small |
+| `encodeDouble(field_number, val, buf)` | I64 wire type (1), 8-byte little-endian IEEE 754, returns bytes written, `BufferFull` when buf is too small |
 | `decodeDouble(payload)` | reads `*const [8]u8`, returns `f64` |
 | `MessageReader.init(buf)` | wraps a serialized message buffer |
-| `MessageReader.next()` | returns `?ProtoField` with `field_number`, `wire_type`, `payload` |
+| `MessageReader.next()` | returns `?ProtoField` with `field_number`, `wire_type`, `payload`, `value_u64` (null at the end), errors on a cut field, an unknown wire type, or a field number past u32 |
 
 Example encoding a `HelloRequest { string name = 1; }`:
 
 ```zig
 var out: [256]u8 = undefined;
-const n = zix.Grpc.encodeString(1, "world", &out);
+const n = try zix.Grpc.encodeString(1, "world", &out);
 // send out[0..n] as the gRPC message payload
 ```
 
