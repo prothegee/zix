@@ -152,9 +152,13 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http2/grpc/status.zig` | `refAllDecls` + perilaku: OK=0, CANCELLED=1, UNIMPLEMENTED=12, UNAUTHENTICATED=16 |
+| `tcp/http2/grpc/status.zig` | setiap kode sesuai nilai kanoniknya, setiap nilai kanonik kembali ke kodenya, OK adalah nilai nol, kode tak dikenal di atas 16 / u8 maksimum mempertahankan nilainya |
 | `tcp/http2/grpc/frame.zig` | `refAllDecls` + perilaku: round-trip `readGrpcPrefix` / `writeGrpcPrefix`, flag compress tersimpan, panjang pesan tersimpan, `sendGrpcError` menyertakan header `content-type` |
-| `tcp/http2/grpc/proto.zig` | `refAllDecls` + perilaku: round-trip `encodeVarint` / `decodeVarint`, `encodeString` menghasilkan wire type LEN, `encodeInt32` menghasilkan wire type VARINT, round-trip `encodeDouble` / `decodeDouble` (nilai positif dan negatif), `MessageReader` mengiterasi semua field |
+| `tcp/http2/grpc/proto/wire_type.zig` | id sesuai encoding protobuf |
+| `tcp/http2/grpc/proto/varint.zig` | 1 menjadi satu byte, 300 menjadi dua byte, u64 maksimum menjadi `MAX_LEN` byte, round-trip lintas ukuran, decode berhenti di byte akhir pertama, encode ke buf kosong / melewati buf BufferFull, input kosong / terpotong UnexpectedEOF, byte ke-10 melewati bit 0 / 11 byte Overflow |
+| `tcp/http2/grpc/proto/field.zig` | string meng-encode tag, panjang, dan byte, string kosong panjang nol, int32 150 field varint, int32 negatif 10 byte nilai, round-trip double positif / negatif, string / int32 / double / buf kosong BufferFull |
+| `tcp/http2/grpc/proto/ProtoField.zig` | menampung field varint, payload menunjuk ke sumbernya |
+| `tcp/http2/grpc/proto/MessageReader.zig` | buf kosong null, membaca field string / varint / double / I32, membaca field secara berurutan, LEN melewati buf / LEN u64 maksimum / I64 pendek / I32 pendek / varint terpotong UnexpectedEOF, tipe wire group UnknownWireType, tag melewati 64 bit Overflow, nomor field melewati u32 FieldNumberTooLarge |
 | `tcp/http2/grpc/timeout.zig` | `refAllDecls` + perilaku: satuan H/M/S/m/u/n dikonversi dengan benar, karakter tunggal menghasilkan null, kosong menghasilkan null |
 | `tcp/http2/grpc/core.zig` | `refAllDecls` + perilaku: `parsePath` input valid dan tidak valid, `detectContentType` proto/json/tidak diketahui, `GrpcContext.recvMessage` body kosong menghasilkan null, `Route.timeout_ms` default nol, `GrpcContext.isExpired` deadline null/lampau/mendatang, `GrpcServeOpts.handler_timeout_ms` default nol, Router mendispatch ke handler yang cocok |
 | `tcp/http2/grpc/config.zig` | `refAllDecls` + perilaku: field wajib dan default `GrpcServerConfig` (handler_timeout_ms=0), field wajib `GrpcClientConfig` |
