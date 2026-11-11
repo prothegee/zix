@@ -31,7 +31,7 @@
 //!
 
 const std = @import("std");
-const Config = @import("../../tcp/http1/Config.zig");
+const CacheSize = @import("CacheSize.zig");
 const slab_mem = @import("../../multiplexers/slab.zig");
 
 // --------------------------------------------------------- //
@@ -81,15 +81,15 @@ pub const Meta = struct {
 /// costs no physical memory.
 ///
 /// Note:
-/// - cache_max_entries is rounded down to a power of two, so the configured entry
-///   count is an upper bound and the slab never exceeds
-///   cache_max_entries * cache_max_value_bytes.
+/// - size.max_entries is rounded down to a power of two, so the configured
+///   entry count is an upper bound and the slab never exceeds
+///   size.max_entries * size.max_value_bytes.
 /// - The first PRETOUCH_BYTES of the slab are made resident up front, so
 ///   the hot region is a startup property instead of ramp-time faults.
 ///
 /// Param:
 /// backing - std.mem.Allocator (owns the arena's backing memory)
-/// config - Config (slot count and per-slot byte cap)
+/// size - CacheSize (slot count and per-slot byte cap)
 ///
 /// Return:
 /// - !ResponseCache
@@ -99,9 +99,9 @@ pub const Error = error {
     ZixUtils_ResponseCache_MapFailed,
 };
 
-pub fn init(backing: std.mem.Allocator, config: Config) Error!Self {
-    const entries: usize = std.math.floorPowerOfTwo(u32, @max(1, config.cache_max_entries));
-    const value_bytes: usize = @max(1, config.cache_max_value_bytes);
+pub fn init(backing: std.mem.Allocator, size: CacheSize) Error!Self {
+    const entries: usize = std.math.floorPowerOfTwo(u32, @max(1, size.max_entries));
+    const value_bytes: usize = @max(1, size.max_value_bytes);
 
     var arena = std.heap.ArenaAllocator.init(backing);
     errdefer arena.deinit();
@@ -280,17 +280,13 @@ pub fn unpin(self: *Self, slot: u32) void {
 // --------------------------------------------------------- //
 // Test:
 
-test "zix utils cache: ResponseCache, stores and expires" {
-    const config: Config = .{
-        .io = std.testing.io,
-        .ip = "127.0.0.1",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = 4,
-        .cache_max_value_bytes = 64,
-    };
+const TEST_SIZE: CacheSize = .{
+    .max_entries = 4,
+    .max_value_bytes = 64,
+};
 
-    var cache = try Self.init(std.testing.allocator, config);
+test "zix utils cache: ResponseCache, stores and expires" {
+    var cache = try Self.init(std.testing.allocator, TEST_SIZE);
     defer cache.deinit();
 
     try std.testing.expect(cache.store(7, "hello", 1000, 10));
@@ -307,16 +303,7 @@ test "zix utils cache: ResponseCache, stores and expires" {
 }
 
 test "zix utils cache: ResponseCache, rejects a value past the slot cap" {
-    const config: Config = .{
-        .io = std.testing.io,
-        .ip = "127.0.0.1",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = 4,
-        .cache_max_value_bytes = 64,
-    };
-
-    var cache = try Self.init(std.testing.allocator, config);
+    var cache = try Self.init(std.testing.allocator, TEST_SIZE);
     defer cache.deinit();
 
     const big: [65]u8 = @splat('x');
@@ -326,16 +313,7 @@ test "zix utils cache: ResponseCache, rejects a value past the slot cap" {
 }
 
 test "zix utils cache: ResponseCache, hitSlot rejects a foreign slice" {
-    const config: Config = .{
-        .io = std.testing.io,
-        .ip = "127.0.0.1",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = 4,
-        .cache_max_value_bytes = 64,
-    };
-
-    var cache = try Self.init(std.testing.allocator, config);
+    var cache = try Self.init(std.testing.allocator, TEST_SIZE);
     defer cache.deinit();
 
     try std.testing.expect(cache.store(7, "hello", 1000, 10));
@@ -344,5 +322,26 @@ test "zix utils cache: ResponseCache, hitSlot rejects a foreign slice" {
     const copy = "hello";
 
     try std.testing.expect(cache.hitSlot(copy) == null);
+}
+
+test "zix utils cache: ResponseCache, entry count rounds down to a power of two" {
+    var cache = try Self.init(std.testing.allocator, .{
+        .max_entries = 6,
+        .max_value_bytes = 64,
+    });
+    defer cache.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), cache.keys.len);
+}
+
+test "zix utils cache: ResponseCache, zero size falls back to one slot" {
+    var cache = try Self.init(std.testing.allocator, .{
+        .max_entries = 0,
+        .max_value_bytes = 0,
+    });
+    defer cache.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), cache.keys.len);
+    try std.testing.expectEqual(@as(usize, 1), cache.value_bytes);
 }
 
