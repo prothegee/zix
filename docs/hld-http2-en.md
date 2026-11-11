@@ -37,7 +37,11 @@ Use `zix.Http2` for browser-grade or prior-knowledge HTTP/2 with raw frame contr
 
 ## Runtime Model
 
-Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
+Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enum). Required: the caller must set it explicitly (no default). `.EPOLL` and `.URING` are Linux-only, and `run()` rejects them off Linux with `Error.ZixHttp2_Server_DispatchModel_NotSupported` (ADR-065).
+
+`run()` checks in this order before it serves: `config.port` (0 returns `ZixHttp2_Server_PortNotConfigured`), the dispatch model, then `public_dir` (`ZixHttp2_Server_PublicDir*`). A rejected config leaves no listener and no static cache behind.
+
+Note: the dispatch model files are not ported yet. Until they land, `run()` returns `ZixHttp2_Server_DispatchModel_NotSupported` for every model after these checks pass.
 
 ### .ASYNC: Thread-per-connection over the blocking core
 
@@ -76,13 +80,13 @@ flowchart TD
 - One worker drives many non-blocking connections through the resumable h2 state machine in `mux/`, one `MuxConn` per fd, so concurrency is bounded by connection count, not thread count.
 - Every frame a readable batch writes (HEADERS plus DATA per stream, times the streams in the batch) coalesces into a single `write()` through a per-worker sink (`beginCoalesce` / `endCoalesce`), instead of one write per frame.
 - `workers` is the mux worker count (0 = cpu count). A handler runs inline on the worker, so it must stay bounded: a long handler blocks that worker's other connections.
-- Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
+- Off Linux, `run()` returns `Error.ZixHttp2_Server_DispatchModel_NotSupported` after logging which model was rejected: pick `.ASYNC` there.
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
 Same shared-nothing, one-listener-per-worker topology as `.EPOLL`, but completion-based: a multishot accept and one recv per connection are submitted as SQEs and reaped as CQEs (ADR-037 Phase 4). Each recv fills the connection's read accumulator, then `process.processRing` drives the same resumable state machine. The handler still writes its reply straight to the (non-blocking) fd, batched by the same coalescing sink.
 
-`.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. That is a runtime capability gap on Linux. Off Linux the model is rejected outright with `error.ZixDispatchModelUnsupported`.
+`.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. That is a runtime capability gap on Linux. Off Linux the model is rejected outright with `Error.ZixHttp2_Server_DispatchModel_NotSupported`.
 
 ---
 
@@ -104,7 +108,7 @@ graph TD
     Http2 --> hpack["hpack/\nstatic table + Huffman + integer\ndecoder + encoder + respHeaderBlock"]
     Http2 --> config["Config.zig\nServerConfig"]
     Http2 --> types["Request.zig + Response.zig + Context.zig\nhandler trio"]
-    Http2 --> server["server.zig\nServer + dispatch_model switch"]
+    Http2 --> server["Server.zig\nServer + config gates + dispatch_model switch"]
     Http2 --> static["static.zig\npublic_dir fallback\nHEADERS + capped DATA frames"]
 
     server --> dispatch["dispatch/\nasync pool mixed epoll uring + common"]
@@ -161,11 +165,13 @@ Access via `const zix = @import("zix");`
 | `zix.Http2.serveCached` / `sendCachedFD` / `cacheTtl` | fn | Per-worker response cache (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Http2.HpackEncoder` / `HpackDecoder` / `HpackEntry` | type | HPACK codec types |
 | `zix.Http2.huffEncode` / `huffDecode` | fn | HPACK Huffman codec |
-| `zix.Http2.respHeaderBlock` | fn | Encode a cached `[:status, content-type, content-encoding, content-length]` block |
-| `zix.Http2.FrameHeader` + `parseFrameHeader` / `writeFrameHeader` / `encodeFrameHeader` / `readFrameHeader` | type / fn | Frame-header codec for custom framing |
+| `zix.Http2.FrameHeader` + `parseFrameHeader` / `writeFrameHeaderFD` / `encodeFrameHeader` / `readFrameHeader` | type / fn | Frame-header codec for custom framing |
+| `zix.Http2.writeAllFD` / `recvExact` | fn | Blocking write-all and exact read on an fd |
 | `zix.Http2.sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` | fn | Control-frame senders |
 | `zix.Http2.FRAME_TYPE_*` / `FLAG_*` / `ERR_*` / `SETTINGS_*` | const | RFC 7540 frame, flag, error, and settings constants |
 | `zix.Http2.PREFACE` / `HPACK_STATIC` | const | Connection preface string, HPACK static table |
+| `zix.Http2.FRAME_HEADER_LEN` / `FRAME_PAYLOAD_SLACK` / `HPACK_ENCODE_SCRATCH` / `MAX_HEADERS` | const | Frame and buffer sizes |
+| `zix.Http2.DEFAULT_INITIAL_WINDOW` / `DEFAULT_MAX_FRAME_SIZE` | const | RFC 7540 defaults (65535, 16384). `DEFAULT_WINDOW_SIZE` and `MAX_PAYLOAD` are the old names, kept for callers |
 
 ---
 
@@ -319,7 +325,7 @@ Send-side flow control follows RFC 7540 6.9. Each `MuxConn` carries a connection
 
 ## h2 over TLS
 
-Setting `config.tls` (a `*Tls.Context`) opts into HTTP/2 over TLS (TLS 1.3 with a 1.2 fallback, ALPN h2). The `server.zig` `run()` switch picks one of two terminators by `dispatch_model`:
+Setting `config.tls` (a `*Tls.Context`) opts into HTTP/2 over TLS (TLS 1.3 with a 1.2 fallback, ALPN h2). The `Server.zig` `run()` switch picks one of two terminators by `dispatch_model`:
 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. One `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker, with no socketpair and no thread per connection. The resumable h2 mux consumes the decrypted plaintext, and its reply frames are encrypted back into TLS records through the thread-local frame write hook. Outbound ciphertext that does not fit is staged per connection and flushed on the next EPOLLOUT, so a slow client never parks the worker.
 - `.ASYNC`: `tls_serve.runTls`. An accept loop hands each connection to its own worker thread, which runs the shared terminator (`tcp/tls/h2_terminator.zig`) with an inline-mux driver that drives the same resumable mux directly over the decrypted stream (one thread per connection, no socketpair). This path also serves TLS 1.2.
