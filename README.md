@@ -105,6 +105,26 @@
 <!-- </div> -->
 <!-- https://shields.io/badges/git-hub-actions-workflow-status -->
 
+<br>
+
+<h4 align="center">
+    <b><i>ZIX Internal Library/Module</i></b>
+</h4>
+<div align="center">
+
+[JZON](src/jzon/README.md)
+
+<div align="center">
+    <img src="src/jzon/jzon-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="256px">
+</div>
+<p align="center">
+    <b>
+        <i>JSON and ZON in both directions, written in pure Zig, standard library only</i>
+    </b>
+</p>
+
+</div>
+
 <hr>
 
 <h2 align="center">
