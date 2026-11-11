@@ -41,7 +41,7 @@ Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchMode
 
 `run()` memeriksa dengan urutan ini sebelum melayani: `config.port` (0 menghasilkan `ZixHttp2_Server_PortNotConfigured`), dispatch model, lalu `public_dir` (`ZixHttp2_Server_PublicDir*`). Config yang ditolak tidak meninggalkan listener maupun static cache.
 
-Note: file dispatch model belum di-port. Sampai file itu masuk, `run()` mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported` untuk setiap model setelah pemeriksaan ini lolos.
+Note: hanya `.ASYNC` yang sudah tersambung. `.EPOLL` dan `.URING` masuk bersama dispatch Linux. Sampai itu, `run()` mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported` untuk keduanya setelah pemeriksaan ini lolos.
 
 ### .ASYNC: Thread-per-connection di atas core blocking
 
