@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Logger = @import("../../logger/Logger.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -42,6 +43,8 @@ fd: std.posix.fd_t,
 sid: u31,
 /// Per-request scratch allocator.
 allocator: std.mem.Allocator,
+/// Logger from Config.logger. Null when no logger is attached.
+logger: ?*Logger = null,
 deadline: ?std.Io.Clock.Timestamp = null,
 /// Static file directory from Config.public_dir. Empty sends an unmatched
 /// route straight to 404.
@@ -149,6 +152,12 @@ test "zix http2: Context, defaults to no static dir and a 16 KiB frame" {
 
     try std.testing.expectEqualStrings("", ctx.public_dir);
     try std.testing.expectEqual(@as(u32, 16384), ctx.max_frame_size);
+}
+
+test "zix http2: Context, logger defaults to null" {
+    const ctx = testContext();
+
+    try std.testing.expectEqual(@as(?*Logger, null), ctx.logger);
 }
 
 test "zix http2: Context, starts without a deadline" {
