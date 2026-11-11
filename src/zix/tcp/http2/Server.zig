@@ -12,9 +12,8 @@
 //!
 //! ### note:
 //!
-//! Only .ASYNC is wired. .EPOLL and .URING land with the Linux dispatch.
-//! Until then they return DispatchModel_NotSupported after the config gates
-//! pass.
+//! .ASYNC runs everywhere. .EPOLL and .URING run on Linux only. .IOCP and
+//! .KQUEUE are not wired and return DispatchModel_NotSupported.
 //!
 //! ---------------------------------------------------------
 //!
@@ -36,6 +35,8 @@ const Config = @import("Config.zig");
 const DispatchModel = @import("../../shared/dispatch.zig").Model;
 const HandlerFn = @import("handler.zig").HandlerFn;
 const dispatch_async = @import("dispatch/async.zig");
+const dispatch_epoll = @import("dispatch/epoll.zig");
+const dispatch_uring = @import("dispatch/uring.zig");
 const StaticCacheRegistry = @import("../../utils/static/StaticCacheRegistry.zig");
 const OS = @import("builtin").target.os.tag;
 
@@ -144,6 +145,35 @@ fn dispatchError(err: dispatch_async.Error) Error {
     };
 }
 
+fn dispatchEpollError(err: dispatch_epoll.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_Epoll_ResolveFailed
+            => Error.ZixHttp2_Server_ResolveFailed,
+        error.ZixHttp2_Epoll_ListenFailed
+            => Error.ZixHttp2_Server_ListenFailed,
+        error.ZixHttp2_Epoll_OutOfMemory,
+        error.ZixHttp2_Epoll_SpawnFailed,
+        error.ZixHttp2_Epoll_SetupFailed,
+        error.ZixHttp2_Epoll_Unsupported,
+            => Error.ZixHttp2_Server_EpollSetupFailed,
+    };
+}
+
+fn dispatchUringError(err: dispatch_uring.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_Uring_ResolveFailed
+            => Error.ZixHttp2_Server_ResolveFailed,
+        error.ZixHttp2_Uring_ListenFailed
+            => Error.ZixHttp2_Server_ListenFailed,
+        error.ZixHttp2_Uring_OutOfMemory,
+        error.ZixHttp2_Uring_SpawnFailed,
+        error.ZixHttp2_Uring_SetupFailed,
+        error.ZixHttp2_Uring_WaitFailed,
+        error.ZixHttp2_Uring_Unsupported,
+            => Error.ZixHttp2_Server_UringSetupFailed,
+    };
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -164,6 +194,10 @@ pub const Error = error {
     ZixHttp2_Server_ListenFailed,
     /// E.Q.: error.ZixHttp2_Async_AcceptFailed
     ZixHttp2_Server_AcceptFailed,
+    /// E.Q.: error.ZixHttp2_Epoll_SetupFailed
+    ZixHttp2_Server_EpollSetupFailed,
+    /// E.Q.: error.ZixHttp2_Uring_SetupFailed
+    ZixHttp2_Server_UringSetupFailed,
 };
 
 /// Build the server. Validation happens in run.
@@ -214,8 +248,10 @@ pub fn deinit(self: *Self) void {
 /// - Error.ZixHttp2_Server_PortNotConfigured when config.port is 0
 /// - Error.ZixHttp2_Server_DispatchModel_NotSupported when the model cannot run
 /// - Error.ZixHttp2_Server_PublicDir* when config.public_dir cannot be entered
-/// - Error.ZixHttp2_Server_ResolveFailed, ListenFailed, or AcceptFailed from
-///   the .ASYNC model
+/// - Error.ZixHttp2_Server_ResolveFailed or ListenFailed from any model
+/// - Error.ZixHttp2_Server_AcceptFailed from the .ASYNC model
+/// - Error.ZixHttp2_Server_EpollSetupFailed or UringSetupFailed when a Linux
+///   model could not start its workers
 pub fn run(self: *const Self) Error!void {
     try gatePort(self.config);
     try gateDispatchModel(self.config.dispatch_model);
@@ -232,10 +268,17 @@ pub fn run(self: *const Self) Error!void {
                 else => return dispatchError(err),
             };
         },
-        // .EPOLL and .URING land with the Linux dispatch. .IOCP and .KQUEUE
-        // never pass gateDispatchModel.
-        .EPOLL,
-        .URING,
+        .EPOLL => {
+            dispatch_epoll.run(self.config, self.handler) catch |err| switch (err) {
+                else => return dispatchEpollError(err),
+            };
+        },
+        .URING => {
+            dispatch_uring.run(self.config, self.handler) catch |err| switch (err) {
+                else => return dispatchUringError(err),
+            };
+        },
+        // Never pass gateDispatchModel.
         .IOCP,
         .KQUEUE,
         => Error.ZixHttp2_Server_DispatchModel_NotSupported,
@@ -419,6 +462,74 @@ test "zix http2: Server, dispatchError maps AcceptFailed" {
 
 test "zix http2: Server, ASYNC with an unresolvable ip is ResolveFailed" {
     var server = testServer(.ASYNC);
+    server.config.ip = "not-an-ip";
+
+    try std.testing.expectError(Error.ZixHttp2_Server_ResolveFailed, server.run());
+}
+
+test "zix http2: Server, dispatchEpollError maps ResolveFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ResolveFailed,
+        dispatchEpollError(error.ZixHttp2_Epoll_ResolveFailed),
+    );
+}
+
+test "zix http2: Server, dispatchEpollError maps ListenFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ListenFailed,
+        dispatchEpollError(error.ZixHttp2_Epoll_ListenFailed),
+    );
+}
+
+test "zix http2: Server, dispatchEpollError maps setup failures" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_EpollSetupFailed,
+        dispatchEpollError(error.ZixHttp2_Epoll_SetupFailed),
+    );
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_EpollSetupFailed,
+        dispatchEpollError(error.ZixHttp2_Epoll_SpawnFailed),
+    );
+}
+
+test "zix http2: Server, dispatchUringError maps ResolveFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ResolveFailed,
+        dispatchUringError(error.ZixHttp2_Uring_ResolveFailed),
+    );
+}
+
+test "zix http2: Server, dispatchUringError maps ListenFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ListenFailed,
+        dispatchUringError(error.ZixHttp2_Uring_ListenFailed),
+    );
+}
+
+test "zix http2: Server, dispatchUringError maps setup failures" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_UringSetupFailed,
+        dispatchUringError(error.ZixHttp2_Uring_SetupFailed),
+    );
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_UringSetupFailed,
+        dispatchUringError(error.ZixHttp2_Uring_WaitFailed),
+    );
+}
+
+test "zix http2: Server, EPOLL with an unresolvable ip is ResolveFailed" {
+    if (comptime OS != .linux) return error.SkipZigTest;
+
+    var server = testServer(.EPOLL);
+    server.config.ip = "not-an-ip";
+
+    try std.testing.expectError(Error.ZixHttp2_Server_ResolveFailed, server.run());
+}
+
+test "zix http2: Server, URING with an unresolvable ip is ResolveFailed" {
+    if (comptime OS != .linux) return error.SkipZigTest;
+
+    var server = testServer(.URING);
     server.config.ip = "not-an-ip";
 
     try std.testing.expectError(Error.ZixHttp2_Server_ResolveFailed, server.run());
