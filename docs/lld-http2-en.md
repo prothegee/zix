@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-http2-en.md`](hld-http2-en.md), ADR-043 (the per-engine `dispatch/` split), and ADR-052 (multiplexed TLS).
 
-The blocking model (`.ASYNC`) uses one connection path (`core.serveConn` -> `serveH2cLoop`). The `.EPOLL` and `.URING` models drive a separate, resumable, non-blocking state machine (`mux.zig`) that owns the bulk of this document. Both feed one comptime `Router`. The TLS path (`config.tls != null`) terminates in place, either multiplexed (`tls_mux.zig`, for `.EPOLL` / `.URING`) or thread-per-connection (`tls_serve.zig`, which also serves TLS 1.2).
+The blocking model (`.ASYNC`) uses one connection path (`serve.serveConn` -> `serveLoop`). The `.EPOLL` and `.URING` models drive a separate, resumable, non-blocking state machine (`mux.zig`) that owns the bulk of this document. Both feed one comptime `Router`. The TLS path (`config.tls != null`) terminates in place, either multiplexed (`tls_mux.zig`, for `.EPOLL` / `.URING`) or thread-per-connection (`tls_serve.zig`, which also serves TLS 1.2).
 
 ---
 
@@ -43,7 +43,7 @@ Heap-owned per-connection h2 state, one per fd, private to the owning worker.
 ```zig
 pub const MuxConn = struct {
     fd: std.posix.fd_t,
-    opts: core.ServeOpts,
+    opts: ServeOpts,
 
     rbuf: []u8,                 // read accumulator, persists across events, holds partial frames
     rstart: usize,
@@ -125,7 +125,7 @@ A decode failure sends `RST_STREAM COMPRESSION_ERROR` and frees the slot. `sendS
 
 ### muxDispatch
 
-Extracts method / path from the decoded pseudo-headers (length-gated compares: `:path` is 5, `:method` is 7), sets `active_conn = conn`, records `tl_req_path` / `tl_req_body` only when a response cache is installed, and calls `core.Router(routes).dispatch`. After the handler returns, the slot is freed unless the response body is parked on a window (`pending_body.len > 0`), in which case a later `WINDOW_UPDATE` resumes and frees it.
+Extracts method / path from the decoded pseudo-headers (length-gated compares: `:path` is 5, `:method` is 7), sets `active_conn = conn`, records `tl_req_path` / `tl_req_body` only when a response cache is installed, and calls `router.Router(routes).dispatch`. After the handler returns, the slot is freed unless the response body is parked on a window (`pending_body.len > 0`), in which case a later `WINDOW_UPDATE` resumes and frees it.
 
 ### pumpBody / resumeStream / resumeAll / sendResponseStreamFD
 
@@ -207,11 +207,24 @@ max_size: usize = 4096,
 
 ---
 
-## core.zig
+## Blocking core (serve.zig and its parts)
 
-Shared request processing, the router, and the blocking connection path.
+Shared request processing and the blocking connection path, split by responsibility:
 
-### ServeOpts / Router / Route
+| file | holds |
+| :- | :- |
+| `ServeOpts.zig` | per-connection serving knobs |
+| `serve.zig` | `serveConn`: preface or upgrade, then one frame at a time |
+| `upgrade.zig` + `UpgradeHead.zig` | HTTP/1.1 half of the h2c upgrade (`accept`, answers 101) |
+| `Stream.zig` | one request stream: decoded headers and body |
+| `stream_state.zig` | `StreamState` (RFC 7540 section 5.1) |
+| `stream_slot.zig` | stream table `claim`, `find`, `requestInFlight` |
+| `declared.zig` + `stream_body.zig` | content-length against DATA bytes (`declared`, `isWhole`) |
+| `stream_invoke.zig` | `invokeWhole`: finished stream to `Request`, then the handler |
+| `handler.zig` | `HandlerFn`, `invokeHandler`, `setAccessLogger` |
+| `cache.zig` | per-worker response cache |
+
+### ServeOpts
 
 `ServeOpts` holds the per-connection tuning with these defaults:
 
@@ -221,28 +234,47 @@ Shared request processing, the router, and the blocking connection path.
 | `max_frame_size` | 16384 (`DEFAULT_MAX_FRAME_SIZE`) |
 | `max_header_scratch` | 4096 |
 | `max_body` | 16384 |
+| `logger` | null (logs nothing) |
 | `conn_read_buf_min` | 32 * 1024 |
 | `tls_write_buf_initial` | 16 * 1024 |
 | `response_cache` | false |
+| `cache_max_entries` | 256 |
+| `cache_max_value_bytes` | 16 * 1024 |
+| `cache_ttl_ms` | 1000 |
+| `cache_max_total_bytes` | 0 (no ceiling) |
+| `handler_timeout_ms` | 0 (no deadline) |
 | `public_dir` | "" (empty disables the static fallback) |
 
-`HandlerFn` is `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio, built at dispatch by `core.invokeHandler`). `Route` is `{ path, handler, kind = .EXACT }` with `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` builds a comptime table: `EXACT` routes resolve through a `StaticStringMap` (O(1)), `PREFIX` routes match the longest registered prefix on a path-segment boundary, the query string is stripped first, and an unmatched path sends `404`. `Router(routes).dispatch` itself matches `HandlerFn` exactly, so `Server.init` takes `router.dispatch` as a plain runtime value, not the route table.
+### handler.zig
 
-The per-worker response cache (ADR-036) also lives here: `tl_cache`, `serveCached` / `sendCached`, and `requestKey` (Wyhash over path + body). It is installed by the `.EPOLL` / `.URING` workers and keyed off `tl_req_path` / `tl_req_body`, which `muxDispatch` records.
+`HandlerFn` is `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio, built at dispatch by `handler.invokeHandler`). `invokeHandler` is the one place a handler is called, so every dispatch model builds the trio the same way. On a handler error it sends one 500, but only when nothing was written yet: neither `Response.sent` nor `writer.respondedFD()`. Then it writes the access record when `setAccessLogger` installed a logger.
 
 `invokeHandler` takes `peer_max_frame_size: u32` as an explicit parameter and copies it onto `Context.max_frame_size`, which the static fallback uses to size DATA frames. It is separate from `ServeOpts.max_frame_size` on purpose: that field is this server's receive-side advertisement, and using it as the outbound cap is what a conforming peer answers with `FRAME_SIZE_ERROR`. Three call sites supply the correct value:
 
 | call site | source of the peer value |
 | :- | :- |
 | `mux.zig` (`.EPOLL` / `.URING`) | `conn.peer_max_frame_size`, which the mux already tracked for `pumpBody` |
-| `core.serveH2cLoop` (blocking models) | a running local, updated from every SETTINGS frame with the same 16384..16777215 validation the mux applies, since a peer may raise it mid-connection |
-| `core.serveH2cUpgrade` | decoded from the base64 `HTTP2-Settings` header, so the carried stream-1 response is correct before any frame is exchanged |
+| `serve.serveLoop` (blocking models) | a running local, updated from every SETTINGS frame with the 16384..16777215 check (`MAX_FRAME_SIZE_LIMIT`), since a peer may raise it mid-connection |
+| `serve.serveUpgrade` | decoded from the base64 `HTTP2-Settings` header, so the carried stream-1 response is correct before any frame is exchanged |
 
 `Context.public_dir` is filled from `ServeOpts.public_dir` at the same point, so the router reaches the static root without a threadlocal (unlike `zix.Http1`, which keeps `tl_static_dir`).
 
-### Blocking path (serveConn / serveH2cLoop)
+### Router / Route (router.zig)
 
-`serveConn` sets `TCP_NODELAY` and calls `serveConnInner`, which reads 3 bytes: `"PRI"` runs the h2c-direct preface (validate, `sendSettingsFD`, `serveH2cLoop`), anything else runs `serveH2cUpgrade` (the HTTP/1.1 `Upgrade: h2c` handshake, which serves the initial stream-1 request then `serveH2cLoop`). `serveH2cLoop` allocates a payload buffer plus a `[]Stream` slot table and runs the same frame switch as the mux with blocking `readFrameHeader` + `recvExact`, dispatching inline via `dispatchStream`. Note the blocking `Stream` is a fixed inline struct (`body: [65536]u8`, `header_scratch: [4096]u8`) held `max_streams` deep per connection, in contrast to the mux's pooled buffers sized to the serve options.
+`Route` is `{ path, handler, kind = .EXACT }` with `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` builds a comptime table: `EXACT` routes resolve through a `StaticStringMap` (O(1)), `PREFIX` routes match the longest registered prefix on a path-segment boundary, the query string is stripped first, and an unmatched path sends `404`. `Router(routes).dispatch` itself matches `HandlerFn` exactly, so `Server.init` takes `router.dispatch` as a plain runtime value, not the route table.
+
+### cache.zig
+
+The per-worker response cache (ADR-036): `tl_cache`, `setCache`, `cacheTtl`, `serveCached` / `sendCachedFD`, and `requestKey` (Wyhash over path + body). The cache stores the unframed body, so a hit is framed again for the stream that asked and one entry serves any stream id. The handler does not pass its request, so the dispatcher records `tl_req_path` / `tl_req_body` / `tl_req_io` around each handler call. An empty path or a null io turns every call into a plain send.
+
+### Blocking path (serveConn / serveLoop)
+
+`serveConn` sets `TCP_NODELAY` and calls `serveInner`, which reads 3 bytes: `"PRI"` runs the h2c-direct preface (validate, send SETTINGS, `serveLoop`), anything else runs `serveUpgrade` (`upgrade.accept` for the HTTP/1.1 `Upgrade: h2c` handshake, which serves the initial stream-1 request then `serveLoop`). `serveLoop` allocates a payload buffer (`max_frame_size + FRAME_PAYLOAD_SLACK`) plus a `[]Stream` table and a `[]bool` used flag, both `max_streams` deep, then reads with blocking `readFrameHeader` + `recvExact`. A finished stream goes through `stream_invoke.invokeWhole`.
+
+- A `Stream` is about 70 KiB (`body: [BODY_BUF_SIZE]u8` 64 KiB, `header_scratch: [4096]u8`, up to `MAX_HEADERS` 64 headers), so the table is allocated once per connection on the heap and each entry is reused, in contrast to the mux's pooled buffers sized to the serve options.
+- A body past what a stream can hold is shed with 413, never truncated, so a handler never receives a partial body.
+- A stream short of (or past) its own content-length is reset with PROTOCOL_ERROR and never reaches the handler (RFC 9113 section 8.1.1).
+- A peer that hangs up with a request unfinished gets GOAWAY PROTOCOL_ERROR. A peer that hangs up idle gets nothing, that is an ordinary close.
 
 ---
 
@@ -268,7 +300,7 @@ Range parsing itself is not local: it comes from `src/utils/http_range.zig`, sha
 
 ## dispatch/ and tls_mux.zig
 
-`server.zig` holds the public `Http2Server` type and a thin `run()` switch: `.ASYNC` keeps the accept-thread structure (`common.ConnTask` plus `common.dispatchConn`) and calls `core.serveConn`, `.EPOLL` calls `epoll.runEpoll`, `.URING` calls `uring.runUring`, and `config.tls != null` routes `.EPOLL` / `.URING` to `tls_mux.runTlsMux`, everything else to `tls_serve.runTls`. Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
+`server.zig` holds the public `Http2Server` type and a thin `run()` switch: `.ASYNC` keeps the accept-thread structure (`common.ConnTask` plus `common.dispatchConn`) and calls `serve.serveConn`, `.EPOLL` calls `epoll.runEpoll`, `.URING` calls `uring.runUring`, and `config.tls != null` routes `.EPOLL` / `.URING` to `tls_mux.runTlsMux`, everything else to `tls_serve.runTls`. Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### dispatch/epoll.zig
 
@@ -280,7 +312,7 @@ The io_uring shape of the same loop (ADR-037 Phase 4). `initUringRing` requests 
 
 ### dispatch/common.zig
 
-`serveOpts(cfg)` maps `Config` (`Config.zig`) to `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus the cache fields and `public_dir`). It also holds `setNoDelay`, `setBusyPoll`, `pinToCpu` and `getAvailableCpuCount` (both cgroup-mask aware), and `effectiveCacheEntries` (honors `cache_max_total_bytes`).
+`serveOpts(cfg)` maps `Config` (`Config.zig`) to `ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus the cache fields and `public_dir`). It also holds `setNoDelay`, `setBusyPoll`, `pinToCpu` and `getAvailableCpuCount` (both cgroup-mask aware), and `effectiveCacheEntries` (honors `cache_max_total_bytes`).
 
 The write-coalescing sink is the batching primitive for the cleartext mux: `MuxCoalesceSink` (a 64 KiB threadlocal, one per worker) is installed as `writer.write_hook` by `beginCoalesce(fd)` and torn down by `endCoalesce()`. While installed, every frame the mux writes in one readable batch (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) stages into one buffer and leaves as a single write, so a many-stream batch is one segment rather than one tiny segment per frame under `TCP_NODELAY`. It flushes when full and writes an oversized frame straight through, so correctness never depends on the buffer size. `endCoalesce` returns whether a write failed during the batch.
 
