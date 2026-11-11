@@ -94,6 +94,13 @@ pub const SETTINGS_PARAM_LEN: usize = 6;
 pub const DEFAULT_INITIAL_WINDOW: u32 = 65535;
 /// Default SETTINGS_MAX_FRAME_SIZE (RFC 7540 section 6.5.2).
 pub const DEFAULT_MAX_FRAME_SIZE: u32 = 16384;
+/// Largest SETTINGS_MAX_FRAME_SIZE a peer may advertise (RFC 7540 section 6.5.2).
+pub const MAX_FRAME_SIZE_LIMIT: u32 = 16_777_215;
+/// Slack over SETTINGS_MAX_FRAME_SIZE when sizing a read buffer: the frame
+/// header plus small HPACK and control overhead.
+pub const FRAME_PAYLOAD_SLACK: usize = 256;
+/// Most decoded headers one request may carry.
+pub const MAX_HEADERS: usize = 64;
 
 /// HPACK encode scratch for one response HEADERS block.
 pub const HPACK_ENCODE_SCRATCH: usize = 512;
@@ -196,6 +203,11 @@ test "zix http2: frame, settings id values follow RFC 7540" {
     try std.testing.expectEqual(@as(u16, 0x04), SETTINGS_INITIAL_WINDOW_SIZE);
     try std.testing.expectEqual(@as(u16, 0x05), SETTINGS_MAX_FRAME_SIZE);
     try std.testing.expectEqual(@as(u16, 0x06), SETTINGS_MAX_HEADER_LIST_SIZE);
+}
+
+test "zix http2: frame, MAX_FRAME_SIZE_LIMIT is the largest u24" {
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u24)), MAX_FRAME_SIZE_LIMIT);
+    try std.testing.expect(DEFAULT_MAX_FRAME_SIZE < MAX_FRAME_SIZE_LIMIT);
 }
 
 test "zix http2: frame, header round trips" {
