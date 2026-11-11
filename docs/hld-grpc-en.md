@@ -37,7 +37,7 @@ graph LR
 | `src/zix/tcp/http2/grpc/frame/` | `GrpcPrefix.zig`, `prefix.zig` (`readGrpcPrefix`, `writeGrpcPrefix`, `PREFIX_LEN`), `reply_block.zig` (comptime cached reply blocks), `build.zig` (`buildGrpcHeaders`, `buildGrpcHeadersGzip`, `buildGrpcDataHeader`, `buildGrpcTrailer`, `buildGrpcError`), `send.zig` (`sendGrpcHeadersFD`, `sendGrpcDataFD`, `sendGrpcTrailerFD`, `sendGrpcErrorFD`), `gzip.zig` (`compressGrpcMessage`, `decompressGrpcBody`) |
 | `src/zix/tcp/http2/grpc/proto/` | `wire_type.zig` (`WT_*` wire type constants), `varint.zig` (`encodeVarint`, `decodeVarint`, `MAX_LEN`), `field.zig` (`encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`), `ProtoField.zig`, `MessageReader.zig` |
 | `src/zix/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (u8), OK=0 to UNAUTHENTICATED=16 |
-| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: grpc-timeout header parser |
+| `src/zix/tcp/http2/grpc/timeout.zig` | `parseTimeout`: grpc-timeout header parser, `MAX_DIGITS` |
 
 ## Public API
 
@@ -67,7 +67,7 @@ graph LR
 | `zix.Grpc.sendErrorFD` | `fn(fd, sid, grpc_status, grpc_message) Error!void`: trailers-only error, no DATA frame |
 | `zix.Grpc.parsePath` | `fn(path: []const u8) ?Path` |
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
-| `zix.Grpc.parseTimeout` | `fn(value: []const u8) ?u64` (nanoseconds) |
+| `zix.Grpc.parseTimeout` | `fn(value: []const u8) Error!u64` (nanoseconds, `ZixHttp2_GrpcTimeout_*` on a bad value) |
 | `zix.Grpc.serveConn` | `fn(comptime RouterType, fd, opts, io) void`: direct connection entry point |
 | `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
 | `zix.Grpc.wallClockNs` | `fn() u64`: current wall-clock time in nanoseconds (CLOCK_REALTIME). Used to override `ctx.deadline_ns` at runtime. |
