@@ -33,7 +33,7 @@
 //!
 
 const std = @import("std");
-const build = @import("frame/build.zig");
+const builder = @import("frame/builder.zig");
 const cache = @import("cache.zig");
 const frame = @import("../frame.zig");
 const gzip = @import("frame/gzip.zig");
@@ -85,7 +85,7 @@ const Self = @This();
 // --------------------------------------------------------- //
 // Private:
 
-const Inner = Error || build.Error || writer.Error;
+const Inner = Error || builder.Error || writer.Error;
 
 /// A streaming DATA frame up to this size (head plus payload) goes out in one
 /// write instead of two.
@@ -99,9 +99,9 @@ fn innerError(err: Inner) Error {
         error.ZixHttp2_GrpcContext_UnexpectedEOF => Error.ZixHttp2_GrpcContext_UnexpectedEOF,
         error.ZixHttp2_GrpcContext_Overflow => Error.ZixHttp2_GrpcContext_Overflow,
         error.ZixHttp2_GrpcContext_BufferFull => Error.ZixHttp2_GrpcContext_BufferFull,
-        error.ZixHttp2_GrpcBuild_UnexpectedEOF => Error.ZixHttp2_GrpcContext_UnexpectedEOF,
-        error.ZixHttp2_GrpcBuild_Overflow => Error.ZixHttp2_GrpcContext_Overflow,
-        error.ZixHttp2_GrpcBuild_BufferFull => Error.ZixHttp2_GrpcContext_BufferFull,
+        error.ZixHttp2_GrpcBuilder_UnexpectedEOF => Error.ZixHttp2_GrpcContext_UnexpectedEOF,
+        error.ZixHttp2_GrpcBuilder_Overflow => Error.ZixHttp2_GrpcContext_Overflow,
+        error.ZixHttp2_GrpcBuilder_BufferFull => Error.ZixHttp2_GrpcContext_BufferFull,
         error.ZixHttp2_Writer_BrokenPipe => Error.ZixHttp2_GrpcContext_BrokenPipe,
         error.ZixHttp2_Writer_UnexpectedEOF => Error.ZixHttp2_GrpcContext_UnexpectedEOF,
         error.ZixHttp2_Writer_Overflow => Error.ZixHttp2_GrpcContext_Overflow,
@@ -131,11 +131,11 @@ fn flushHeaders(self: *Self, content_type: []const u8) Inner!void {
 
     if (self._out) |out| try stageStatus(out);
 
-    var buf: [build.HEADERS_FRAME_SCRATCH]u8 = undefined;
+    var buf: [builder.HEADERS_FRAME_SCRATCH]u8 = undefined;
     const len = if (self._resp_gzip)
-        try build.buildGrpcHeadersGzip(&buf, self.stream_id, content_type)
+        try builder.buildGrpcHeadersGzip(&buf, self.stream_id, content_type)
     else
-        try build.buildGrpcHeaders(&buf, self.stream_id, content_type);
+        try builder.buildGrpcHeaders(&buf, self.stream_id, content_type);
 
     if (self._out) |out| {
         out.append(buf[0..len]);
@@ -199,8 +199,8 @@ fn stageData(
         self.emitCoalesced(out);
     }
 
-    var head: [build.DATA_HEAD_LEN]u8 = undefined;
-    _ = try build.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
+    var head: [builder.DATA_HEAD_LEN]u8 = undefined;
+    _ = try builder.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
 
     out.append(&head);
     out.append(payload);
@@ -211,8 +211,9 @@ fn stageData(
 
 /// Write one DATA frame now. The caller holds _write_mutex.
 fn writeData(self: *Self, payload: []const u8, compress: bool) Inner!void {
-    var head: [build.DATA_HEAD_LEN]u8 = undefined;
-    const head_len = try build.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
+    var head: [builder.DATA_HEAD_LEN]u8 = undefined;
+    const head_len =
+        try builder.buildGrpcDataHeader(&head, self.stream_id, payload.len, compress);
 
     if (head_len + payload.len <= STREAM_INLINE_CAP) {
         var one: [STREAM_INLINE_CAP]u8 = undefined;
@@ -281,19 +282,19 @@ fn sendMessageInner(self: *Self, content_type: []const u8, data: []const u8) Inn
 }
 
 /// The closing HEADERS: a trailer after HEADERS, trailers-only before them.
-fn buildClose(self: *const Self, out: []u8, grpc_message: []const u8) build.Error!usize {
+fn buildClose(self: *const Self, out: []u8, grpc_message: []const u8) builder.Error!usize {
     if (self._hdr_sent) {
-        return build.buildGrpcTrailer(out, self.stream_id, self._grpc_status, grpc_message);
+        return builder.buildGrpcTrailer(out, self.stream_id, self._grpc_status, grpc_message);
     }
 
-    return build.buildGrpcError(out, self.stream_id, self._grpc_status, grpc_message);
+    return builder.buildGrpcError(out, self.stream_id, self._grpc_status, grpc_message);
 }
 
 fn finishInner(self: *Self, stat: GrpcStatus, grpc_message: []const u8) Inner!void {
     self._grpc_status = @intFromEnum(stat);
     self._finished = true;
 
-    var buf: [build.HEADERS_FRAME_SCRATCH]u8 = undefined;
+    var buf: [builder.HEADERS_FRAME_SCRATCH]u8 = undefined;
 
     if (self._out) |out| {
         self.emitCoalesced(out);
@@ -786,9 +787,9 @@ test "zix http2 grpc: Context, finish before a message is trailers-only" {
 
     try ctx.finish(.NOT_FOUND, "missing");
 
-    var expected: [build.HEADERS_FRAME_SCRATCH]u8 = undefined;
+    var expected: [builder.HEADERS_FRAME_SCRATCH]u8 = undefined;
     const status_code = @intFromEnum(GrpcStatus.NOT_FOUND);
-    const len = try build.buildGrpcError(&expected, 1, status_code, "missing");
+    const len = try builder.buildGrpcError(&expected, 1, status_code, "missing");
 
     try std.testing.expectEqualSlices(u8, expected[0..len], stage.buf[0..stage.len]);
     try std.testing.expectEqual(status_code, ctx._grpc_status);
@@ -844,7 +845,7 @@ test "zix http2 grpc: Context, content_type past the scratch is BufferFull" {
         .buf = &backing,
     };
     var ctx = stagedContext(&stage);
-    const long: [build.HEADERS_FRAME_SCRATCH]u8 = @splat('a');
+    const long: [builder.HEADERS_FRAME_SCRATCH]u8 = @splat('a');
 
     try std.testing.expectError(Error.ZixHttp2_GrpcContext_BufferFull, ctx.sendHeaders(&long));
 }
@@ -960,13 +961,13 @@ test "zix http2 grpc: Context, streaming small DATA frame is one write" {
     try ctx.sendMessage("application/grpc", "pong");
 
     try std.testing.expectEqual(@as(usize, 1), probe.count);
-    try std.testing.expectEqual(build.DATA_HEAD_LEN + 4, probe.len);
+    try std.testing.expectEqual(builder.DATA_HEAD_LEN + 4, probe.len);
 
     const header: FrameHeader = frame.parseFrameHeader(probe.buf[0..frame.FRAME_HEADER_LEN]);
 
     try std.testing.expectEqual(frame.FRAME_TYPE_DATA, header.frame_type);
     try std.testing.expectEqual(@as(u31, 1), header.stream_id);
-    try std.testing.expectEqualStrings("pong", probe.buf[build.DATA_HEAD_LEN..][0..4]);
+    try std.testing.expectEqualStrings("pong", probe.buf[builder.DATA_HEAD_LEN..][0..4]);
 }
 
 test "zix http2 grpc: Context, streaming DATA past the inline cap is two writes" {

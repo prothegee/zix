@@ -33,24 +33,24 @@
 
 const std = @import("std");
 
-const build = @import("build.zig");
+const builder = @import("builder.zig");
 const writer = @import("../../writer.zig");
 
 // --------------------------------------------------------- //
 // Private:
 
-const Inner = Error || build.Error || writer.Error;
+const Inner = Error || builder.Error || writer.Error;
 
 fn headersInner(fd: std.posix.fd_t, stream_id: u31, content_type: []const u8) Inner!void {
-    var buf: [build.HEADERS_FRAME_SCRATCH]u8 = undefined;
-    const len = try build.buildGrpcHeaders(&buf, stream_id, content_type);
+    var buf: [builder.HEADERS_FRAME_SCRATCH]u8 = undefined;
+    const len = try builder.buildGrpcHeaders(&buf, stream_id, content_type);
 
     try writer.writeAllFD(fd, buf[0..len]);
 }
 
 fn dataInner(fd: std.posix.fd_t, stream_id: u31, message: []const u8) Inner!void {
-    var head: [build.DATA_HEAD_LEN]u8 = undefined;
-    _ = try build.buildGrpcDataHeader(&head, stream_id, message.len, false);
+    var head: [builder.DATA_HEAD_LEN]u8 = undefined;
+    _ = try builder.buildGrpcDataHeader(&head, stream_id, message.len, false);
 
     try writer.writeAllFD(fd, &head);
     try writer.writeAllFD(fd, message);
@@ -62,8 +62,8 @@ fn trailerInner(
     grpc_status: u8,
     grpc_message: []const u8,
 ) Inner!void {
-    var buf: [build.HEADERS_FRAME_SCRATCH]u8 = undefined;
-    const len = try build.buildGrpcTrailer(&buf, stream_id, grpc_status, grpc_message);
+    var buf: [builder.HEADERS_FRAME_SCRATCH]u8 = undefined;
+    const len = try builder.buildGrpcTrailer(&buf, stream_id, grpc_status, grpc_message);
 
     try writer.writeAllFD(fd, buf[0..len]);
 }
@@ -74,8 +74,8 @@ fn errorInner(
     grpc_status: u8,
     grpc_message: []const u8,
 ) Inner!void {
-    var buf: [build.HEADERS_FRAME_SCRATCH]u8 = undefined;
-    const len = try build.buildGrpcError(&buf, stream_id, grpc_status, grpc_message);
+    var buf: [builder.HEADERS_FRAME_SCRATCH]u8 = undefined;
+    const len = try builder.buildGrpcError(&buf, stream_id, grpc_status, grpc_message);
 
     try writer.writeAllFD(fd, buf[0..len]);
 }
@@ -84,9 +84,9 @@ fn innerError(err: Inner) Error {
     @branchHint(.cold);
 
     return switch (err) {
-        error.ZixHttp2_GrpcBuild_UnexpectedEOF => Error.ZixHttp2_GrpcSend_UnexpectedEOF,
-        error.ZixHttp2_GrpcBuild_Overflow => Error.ZixHttp2_GrpcSend_Overflow,
-        error.ZixHttp2_GrpcBuild_BufferFull => Error.ZixHttp2_GrpcSend_BufferFull,
+        error.ZixHttp2_GrpcBuilder_UnexpectedEOF => Error.ZixHttp2_GrpcSend_UnexpectedEOF,
+        error.ZixHttp2_GrpcBuilder_Overflow => Error.ZixHttp2_GrpcSend_Overflow,
+        error.ZixHttp2_GrpcBuilder_BufferFull => Error.ZixHttp2_GrpcSend_BufferFull,
         error.ZixHttp2_Writer_BrokenPipe => Error.ZixHttp2_GrpcSend_BrokenPipe,
         error.ZixHttp2_Writer_UnexpectedEOF => Error.ZixHttp2_GrpcSend_UnexpectedEOF,
         error.ZixHttp2_Writer_Overflow => Error.ZixHttp2_GrpcSend_Overflow,
@@ -276,13 +276,13 @@ test "zix http2 grpc frame: send, sendGrpcDataFD writes prefix then message" {
     try sendGrpcDataFD(fds[1], 1, "hello");
 
     var buf: [64]u8 = undefined;
-    const got = try testReadAtLeast(fds[0], &buf, build.DATA_HEAD_LEN + 5);
+    const got = try testReadAtLeast(fds[0], &buf, builder.DATA_HEAD_LEN + 5);
     const header = frame.parseFrameHeader(buf[0..frame.FRAME_HEADER_LEN]);
     const grpc_prefix = try prefix.readGrpcPrefix(buf[frame.FRAME_HEADER_LEN..got]);
 
     try std.testing.expectEqual(frame.FRAME_TYPE_DATA, header.frame_type);
     try std.testing.expectEqual(@as(u32, 5), grpc_prefix.msg_len);
-    try std.testing.expectEqualStrings("hello", buf[build.DATA_HEAD_LEN..got]);
+    try std.testing.expectEqualStrings("hello", buf[builder.DATA_HEAD_LEN..got]);
 }
 
 test "zix http2 grpc frame: send, sendGrpcDataFD empty message sends the head only" {
@@ -297,7 +297,7 @@ test "zix http2 grpc frame: send, sendGrpcDataFD empty message sends the head on
     const got = try testReadFrame(fds[0], &buf);
     const header = frame.parseFrameHeader(buf[0..frame.FRAME_HEADER_LEN]);
 
-    try std.testing.expectEqual(build.DATA_HEAD_LEN, got);
+    try std.testing.expectEqual(builder.DATA_HEAD_LEN, got);
     try std.testing.expectEqual(@as(u24, prefix.PREFIX_LEN), header.length);
 }
 

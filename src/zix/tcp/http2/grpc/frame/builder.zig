@@ -1,6 +1,6 @@
-//! ZIX Http2 Grpc frame build
+//! ZIX Http2 Grpc frame builder
 //!
-//! ### file: src/zix/tcp/http2/grpc/frame/build.zig
+//! ### file: src/zix/tcp/http2/grpc/frame/builder.zig
 //!
 //! ### author: Prana Ron
 //!
@@ -53,7 +53,7 @@ const FLAGS_TRAILER: u8 = frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM;
 /// Stamp a HEADERS frame header plus an HPACK block into out.
 fn emitHeaders(out: []u8, stream_id: u31, flags: u8, block: []const u8) Error!usize {
     const total = frame.FRAME_HEADER_LEN + block.len;
-    if (out.len < total) return Error.ZixHttp2_GrpcBuild_BufferFull;
+    if (out.len < total) return Error.ZixHttp2_GrpcBuilder_BufferFull;
 
     frame.encodeFrameHeader(out[0..frame.FRAME_HEADER_LEN], .{
         .length = @intCast(block.len),
@@ -125,23 +125,23 @@ fn innerError(err: Inner) Error {
     @branchHint(.cold);
 
     return switch (err) {
-        error.ZixHttp2_HpackEncoder_UnexpectedEOF => Error.ZixHttp2_GrpcBuild_UnexpectedEOF,
-        error.ZixHttp2_HpackEncoder_Overflow => Error.ZixHttp2_GrpcBuild_Overflow,
-        error.ZixHttp2_HpackEncoder_BufferFull => Error.ZixHttp2_GrpcBuild_BufferFull,
-        error.ZixHttp2_GrpcBuild_UnexpectedEOF => Error.ZixHttp2_GrpcBuild_UnexpectedEOF,
-        error.ZixHttp2_GrpcBuild_Overflow => Error.ZixHttp2_GrpcBuild_Overflow,
-        error.ZixHttp2_GrpcBuild_BufferFull => Error.ZixHttp2_GrpcBuild_BufferFull,
+        error.ZixHttp2_HpackEncoder_UnexpectedEOF => Error.ZixHttp2_GrpcBuilder_UnexpectedEOF,
+        error.ZixHttp2_HpackEncoder_Overflow => Error.ZixHttp2_GrpcBuilder_Overflow,
+        error.ZixHttp2_HpackEncoder_BufferFull => Error.ZixHttp2_GrpcBuilder_BufferFull,
+        error.ZixHttp2_GrpcBuilder_UnexpectedEOF => Error.ZixHttp2_GrpcBuilder_UnexpectedEOF,
+        error.ZixHttp2_GrpcBuilder_Overflow => Error.ZixHttp2_GrpcBuilder_Overflow,
+        error.ZixHttp2_GrpcBuilder_BufferFull => Error.ZixHttp2_GrpcBuilder_BufferFull,
     };
 }
 
 // --------------------------------------------------------- //
 // Public:
 
-/// ZIX Http2 Grpc frame build error
+/// ZIX Http2 Grpc frame builder error
 pub const Error = error {
-    ZixHttp2_GrpcBuild_UnexpectedEOF,
-    ZixHttp2_GrpcBuild_Overflow,
-    ZixHttp2_GrpcBuild_BufferFull,
+    ZixHttp2_GrpcBuilder_UnexpectedEOF,
+    ZixHttp2_GrpcBuilder_Overflow,
+    ZixHttp2_GrpcBuilder_BufferFull,
 };
 
 /// Room for any HEADERS or trailer frame built here: frame header plus HPACK block.
@@ -165,7 +165,7 @@ pub const MAX_DATA_MSG_LEN: usize = std.math.maxInt(u24) - prefix.PREFIX_LEN;
 ///
 /// Return:
 /// - usize (bytes written)
-/// - error.ZixHttp2_GrpcBuild_BufferFull when the frame does not fit out or the scratch
+/// - error.ZixHttp2_GrpcBuilder_BufferFull when the frame does not fit out or the scratch
 pub fn buildGrpcHeaders(out: []u8, stream_id: u31, content_type: []const u8) Error!usize {
     if (std.mem.eql(u8, content_type, reply_block.GRPC_CONTENT_TYPE)) {
         return emitHeaders(
@@ -188,7 +188,7 @@ pub fn buildGrpcHeaders(out: []u8, stream_id: u31, content_type: []const u8) Err
 ///
 /// Return:
 /// - usize (bytes written)
-/// - error.ZixHttp2_GrpcBuild_BufferFull when the frame does not fit out or the scratch
+/// - error.ZixHttp2_GrpcBuilder_BufferFull when the frame does not fit out or the scratch
 pub fn buildGrpcHeadersGzip(out: []u8, stream_id: u31, content_type: []const u8) Error!usize {
     return headersInner(out, stream_id, content_type, true) catch |err| innerError(err);
 }
@@ -206,16 +206,16 @@ pub fn buildGrpcHeadersGzip(out: []u8, stream_id: u31, content_type: []const u8)
 ///
 /// Return:
 /// - usize (always DATA_HEAD_LEN)
-/// - error.ZixHttp2_GrpcBuild_BufferFull when out is shorter than DATA_HEAD_LEN
-/// - error.ZixHttp2_GrpcBuild_Overflow when msg_len is past MAX_DATA_MSG_LEN
+/// - error.ZixHttp2_GrpcBuilder_BufferFull when out is shorter than DATA_HEAD_LEN
+/// - error.ZixHttp2_GrpcBuilder_Overflow when msg_len is past MAX_DATA_MSG_LEN
 pub fn buildGrpcDataHeader(
     out: []u8,
     stream_id: u31,
     msg_len: usize,
     compress: bool,
 ) Error!usize {
-    if (out.len < DATA_HEAD_LEN) return Error.ZixHttp2_GrpcBuild_BufferFull;
-    if (msg_len > MAX_DATA_MSG_LEN) return Error.ZixHttp2_GrpcBuild_Overflow;
+    if (out.len < DATA_HEAD_LEN) return Error.ZixHttp2_GrpcBuilder_BufferFull;
+    if (msg_len > MAX_DATA_MSG_LEN) return Error.ZixHttp2_GrpcBuilder_Overflow;
 
     frame.encodeFrameHeader(out[0..frame.FRAME_HEADER_LEN], .{
         .length = @intCast(prefix.PREFIX_LEN + msg_len),
@@ -246,7 +246,7 @@ pub fn buildGrpcDataHeader(
 ///
 /// Return:
 /// - usize (bytes written)
-/// - error.ZixHttp2_GrpcBuild_BufferFull when the frame does not fit out or the scratch
+/// - error.ZixHttp2_GrpcBuilder_BufferFull when the frame does not fit out or the scratch
 pub fn buildGrpcTrailer(
     out: []u8,
     stream_id: u31,
@@ -275,7 +275,7 @@ pub fn buildGrpcTrailer(
 ///
 /// Return:
 /// - usize (bytes written)
-/// - error.ZixHttp2_GrpcBuild_BufferFull when the frame does not fit out or the scratch
+/// - error.ZixHttp2_GrpcBuilder_BufferFull when the frame does not fit out or the scratch
 pub fn buildGrpcError(
     out: []u8,
     stream_id: u31,
@@ -325,7 +325,7 @@ fn testValue(decoded: *const TestDecoded, name: []const u8) ?[]const u8 {
     return null;
 }
 
-test "zix http2 grpc frame: build, buildGrpcHeaders default type is HEADERS with END_HEADERS" {
+test "zix http2 grpc frame: builder, buildGrpcHeaders default type is HEADERS with END_HEADERS" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -337,7 +337,7 @@ test "zix http2 grpc frame: build, buildGrpcHeaders default type is HEADERS with
     try std.testing.expectEqual(@as(u31, 1), decoded.header.stream_id);
 }
 
-test "zix http2 grpc frame: build, buildGrpcHeaders default type copies the cached block" {
+test "zix http2 grpc frame: builder, buildGrpcHeaders default type copies the cached block" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
 
     const len = try buildGrpcHeaders(&buf, 1, reply_block.GRPC_CONTENT_TYPE);
@@ -349,7 +349,7 @@ test "zix http2 grpc frame: build, buildGrpcHeaders default type copies the cach
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcHeaders other type decodes to status and type" {
+test "zix http2 grpc frame: builder, buildGrpcHeaders other type decodes to status and type" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -363,26 +363,26 @@ test "zix http2 grpc frame: build, buildGrpcHeaders other type decodes to status
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcHeaders out too small is BufferFull" {
+test "zix http2 grpc frame: builder, buildGrpcHeaders out too small is BufferFull" {
     var buf: [frame.FRAME_HEADER_LEN]u8 = undefined;
 
     try std.testing.expectError(
-        Error.ZixHttp2_GrpcBuild_BufferFull,
+        Error.ZixHttp2_GrpcBuilder_BufferFull,
         buildGrpcHeaders(&buf, 1, reply_block.GRPC_CONTENT_TYPE),
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcHeaders type past the scratch is BufferFull" {
+test "zix http2 grpc frame: builder, buildGrpcHeaders type past the scratch is BufferFull" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     const long_type: [frame.HPACK_ENCODE_SCRATCH]u8 = @splat('~');
 
     try std.testing.expectError(
-        Error.ZixHttp2_GrpcBuild_BufferFull,
+        Error.ZixHttp2_GrpcBuilder_BufferFull,
         buildGrpcHeaders(&buf, 1, &long_type),
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcHeadersGzip carries grpc-encoding gzip" {
+test "zix http2 grpc frame: builder, buildGrpcHeadersGzip carries grpc-encoding gzip" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -393,16 +393,16 @@ test "zix http2 grpc frame: build, buildGrpcHeadersGzip carries grpc-encoding gz
     try std.testing.expectEqualStrings("gzip", testValue(&decoded, "grpc-encoding").?);
 }
 
-test "zix http2 grpc frame: build, buildGrpcHeadersGzip out too small is BufferFull" {
+test "zix http2 grpc frame: builder, buildGrpcHeadersGzip out too small is BufferFull" {
     var buf: [frame.FRAME_HEADER_LEN]u8 = undefined;
 
     try std.testing.expectError(
-        Error.ZixHttp2_GrpcBuild_BufferFull,
+        Error.ZixHttp2_GrpcBuilder_BufferFull,
         buildGrpcHeadersGzip(&buf, 1, reply_block.GRPC_CONTENT_TYPE),
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcDataHeader frame length counts the prefix" {
+test "zix http2 grpc frame: builder, buildGrpcDataHeader frame length counts the prefix" {
     var buf: [DATA_HEAD_LEN]u8 = undefined;
 
     const len = try buildGrpcDataHeader(&buf, 5, 10, false);
@@ -414,7 +414,7 @@ test "zix http2 grpc frame: build, buildGrpcDataHeader frame length counts the p
     try std.testing.expectEqual(@as(u8, 0), header.flags);
 }
 
-test "zix http2 grpc frame: build, buildGrpcDataHeader prefix holds the message length" {
+test "zix http2 grpc frame: builder, buildGrpcDataHeader prefix holds the message length" {
     var buf: [DATA_HEAD_LEN]u8 = undefined;
 
     _ = try buildGrpcDataHeader(&buf, 1, 10, false);
@@ -424,7 +424,7 @@ test "zix http2 grpc frame: build, buildGrpcDataHeader prefix holds the message 
     try std.testing.expectEqual(@as(u32, 10), grpc_prefix.msg_len);
 }
 
-test "zix http2 grpc frame: build, buildGrpcDataHeader compress sets flag 1" {
+test "zix http2 grpc frame: builder, buildGrpcDataHeader compress sets flag 1" {
     var buf: [DATA_HEAD_LEN]u8 = undefined;
 
     _ = try buildGrpcDataHeader(&buf, 1, 10, true);
@@ -432,7 +432,7 @@ test "zix http2 grpc frame: build, buildGrpcDataHeader compress sets flag 1" {
     try std.testing.expectEqual(@as(u8, 1), buf[frame.FRAME_HEADER_LEN]);
 }
 
-test "zix http2 grpc frame: build, buildGrpcDataHeader MAX_DATA_MSG_LEN fills u24" {
+test "zix http2 grpc frame: builder, buildGrpcDataHeader MAX_DATA_MSG_LEN fills u24" {
     var buf: [DATA_HEAD_LEN]u8 = undefined;
 
     _ = try buildGrpcDataHeader(&buf, 1, MAX_DATA_MSG_LEN, false);
@@ -441,25 +441,25 @@ test "zix http2 grpc frame: build, buildGrpcDataHeader MAX_DATA_MSG_LEN fills u2
     try std.testing.expectEqual(@as(u24, std.math.maxInt(u24)), header.length);
 }
 
-test "zix http2 grpc frame: build, buildGrpcDataHeader past MAX_DATA_MSG_LEN is Overflow" {
+test "zix http2 grpc frame: builder, buildGrpcDataHeader past MAX_DATA_MSG_LEN is Overflow" {
     var buf: [DATA_HEAD_LEN]u8 = undefined;
 
     try std.testing.expectError(
-        Error.ZixHttp2_GrpcBuild_Overflow,
+        Error.ZixHttp2_GrpcBuilder_Overflow,
         buildGrpcDataHeader(&buf, 1, MAX_DATA_MSG_LEN + 1, false),
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcDataHeader out too small is BufferFull" {
+test "zix http2 grpc frame: builder, buildGrpcDataHeader out too small is BufferFull" {
     var buf: [DATA_HEAD_LEN - 1]u8 = undefined;
 
     try std.testing.expectError(
-        Error.ZixHttp2_GrpcBuild_BufferFull,
+        Error.ZixHttp2_GrpcBuilder_BufferFull,
         buildGrpcDataHeader(&buf, 1, 10, false),
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcTrailer OK copies the cached block" {
+test "zix http2 grpc frame: builder, buildGrpcTrailer OK copies the cached block" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
 
     const len = try buildGrpcTrailer(&buf, 3, 0, "");
@@ -473,7 +473,7 @@ test "zix http2 grpc frame: build, buildGrpcTrailer OK copies the cached block" 
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcTrailer carries status and message" {
+test "zix http2 grpc frame: builder, buildGrpcTrailer carries status and message" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -485,7 +485,7 @@ test "zix http2 grpc frame: build, buildGrpcTrailer carries status and message" 
     try std.testing.expectEqualStrings("boom", testValue(&decoded, "grpc-message").?);
 }
 
-test "zix http2 grpc frame: build, buildGrpcTrailer empty message omits grpc-message" {
+test "zix http2 grpc frame: builder, buildGrpcTrailer empty message omits grpc-message" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -496,7 +496,7 @@ test "zix http2 grpc frame: build, buildGrpcTrailer empty message omits grpc-mes
     try std.testing.expect(testValue(&decoded, "grpc-message") == null);
 }
 
-test "zix http2 grpc frame: build, buildGrpcTrailer max u8 status encodes 255" {
+test "zix http2 grpc frame: builder, buildGrpcTrailer max u8 status encodes 255" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -506,17 +506,17 @@ test "zix http2 grpc frame: build, buildGrpcTrailer max u8 status encodes 255" {
     try std.testing.expectEqualStrings("255", testValue(&decoded, "grpc-status").?);
 }
 
-test "zix http2 grpc frame: build, buildGrpcTrailer message past the scratch is BufferFull" {
+test "zix http2 grpc frame: builder, buildGrpcTrailer message past the scratch is BufferFull" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     const long_message: [frame.HPACK_ENCODE_SCRATCH]u8 = @splat('~');
 
     try std.testing.expectError(
-        Error.ZixHttp2_GrpcBuild_BufferFull,
+        Error.ZixHttp2_GrpcBuilder_BufferFull,
         buildGrpcTrailer(&buf, 1, 13, &long_message),
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcError carries status 200 and content-type" {
+test "zix http2 grpc frame: builder, buildGrpcError carries status 200 and content-type" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -530,7 +530,7 @@ test "zix http2 grpc frame: build, buildGrpcError carries status 200 and content
     );
 }
 
-test "zix http2 grpc frame: build, buildGrpcError ends the stream with the status" {
+test "zix http2 grpc frame: builder, buildGrpcError ends the stream with the status" {
     var buf: [HEADERS_FRAME_SCRATCH]u8 = undefined;
     var scratch: [256]u8 = undefined;
 
@@ -542,11 +542,11 @@ test "zix http2 grpc frame: build, buildGrpcError ends the stream with the statu
     try std.testing.expectEqualStrings("no route", testValue(&decoded, "grpc-message").?);
 }
 
-test "zix http2 grpc frame: build, buildGrpcError out too small is BufferFull" {
+test "zix http2 grpc frame: builder, buildGrpcError out too small is BufferFull" {
     var buf: [frame.FRAME_HEADER_LEN]u8 = undefined;
 
     try std.testing.expectError(
-        Error.ZixHttp2_GrpcBuild_BufferFull,
+        Error.ZixHttp2_GrpcBuilder_BufferFull,
         buildGrpcError(&buf, 1, 3, ""),
     );
 }
