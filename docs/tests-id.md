@@ -91,10 +91,38 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `tcp/http2/frame.zig` | `refAllDecls` + perilaku: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, round-trip `writeFrameHeader`/`readFrameHeader` melalui pipe, PREFACE dimulai dengan `PRI`, `sendSettings` menulis frame SETTINGS 9-byte valid melalui pipe |
-| `tcp/http2/hpack.zig` | `refAllDecls` + perilaku: round-trip encode/decode Huffman, `HpackEncoder.writeHeader` menghasilkan entri terindeks dari static table, `HpackDecoder.decode` mendekode `:method GET` terindeks, eviksi dynamic table menghormati max_size, indeks `HPACK_STATIC` ke-8 adalah `:status 200` |
-| `tcp/http2/core.zig` | `refAllDecls` + perilaku: default struct `ServeOpts`, `HandlerFn` adalah tipe function pointer |
-| `tcp/http2/config.zig` | `refAllDecls` + perilaku: field wajib `Http2ServerConfig` berhasil dikompilasi, dispatch_model wajib (disetel eksplisit), workers default 0, max_streams=128 dan max_frame_size=16384 |
+| `tcp/http2/frame.zig` | PREFACE adalah preface 24-byte, nilai type / flag / error code / settings id sesuai RFC 7540, `MAX_FRAME_SIZE_LIMIT` adalah u24 terbesar, round-trip header / big endian / length dan stream id terbesar, bit reserved dibuang, frame type tak dikenal diteruskan |
+| `tcp/http2/FrameHeader.zig` | menyimpan field-nya, menampung length dan stream id terbesar |
+| `tcp/http2/writer.zig` | `writeAllFD` mengirim data / menandai stream terjawab / data kosong tidak menulis, `writeAllDirectFD` tidak menyentuh tanda / peer tertutup BrokenPipe, `writeFrameHeaderFD` mengirim 9 byte, `sendResponseFD` tanpa body END_STREAM di HEADERS / body kecil satu DATA / tepat `SEND_STAGE_BODY_MAX` satu DATA / melewati stage jalur vectored / melewati max frame size dipecah / menandai terjawab / content-type melewati scratch BufferFull, `sendResponseEncodedFD` peer tertutup BrokenPipe |
+| `tcp/http2/reader.zig` | `readOnceFD` mengembalikan yang tiba / 0 setelah close, `recvExact` mengisi / buffer kosong / kurang data Closed, `readFrameHeader` parse / terpotong Closed |
+| `tcp/http2/control.zig` | `sendSettingsFD` kosong / setiap param / melewati 24-bit TooManySettings, `sendSettingsAckFD` ACK tanpa payload, `sendPingAckFD` memantulkan payload, `sendGoawayFD` last stream dan code, `sendRstStreamFD` menuju stream, `sendWindowUpdateFD` increment / bit atas bersih, peer tertutup BrokenPipe |
+| `tcp/http2/hpack/Header.zig` | menyimpan field-nya, menampung value kosong |
+| `tcp/http2/hpack/HuffSym.zig` | menyimpan field-nya, menampung code 30-bit terpanjang |
+| `tcp/http2/hpack/huffman_table.zig` | code yang diketahui untuk spasi, `a`, byte 255, setiap code muat di bit length-nya |
+| `tcp/http2/hpack/static_table.zig` | indeks 0 kosong, indeks 2 `:method GET`, indeks 8 `:status 200`, indeks 16, indeks terakhir, setiap nama lowercase |
+| `tcp/http2/hpack/huffman.zig` | round-trip ascii dan setiap byte, vektor RFC 7541 C.4.1 / C.4.2, input kosong, OutputTooSmall saat encode dan decode, padding lebih dari 7 bit / deretan bit 1 panjang InvalidCode |
+| `tcp/http2/hpack/integer.zig` | vektor RFC 7541 C.1.1 / C.1.2, decode mengabaikan bit representasi, round-trip lintas ukuran prefix, UnexpectedEOF kosong dan di tengah continuation, Overflow melewati 64 bit, BufferFull |
+| `tcp/http2/hpack/DynamicTable.zig` | add menjadi indeks 1, terbaru di depan, overhead 32-byte, byte disalin, di luar rentang null, eviksi melewati max_size, entry kebesaran mengosongkan, `evictTo` 0 mengosongkan, compaction menjaga entry terbaca, buffer byte penuh melewati entry |
+| `tcp/http2/hpack/HpackDecoder.zig` | `:method GET` terindeks, RFC 7541 C.3.1 dan C.4.2, literal tanpa indexing, output di scratch, size update mengeviksi, `evictTo` diteruskan, InvalidIndex (tak dikenal, 0), TooManyHeaders, ScratchFull, UnexpectedEOF, InvalidCode |
+| `tcp/http2/hpack/HpackEncoder.zig` | static match persis satu byte, indeks nama static, nama literal, nama case-insensitive, round-trip lewat decoder, melewati scratch Huffman jadi literal biasa, BufferFull (penuh, kosong) |
+| `tcp/http2/hpack/RespPrefix.zig` | triple sama cocok, status / content-encoding lain tidak cocok, triple kosong cocok |
+| `tcp/http2/hpack/response_block.zig` | sama byte demi byte dengan `writeHeader`, prefix cache byte sama / encode ulang length, content-encoding, length null tanpa content-length, round-trip lewat decoder, status lima digit, content-type panjang melewati cache, dst kecil BufferFull |
+| `tcp/http2/ServeOpts.zig` | default, limit eksplisit |
+| `tcp/http2/Stream.zig` | `open` me-reset dan mengeset id, `appendBody` mengakumulasi / melewati batas tidak menambah apa pun / menerima payload kosong, `headerList` mencakup `header_count` |
+| `tcp/http2/UpgradeHead.zig` | `settings` default kosong |
+| `tcp/http2/stream_state.zig` | `IDLE` adalah nilai nol, nama tag sesuai enum |
+| `tcp/http2/stream_slot.zig` | `claim` entry kosong pertama / melewati batas mengembalikan null, `find` entry hidup / melewati entry yang dibebaskan, `requestInFlight` stream belum selesai / semua selesai / tabel kosong |
+| `tcp/http2/declared.zig` | `LENGTH` membawa jumlah byte, `ABSENT` dan `BROKEN` berbeda |
+| `tcp/http2/stream_body.zig` | tanpa content-length selalu utuh, hanya pada jumlah tepat, nol dengan body, bukan desimal murni, melewati u64, digit kebanyakan, nilai sama berulang dihitung sekali, nilai berbeda, nama case-insensitive |
+| `tcp/http2/stream_invoke.zig` | `buildRequest` pseudo-header dan fallback, body utuh sampai ke handler, body kurang di-reset |
+| `tcp/http2/handler.zig` | error tanpa jawaban menjadi satu 500, tidak ada response kedua setelah jawaban fd atau `Response`, error yang ditelan tidak mendapat apa pun, context membawa opts dan frame size peer, timeout nol tanpa deadline, access record ditulis / dilewati tanpa logger |
+| `tcp/http2/cache.zig` | default ttl, key tidak pernah nol, key memisahkan body, miss tanpa cache, simpan lalu hit, path lain miss, path kosong tidak menyimpan, miss tanpa io |
+| `tcp/http2/upgrade.zig` | `headerValue` case dan trim / melewati request line / tidak ada, `decodeSettings` valid / malformed / terlalu besar, `requestLine` split dan fallback, `accept` menjawab 101 / 400 tanpa h2c / head terlalu besar / peer menutup di tengah head |
+| `tcp/http2/serve.zig` | `headerBlock` / `dataBlock` strip padding dan padding malformed, `applySettings` valid / di luar rentang / ukuran tabel HPACK, `serveConn` prior knowledge / preface buruk GOAWAY / upgrade h2c stream 1, body kurang di-reset, body cocok dilayani, body melewati buffer stream 413, hang-up belum selesai GOAWAY, hang-up idle tanpa GOAWAY, PING ACK |
+| `tcp/http2/Config.zig` | field wajib, dispatch model eksplisit, default worker / buffer / stream dan frame, response cache mati, logger null, `handler_timeout_ms` nol, static serving mati |
+| `tcp/http2/Context.zig` | init menyimpan fd dan stream id, tanpa static dir dan frame 16 KiB, tanpa deadline di awal, `withTimeout` nol expired / masa depan belum expired / original tidak tersentuh, `withDeadline` lampau expired, `setTimeout` mengganti deadline |
+| `tcp/http2/Request.zig` | `splitPath` path dan query / tanpa query / `?` di akhir, `header` case-insensitive / pseudo-header / tidak ada, `queryParam` value / tanpa value / tidak ada / query kosong, `queryParams` pasangan / melewati pasangan kosong / kosong / out of memory, `pathSegments` split / root / out of memory |
+| `tcp/http2/Response.zig` | default 200 tanpa content type, `setStatus`, `setContentType`, `send` sama dengan `writer.sendResponseFD` / mencatat sent dan bytes_written / peer tertutup BrokenPipe, `sendJson`, `sendText`, `sendNoContent` 204 |
 | `tcp/http2/server.zig` | `refAllDecls` + perilaku: port nol menghasilkan `error.ZixPortNotConfigured`, konfigurasi valid berhasil dan deinit aman |
 | `tcp/http2/static.zig` | `refAllDecls` + perilaku: zero copy ditolak untuk batch coalescing dan fd sentinel, file dibingkai sebagai HEADERS plus DATA dengan END_STREAM, traversal / file hilang / path kepanjangan ditolak, body melebihi max frame size dipotong, file kosong menutup stream di HEADERS, sibling brotli dipilih dari cache |
 
