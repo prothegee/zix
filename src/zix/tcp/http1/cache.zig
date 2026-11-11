@@ -30,6 +30,7 @@
 //!
 
 const std = @import("std");
+const CacheSize = @import("../../utils/cache/CacheSize.zig");
 const Config = @import("Config.zig");
 const ResponseCache = @import("../../utils/cache/ResponseCache.zig");
 const ParsedHead = @import("ParsedHead.zig");
@@ -115,7 +116,12 @@ pub fn installWorker(
     slot.* = null;
 
     if (config.response_cache) {
-        slot.* = ResponseCache.init(allocator, config) catch |err| switch (err) {
+        const size: CacheSize = .{
+            .max_entries = config.cache_max_entries,
+            .max_value_bytes = config.cache_max_value_bytes,
+        };
+
+        slot.* = ResponseCache.init(allocator, size) catch |err| switch (err) {
             error.ZixUtils_ResponseCache_OutOfMemory,
             error.ZixUtils_ResponseCache_MapFailed,
             => null,
@@ -199,6 +205,11 @@ fn testHead(method: []const u8) ParsedHead {
     };
 }
 
+const TEST_SIZE: CacheSize = .{
+    .max_entries = 8,
+    .max_value_bytes = 256,
+};
+
 fn testCacheConfig() Config {
     return .{
         .io = std.testing.io,
@@ -244,7 +255,7 @@ test "zix http1: cache, keys separate queries" {
 }
 
 test "zix http1: cache, store then lookup hits with an installed cache" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
@@ -260,7 +271,7 @@ test "zix http1: cache, store then lookup hits with an installed cache" {
 }
 
 test "zix http1: cache, lookup misses an unstored request" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
@@ -274,7 +285,7 @@ test "zix http1: cache, lookup misses an unstored request" {
 }
 
 test "zix http1: cache, zero ttl entry is expired" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
@@ -287,7 +298,7 @@ test "zix http1: cache, zero ttl entry is expired" {
 }
 
 test "zix http1: cache, QUERY request is not stored" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
@@ -320,6 +331,18 @@ test "zix http1: cache, installWorker installs the cache when on" {
     try std.testing.expect(slot != null);
     try std.testing.expect(tl_cache == &slot.?);
     try std.testing.expectEqual(@as(u32, 2500), cacheTtl());
+}
+
+test "zix http1: cache, installWorker sizes the cache from the config" {
+    var config = testCacheConfig();
+    config.response_cache = true;
+
+    var slot: ?ResponseCache = null;
+    installWorker(&slot, std.testing.allocator, config);
+    defer uninstallWorker(&slot);
+
+    try std.testing.expectEqual(@as(usize, 8), slot.?.keys.len);
+    try std.testing.expectEqual(@as(usize, 256), slot.?.value_bytes);
 }
 
 test "zix http1: cache, installWorker leaves the cache off when off" {
