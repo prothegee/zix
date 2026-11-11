@@ -177,6 +177,29 @@ Unchanged for `.ASYNC`. `serveGrpcConn` sets `TCP_NODELAY` and calls `serveGrpcC
 
 ---
 
+## proto/
+
+### varint.zig
+
+7 value bits per byte, low bits first, top bit set while more bytes follow. A u64 takes at most `MAX_LEN` (10) bytes.
+
+- `decodeVarint`: the 10th byte may only carry bit 0. More than that, or an 11th byte, is `Overflow`. Input that ends mid-varint is `UnexpectedEOF`.
+- `encodeVarint`: checks room before each byte. On `BufferFull`, buf may hold a partial varint.
+
+### field.zig
+
+Tag = `(field_number << 3) | wire_type`. Each encoder writes the tag, then the value, and checks room before the payload. A negative int32 is sign-extended to 64 bits, so it encodes as a 10-byte varint (same as protobuf). Varint errors are translated to `ZixHttp2_GrpcField_*` at each public function.
+
+### MessageReader.zig
+
+`{ buf, pos }`. `next` reads one tag, then the value for its wire type, and moves `pos` past it. Every `payload` is a slice of `buf`, nothing is copied.
+
+- A LEN length is checked against `buf.len - pos`, so a huge length is `UnexpectedEOF`, never an overflow of `pos + len`.
+- A field number past u32 is `FieldNumberTooLarge`.
+- Wire types 3, 4 (deprecated groups), 6, and 7 are `UnknownWireType`.
+
+---
+
 ## frame.zig
 
 ### build* / send*
