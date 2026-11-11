@@ -126,7 +126,7 @@ graph TD
     reader --> frame
     control --> writer
     types --> writer
-    static --> static_cache["utils/static_cache.zig\nshared open-file cache"]
+    static --> static_cache["utils/static/StaticCache.zig\nshared open-file cache"]
 ```
 
 ---
@@ -178,10 +178,11 @@ kernel_backlog: u31   = 1024,
 workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux workers. Ignored by .ASYNC
 worker_stack_size_bytes: usize = 512 * 1024,
 busy_poll_us:   u32   = 0,     // SO_BUSY_POLL spin window (.EPOLL/.URING), 0 = unset
+reuseport_cbpf: bool  = false, // steer a connection to the listener on its CPU (.EPOLL/.URING), opt-in
 max_streams:    u32   = 128,   // advertised SETTINGS_MAX_CONCURRENT_STREAMS
 max_frame_size: u32   = 16384, // advertised SETTINGS_MAX_FRAME_SIZE
-max_header_scratch: usize = 4096,       // HPACK decode scratch per connection
-max_body:       usize = 16384, // max request body buffered per stream (a body past this sheds the stream with 413)
+max_header_scratch: usize = 4096,       // HPACK decode scratch per connection (.EPOLL/.URING)
+max_body:       usize = 16384, // max request body buffered per stream (.EPOLL/.URING), a body past this sheds the stream with 413
 max_recv_buf:   usize = 32 * 1024,      // per-connection read-buffer floor (.EPOLL/.URING)
 tls_write_buf_initial_bytes: usize = 16 * 1024,
 response_cache: bool  = false, // per-worker response cache (ADR-036), every model
@@ -193,7 +194,7 @@ tls:            ?*Tls.Context = null,   // non-null serves h2 over TLS (ALPN h2)
 logger:         ?*Logger = null,        // lifecycle lines only, see Logging section
 ```
 
-Note: `workers` is the mux worker count under `.EPOLL` / `.URING` (0 = cpu count), and oversubscribing it only adds scheduler churn. `.ASYNC` ignores it. `max_recv_buf` is a floor: the mux read accumulator is sized to the larger of it and one max frame, so a larger floor cuts `read()` and buffer compaction for big frames. `tls` opts into h2 over TLS: when non-null the server serves on a gated TLS path (the cleartext dispatch models are untouched), and for HTTP/2 the context's ALPN should include `.H2`. The `response_cache` and `cache_*` fields configure the opt-in per-worker cache (ADR-036), read at runtime under `.EPOLL` and `.URING`.
+Note: `workers` is the mux worker count under `.EPOLL` / `.URING` (0 = cpu count), and oversubscribing it only adds scheduler churn. `.ASYNC` ignores it, and it also ignores `max_body` and `max_header_scratch`: its blocking loop gives each stream fixed buffers (64 KiB body, 4 KiB header scratch, `Stream.zig`). `max_recv_buf` is a floor: the mux read accumulator is sized to the larger of it and one max frame, so a larger floor cuts `read()` and buffer compaction for big frames. `tls` opts into h2 over TLS: when non-null the server serves on a gated TLS path (the cleartext dispatch models are untouched), and for HTTP/2 the context's ALPN should include `.H2`. The `response_cache` and `cache_*` fields configure the opt-in per-worker cache (ADR-036), read at runtime under `.EPOLL` and `.URING`.
 
 `handler_timeout_ms` (ADR-063) is the global deadline: seeded onto `Context.deadline` at dispatch, 0 leaves no deadline. A handler may tighten or clear its own via `ctx.setTimeout` / `withDeadline`, checked with `ctx.isExpired()` between steps (the engine never interrupts a running handler, this is opt-in).
 
@@ -238,10 +239,10 @@ try server.run();
 flowchart TD
     A["router: no route matched"] --> B{"ctx.public_dir set?"}
     B -->|no| Z["404 Not Found"]
-    B -->|yes| C{"path contains '..'?"}
+    B -->|yes| C{"unsafe path?\n'..', absolute, root '/', past PUBLIC_PATH_MAX"}
     C -->|yes| Z
     C -->|no| D["negotiate encoding, resolve the file"]
-    D -->|absent| Z
+    D -->|absent or a directory| Z
     D -->|found| E{"Range header?"}
     E -->|none or malformed| F["200, whole file"]
     E -->|satisfiable| G["206 with Content-Range"]
@@ -253,10 +254,11 @@ flowchart TD
 
 - One HEADERS frame carries the status, content type, `content-length`, `accept-ranges`, and `content-range` when the response is a 206. An empty file closes the stream on HEADERS with no DATA at all.
 - DATA frames are capped at the **peer's** `SETTINGS_MAX_FRAME_SIZE`, not at this server's `max_frame_size`. The two are different values: `max_frame_size` is what this server advertises it will accept, and sizing outbound frames by it is what a conforming peer answers with `FRAME_SIZE_ERROR`. The peer value arrives from the mux, from SETTINGS frames mid-connection, or from the base64 `HTTP2-Settings` header on an h2c upgrade.
+- A 206 whose HEADERS block does not fit the encode scratch falls back to the whole file as 200. When even the 200 block does not fit, the stream is closed with RST_STREAM `INTERNAL_ERROR`.
 - Range (RFC 7233) is served: 206 for a satisfiable range, 416 with `Content-Range: bytes */length` for a well-formed range past the end, and a malformed header is ignored so the whole file is sent, which is what section 3.1 asks for. A multi-range header answers the first range only.
-- Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set. With it set, a repeat request costs a hash lookup instead of an open plus a stat, and `.br` / `.gz` siblings are resolved once at insert instead of probed per request. Every cached variant header carries `Vary: Accept-Encoding`.
-- Zero copy (`sendfile`) is always refused on this engine, cleartext included, because the mux coalescing hook (`writer.write_hook`) is installed on every batch and a direct socket write would put the body ahead of frames already staged. The body is cut from a resident snapshot instead.
-- Static sends use the same unmetered `writer.sendResponseFD` path `Response.send` uses, not the window-paced `mux.sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
+- Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set. With it set, a repeat request costs a hash lookup instead of an open plus a stat, and `.br` / `.gz` siblings are resolved once at insert instead of probed per request. The HTTP/2 response does not carry `Vary: Accept-Encoding`, cached or not.
+- Zero copy (`sendfile`) is used on Linux while frames go straight to the socket. Once the mux batching hook lands, zero copy must be refused while a batch is staged, or the body overtakes frames already staged. The body is then cut from a resident snapshot instead.
+- Static sends use the same unmetered `writer` frame writes `Response.send` uses, not the window-paced `mux.sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
 - `public_dir_upload` is not offered here. `zix.Http2` has no upload handler convention, unlike `zix.Http1`.
 
 ---
@@ -325,7 +327,7 @@ The write hook (`writer.write_hook`) is the shared mechanism: the mux writes pla
 
 `config.logger` receives server lifecycle lines only (listening notices, io_uring fallback, non-Linux fallback) via `logger.system()`. When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds.
 
-Per-stream access logging is the engine's, not the handler's. When `config.logger` is set the engine writes one `[http2:access]` record after every served stream, taking the status and byte count off the `Response`. A handler that frames its own bytes through `writer.sendResponseFD` is still recorded, but its byte count reads 0, so such a handler may call `logger.access()` itself where the real size is known.
+Per-stream access logging is the engine's, not the handler's. When `config.logger` is set the engine writes one `[http2:access]` record after every served stream, taking the status and byte count off the `Response`. A handler that frames its own bytes through `writer.sendResponseFD` is still recorded, but its byte count reads 0, so such a handler may call `logger.access()` itself where the real size is known. A file served by the static fallback is recorded the same way, with a byte count of 0.
 
 ---
 
@@ -350,10 +352,10 @@ The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-lo
 
 | Limit | Behaviour |
 | :- | :- |
-| Request body per stream | Buffered up to `max_body` (16 KB default). A body past the buffer cap sheds the stream with a 413 and END_STREAM, so the handler never sees a truncated slice and a corrupt body never dispatches. Only the connection window is credited for the discarded bytes, keeping the connection usable for its other streams |
+| Request body per stream | `.EPOLL` / `.URING`: buffered up to `max_body` (16 KB default). `.ASYNC`: a fixed 64 KiB per stream (`Stream.BODY_BUF_SIZE`). A body past the buffer cap sheds the stream with a 413 and END_STREAM, so the handler never sees a truncated slice and a corrupt body never dispatches. Only the connection window is credited for the discarded bytes, keeping the connection usable for its other streams |
 | Concurrent streams | Advertised as `max_streams` (`SETTINGS_MAX_CONCURRENT_STREAMS`). A stream opened beyond it is answered with `REFUSED_STREAM`, so the advertised value must be at least the peer's concurrent-stream count |
 | h2c upgrade (.EPOLL/.URING) | Served minimally on the mux path: `101` then the connection preface, the request carried on stream 1 is not served. Prior-knowledge clients (the common h2c case) are unaffected. The blocking `.ASYNC` model serves the upgraded stream-1 request |
-| Header block scratch | `max_header_scratch` per connection (4 KB default). A header set that overflows it is answered with `COMPRESSION_ERROR` and RST_STREAM |
+| Header block scratch | `.EPOLL` / `.URING`: `max_header_scratch` per connection (4 KB default). `.ASYNC`: a fixed 4 KiB per stream (`Stream.HEADER_SCRATCH_SIZE`). A header set that overflows it is answered with `COMPRESSION_ERROR` and RST_STREAM |
 | Frame size | A frame larger than `max_frame_size` plus slack is a `FRAME_SIZE_ERROR` and closes the connection with GOAWAY. Outbound DATA is sized by the peer's advertised value instead, never by this one |
 | Static files | `public_dir` serves whole files and single ranges. A multi-range header answers the first range only, and there is no `public_dir_upload` companion on this engine |
 | TLS | h2 over TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, on its own perf band. `.EPOLL` / `.URING` terminate in an event-driven epoll-mux worker, `.ASYNC` per connection in a worker thread. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
