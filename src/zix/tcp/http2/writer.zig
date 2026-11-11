@@ -12,7 +12,8 @@
 //!
 //! ### note:
 //!
-//! n/a
+//! - A worker that batches frames sets write_hook. Every frame write then
+//!   goes to the hook, and only writeAllDirectFD still reaches the socket.
 //!
 //! ---------------------------------------------------------
 //!
@@ -113,9 +114,30 @@ fn writevAllDirectFD(fd: std.posix.fd_t, head: []const u8, payload: []const u8) 
     }
 }
 
-/// Write a frame head + payload pair and mark the stream answered.
+/// Hand bytes to the write hook when one is set.
+///
+/// Return:
+/// - true when the hook took the bytes
+/// - false when no hook (or no hook context) is set, so the caller writes
+fn writeHooked(data: []const u8) bool {
+    const hook = write_hook orelse return false;
+    const ctx = write_hook_ctx orelse return false;
+
+    hook(ctx, data);
+
+    return true;
+}
+
+/// Write a frame head + payload pair and mark the stream answered. A write
+/// hook takes the two slices as two appends.
 fn writePairFD(fd: std.posix.fd_t, head: []const u8, payload: []const u8) Error!void {
     markResponded();
+
+    if (writeHooked(head)) {
+        _ = writeHooked(payload);
+
+        return;
+    }
 
     return writevAllDirectFD(fd, head, payload);
 }
@@ -217,6 +239,17 @@ pub const Error = error {
 ///   by the core before each handler call.
 pub threadlocal var tl_responded: bool = false;
 
+/// Frame write hook of the calling worker. Null writes to the socket.
+///
+/// Note:
+/// - Set only around one batch of frame writes (see coalesce.zig), and
+///   cleared before the batch ends.
+/// - The hook must write through writeAllDirectFD, or it calls itself.
+pub threadlocal var write_hook: ?*const fn (ctx: *anyopaque, bytes: []const u8) void = null;
+
+/// Context passed to write_hook. The hook runs only when both are set.
+pub threadlocal var write_hook_ctx: ?*anyopaque = null;
+
 /// Record that frames for the stream in flight left for the peer.
 pub fn markResponded() void {
     tl_responded = true;
@@ -267,6 +300,7 @@ pub fn writeAllDirectFD(fd: std.posix.fd_t, data: []const u8) Error!void {
 /// Note:
 /// - Marks the stream in flight as answered, so a handler that writes here
 ///   directly is not completed a second time.
+/// - With write_hook set, the bytes go to the hook and never fail here.
 ///
 /// Param:
 /// fd - std.posix.fd_t (the connection)
@@ -277,6 +311,8 @@ pub fn writeAllDirectFD(fd: std.posix.fd_t, data: []const u8) Error!void {
 /// - error.ZixHttp2_Writer_BrokenPipe on a write error
 pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) Error!void {
     markResponded();
+
+    if (writeHooked(data)) return;
 
     return writeAllDirectFD(fd, data);
 }
@@ -438,6 +474,31 @@ fn testSendAndCollect(body: []const u8, buf: []u8) !TestFrames {
     return frames;
 }
 
+const TEST_FD: std.posix.fd_t = if (@import("builtin").os.tag == .windows)
+    std.os.windows.INVALID_HANDLE_VALUE
+else
+    -1;
+
+/// Bytes the test hook collected.
+threadlocal var test_hook_buf: [64 * 1024]u8 = undefined;
+threadlocal var test_hook_len: usize = 0;
+
+fn testHookCollect(_: *anyopaque, bytes: []const u8) void {
+    @memcpy(test_hook_buf[test_hook_len..][0..bytes.len], bytes);
+    test_hook_len += bytes.len;
+}
+
+fn testHookSet(ctx: *anyopaque) void {
+    test_hook_len = 0;
+    write_hook = testHookCollect;
+    write_hook_ctx = ctx;
+}
+
+fn testHookClear() void {
+    write_hook = null;
+    write_hook_ctx = null;
+}
+
 test "zix http2: writer, writeAllFD delivers data" {
     var fds: [2]std.posix.fd_t = undefined;
     try pair.open(std.testing.io, &fds);
@@ -592,7 +653,7 @@ test "zix http2: writer, sendResponseFD marks the stream answered" {
 test "zix http2: writer, sendResponseFD content-type past the block scratch is BufferFull" {
     const long_type: [frame.HPACK_ENCODE_SCRATCH]u8 = @splat('t');
 
-    const result = sendResponseFD(-1, 1, 200, &long_type, "x");
+    const result = sendResponseFD(TEST_FD, 1, 200, &long_type, "x");
 
     try std.testing.expectError(Error.ZixHttp2_Writer_BufferFull, result);
 }
@@ -606,5 +667,88 @@ test "zix http2: writer, sendResponseEncodedFD to a closed peer is BrokenPipe" {
     const result = sendResponseEncodedFD(fds[1], 1, 200, "text/plain", "br", "zz");
 
     try std.testing.expectError(Error.ZixHttp2_Writer_BrokenPipe, result);
+}
+
+test "zix http2: writer, write hook defaults to null" {
+    try std.testing.expect(write_hook == null);
+    try std.testing.expect(write_hook_ctx == null);
+}
+
+test "zix http2: writer, writeAllFD goes to the write hook" {
+    var ctx: usize = 0;
+    testHookSet(@ptrCast(&ctx));
+    defer testHookClear();
+
+    try writeAllFD(TEST_FD, "staged");
+
+    try std.testing.expectEqualStrings("staged", test_hook_buf[0..test_hook_len]);
+}
+
+test "zix http2: writer, writeAllFD through the write hook marks the stream answered" {
+    var ctx: usize = 0;
+    testHookSet(@ptrCast(&ctx));
+    defer testHookClear();
+
+    tl_responded = false;
+    defer tl_responded = false;
+
+    try writeAllFD(TEST_FD, "x");
+
+    try std.testing.expect(respondedFD());
+}
+
+test "zix http2: writer, write hook without a context writes to the socket" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    test_hook_len = 0;
+    write_hook = testHookCollect;
+    defer testHookClear();
+
+    try writeAllFD(fds[1], "wire");
+
+    var buf: [8]u8 = undefined;
+    const got = try std.posix.read(fds[0], &buf);
+
+    try std.testing.expectEqualStrings("wire", buf[0..got]);
+    try std.testing.expectEqual(@as(usize, 0), test_hook_len);
+}
+
+test "zix http2: writer, writeAllDirectFD skips the write hook" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var ctx: usize = 0;
+    testHookSet(@ptrCast(&ctx));
+    defer testHookClear();
+
+    try writeAllDirectFD(fds[1], "raw");
+
+    var buf: [8]u8 = undefined;
+    const got = try std.posix.read(fds[0], &buf);
+
+    try std.testing.expectEqualStrings("raw", buf[0..got]);
+    try std.testing.expectEqual(@as(usize, 0), test_hook_len);
+}
+
+test "zix http2: writer, sendResponseFD vectored body goes to the write hook" {
+    var ctx: usize = 0;
+    testHookSet(@ptrCast(&ctx));
+    defer testHookClear();
+
+    var body: [frame.SEND_STAGE_BODY_MAX + 100]u8 = undefined;
+    @memset(&body, 'v');
+
+    try sendResponseFD(TEST_FD, 1, 200, "text/plain", &body);
+
+    const wire = test_hook_buf[0..test_hook_len];
+    const head = frame.parseFrameHeader(wire[0..frame.FRAME_HEADER_LEN]);
+
+    try std.testing.expectEqual(frame.FRAME_TYPE_HEADERS, head.frame_type);
+    try std.testing.expect(test_hook_len > body.len);
 }
 
