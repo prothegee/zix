@@ -49,7 +49,7 @@ pub const MuxConn = struct {
     rstart: usize,
     rend: usize,
 
-    hpack_dec: hpack.HpackDecoder,
+    hpack_dec: HpackDecoder,
     streams: []*MuxStream,      // pointer array: an idle conn reserves max_streams pointers, not buffers
     slots: []bool,
 
@@ -134,7 +134,7 @@ The send-side flow control (`active_conn` is the threadlocal that binds a runnin
 - `pumpBody(conn, stream, body, end)`: writes DATA up to `min(conn.send_window, stream.send_window)` and `max_frame_size`, decrements both windows per chunk, sets END_STREAM only on the final chunk once the whole body has gone out, and parks the remainder in `pending_body` / `pending_end`.
 - `resumeStream(conn, slot)`: after a stream window grew, `pumpBody`s the parked tail and frees the slot when it fully drains.
 - `resumeAll(conn)`: after the connection window grew, resumes every parked stream.
-- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: the flow-controlled response entry. With no `active_conn` or no matching slot it falls back to `frame.sendResponseEncodedFD` (immediate, unmetered). Otherwise it writes HEADERS (`sendRespHeadersFD` -> `hpack.respHeaderBlock`) then `pumpBody(..., true)`. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache).
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: the flow-controlled response entry. With no `active_conn` or no matching slot it falls back to `writer.sendResponseEncodedFD` (immediate, unmetered). Otherwise it writes HEADERS (`sendRespHeadersFD` -> `response_block.respHeaderBlock`) then `pumpBody(..., true)`. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache).
 
 ### onReadable / processRing
 
@@ -142,28 +142,50 @@ The send-side flow control (`active_conn` is the threadlocal that binds a runnin
 
 ---
 
-## hpack.zig
+## hpack/
 
-Static table, Huffman codec, decoder (with dynamic-table eviction), stateless encoder, and the response-prefix cache.
+HPACK codec, one file per concern:
+
+| File | Holds |
+| :- | :- |
+| `Header.zig` | `{ name, value }`, also the static and dynamic table entry |
+| `HuffSym.zig` | `{ code: u32, bits: u5 }` |
+| `huffman_table.zig` | `HUFF: [256]HuffSym` (RFC 7541 appendix B), joined at comptime from a code array and a bit-length array |
+| `static_table.zig` | `HPACK_STATIC: [62]Header` (RFC 7541 appendix A), index 0 unused |
+| `huffman.zig` | `huffEncode`, `huffDecode` |
+| `integer.zig` | `encodeInt`, `decodeInt` (prefix integers, RFC 7541 section 5.1) |
+| `DynamicTable.zig` | dynamic table entries, eviction, compaction |
+| `HpackDecoder.zig` | `decode`, `evictTo`, `max_size` |
+| `HpackEncoder.zig` | `writeHeader`, `encoded` |
+| `RespPrefix.zig` | one cached response prefix |
+| `response_block.zig` | `respHeaderBlock` plus the prefix cache |
 
 ### respHeaderBlock + response-header cache
 
-`respHeaderBlock(dst, status, content_type, content_encoding, content_length)` encodes a full response header block. The `[:status, content-type, content-encoding]` prefix is served from a process-global append-only cache, only `content_length` (which varies) is encoded per call. A null `content_length` omits the field (a bodyless END_STREAM response).
+`respHeaderBlock(dst, status, content_type, content_encoding, content_length)` encodes a full response header block. The `[:status, content-type, content-encoding]` prefix is served from a process-global append-only cache, only `content_length` (which varies) is encoded per call. A null `content_length` omits the field (a bodyless END_STREAM response). A `dst` too small for the block returns `ZixHttp2_ResponseBlock_BufferFull`.
 
-The cache is `g_resp_prefix: [32]RespPrefix` with a release-published count and a spinlock (`g_resp_prefix_lock`). Readers scan `0..count` lock-free, the spinlock serializes only the rare insert (one per distinct triple). It is byte-identical on every connection because `HpackEncoder` is stateless: static table plus literal-without-indexing, never the dynamic table or a size update, so the cached bytes plus a per-call content-length are valid HPACK. A too-long triple or a full cache falls back to a direct encode, so correctness never depends on a hit. A test asserts `respHeaderBlock` matches four `writeHeader` calls byte-for-byte.
+The cache is `prefix_cache: [32]RespPrefix` with a release-published count and a spinlock (`prefix_lock`). Readers scan `0..count` lock-free, the spinlock serializes only the rare insert (one per distinct triple). It is byte-identical on every connection because `HpackEncoder` is stateless: static table plus literal-without-indexing, never the dynamic table or a size update, so the cached bytes plus a per-call content-length are valid HPACK. A too-long triple or a full cache falls back to a direct encode, so correctness never depends on a hit. A test asserts `respHeaderBlock` matches the `writeHeader` calls byte-for-byte.
+
+### DynamicTable
+
+```zig
+entries: [128]Header = undefined, // newest first, entries[0] is dynamic index 1
+count: usize = 0,
+size: usize = 0,                  // name.len + value.len + 32 per entry
+buf: [8192]u8 = undefined,        // entries always slice into here, never per-call scratch
+buf_pos: usize = 0,
+```
+
+`add(name, value, max_size)` copies the entry into `buf` (connection-lifetime), so an indexed lookup stays valid after a stream slot's scratch is reused. `evictTo(target)` drops the oldest entries until the table fits. When `buf` runs out, `compact` repacks the live entries at the front with a forward copy (source and destination can overlap). An entry larger than `max_size` empties the table and is not stored.
 
 ### HpackDecoder
 
 ```zig
-pub const HpackDecoder = struct {
-    dyn: [128]HpackEntry = undefined,
-    dyn_count, dyn_size, max_size = 4096,
-    dyn_buf: [8192]u8 = undefined,   // dyn[] entries always slice into here, never per-call scratch
-    dyn_buf_pos,
-};
+table: DynamicTable = .{},
+max_size: usize = 4096,
 ```
 
-`decode(block, out, scratch)` handles indexed, literal-with-incremental-indexing, dynamic-table-size-update, and literal-without-indexing representations. Every decoded slice points into the caller's `scratch`. Dynamic entries are copied into `dyn_buf` (connection-lifetime), so an indexed lookup stays valid after a stream slot's scratch is reused (a fixed regression). `evictTo(target)` drops the oldest entries until the table fits, `compactDynBuf` repacks live entries at the front of `dyn_buf` when it fills, and `addDynamic` sizes an entry as `name.len + value.len + 32`. Huffman literals go through `huffDecode`.
+`decode(block, out, scratch)` handles indexed, literal-with-incremental-indexing, dynamic-table-size-update, and literal-without-indexing representations. Every decoded slice points into the caller's `scratch`, also for table lookups. `evictTo(target)` forwards to the table, so callers that apply SETTINGS_HEADER_TABLE_SIZE keep using `max_size` and `evictTo`. Huffman literals go through `huffDecode`.
 
 ### HpackEncoder
 
@@ -171,15 +193,17 @@ pub const HpackDecoder = struct {
 
 ---
 
-## frame.zig
+## frame.zig, writer.zig, reader.zig, control.zig
 
-Frame codec, control-frame senders, and the constants (`FRAME_TYPE_*`, `FLAG_*`, `ERR_*`, `SETTINGS_*`, `PREFACE`, `FRAME_HEADER_LEN` 9, `FRAME_PAYLOAD_SLACK` 256, `DEFAULT_MAX_FRAME_SIZE` 16384, `MAX_HEADERS` 64).
+`frame.zig` holds the constants (`FRAME_TYPE_*`, `FLAG_*`, `ERR_*`, `SETTINGS_*`, `PREFACE`, `FRAME_HEADER_LEN` 9, `DEFAULT_MAX_FRAME_SIZE` 16384, `HPACK_ENCODE_SCRATCH` 512, `SEND_STAGE_BODY_MAX` 4096) and the header codec. `FrameHeader.zig` is `{ length: u24, frame_type: u8, flags: u8, stream_id: u31 }`. `parseFrameHeader` / `encodeFrameHeader` do no I/O (for buffered or staged writes).
 
-`FrameHeader` is `{ length: u24, frame_type: u8, flags: u8, stream_id: u31 }`. `parseFrameHeader` / `encodeFrameHeader` do no I/O (for buffered or staged writes), `writeFrameHeader` and `readFrameHeader` add the fd I/O.
+`writer.zig` is the write side. `writeAllFD` marks the stream answered (`tl_responded`) and checks a threadlocal `write_hook`: when set (the TLS seal path, or the coalescing sink) it hands the plaintext to the hook, otherwise it calls `writeAllDirectFD`, the blocking write-all that polls on `POLL.OUT` for a non-blocking socket's EAGAIN and retries on INTR. `writeAllDirectFD` is also the hook's own flush path, so a coalescing flush does not re-enter the hook. `writeFrameHeaderFD` encodes and writes one header.
 
-`writeAllFD` checks a threadlocal `write_hook`: when set (the TLS seal path, or the coalescing sink) it hands the plaintext to the hook, otherwise it calls `writeAllRawFD`, the blocking write-all that polls on `POLL.OUT` for a non-blocking socket's EAGAIN and retries on INTR. `writeAllRawFD` is also the hook's own flush path, so a coalescing flush does not re-enter the hook.
+`sendResponseFD` -> `sendResponseEncodedFD` (also in `writer.zig`) is the immediate, unmetered response (no flow control): HEADERS via `respHeaderBlock`, then the body framed in `<= DEFAULT_MAX_FRAME_SIZE` DATA chunks with END_STREAM on the last (or on HEADERS when the body is empty). A body at or under `SEND_STAGE_BODY_MAX` (4 KiB) leaves as one staged write, a larger one as one vectored write per DATA chunk (the HEADERS block rides the first chunk, a write hook receives each pair as two appends). Large bodies that may exceed the peer window use `mux.sendResponseStreamFD` instead.
 
-`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` encode one control frame each. `sendResponseFD` -> `sendResponseEncodedFD` is the immediate, unmetered response (no flow control): HEADERS via `respHeaderBlock`, then the body framed in `<= DEFAULT_MAX_FRAME_SIZE` DATA chunks with END_STREAM on the last (or on HEADERS when the body is empty). A body at or under `SEND_STAGE_BODY_MAX` (4 KiB) leaves as one staged write, a larger one as one vectored write per DATA chunk (the HEADERS block rides the first chunk, a write hook receives each pair as two appends). Large bodies that may exceed the peer window use `mux.sendResponseStreamFD` instead.
+`reader.zig` is the read side: `readOnceFD`, `recvExact` (fills the buffer or returns `Closed`), and `readFrameHeader`.
+
+`control.zig` holds `sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD`, each encoding one control frame. A fixed-size control frame leaves as one write.
 
 ---
 
@@ -234,7 +258,7 @@ The `public_dir` fallback (ADR-064), called from `Router.dispatch` after every r
 | `segmentFor` | turns a `Range` header into a `Segment`. Returns a whole-file segment when the header is absent or malformed (RFC 7233 section 3.1 says ignore it), and null when it is well-formed but unsatisfiable, which is the caller's cue to answer 416 |
 | `sendFramed` | one HEADERS frame (status, content type, `content-length`, `accept-ranges`, and `content-range` for a 206) then DATA frames, each capped at `max_frame_size`, the last flagged END_STREAM |
 | `sendRangeNotSatisfiable` | 416 with `Content-Range: bytes */length`, headers only, END_STREAM on the HEADERS frame |
-| `zeroCopyAllowed` | always false on this engine. `dispatch/common.beginCoalesce` installs `frame.write_hook` on every batch, cleartext included, so a `sendfile` would put the body ahead of frames already staged in the sink |
+| `zeroCopyAllowed` | always false on this engine. `dispatch/common.beginCoalesce` installs `writer.write_hook` on every batch, cleartext included, so a `sendfile` would put the body ahead of frames already staged in the sink |
 
 `Segment` carries `{ offset, length, status, content_range }`, so a 200 and a 206 share one framing path and only the header block differs. `Content-Length` carries the segment length, not the file size, or a client waits for bytes that never arrive. An empty file closes the stream on HEADERS with no DATA frame at all.
 
@@ -258,11 +282,11 @@ The io_uring shape of the same loop (ADR-037 Phase 4). `initUringRing` requests 
 
 `serveOpts(cfg)` maps `Http2ServerConfig` to `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus the cache fields and `public_dir`). It also holds `setNoDelay`, `setBusyPoll`, `pinToCpu` and `getAvailableCpuCount` (both cgroup-mask aware), and `effectiveCacheEntries` (honors `cache_max_total_bytes`).
 
-The write-coalescing sink is the batching primitive for the cleartext mux: `MuxCoalesceSink` (a 64 KiB threadlocal, one per worker) is installed as `frame.write_hook` by `beginCoalesce(fd)` and torn down by `endCoalesce()`. While installed, every frame the mux writes in one readable batch (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) stages into one buffer and leaves as a single write, so a many-stream batch is one segment rather than one tiny segment per frame under `TCP_NODELAY`. It flushes when full and writes an oversized frame straight through, so correctness never depends on the buffer size. `endCoalesce` returns whether a write failed during the batch.
+The write-coalescing sink is the batching primitive for the cleartext mux: `MuxCoalesceSink` (a 64 KiB threadlocal, one per worker) is installed as `writer.write_hook` by `beginCoalesce(fd)` and torn down by `endCoalesce()`. While installed, every frame the mux writes in one readable batch (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) stages into one buffer and leaves as a single write, so a many-stream batch is one segment rather than one tiny segment per frame under `TCP_NODELAY`. It flushes when full and writes an oversized frame straight through, so correctness never depends on the buffer size. `endCoalesce` returns whether a write failed during the batch.
 
 ### tls_mux.zig
 
-Multiplexed h2 over TLS 1.3 (ADR-052): one `SO_REUSEPORT` listener plus one epoll instance per worker, each connection terminating TLS in place via a resumable `tls_session.Session` (no socketpair, no thread per connection). A `TlsConn` holds the session, the `?*MuxConn` h2 state (allocated once the handshake establishes and ALPN selects h2), an outbound-ciphertext backpressure buffer (`wbuf` / `woff` / `wlen`, flushed on EPOLLOUT), and a `plain` staging buffer. The pass is: recv ciphertext -> `session.feed` decrypts -> `feedMux` appends plaintext to `h2.rbuf` and runs `mux.processRing` -> the mux's reply frames route through `frame.write_hook = hookWrite` -> sealed into TLS records -> `sendRaw`.
+Multiplexed h2 over TLS 1.3 (ADR-052): one `SO_REUSEPORT` listener plus one epoll instance per worker, each connection terminating TLS in place via a resumable `tls_session.Session` (no socketpair, no thread per connection). A `TlsConn` holds the session, the `?*MuxConn` h2 state (allocated once the handshake establishes and ALPN selects h2), an outbound-ciphertext backpressure buffer (`wbuf` / `woff` / `wlen`, flushed on EPOLLOUT), and a `plain` staging buffer. The pass is: recv ciphertext -> `session.feed` decrypts -> `feedMux` appends plaintext to `h2.rbuf` and runs `mux.processRing` -> the mux's reply frames route through `writer.write_hook = hookWrite` -> sealed into TLS records -> `sendRaw`.
 
 `hookWrite` is a seal-in-place gather. It accumulates plaintext into `plain`, and whenever the staged prefix plus the new write completes a full record it seals that record straight from source with `sealGather` -> `conn.tls.encrypt2(prefix, tail, sealed)` (which threads down to `connection.writeAppData2` and `record.protect2`), gathering the staged prefix with a slice of the source. This avoids copying a large DATA payload into `plain` first, only the sub-record remainder is staged. The `seal_in_place` toggle is a comptime `const` so the gather path can be A/B'd against the accumulate-then-seal fallback (`flushPlain` -> `encrypt`) without changing any other behavior. `sendRaw` preserves record order (the AEAD nonce is the record sequence number): if ciphertext is already staged it appends rather than writing directly, so a later record never overtakes a staged one on the wire.
 
