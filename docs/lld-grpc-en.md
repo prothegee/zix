@@ -2,7 +2,7 @@
 
 Internal implementation details. For design rationale see [`docs/hld-grpc-en.md`](hld-grpc-en.md) and ADR-031.
 
-The blocking model (`.ASYNC`) uses one connection path (`serve.serveConn` -> `serveLoop`). The multiplexed models (`.EPOLL`, `.URING`) use a separate, non-blocking path under `mux/` (`process.onReadable`, `process.processRing`). The mux is ported, the `.EPOLL` and `.URING` dispatch files that drive it are not ported yet.
+The blocking model (`.ASYNC`) uses one connection path (`serve.serveConn` -> `serveLoop`). The multiplexed models (`.EPOLL`, `.URING`) use a separate, non-blocking path under `mux/` (`process.onReadable`, `process.processRing`). `dispatch/epoll.zig` and `dispatch/uring.zig` drive it.
 
 Every route-table-dependent internal function below still takes `comptime RouterType: type` (ADR-063), not a flattened runtime `handler: HandlerFn` like Http2's equivalents. This is deliberate: the engine reads `Route.is_server_streaming` off `RouterType.route_slice` before invoking the handler, to pick sync-inline vs task-spawn dispatch, and a bare `HandlerFn` pointer cannot carry that metadata. See `docs/hld-grpc-en.md`'s Handler Pattern section for the measured cost of losing it.
 
@@ -331,8 +331,10 @@ Functions only. `init(comptime RouterType, config)` returns `GrpcServer(RouterTy
 `run` checks, in order:
 
 1. `config.port == 0` -> `ZixHttp2_GrpcServer_PortNotConfigured`.
-2. the dispatch model: `.ASYNC` runs. `.EPOLL`, `.URING`, `.IOCP`, and `.KQUEUE` -> `ZixHttp2_GrpcServer_DispatchModel_NotSupported` (`.EPOLL` and `.URING` are not ported yet).
-3. `dispatch_async.run(RouterType, config)`. Its errors are translated by `dispatchError`: `ZixHttp2_GrpcAsync_ResolveFailed`, `ListenFailed`, `AcceptFailed` -> `ZixHttp2_GrpcServer_ResolveFailed`, `ListenFailed`, `AcceptFailed`.
+2. the dispatch model: `.ASYNC` runs everywhere, `.EPOLL` and `.URING` run on Linux. `.EPOLL` / `.URING` off Linux, `.IOCP`, and `.KQUEUE` -> `ZixHttp2_GrpcServer_DispatchModel_NotSupported`.
+3. the model's `run(RouterType, config)`. Its errors are translated into the server set:
+   - `dispatchError` (`.ASYNC`): `ResolveFailed`, `ListenFailed`, `AcceptFailed` keep their names.
+   - `dispatchEpollError` / `dispatchUringError`: `ResolveFailed` and `ListenFailed` keep their names. `OutOfMemory`, `SpawnFailed`, `SetupFailed`, `Unsupported` (and `WaitFailed` for `.URING`) -> `ZixHttp2_GrpcServer_EpollSetupFailed` / `UringSetupFailed`.
 
 ### dispatch/async.zig
 
@@ -346,7 +348,28 @@ Functions only. `init(comptime RouterType, config)` returns `GrpcServer(RouterTy
 
 ### dispatch/epoll.zig and dispatch/uring.zig
 
-Not ported yet. They will drive `mux/process.zig` (`onReadable` for `.EPOLL`, `processRing` for `.URING`).
+Same structure as the http2 `dispatch/epoll.zig` / `uring.zig`. Both `run(comptime RouterType, config)`:
+
+1. resolve `config.ip`, then bind one `reuse_address` listener per worker on the calling thread, in worker order (`workers`, 0 = available CPU count). A bind failure returns before anything serves.
+2. attach the `reuseport_cbpf` CPU steering to the group when asked. A kernel that refuses it logs a warning and keeps the default hash.
+3. spawn one worker per listener with `worker_stack_size_bytes`. The Router is bound by `WorkerEntry(RouterType)` (epoll) or `Worker(RouterType)` (uring), since `std.Thread.spawn` takes a plain function.
+4. join every worker. A worker that could not start its loop sets `failed` and `stop`, so the whole group stops and `run` returns `SetupFailed`.
+
+Each worker pins itself to a CPU (`cpu_affinity.pinToCpu`), installs its own response cache (`cache.installWorker`, freed on return), and keeps an fd-indexed slot table (`slab.mapZeroedSlots`, `MAX_FD` = 65536). A fd past the table is closed. Accepted fds get TCP_NODELAY and, when `busy_poll_us` is set, SO_BUSY_POLL. The loop waits at most 1 s at a time, so it sees `stop`.
+
+`.EPOLL` (level-triggered):
+
+- the listener event runs `acceptAll`: `accept4` until EAGAIN, a `MuxConn` per fd, registered for `EPOLLIN | EPOLLRDHUP`.
+- a connection event runs `serveEvent`: `EPOLLHUP` / `EPOLLERR` close it, otherwise `process.onReadable` reads, processes, and flushes the stage in one write. `.close` unregisters, frees, and closes the fd.
+
+`.URING`:
+
+- one ring per worker (single issuer, deferred task run, 16 Ki CQ entries, falls back to a plain ring). No fallback to `.EPOLL`.
+- multishot accept. A re-arm lost to a full SQ is retried on the next pass (`accept_pending`).
+- `user_data` packs the op (`accept`, `recv`, `send`), a 24-bit generation, and the fd, so a completion for an earlier connection on a reused fd is dropped.
+- a recv completion runs `process.processRing`, then sends `conn.stage` on the ring. Only one recv or one send is in flight per connection, so the read buffer and the stage are never touched while the kernel holds them. A partial send resends the rest.
+- a hang-up part way through a request stages a GOAWAY (`mux_dispatch.hangupGoaway`) and the connection closes after that send lands (`closing`). A send error closes at once.
+- on stop, the ring is torn down before the connections, so no send still reads a freed stage.
 
 ---
 
