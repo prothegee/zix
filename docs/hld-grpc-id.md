@@ -28,7 +28,7 @@ graph LR
 | :- | :- |
 | `src/tcp/http2/grpc/Grpc.zig` | namespace: semua re-export publik |
 | `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `GrpcRequest`, `GrpcResponse`, `HandlerFn`, `Router`, `serveGrpcConn` (model blocking), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplex `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
-| `src/tcp/http2/grpc/config.zig` | `GrpcServerConfig`, `GrpcClientConfig` |
+| `src/zix/tcp/http2/grpc/Config.zig` | `Config` server (`GrpcServerConfig`) |
 | `src/tcp/http2/grpc/server.zig` | `GrpcServer`: `run()` switch tipis yang men-dispatch ke berkas per-model di bawah `dispatch/` (dan ke jalur serve TLS saat `cfg.tls != null`) |
 | `src/tcp/http2/grpc/dispatch/` | berkas dispatch per-model: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplex `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (helper bersama) |
 | `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: jalur handler TLS blocking (per koneksi) |
@@ -79,7 +79,7 @@ graph LR
 | `io` | wajib | backend `std.Io` yang disediakan pemanggil |
 | `ip` | wajib | alamat bind |
 | `port` | wajib | port listen, 0 -> `error.ZixPortNotConfigured` |
-| `dispatch_model` | `.ASYNC` | `.ASYNC`, `.EPOLL`, atau `.URING` (dua terakhir hanya Linux, native, ditolak di luar Linux dengan error.ZixDispatchModelUnsupported) |
+| `dispatch_model` | wajib | `.ASYNC`, `.EPOLL`, atau `.URING` (dua terakhir hanya Linux, native, ditolak di luar Linux dengan error.ZixDispatchModelUnsupported) |
 | `kernel_backlog` | 1024 | backlog `listen()` |
 | `workers` | 0 | 0 -> cpu_count worker multiplex untuk EPOLL dan URING. Diabaikan oleh ASYNC |
 | `max_streams` | 128 | maksimum stream HTTP/2 konkuren per koneksi (SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan) |
