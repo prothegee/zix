@@ -177,6 +177,29 @@ Tidak berubah untuk `.ASYNC`. `serveGrpcConn` mengeset `TCP_NODELAY` dan memangg
 
 ---
 
+## proto/
+
+### varint.zig
+
+7 bit nilai per byte, bit rendah lebih dulu, bit teratas menyala selama masih ada byte berikutnya. Sebuah u64 paling banyak memakai `MAX_LEN` (10) byte.
+
+- `decodeVarint`: byte ke-10 hanya boleh membawa bit 0. Lebih dari itu, atau byte ke-11, adalah `Overflow`. Input yang habis di tengah varint adalah `UnexpectedEOF`.
+- `encodeVarint`: memeriksa ruang sebelum setiap byte. Saat `BufferFull`, buf bisa berisi varint yang belum lengkap.
+
+### field.zig
+
+Tag = `(field_number << 3) | wire_type`. Setiap encoder menulis tag, lalu nilainya, dan memeriksa ruang sebelum payload. int32 negatif di-sign-extend ke 64 bit, sehingga di-encode sebagai varint 10 byte (sama seperti protobuf). Error varint diterjemahkan ke `ZixHttp2_GrpcField_*` di setiap fungsi publik.
+
+### MessageReader.zig
+
+`{ buf, pos }`. `next` membaca satu tag, lalu nilai sesuai tipe wire-nya, dan memajukan `pos` melewatinya. Setiap `payload` adalah slice dari `buf`, tidak ada yang disalin.
+
+- Panjang LEN dibandingkan dengan `buf.len - pos`, sehingga panjang yang sangat besar menjadi `UnexpectedEOF`, tidak pernah overflow pada `pos + len`.
+- Nomor field yang melewati u32 adalah `FieldNumberTooLarge`.
+- Tipe wire 3, 4 (group yang sudah deprecated), 6, dan 7 adalah `UnknownWireType`.
+
+---
+
 ## frame.zig
 
 ### build* / send*
