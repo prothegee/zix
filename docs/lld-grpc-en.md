@@ -243,6 +243,16 @@ The blocks come from the real `HpackEncoder` run at comptime, so they are byte-i
 
 ---
 
+## timeout.zig
+
+`parseTimeout` reads `<digits><unit>` and returns nanoseconds. Units: `H`, `M`, `S`, `m`, `u`, `n` (case-sensitive).
+
+- Fewer than 2 bytes is `InvalidFormat`. More than `MAX_DIGITS` (8) digits is `TooManyDigits` (gRPC over HTTP/2 spec).
+- Digits are ASCII 0-9 only, so `+5S`, `-5S`, and `1_0S` are `InvalidNumber`. Zero is `NotPositive` (the spec asks for a positive integer). An unknown unit is `InvalidUnit`.
+- The multiply is checked, so `99999999H` is `Overflow`, never a panic.
+
+---
+
 ## server.zig and dispatch/
 
 ### Dispatch (run)
