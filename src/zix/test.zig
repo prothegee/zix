@@ -45,6 +45,8 @@ test {
     _ = @import("logger/Timestamp.zig");
     _ = @import("logger/format.zig");
     _ = @import("logger/windows_file.zig");
+    _ = @import("multiplexers/cpu_affinity.zig");
+    _ = @import("multiplexers/reuseport.zig");
     _ = @import("multiplexers/slab.zig");
     _ = @import("shared/dispatch.zig");
     _ = @import("tcp/http1/BodyInfo.zig");
@@ -101,6 +103,7 @@ test {
     _ = @import("tcp/http1/websocket/pump.zig");
     _ = @import("tcp/http1/websocket/send.zig");
     _ = @import("tcp/http1/websocket/upgrade.zig");
+    _ = @import("tcp/http2/CoalesceSink.zig");
     _ = @import("tcp/http2/Config.zig");
     _ = @import("tcp/http2/Context.zig");
     _ = @import("tcp/http2/FrameHeader.zig");
@@ -112,9 +115,12 @@ test {
     _ = @import("tcp/http2/Stream.zig");
     _ = @import("tcp/http2/UpgradeHead.zig");
     _ = @import("tcp/http2/cache.zig");
+    _ = @import("tcp/http2/coalesce.zig");
     _ = @import("tcp/http2/control.zig");
     _ = @import("tcp/http2/declared.zig");
     _ = @import("tcp/http2/dispatch/async.zig");
+    _ = @import("tcp/http2/dispatch/epoll.zig");
+    _ = @import("tcp/http2/dispatch/uring.zig");
     _ = @import("tcp/http2/hpack/DynamicTable.zig");
     _ = @import("tcp/http2/hpack/Header.zig");
     _ = @import("tcp/http2/hpack/HpackDecoder.zig");
