@@ -253,6 +253,16 @@ The blocks come from the real `HpackEncoder` run at comptime, so they are byte-i
 
 ---
 
+## Config.zig
+
+Server config record. `io`, `ip`, `port`, and `dispatch_model` are required, every other field has a default (see the hld field table).
+
+- `max_recv_buf` defaults to 64 KiB (Http2 uses 32 KiB).
+- `compress` and `handler_timeout_ms` are gRPC only. Http2 has no `compress`.
+- `tls` and `tls_port` are not ported yet.
+
+---
+
 ## server.zig and dispatch/
 
 ### Dispatch (run)
