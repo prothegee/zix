@@ -37,7 +37,7 @@ graph LR
 | `src/zix/tcp/http2/grpc/frame/` | `GrpcPrefix.zig`, `prefix.zig` (`readGrpcPrefix`, `writeGrpcPrefix`, `PREFIX_LEN`), `reply_block.zig` (blok reply cache comptime), `build.zig` (`buildGrpcHeaders`, `buildGrpcHeadersGzip`, `buildGrpcDataHeader`, `buildGrpcTrailer`, `buildGrpcError`), `send.zig` (`sendGrpcHeadersFD`, `sendGrpcDataFD`, `sendGrpcTrailerFD`, `sendGrpcErrorFD`), `gzip.zig` (`compressGrpcMessage`, `decompressGrpcBody`) |
 | `src/zix/tcp/http2/grpc/proto/` | `wire_type.zig` (konstanta tipe wire `WT_*`), `varint.zig` (`encodeVarint`, `decodeVarint`, `MAX_LEN`), `field.zig` (`encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`), `ProtoField.zig`, `MessageReader.zig` |
 | `src/zix/tcp/http2/grpc/status.zig` | enum `GrpcStatus` (u8), OK=0 sampai UNAUTHENTICATED=16 |
-| `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: parser header grpc-timeout |
+| `src/zix/tcp/http2/grpc/timeout.zig` | `parseTimeout`: parser header grpc-timeout, `MAX_DIGITS` |
 
 ## API Publik
 
@@ -67,7 +67,7 @@ graph LR
 | `zix.Grpc.sendErrorFD` | `fn(fd, sid, grpc_status, grpc_message) Error!void`: error trailers-only, tanpa frame DATA |
 | `zix.Grpc.parsePath` | `fn(path: []const u8) ?Path` |
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
-| `zix.Grpc.parseTimeout` | `fn(value: []const u8) ?u64` (nanodetik) |
+| `zix.Grpc.parseTimeout` | `fn(value: []const u8) Error!u64` (nanodetik, `ZixHttp2_GrpcTimeout_*` untuk nilai yang salah) |
 | `zix.Grpc.serveConn` | `fn(comptime RouterType, fd, opts, io) void`: titik masuk koneksi langsung |
 | `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
 | `zix.Grpc.wallClockNs` | `fn() u64`: waktu wall-clock saat ini dalam nanodetik (CLOCK_REALTIME). Digunakan untuk menimpa `ctx.deadline_ns` saat runtime. |
