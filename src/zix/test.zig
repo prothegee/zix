@@ -137,6 +137,8 @@ test {
     _ = @import("tcp/http2/grpc/content_type.zig");
     _ = @import("tcp/http2/grpc/deadline.zig");
     _ = @import("tcp/http2/grpc/dispatch/async.zig");
+    _ = @import("tcp/http2/grpc/dispatch/epoll.zig");
+    _ = @import("tcp/http2/grpc/dispatch/uring.zig");
     _ = @import("tcp/http2/grpc/encoding.zig");
     _ = @import("tcp/http2/grpc/frame/GrpcPrefix.zig");
     _ = @import("tcp/http2/grpc/frame/builder.zig");
@@ -213,6 +215,7 @@ test {
     _ = @import("utils/cache/async.zig");
     _ = @import("utils/cache/CacheEntry.zig");
     _ = @import("utils/cache/CacheRegistry.zig");
+    _ = @import("utils/cache/CacheSize.zig");
     _ = @import("utils/available.zig");
     _ = @import("utils/base32.zig");
     _ = @import("utils/base64.zig");
