@@ -2,78 +2,105 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-grpc-id.md`](hld-grpc-id.md) dan ADR-031.
 
-Model blocking (`.ASYNC`) memakai satu jalur koneksi (`serveGrpcConn` -> `serveGrpcLoop`). Model `.EPOLL` adalah jalur terpisah, multiplex, non-blocking (`grpcMuxOnReadable`) yang menjadi fokus utama dokumen ini.
+Model blocking (`.ASYNC`) memakai satu jalur koneksi (`serve.serveConn` -> `serveLoop`). Model `.EPOLL` adalah jalur terpisah, multiplex, non-blocking (`grpcMuxOnReadable`) yang menjadi fokus utama dokumen ini.
 
 Setiap fungsi internal yang bergantung pada tabel route di bawah ini tetap menerima `comptime RouterType: type` (ADR-063), bukan `handler: HandlerFn` runtime yang diratakan seperti padanan Http2. Ini disengaja: engine membaca `Route.is_server_streaming` dari `RouterType.route_slice` sebelum memanggil handler, untuk memilih dispatch sync-inline vs task-spawn, dan pointer `HandlerFn` polos tidak bisa membawa metadata itu. Lihat bagian Pola Handler di `docs/hld-grpc-id.md` untuk biaya terukur kehilangan metadata itu.
 
 ---
 
-## core.zig
+## File inti
 
-### GrpcContext
+| File | Peran |
+| :- | :- |
+| `Context.zig` | state per call: pesan request, verb balasan, deadline, verb cache |
+| `Request.zig`, `Response.zig` | view tipis di atas `Context` |
+| `handler.zig` | `HandlerFn`, `invoke` (satu-satunya tempat handler dipanggil), `completeHandlerError`, `rpcStart` / `writeRpcRecord` |
+| `router.zig` | `Route`, `Router`, `routeIsStreaming` |
+| `serve.zig` | `serveConn`: preface atau upgrade h2c, lalu `serveLoop` |
+| `stream_dispatch.zig` | `dispatchWhole` (cek content-length), `dispatchStream`, `dispatchInline` |
+| `DispatchTask.zig` | satu call server-streaming di task sendiri |
+| `ReplyStage.zig`, `ConnReader.zig`, `ConnMutex.zig` | cork buffer, pembaca frame ber-buffer, write lock koneksi |
+| `Stream.zig`, `stream_slot.zig` | satu stream request, claim / find / in-flight tabel stream |
+| `deadline.zig`, `encoding.zig`, `cache.zig`, `path.zig`, `content_type.zig`, `window.zig` | deadline, header gzip, key cache response, pemisahan path, content-type, ukuran window |
 
-State handler per stream. `GrpcRequest` (`recvMessage`) dan `GrpcResponse` (`sendHeaders` / `sendMessage` / `finish` / `serveCached` / `sendCached`) adalah wrapper tipis yang memegang pointer `*GrpcContext`, delegasi satu baris ke method di bawah: trio publik (ADR-063) tidak menambah logika baru di sini, hanya mengganti nama panggilan dari `ctx.foo()` menjadi `req.foo()` / `res.foo()`. Field yang relevan untuk keluaran:
+### Context
+
+State handler per call. `Request` (`header`, `recvMessage`) dan `Response` (`sendHeaders` / `sendMessage` / `finish` / `serveCached` / `sendCached`) adalah wrapper tipis yang memegang pointer `*Context`, delegasi satu baris ke method di bawah: trio publik (ADR-063) tidak menambah logika baru di sini. Field yang relevan untuk keluaran:
 
 ```zig
 fd: std.posix.fd_t,
 stream_id: u31,
-_hdr_sent: bool,
-_write_mutex: ?*ConnMutex = null,   // hanya model streaming; null pada jalur mux
-_out: ?*ReplyStage = null,          // diset pada jalur inline/mux: stage alih-alih write langsung
+deadline: ?std.Io.Clock.Timestamp = null,
+_hdr_sent: bool = false,
+_write_mutex: ?*ConnMutex = null,   // hanya task streaming, null pada jalur inline dan mux
+_out: ?*ReplyStage = null,          // diset pada jalur inline dan mux: stage alih-alih write
 ```
 
-`sendMessage` / `sendHeaders` / `finish` bercabang pada `_out`: saat diset, mereka meng-append frame terenkode ke cork (tanpa lock per panggilan, tanpa `write` langsung). Saat null, mereka menulis langsung ke fd, mengambil `_write_mutex` jika ada task streaming konkuren yang mungkin menulis. Dispatch unary inline dan setiap dispatch mux memakai jalur staged. Server-streaming pada model blocking memakai jalur langsung.
+`sendMessage` / `sendHeaders` / `finish` bercabang pada `_out`: saat diset, mereka meng-append frame terenkode ke cork (tanpa lock per panggilan, tanpa `write` langsung). Saat null, mereka menulis langsung ke fd, mengambil `_write_mutex` bila diset. Frame DATA streaming sampai 4096 byte (head plus payload) keluar dalam satu write, yang lebih besar dalam dua.
 
-Cache response unary per-worker (ADR-036) juga hidup di sini: `tl_cache`, `GrpcContext.serveCached` / `sendCached`, dengan key `requestKey(path, body)` (Wyhash atas path gRPC plus raw request body). `serveCached` melakukan lookup, replay lewat `sendMessage` dan `finish(.OK, "")` saat hit, dan mengembalikan false saat miss, tanpa cache, atau path kosong (caller lalu membangun response seperti biasa). `sendCached` mengirim lalu menyimpan, melewati penyimpanan pada kondisi yang sama. Dipasang oleh worker `.EPOLL` / `.URING`, opt-in lewat `response_cache`.
+Error-nya `ZixHttp2_GrpcContext_*` (`BrokenPipe`, `UnexpectedEOF`, `Overflow`, `BufferFull`), diterjemahkan ke `ZixHttp2_GrpcResponse_*` oleh `Response`. Reply staged yang sudah gagal menulis melaporkan `BrokenPipe` pada send berikutnya. Content-type atau grpc-message yang melewati scratch HPACK adalah `BufferFull`.
+
+`finishIfOpen` menutup call yang dibiarkan terbuka oleh handler, dan membiarkan call yang sudah selesai. `handler.invoke` memanggilnya lewat `completeHandlerError` (INTERNAL, `handler error`) saat handler mengembalikan error.
+
+Cache response unary per-worker (ADR-036) hidup di `cache.zig`: `tl_cache`, dengan key `requestKey(path, body)` (Wyhash atas path gRPC plus raw request body). `Context.serveCached` melakukan lookup, replay lewat `sendMessage` dan `finish(.OK, "")` saat hit, dan mengembalikan false saat miss, tanpa cache, atau path kosong. `sendCached` mengirim lalu menyimpan, melewati penyimpanan pada kondisi yang sama. Jam TTL-nya `nowMillis(ctx.io)`.
+
+### Deadline
+
+`deadline.computeDeadline(io, handler_timeout_ms, headers)` mengambil yang paling ketat dari budget server dan header `grpc-timeout` yang valid. `grpc-timeout` yang tidak bisa di-parse diabaikan. `Router.dispatch` lalu memperketatnya dengan `Route.timeout_ms` (`tightenMs`), jadi budget route tidak pernah memperlunaknya.
 
 ### ReplyStage
 
-Penulis cork untuk satu koneksi. Dipakai oleh dispatch unary inline (model blocking) dan oleh setiap dispatch pada jalur mux.
+Penulis cork untuk satu reply. Dipakai oleh dispatch unary inline dan oleh setiap dispatch pada jalur mux.
 
 ```zig
-const ReplyStage = struct {
-    fd: std.posix.fd_t,
-    buf: []u8,                    // backing milik pemanggil, bukan array inline
-    len: usize,
+fd: std.posix.fd_t,
+buf: []u8,                    // backing milik pemanggil, bukan array inline
+len: usize = 0,
+failed: bool = false,         // diset saat sebuah write gagal, dibaca oleh send berikutnya
 
-    fn append(self, bytes) void   // flush dulu jika akan overflow; payload > buf diteruskan langsung
-    fn flush(self) void           // satu writeAllFD dari buf[0..len]; len = 0
-};
+fn append(self, bytes) void   // flush dulu bila akan overflow, chunk melewati buf diteruskan langsung
+fn flush(self) void           // satu writeAllFD dari buf[0..len], len = 0
 ```
 
-`buf` adalah slice yang dipasok pemanggil. Jalur inline blocking (`dispatchGrpcInline`) menyokongnya dengan array stack 4096 byte (reply unary kecil). Jalur mux menyokongnya dengan `stage_buf` 64 KB milik koneksi (lihat `GrpcMuxConn`). Semua frame respons yang dihasilkan saat menangani satu event readable terkumpul di sini dan keluar dalam satu `write()`.
+Jalur inline (`stream_dispatch.dispatchInline`) menyokong `buf` dengan array stack 4096 byte (reply unary kecil). Jalur mux menyokongnya dengan `stage_buf` 64 KB milik koneksi (lihat `GrpcMuxConn`).
 
 ### ConnReader (model blocking)
 
-Pembaca frame ber-buffer yang dipakai `serveGrpcLoop`. `ensure(n)` blocking sampai `n` byte ter-buffer (kompaksi bila perlu), `take(n)` mengembalikan dan memajukan. Mengganti pembacaan header 9-byte plus pembacaan payload per frame dengan pembacaan ter-batch.
+Pembaca frame ber-buffer yang dipakai `serveLoop`. `ensure(n)` blocking sampai `n` byte ter-buffer (kompaksi bila perlu), `take(n)` mengembalikan dan memajukan. `n` melewati buffer adalah `TooLarge`, peer yang menutup lebih dulu adalah `Closed`.
+
+### ConnMutex
+
+Spinlock ber-ref-count di heap, dipakai bersama oleh read loop dan setiap task streaming dari satu koneksi. `active_streaming` menghitung task yang sedang menulis. Jalur inline mengambil lock hanya selama nilainya di atas 0. `release` terakhir membebaskannya.
+
+### DispatchTask
+
+`spawn` menyalin penuh header stream (di-rebase ke scratch 4 KiB miliknya) dan body (64 KiB, di-gunzip dulu bila klien mengirim `grpc-encoding: gzip`), sehingga read loop langsung membebaskan slot. Task berjalan di `opts.io` bila diset, selain itu di thread terlepas. Call yang tidak bisa diterima langsung ditutup: INTERNAL saat task tidak bisa dibuat atau ada header melewati scratch, RESOURCE_EXHAUSTED saat body melewati 64 KiB.
 
 ### Stream
 
-State parse per stream. `body` dan `header_scratch` adalah buffer berukuran `opts.max_body` / `opts.max_header_scratch`, bukan array inline. Pada path multiplex (`.EPOLL` / `.URING`) sebuah `Stream` dipinjam dari pool per-worker selama terbuka dan dikembalikan saat ditutup (`next_free` menautkannya ke freelist selagi idle), sehingga memori stream residen mengikuti stream konkuren pada worker, bukan `connections * max_streams`. Pada path blocking array-nya inline dan buffer-nya adalah slice ke backing per koneksi.
+State parse per stream. `body` dan `header_scratch` adalah slice pinjaman berukuran `opts.max_body` / `opts.max_header_scratch`. Pada jalur multiplex (`.EPOLL` / `.URING`) sebuah `Stream` dipinjam dari pool per-worker selama terbuka (`next_free` menautkannya ke freelist selagi idle). Pada jalur blocking setiap entri tabel menunjuk ke backing per koneksi.
 
 ```zig
-const Stream = struct {
-    id: u31,
-    state: StreamState,
-    headers: [h2.MAX_HEADERS]h2.Header,
-    header_count: usize,
-    body: []u8,
-    body_len: usize,
-    header_scratch: []u8,
-    end_headers: bool,
-    end_stream: bool,
-    next_free: ?*Stream,        // tautan freelist selagi idle di pool per-worker
-};
+id: u31 = 0,
+state: StreamState = .IDLE,
+headers: [frame.MAX_HEADERS]Header = undefined,
+header_count: usize = 0,
+body: []u8 = &.{},
+body_len: usize = 0,
+header_scratch: []u8 = &.{},
+end_headers: bool = false,
+end_stream: bool = false,
+next_free: ?*Self = null,     // tautan freelist selagi idle di pool per-worker
 ```
 
-Pada path mux `muxSlotFor(conn, stream_id)` meminjam `Stream` dari pool per-worker ke slot bebas pertama (`acquireGrpcStream` menumbuhkan freelist saat miss, `muxReleaseSlot` / `releaseGrpcStream` mengembalikannya saat ditutup), dan `muxFindSlot(stream_id, ...)` mencari stream terbuka berdasarkan id. Path blocking mempertahankan `slotFor` / `findSlot` array-inline. Semuanya scan linear atas `max_streams`.
+`open(sid)` me-reset-nya untuk stream baru, `appendBody` menolak chunk yang melewati body (tidak ada yang disalin). Jalur blocking meng-claim dan mencari entri dengan `stream_slot.claim` / `find`, keduanya scan linear atas `max_streams`.
 
-### Konstanta flow-control
+### Konstanta flow-control (`window.zig`)
 
 ```zig
-const STREAM_WINDOW_SIZE: u32 = 16 * 1024 * 1024;  // SETTINGS_INITIAL_WINDOW_SIZE yang diiklankan
-const CONN_WINDOW_BUMP: u31 = 1 << 30;             // bump window koneksi sekali setelah handshake
-const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;   // titik replenish window koneksi secara bulk
+pub const STREAM_WINDOW_SIZE: u32 = 16 * 1024 * 1024;  // SETTINGS_INITIAL_WINDOW_SIZE yang diiklankan
+pub const CONN_WINDOW_BUMP: u31 = 1 << 30;             // bump window koneksi sekali setelah handshake
+pub const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;   // titik replenish window koneksi secara bulk
 ```
 
 Window stream cukup besar sehingga body request kecil tidak pernah butuh `WINDOW_UPDATE` stream per-DATA. Window koneksi di-bump sekali dan hanya di-replenish secara bulk melewati threshold.
@@ -165,15 +192,15 @@ Frame kontrol di-stage via `muxStageFrame` / `muxStageWindowUpdate` / `muxStageG
 
 ### muxDispatch(comptime RouterType, conn, stream)
 
-Membangun `GrpcContext` dengan `_out = &conn.stage` dan `_write_mutex = null` (worker memiliki koneksi, jadi tidak ada penulis konkuren), membungkusnya dalam pasangan `GrpcRequest` / `GrpcResponse` (view delegasi tipis, tanpa logika tambahan), lalu memanggil `RouterType.dispatch(&req, &res, &ctx)`. Setiap route, unary dan streaming, berjalan inline. `logger.rpc` opsional membungkus pemanggilan untuk timing.
+Membangun `Context` dengan `_out = &conn.stage` dan `_write_mutex = null` (worker memiliki koneksi, jadi tidak ada penulis konkuren), membungkusnya dalam pasangan `Request` / `Response` (view delegasi tipis, tanpa logika tambahan), lalu memanggil `RouterType.dispatch(&req, &res, &ctx)`. Setiap route, unary dan streaming, berjalan inline. `logger.rpc` opsional membungkus pemanggilan untuk timing.
 
-Reply server-streaming dipadatkan pada lapisan gRPC. `muxDispatch` memberi route streaming sebuah buffer coalesce per-call (`ctx._coal`), dan `sendMessage` memadatkan pesan-pesan yang sudah ber-frame gRPC ke dalamnya, mengeluarkan satu DATA frame HTTP/2 per `grpc_stream_coalesce_cap` (16 KiB, max frame size default HTTP/2) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di sisi klien. Unary tetap satu frame per pesan (`_coal` null), jadi byte-nya persis sama.
+Reply server-streaming dipadatkan pada lapisan gRPC. `muxDispatch` memberi route streaming sebuah buffer coalesce per-call (`ctx._coal`), dan `sendMessage` memadatkan pesan-pesan yang sudah ber-frame gRPC ke dalamnya, mengeluarkan satu DATA frame HTTP/2 per `Context.STREAM_COALESCE_CAP` (16 KiB, max frame size default HTTP/2) alih-alih satu DATA frame per pesan. Reply `count = 5000` turun dari 5000 DATA frame kecil menjadi sekitar 3, memangkas byte header frame di wire dan biaya parse per-frame di sisi klien. Unary tetap satu frame per pesan (`_coal` null), jadi byte-nya persis sama.
 
 Untuk route streaming (dideteksi oleh `routeIsStreaming(RouterType.route_slice, path)`), dispatch dibungkus dalam `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: kernel menahan output hingga MSS penuh atau cork dilepas, menggabungkan beberapa flush stage perantara yang dihasilkan handler streaming menjadi lebih sedikit segmen TCP. Route unary tidak di-cork (sudah keluar dalam satu write). `setTcpCork` no-op pada target non-Linux.
 
-### Jalur blocking (serveGrpcConn / serveGrpcLoop)
+### Jalur blocking (serveConn / serveLoop)
 
-Tidak berubah untuk `.ASYNC`. `serveGrpcConn` mengeset `TCP_NODELAY` dan memanggil `serveGrpcConnInner`, yang menangani preface h2c-direct atau upgrade h2c, lalu `serveGrpcLoop`. Loop memakai `ConnReader` blocking dan switch frame yang sama, dispatch via `dispatchStream`: unary inline (`dispatchGrpcInline`, di-stage via `ReplyStage` di stack), server-streaming via `spawnGrpcStream` (satu thread terlepas, menyalin header dan body, menulis di bawah `ConnMutex` bersama).
+Dipakai oleh `.ASYNC`. `serveConn` mengeset `TCP_NODELAY`, lalu menangani preface h2c-direct atau upgrade h2c (`upgrade.accept` dari Http2, stream 1 dijawab inline sebelum loop), lalu `serveLoop`. Loop memakai `ConnReader` blocking dan satu switch frame. Setiap write lewat `ConnMutex` koneksi. Stream yang selesai masuk ke `stream_dispatch.dispatchWhole`: body yang kurang dari (atau melewati) content-length-nya di-reset dengan PROTOCOL_ERROR, route unary berjalan inline (`dispatchInline`, di-stage di `ReplyStage` stack), route server-streaming berjalan di `DispatchTask`. Body melewati `max_body` ditutup dengan RESOURCE_EXHAUSTED. Peer yang hang-up dengan request in flight mendapat GOAWAY PROTOCOL_ERROR, hang-up idle tidak mendapat apa pun.
 
 ---
 
@@ -259,6 +286,7 @@ Record config server. `io`, `ip`, `port`, dan `dispatch_model` wajib, field lain
 
 - `max_recv_buf` default 64 KiB (Http2 memakai 32 KiB).
 - `compress` dan `handler_timeout_ms` hanya untuk gRPC. Http2 tidak punya `compress`.
+- `serveOpts()` membangun `ServeOpts` untuk satu koneksi. `io` menjadi pool yang menjalankan call server-streaming.
 - `tls` dan `tls_port` belum di-port.
 
 ---
@@ -267,7 +295,7 @@ Record config server. `io`, `ip`, `port`, dan `dispatch_model` wajib, field lain
 
 ### Dispatch (run)
 
-`server.zig` memuat tipe publik `GrpcServer` dan `run()` switch tipis pada `dispatch_model`. Implementasi per-model berada di `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` mempertahankan struktur accept-thread + `io.async` dan memanggil `serveGrpcConn`. `.EPOLL` memanggil `epoll.runEpoll`. `.URING` memanggil `uring.runUring` (bentuk berbasis completion io_uring dari `.EPOLL`). Saat `cfg.tls != null`, `run()` justru bercabang ke `tls_mux.runTlsMux` (multiplex) atau `tls_serve.runTls` (blocking per koneksi). Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
+`server.zig` memuat tipe publik `GrpcServer` dan `run()` switch tipis pada `dispatch_model`. Implementasi per-model berada di `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` mempertahankan struktur accept-thread + `io.async` dan memanggil `serve.serveConn`. `.EPOLL` memanggil `epoll.runEpoll`. `.URING` memanggil `uring.runUring` (bentuk berbasis completion io_uring dari `.EPOLL`). Saat `cfg.tls != null`, `run()` justru bercabang ke `tls_mux.runTlsMux` (multiplex) atau `tls_serve.runTls` (blocking per koneksi). Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
 
 Simbol `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, dan `runEpoll` di bawah semuanya berada di `dispatch/epoll.zig`.
 
