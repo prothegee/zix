@@ -100,18 +100,12 @@ pub fn freeUpTo(self: *Self, upto: u64) usize {
 // --------------------------------------------------------- //
 // Test:
 
-const Config = @import("../../tcp/http1/Config.zig");
+const CacheSize = @import("CacheSize.zig");
 
-fn testConfig() Config {
-    return .{
-        .io = std.testing.io,
-        .ip = "127.0.0.1",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = 4,
-        .cache_max_value_bytes = 512,
-    };
-}
+const TEST_SIZE: CacheSize = .{
+    .max_entries = 4,
+    .max_value_bytes = 512,
+};
 
 /// Build one cache with smp_allocator and register it for `generation`.
 fn register(registry: *Self, generation: u64) !*ResponseCache {
@@ -119,7 +113,7 @@ fn register(registry: *Self, generation: u64) !*ResponseCache {
     const resp_cache = try allocator.create(ResponseCache);
     errdefer allocator.destroy(resp_cache);
 
-    resp_cache.* = try ResponseCache.init(allocator, testConfig());
+    resp_cache.* = try ResponseCache.init(allocator, TEST_SIZE);
     errdefer resp_cache.deinit();
 
     try registry.items.append(allocator, .{
