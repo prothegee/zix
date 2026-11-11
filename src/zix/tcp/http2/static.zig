@@ -13,9 +13,9 @@
 //!
 //! ### note:
 //!
-//! - sendfile is used only while frames go straight to the socket. A writer
-//!   that batches frames must make zeroCopyAllowed refuse, or the body
-//!   overtakes its own HEADERS frame.
+//! - sendfile is used only while frames go straight to the socket. While
+//!   writer.write_hook batches frames, zeroCopyAllowed refuses, or the body
+//!   would overtake its own HEADERS frame.
 //! - Once the file resolves, the request is answered here, write errors
 //!   included. A broken peer is not a missing file, so no 404 follows.
 //!
@@ -99,10 +99,14 @@ fn nowMillis(io: std.Io) u64 {
 }
 
 /// Whether the body may go straight from the file to the socket.
+///
+/// Note:
+/// - Refused while a write hook batches frames, so the body joins the batch
+///   instead of overtaking the frames already staged.
 fn zeroCopyAllowed(fd: std.posix.fd_t) bool {
     if (comptime builtin.os.tag != .linux) return false;
 
-    return fd >= 0;
+    return fd >= 0 and writer.write_hook == null;
 }
 
 /// writer.writeAllFD in the static_body error set, for the copy path.
@@ -651,6 +655,49 @@ fn wireHeader(wire: []const u8, name: []const u8) !?[]const u8 {
     return headerValue(decoded, name);
 }
 
+/// Bytes the test write hook collected.
+threadlocal var hook_wire: [8 * 1024]u8 = undefined;
+threadlocal var hook_wire_len: usize = 0;
+
+fn hookCollect(_: *anyopaque, bytes: []const u8) void {
+    @memcpy(hook_wire[hook_wire_len..][0..bytes.len], bytes);
+    hook_wire_len += bytes.len;
+}
+
+fn hookSet(ctx: *anyopaque) void {
+    hook_wire_len = 0;
+    writer.write_hook = hookCollect;
+    writer.write_hook_ctx = ctx;
+}
+
+fn hookClear() void {
+    writer.write_hook = null;
+    writer.write_hook_ctx = null;
+}
+
+/// Serve one request on a real fd while the test hook collects the frames.
+fn serveHooked(
+    root: []const u8,
+    req: *const Request,
+    req_path: []const u8,
+    max_frame_size: u32,
+) ![]const u8 {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var hook_ctx: usize = 0;
+    hookSet(@ptrCast(&hook_ctx));
+    defer hookClear();
+
+    const ctx = testContext(fds[0], root);
+
+    try std.testing.expect(serve(req, &ctx, req_path, max_frame_size));
+
+    return hook_wire[0..hook_wire_len];
+}
+
 test "zix http2: static, zeroCopyAllowed refuses the sentinel fd" {
     try std.testing.expect(!zeroCopyAllowed(NO_FD));
 }
@@ -1188,5 +1235,100 @@ test "zix http2: static, fallback strips the leading slash" {
     const ctx = testContext(fds[0], fixtureRoot(&tmp, &root_buf));
 
     try std.testing.expect(fallback(&req, &ctx));
+}
+
+test "zix http2: static, zeroCopyAllowed refuses while a write hook is set" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var hook_ctx: usize = 0;
+    hookSet(@ptrCast(&hook_ctx));
+    defer hookClear();
+
+    try std.testing.expect(!zeroCopyAllowed(3));
+}
+
+test "zix http2: static, acquireHit takes resident bytes while a write hook is set" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(&tmp, "batched.css", "body{margin:0}");
+
+    _ = try StaticCacheRegistry.shared.install(16, 60_000);
+    defer StaticCacheRegistry.shared.shutdown(std.testing.io);
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var hook_ctx: usize = 0;
+    hookSet(@ptrCast(&hook_ctx));
+    defer hookClear();
+
+    var root_buf: [64]u8 = undefined;
+    const cache = StaticCacheRegistry.shared.instance().?;
+    const req = testRequest("/batched.css", &.{});
+    const ctx = testContext(fds[0], fixtureRoot(&tmp, &root_buf));
+
+    const resident = acquireHit(cache, &req, &ctx, "batched.css").?;
+    defer cache.release(resident);
+
+    try std.testing.expectEqualStrings("body{margin:0}", resident.bytes.?);
+}
+
+test "zix http2: static, resident body is framed through the write hook" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var payload: [900]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast('a' + index % 26);
+    writeFixture(&tmp, "bundle.js", &payload);
+
+    _ = try StaticCacheRegistry.shared.install(16, 60_000);
+    defer StaticCacheRegistry.shared.shutdown(std.testing.io);
+
+    var root_buf: [64]u8 = undefined;
+    var body_buf: [1024]u8 = undefined;
+    const req = testRequest("/bundle.js", &.{});
+    const wire = try serveHooked(fixtureRoot(&tmp, &root_buf), &req, "bundle.js", 256);
+    const summary = summarizeFrames(wire);
+
+    try std.testing.expectEqual(@as(usize, 1), summary.header_count);
+    try std.testing.expect(summary.largest_data <= 256);
+    try std.testing.expect((summary.last_data_flags & frame.FLAG_END_STREAM) != 0);
+    try std.testing.expectEqualStrings(&payload, collectData(wire, &body_buf));
+}
+
+test "zix http2: static, brotli sibling is sent through the write hook" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    writeFixture(&tmp, "theme.css", "the plain theme");
+    writeFixture(&tmp, "theme.css.br", "packed");
+
+    _ = try StaticCacheRegistry.shared.install(16, 60_000);
+    defer StaticCacheRegistry.shared.shutdown(std.testing.io);
+
+    const headers = [_]Header{.{
+        .name = "accept-encoding",
+        .value = "br, gzip",
+    }};
+    var root_buf: [64]u8 = undefined;
+    var body_buf: [64]u8 = undefined;
+    const req = testRequest("/theme.css", &headers);
+    const wire = try serveHooked(
+        fixtureRoot(&tmp, &root_buf),
+        &req,
+        "theme.css",
+        frame.DEFAULT_MAX_FRAME_SIZE,
+    );
+
+    try std.testing.expectEqualStrings("packed", collectData(wire, &body_buf));
 }
 
