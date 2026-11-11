@@ -99,6 +99,33 @@ pub fn cacheTtl() u32 {
     return tl_cache_ttl_ms;
 }
 
+/// Cache slot count that fits the memory ceiling.
+///
+/// Note:
+/// - The cache rounds the count down to a power of two afterwards, so the
+///   slab (slots * value bytes) never goes past the ceiling.
+///
+/// Param:
+/// max_entries - u32 (configured slot count)
+/// max_value_bytes - u32 (per-slot cap in bytes, 0 counts as 1)
+/// max_total_bytes - usize (memory ceiling in bytes, 0 disables it)
+///
+/// Return:
+/// - u32 (max_entries, or fewer when the ceiling is set, never below 1)
+pub fn effectiveCacheEntries(
+    max_entries: u32,
+    max_value_bytes: u32,
+    max_total_bytes: usize,
+) u32 {
+    if (max_total_bytes == 0) return max_entries;
+
+    const value_bytes: usize = @max(1, max_value_bytes);
+    const fit = max_total_bytes / value_bytes;
+    const capped = @min(@as(usize, max_entries), fit);
+
+    return @intCast(@max(@as(usize, 1), capped));
+}
+
 /// Serve the current request from the cache when a fresh entry exists.
 ///
 /// Usage:
@@ -204,6 +231,30 @@ test "zix http2: cache, ttl defaults" {
     defer setCache(null, 1000);
 
     try std.testing.expectEqual(@as(u32, 2500), cacheTtl());
+}
+
+test "zix http2: cache, effectiveCacheEntries without a ceiling keeps the count" {
+    try std.testing.expectEqual(@as(u32, 1024), effectiveCacheEntries(1024, 16 * 1024, 0));
+}
+
+test "zix http2: cache, effectiveCacheEntries caps the count to the ceiling" {
+    const entries = effectiveCacheEntries(1024, 16 * 1024, 256 * 1024);
+
+    try std.testing.expectEqual(@as(u32, 16), entries);
+}
+
+test "zix http2: cache, effectiveCacheEntries keeps the count under a loose ceiling" {
+    const entries = effectiveCacheEntries(8, 1024, 1024 * 1024);
+
+    try std.testing.expectEqual(@as(u32, 8), entries);
+}
+
+test "zix http2: cache, effectiveCacheEntries tiny ceiling falls back to 1" {
+    try std.testing.expectEqual(@as(u32, 1), effectiveCacheEntries(1024, 16 * 1024, 1));
+}
+
+test "zix http2: cache, effectiveCacheEntries zero value bytes counts as 1" {
+    try std.testing.expectEqual(@as(u32, 64), effectiveCacheEntries(1024, 0, 64));
 }
 
 test "zix http2: cache, key is never zero" {
