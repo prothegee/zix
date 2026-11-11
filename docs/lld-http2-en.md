@@ -150,7 +150,7 @@ The send-side flow control. `active_conn` is the threadlocal that binds a runnin
 - `resumeAll(conn)`: after the connection window grew, resumes every parked stream.
 - `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: the flow-controlled response entry. With no `active_conn`, another fd, or no matching slot it falls back to `writer.sendResponseEncodedFD` (immediate, unmetered). Otherwise it writes HEADERS (`response_block.respHeaderBlock`, `content-length` always present, END_STREAM on HEADERS for an empty body) then `pumpBody(..., true)`. A header block that does not fit resets the stream with `INTERNAL_ERROR` and sends no DATA. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache).
 
-Note: the frame batching hook (`writer.write_hook`) and the coalescing sink are not in `mux/`. The old mux never installed the hook, `dispatch/common.zig` does around each readable batch, so both land with the Linux dispatch models.
+Note: the frame batching hook (`writer.write_hook`) and the coalescing sink are not in `mux/`. The `.EPOLL` / `.URING` workers install the hook around each readable batch through `coalesce.zig`.
 
 ---
 
@@ -209,7 +209,7 @@ max_size: usize = 4096,
 
 `frame.zig` holds the constants (`FRAME_TYPE_*`, `FLAG_*`, `ERR_*`, `SETTINGS_*`, `PREFACE`, `FRAME_HEADER_LEN` 9, `DEFAULT_MAX_FRAME_SIZE` 16384, `HPACK_ENCODE_SCRATCH` 512, `SEND_STAGE_BODY_MAX` 4096) and the header codec. `FrameHeader.zig` is `{ length: u24, frame_type: u8, flags: u8, stream_id: u31 }`. `parseFrameHeader` / `encodeFrameHeader` do no I/O (for buffered or staged writes).
 
-`writer.zig` is the write side. `writeAllFD` marks the stream answered (`tl_responded`) and calls `writeAllDirectFD`, the blocking write-all that polls on `POLL.OUT` for a non-blocking socket's EAGAIN and retries on INTR. The threadlocal `write_hook` (the TLS seal path, or the coalescing sink) lands with the Linux dispatch models: `writeAllFD` will hand the plaintext to it when set, and `writeAllDirectFD` stays the hook's own flush path, so a coalescing flush does not re-enter the hook. `writeFrameHeaderFD` encodes and writes one header.
+`writer.zig` is the write side. `writeAllFD` marks the stream answered (`tl_responded`) and calls `writeAllDirectFD`, the blocking write-all that polls on `POLL.OUT` for a non-blocking socket's EAGAIN and retries on INTR. When the threadlocal `write_hook` and `write_hook_ctx` are both set (the coalescing sink today, the TLS seal path later), `writeAllFD` and the vectored pair write hand the bytes to the hook instead. `writeAllDirectFD` never consults the hook, so it is the hook's own flush path and a flush does not re-enter the hook. `writeFrameHeaderFD` encodes and writes one header.
 
 `sendResponseFD` -> `sendResponseEncodedFD` (also in `writer.zig`) is the immediate, unmetered response (no flow control): HEADERS via `respHeaderBlock`, then the body framed in `<= DEFAULT_MAX_FRAME_SIZE` DATA chunks with END_STREAM on the last (or on HEADERS when the body is empty). A body at or under `SEND_STAGE_BODY_MAX` (4 KiB) leaves as one staged write, a larger one as one vectored write per DATA chunk (the HEADERS block rides the first chunk, a write hook receives each pair as two appends). Large bodies that may exceed the peer window use `mux/send_stream.sendResponseStreamFD` instead.
 
@@ -308,11 +308,9 @@ The `public_dir` fallback (ADR-064). `Router.dispatch` calls `fallback(req, ctx)
 | `encodeUnsatisfiable` | encodes the 416 block with `Content-Range: bytes */length` |
 | `answer` | picks the segment, encodes the block, then calls `sendFramed`. A 206 block that does not fit falls back to the whole file as 200. When even the 200 block does not fit, the stream is closed with RST_STREAM `INTERNAL_ERROR` (`resetStream`) |
 | `sendFramed` | one HEADERS frame, then DATA frames each capped at `max_frame_size`, the last one flagged END_STREAM. A resident body is cut from its own bytes, otherwise `utils/static/static.sendBody` sends the range |
-| `zeroCopyAllowed` | true on Linux for a real fd (`fd >= 0`), false everywhere else. Frames are written straight to the socket today, so `sendfile` cannot overtake its own HEADERS frame |
+| `zeroCopyAllowed` | true on Linux for a real fd (`fd >= 0`) while no `writer.write_hook` is set, false everywhere else. A set hook stages frames, so `sendfile` would overtake them |
 
 `Source` carries `{ file, size, content_type, content_encoding, bytes }` and `Segment` carries `{ offset, length, status, content_range }`, so a cached and an uncached file, and a 200 and a 206, share one framing path. `Content-Length` carries the segment length, not the file size, or a client waits for bytes that never arrive. An empty file closes the stream on HEADERS with no DATA frame at all.
-
-Note: the frame batching hook lands with the Linux dispatch models (not with `mux/`) and stages frames in a buffer. `zeroCopyAllowed` must then refuse while the hook is set, or the body overtakes frames already staged.
 
 Range parsing is shared with the other engines: `utils/http/range_header.zig`. `parseSpec` (read the header) and `resolve` (clamp against a known length) are separate calls on purpose, because one nullable result cannot tell "ignore the header" apart from "answer 416".
 
@@ -328,27 +326,41 @@ Range parsing is shared with the other engines: `utils/http/range_header.zig`. `
 
 Then `installStaticCache` installs the process static cache when `public_dir` and a TTL are set (a failed install is only a warning). Only the server that built the table shuts it down when `run()` returns.
 
-The model switch maps `.ASYNC` to `dispatch/async.zig` (then `serve.serveConn`), `.EPOLL` to `dispatch/epoll.zig`, and `.URING` to `dispatch/uring.zig`. Only `dispatch/async.zig` is ported. Its errors are translated by `dispatchError` (`ZixHttp2_Async_*` -> `ZixHttp2_Server_ResolveFailed`, `ListenFailed`, `AcceptFailed`). `.EPOLL` and `.URING` return `ZixHttp2_Server_DispatchModel_NotSupported` until the Linux dispatch lands. The `config.tls != null` branch (`tls_mux.runTlsMux` for `.EPOLL` / `.URING`, `tls_serve.runTls` otherwise) is not in `Server.zig` yet either.
+The model switch maps `.ASYNC` to `dispatch/async.zig` (then `serve.serveConn`), `.EPOLL` to `dispatch/epoll.zig`, and `.URING` to `dispatch/uring.zig`. Each model's errors are translated by its own function: `dispatchError` (`ZixHttp2_Async_*` -> `ZixHttp2_Server_ResolveFailed`, `ListenFailed`, `AcceptFailed`), `dispatchEpollError` and `dispatchUringError` (`ResolveFailed` and `ListenFailed` keep their names, every other member -> `ZixHttp2_Server_EpollSetupFailed` or `UringSetupFailed`). The `config.tls != null` branch (`tls_mux.runTlsMux` for `.EPOLL` / `.URING`, `tls_serve.runTls` otherwise) is not in `Server.zig` yet either.
 
 `Http2.zig` is the `zix.Http2` namespace. It re-exports the public types and functions from their own files and keeps the old names `HpackEntry` (the same type as `Header`), `DEFAULT_WINDOW_SIZE`, and `MAX_PAYLOAD`.
 
 ### dispatch/async.zig
 
-`run(config, handler)` resolves `config.ip`, listens with `reuse_address` and `kernel_backlog`, logs the listening line through `log.logSystem`, and hands every accepted stream to `io.async(connEntry, ...)`. A peer that drops before accept (`ConnectionAborted`) is skipped, any other accept failure returns `ZixHttp2_Async_AcceptFailed`. `serveOpts(config)` maps `Config` to `ServeOpts`. `connEntry` sets the access logger, holds the pool thread's response cache (`utils/cache/async.zig`, sized by `cache.effectiveCacheEntries`), runs `serve.serveConn`, then closes the stream and releases the cache. `async_cache.reclaim()` frees the per-thread caches when the accept loop ends.
+`run(config, handler)` resolves `config.ip`, listens with `reuse_address` and `kernel_backlog`, logs the listening line through `log.logSystem`, and hands every accepted stream to `io.async(connEntry, ...)`. A peer that drops before accept (`ConnectionAborted`) is skipped, any other accept failure returns `ZixHttp2_Async_AcceptFailed`. `Config.serveOpts()` maps `Config` to `ServeOpts`. `connEntry` sets the access logger, holds the pool thread's response cache (`utils/cache/async.zig`, sized by `cache.effectiveCacheEntries`), runs `serve.serveConn`, then closes the stream and releases the cache. `async_cache.reclaim()` frees the per-thread caches when the accept loop ends.
 
 ### dispatch/epoll.zig
 
-`ConnTable` is a private per-worker fd -> `*MuxConn` map, indexed by fd over `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged), not shared between workers. `acceptAll` drains `accept4(NONBLOCK | CLOEXEC)` to EAGAIN, sets `TCP_NODELAY` and the optional busy-poll, builds a `MuxConn`, and registers `EPOLL.IN | RDHUP`. `epollMuxWorkerFn(routes)` pins to a CPU, opens a private `SO_REUSEPORT` listener plus its own epoll instance and optional response cache, and runs `epoll_wait` (up to 512 events): the listener drives `acceptAll`, a connection fd runs `beginCoalesce` -> `process.onReadable` -> `endCoalesce` (close on a batch write failure). `runEpoll` spawns `worker_count = workers` (0 = available CPU count) threads and joins them.
+`run(config, handler)` resolves `config.ip`, then binds `workers` listeners (0 = `cpu_affinity.availableCpuCount()`) on the calling thread with `reuse_address`, in worker order, so a bind failure returns `ZixHttp2_Epoll_ListenFailed` before anything serves and listener i is index i of the `SO_REUSEPORT` group. With `reuseport_cbpf` it calls `reuseport.attachCpuSteering` once on the first listener, a refusal is a WARN line. It then spawns one thread per listener with `worker_stack_size_bytes`, logs the listening line, and joins. Shared `stop` and `failed` flags let a worker that cannot set up end the run with `ZixHttp2_Epoll_SetupFailed`.
+
+`workerMain` pins to its CPU slot (`cpu_affinity.pinToCpu`), sets the access logger, installs the worker response cache (`cache.installWorker`), makes the listener non-blocking, opens its epoll instance, and maps an fd-indexed `[]?*MuxConn` slot table over `slab.mapZeroedSlots(MAX_FD = 1 << 16)` (kernel-zeroed, demand-paged). `epoll_wait` drains up to 512 events with a 1 s timeout so the loop sees `stop`, and polls once more without sleeping after a busy pass. The listener drives `acceptAll`, which drains `accept4(NONBLOCK | CLOEXEC)` to EAGAIN, sets `TCP_NODELAY` and `SO_BUSY_POLL` (`busy_poll_us`), builds a `MuxConn`, and registers `EPOLL.IN | RDHUP`. A connection fd runs `serveEvent`: HUP or ERR closes, otherwise `beginCoalesce` -> `process.onReadable` -> `endCoalesce` (a failed batch write closes). On exit every remaining connection is freed and closed.
 
 ### dispatch/uring.zig
 
-The io_uring shape of the same loop (ADR-037 Phase 4). `initUringRing` requests `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` and falls back to a flagless ring. A worker arms a multishot accept, keeps an fd-indexed `[]?*UringConn` slot table, and tags each `user_data` with a `gen: u24` so a stale recv CQE for a reused fd is dropped (`lookup`). `armRecv` compacts the accumulator then posts one `prep_recv` into `rbuf[rend..]` (one recv in flight per connection), and `handleRecv` advances `rend`, runs `beginCoalesce` -> `process.processRing` -> `endCoalesce`, then re-arms. Responses go direct-to-fd on the non-blocking socket (no reply cork is ring-sent). `runUring` probes the ring at startup and falls back to `runEpoll` when io_uring is unavailable.
+The io_uring shape of the same worker, with the same `run` (bind in order, optional CBPF, stack size, `stop` / `failed` flags). `initRing` requests `SINGLE_ISSUER | DEFER_TASKRUN | CQSIZE | CLAMP` and falls back to a flagless ring. There is no fallback to `.EPOLL`: a worker that cannot build its ring ends the run with `ZixHttp2_Uring_SetupFailed`. `waitOnce` waits with a 1 s bound (`IORING_ENTER_EXT_ARG`) when the kernel supports it, so the loop sees `stop`.
 
-### dispatch/common.zig
+A worker arms a multishot accept (re-armed on the next pass when the SQ was full), keeps an fd-indexed `[]?*RingConn` slot table, and tags each `user_data` with `op`, a `gen: u24`, and the fd, so a stale recv CQE for a reused fd is dropped (`lookup`). `handleAccept` sets `TCP_NODELAY`, `SO_BUSY_POLL`, and `O_NONBLOCK` (a direct reply then waits for `POLL.OUT` instead of blocking the worker), builds a `MuxConn`, and arms one recv. `armRecv` compacts the accumulator and posts one `prep_recv` into `rbuf[rend..]` (one recv in flight per connection). `handleRecv` closes on 0 (after `hangupGoaway`) or an error, otherwise advances `rend`, runs `beginCoalesce` -> `process.processRing` -> `endCoalesce`, then re-arms.
 
-`serveOpts(cfg)` maps `Config` (`Config.zig`) to `ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus the cache fields and `public_dir`). It also holds `setNoDelay`, `setBusyPoll`, `pinToCpu` and `getAvailableCpuCount` (both cgroup-mask aware), and `effectiveCacheEntries` (honors `cache_max_total_bytes`).
+### coalesce.zig and CoalesceSink.zig
 
-The write-coalescing sink is the batching primitive for the cleartext mux: `MuxCoalesceSink` (a 64 KiB threadlocal, one per worker) is installed as `writer.write_hook` by `beginCoalesce(fd)` and torn down by `endCoalesce()`. While installed, every frame the mux writes in one readable batch (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) stages into one buffer and leaves as a single write, so a many-stream batch is one segment rather than one tiny segment per frame under `TCP_NODELAY`. It flushes when full and writes an oversized frame straight through, so correctness never depends on the buffer size. `endCoalesce` returns whether a write failed during the batch.
+`CoalesceSink` is the write buffer of one readable batch: `fd`, `len`, `failed`, and a 64 KiB `buf`. `append` stages bytes, flushing first when they do not fit, and writes a chunk larger than the whole buffer straight through after that flush, so wire order is kept and no size is too large. `flush` writes the staged bytes. Both write through `writer.writeAllDirectFD`, and a failed write sets `failed`.
+
+`coalesce.zig` owns one threadlocal sink per worker. `beginCoalesce(fd)` resets it and installs it as `writer.write_hook`, so every frame the mux writes in that batch (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) stages into one buffer and leaves as one write instead of one small segment per frame under `TCP_NODELAY`. `endCoalesce()` removes the hook, flushes, and returns whether a write failed.
+
+### multiplexers/
+
+Linux helpers shared by the `.EPOLL` / `.URING` models of every engine:
+
+| File | Role |
+| :- | :- |
+| `slab.zig` | kernel-zeroed, demand-paged slot tables (`mapZeroedSlots` / `unmapSlots`) |
+| `reuseport.zig` | `attachCpuSteering(fd, group_size)`: the classic BPF program `ld cpu, mod N, ret A` through `SO_ATTACH_REUSEPORT_CBPF`. Returns false when the kernel refuses it |
+| `cpu_affinity.zig` | `availableCpuCount()` (the affinity mask, cgroup and taskset aware) and `pinToCpu(worker_id)`, which lists each physical core once before any SMT sibling (sysfs topology) and keeps the mask order without it |
 
 ### tls_mux.zig
 
