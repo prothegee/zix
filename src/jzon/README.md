@@ -4,6 +4,10 @@
     <b><i>JZON</i></b>
 </h1>
 
+<div align="center">
+    <img src="jzon-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="512px">
+</div>
+
 <p align="center">
     <b>
         <i>JSON and ZON in both directions, written in pure Zig, standard library only</i>
