@@ -34,7 +34,7 @@ graph LR
 | `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: blocking TLS handler path (per-connection) |
 | `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: multiplexed TLS dispatch path |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
-| `src/tcp/http2/grpc/frame.zig` | `GrpcPrefix` struct, `readGrpcPrefix`, `writeGrpcPrefix`, `send*`/`build*` frame helpers (`buildGrpcHeaders`/`buildGrpcDataHeader`/`buildGrpcTrailer`/`buildGrpcError`), comptime cached reply blocks |
+| `src/zix/tcp/http2/grpc/frame/` | `GrpcPrefix.zig`, `prefix.zig` (`readGrpcPrefix`, `writeGrpcPrefix`, `PREFIX_LEN`), `reply_block.zig` (comptime cached reply blocks), `build.zig` (`buildGrpcHeaders`, `buildGrpcHeadersGzip`, `buildGrpcDataHeader`, `buildGrpcTrailer`, `buildGrpcError`), `send.zig` (`sendGrpcHeadersFD`, `sendGrpcDataFD`, `sendGrpcTrailerFD`, `sendGrpcErrorFD`), `gzip.zig` (`compressGrpcMessage`, `decompressGrpcBody`) |
 | `src/zix/tcp/http2/grpc/proto/` | `wire_type.zig` (`WT_*` wire type constants), `varint.zig` (`encodeVarint`, `decodeVarint`, `MAX_LEN`), `field.zig` (`encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`), `ProtoField.zig`, `MessageReader.zig` |
 | `src/zix/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (u8), OK=0 to UNAUTHENTICATED=16 |
 | `src/tcp/http2/grpc/timeout.zig` | `parseTimeout`: grpc-timeout header parser |
@@ -59,12 +59,12 @@ graph LR
 | `zix.Grpc.ServeOpts` | `GrpcServeOpts`: per-connection options passed to `serveConn` |
 | `zix.Grpc.Path` | `package_service: []const u8`, `method: []const u8` |
 | `zix.Grpc.Prefix` | `compress: bool`, `msg_len: u32` |
-| `zix.Grpc.readPrefix` | `fn(body: []const u8) error{TooShort}!Prefix` |
+| `zix.Grpc.readPrefix` | `fn(body: []const u8) Error!Prefix` (`ZixHttp2_GrpcPrefix_TooShort` when body is under 5 bytes) |
 | `zix.Grpc.writePrefix` | `fn(buf: *[5]u8, compress: bool, msg_len: u32) void` |
-| `zix.Grpc.sendHeadersFD` | `fn(fd, sid, content_type) !void`: send initial HEADERS (no END_STREAM) |
-| `zix.Grpc.sendDataFD` | `fn(fd, sid, msg) !void`: send DATA with 5-byte gRPC prefix |
-| `zix.Grpc.sendTrailerFD` | `fn(fd, sid, grpc_status, grpc_message) !void`: send trailer HEADERS (END_STREAM) |
-| `zix.Grpc.sendErrorFD` | `fn(fd, sid, grpc_status, grpc_message) !void`: trailers-only error, no DATA frame |
+| `zix.Grpc.sendHeadersFD` | `fn(fd, sid, content_type) Error!void`: send initial HEADERS (no END_STREAM) |
+| `zix.Grpc.sendDataFD` | `fn(fd, sid, msg) Error!void`: send DATA with 5-byte gRPC prefix |
+| `zix.Grpc.sendTrailerFD` | `fn(fd, sid, grpc_status, grpc_message) Error!void`: send trailer HEADERS (END_STREAM) |
+| `zix.Grpc.sendErrorFD` | `fn(fd, sid, grpc_status, grpc_message) Error!void`: trailers-only error, no DATA frame |
 | `zix.Grpc.parsePath` | `fn(path: []const u8) ?Path` |
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) ?u64` (nanoseconds) |
