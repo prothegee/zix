@@ -80,25 +80,32 @@ fn acceptPreface(conn: *MuxConn) ConnOutcome {
 }
 
 /// Move the connection through its handshake phases, then run the frames.
+///
+/// Note:
+/// - The phases fall through: an upgrade head, the preface, and frames read
+///   together are handled in one pass.
+/// - Stream 1 of an h2c upgrade is answered right after the preface, before
+///   any frame that follows it.
 fn process(handler_fn: handler.HandlerFn, conn: *MuxConn) ConnOutcome {
-    switch (conn.phase) {
-        .await_preface => {
-            const buf = conn.buffered();
-            if (buf.len < PEEK_LEN) return .keep_alive;
+    if (conn.phase == .await_preface) {
+        const buf = conn.buffered();
+        if (buf.len < PEEK_LEN) return .keep_alive;
 
-            if (!std.mem.eql(u8, buf[0..PEEK_LEN], frame.PREFACE[0..PEEK_LEN])) {
-                conn.phase = .await_upgrade;
-
-                return mux_upgrade.handleUpgrade(conn);
-            }
-
+        if (std.mem.eql(u8, buf[0..PEEK_LEN], frame.PREFACE[0..PEEK_LEN])) {
             if (acceptPreface(conn) == .close) return .close;
-        },
-        .await_upgrade => return mux_upgrade.handleUpgrade(conn),
-        .await_preface2 => {
-            if (acceptPreface(conn) == .close) return .close;
-        },
-        .h2 => {},
+        } else {
+            conn.phase = .await_upgrade;
+        }
+    }
+
+    if (conn.phase == .await_upgrade) {
+        if (mux_upgrade.handleUpgrade(conn) == .close) return .close;
+    }
+
+    if (conn.phase == .await_preface2) {
+        if (acceptPreface(conn) == .close) return .close;
+
+        if (conn.phase == .h2) mux_upgrade.serveUpgradeStream(handler_fn, conn);
     }
 
     if (conn.phase != .h2) return .keep_alive;
@@ -196,6 +203,11 @@ const UPGRADE_REQUEST =
     "Connection: Upgrade, HTTP2-Settings\r\n" ++
     "Upgrade: h2c\r\n" ++
     "HTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\n";
+
+/// Bytes of the HTTP/1.1 101 reply before the first server frame.
+const UPGRADE_REPLY_LEN: usize =
+    "HTTP/1.1 101 Switching Protocols\r\n".len +
+    "Connection: Upgrade\r\nUpgrade: h2c\r\n\r\n".len;
 
 threadlocal var tl_calls: usize = 0;
 
@@ -479,12 +491,92 @@ test "zix http2 mux: process, an h2c upgrade then the preface reaches h2" {
     try std.testing.expectEqual(ConnOutcome.keep_alive, processRing(okHandler, conn));
     try std.testing.expectEqual(MuxPhase.h2, conn.phase);
 
-    const reply_len =
-        "HTTP/1.1 101 Switching Protocols\r\n".len +
-        "Connection: Upgrade\r\nUpgrade: h2c\r\n\r\n".len;
-    const tally = try tallyWire(fds[0], fds[1], reply_len);
+    const tally = try tallyWire(fds[0], fds[1], UPGRADE_REPLY_LEN);
 
     try std.testing.expectEqual(@as(usize, 1), tally.settings);
+}
+
+test "zix http2 mux: process, an h2c upgrade answers stream 1 after the preface" {
+    if (!isLinux()) return;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const conn = try MuxConn.init(fds[1], TEST_OPTS, std.testing.io);
+    defer conn.deinit();
+
+    tl_calls = 0;
+    feed(conn, UPGRADE_REQUEST);
+    _ = processRing(okHandler, conn);
+
+    try std.testing.expectEqual(@as(usize, 0), tl_calls);
+
+    feed(conn, frame.PREFACE);
+    try std.testing.expectEqual(ConnOutcome.keep_alive, processRing(okHandler, conn));
+
+    const tally = try tallyWire(fds[0], fds[1], UPGRADE_REPLY_LEN);
+
+    try std.testing.expectEqual(@as(usize, 1), tl_calls);
+    try std.testing.expectEqual(@as(usize, 1), tally.settings);
+    try std.testing.expectEqual(@as(usize, 1), tally.status_200);
+}
+
+test "zix http2 mux: process, an h2c upgrade and the preface in one read reach h2" {
+    if (!isLinux()) return;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const conn = try MuxConn.init(fds[1], TEST_OPTS, std.testing.io);
+    defer conn.deinit();
+
+    tl_calls = 0;
+    feed(conn, UPGRADE_REQUEST ++ frame.PREFACE);
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, processRing(okHandler, conn));
+    try std.testing.expectEqual(MuxPhase.h2, conn.phase);
+
+    const tally = try tallyWire(fds[0], fds[1], UPGRADE_REPLY_LEN);
+
+    try std.testing.expectEqual(@as(usize, 1), tl_calls);
+    try std.testing.expectEqual(@as(usize, 1), tally.status_200);
+}
+
+test "zix http2 mux: process, a stream 1 HEADERS after the upgrade is refused" {
+    if (!isLinux()) return;
+
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    const conn = try MuxConn.init(fds[1], TEST_OPTS, std.testing.io);
+    defer conn.deinit();
+
+    var block: [128]u8 = undefined;
+    var encoder = HpackEncoder.init(&block);
+    try encoder.writeHeader(":method", "GET");
+    try encoder.writeHeader(":path", "/");
+
+    var head: [frame.FRAME_HEADER_LEN]u8 = undefined;
+    frame.encodeFrameHeader(&head, .{
+        .length = @intCast(encoder.encoded().len),
+        .frame_type = frame.FRAME_TYPE_HEADERS,
+        .flags = frame.FLAG_END_HEADERS | frame.FLAG_END_STREAM,
+        .stream_id = 1,
+    });
+
+    tl_calls = 0;
+    feed(conn, UPGRADE_REQUEST ++ frame.PREFACE);
+    feed(conn, &head);
+    feed(conn, encoder.encoded());
+
+    try std.testing.expectEqual(ConnOutcome.keep_alive, processRing(okHandler, conn));
+    try std.testing.expectEqual(@as(usize, 1), tl_calls);
 }
 
 test "zix http2 mux: process, a bad preface after the upgrade closes" {
