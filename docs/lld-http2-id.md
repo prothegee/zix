@@ -261,7 +261,7 @@ Pemrosesan request bersama dan jalur koneksi blocking, dipecah per tanggung jawa
 
 ### Router / Route (router.zig)
 
-`Route` adalah `{ path, handler, kind = .EXACT }` dengan `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` membangun tabel comptime: route `EXACT` di-resolve lewat `StaticStringMap` (O(1)), route `PREFIX` mencocokkan prefix terdaftar terpanjang pada batas segment-path, query string dibuang dulu, dan path yang tak cocok mengirim `404`. `Router(routes).dispatch` sendiri cocok persis dengan `HandlerFn`, jadi `Server.init` menerima `router.dispatch` sebagai nilai runtime biasa, bukan tabel route.
+`Route` adalah `{ path, handler, kind = .EXACT }` dengan `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` membangun tabel comptime: route `EXACT` di-resolve lewat `StaticStringMap` (O(1)), route `PREFIX` mencocokkan prefix terdaftar terpanjang pada batas segment-path, query string dibuang dulu, path yang tak cocok mencoba `static.fallback`, dan path yang tetap tak cocok mengirim `404 text/plain`. `Router(routes).dispatch` sendiri cocok persis dengan `HandlerFn`, jadi `Server.init` menerima `router.dispatch` sebagai nilai runtime biasa, bukan tabel route.
 
 ### cache.zig
 
@@ -280,21 +280,26 @@ Response cache per-worker (ADR-036): `tl_cache`, `setCache`, `cacheTtl`, `serveC
 
 ## static.zig
 
-Fallback `public_dir` (ADR-064), dipanggil dari `Router.dispatch` setelah semua route meleset dan sebelum 404. `serve(req, ctx, req_path, max_frame_size) bool` mengembalikan false untuk percobaan traversal, file yang tidak ada, atau `ctx.public_dir` kosong, lalu router mengirim 404-nya.
+Fallback `public_dir` (ADR-064). `Router.dispatch` memanggil `fallback(req, ctx)` setelah semua route meleset dan sebelum 404. `fallback` mengembalikan false bila `ctx.public_dir` kosong atau path-nya `/`, selain itu ia membuang slash di depan lalu memanggil `serve(req, ctx, req_path, max_frame_size)`. `serve` mengembalikan false untuk percobaan traversal, path absolut, path melebihi `PUBLIC_PATH_MAX`, direktori, atau file yang tidak ada, lalu router mengirim 404-nya. Bila `fallback` mengembalikan true, router mengisi `res.sent`, sehingga jalur error handler tidak pernah menjawab stream itu dua kali.
 
-`serve` mencoba `serveCached` lebih dulu dan jatuh ke open langsung bila proses tidak memasang cache static. Keduanya berakhir di kode framing yang sama, jadi `public_dir` berperilaku identik baik `public_dir_cache_ttl_ms` diatur maupun tidak.
+`serve` mencoba `serveCached` lebih dulu dan jatuh ke `serveUncached` (open, stat, kirim) bila cache static tidak terpasang atau cache menolak path itu. Keduanya berakhir di `answer`, jadi `public_dir` berperilaku sama baik `public_dir_cache_ttl_ms` diatur maupun tidak.
 
 | fungsi | peran |
 | :- | :- |
-| `acquireHit` | menegosiasikan encoding dari `accept-encoding`, lalu menanyakan cache. Karena `zeroCopyAllowed` selalu false di sini, ia menanyakan `acquireMapped` dulu (snapshot resident) dan jatuh ke hit descriptor biasa di atas `SNAPSHOT_MAX_BYTES`, sehingga file besar tetap memakai descriptor yang di-cache alih-alih turun ke jalur non-cache |
-| `segmentFor` | mengubah header `Range` menjadi `Segment`. Mengembalikan segment file utuh bila header tidak ada atau malformed (RFC 7233 bagian 3.1 meminta mengabaikannya), dan null bila well-formed tapi tak terpenuhi, yang menjadi isyarat bagi pemanggil untuk menjawab 416 |
-| `sendFramed` | satu frame HEADERS (status, content type, `content-length`, `accept-ranges`, dan `content-range` untuk 206) lalu frame DATA, masing-masing dibatasi `max_frame_size`, yang terakhir berflag END_STREAM |
-| `sendRangeNotSatisfiable` | 416 dengan `Content-Range: bytes */length`, header saja, END_STREAM pada frame HEADERS |
-| `zeroCopyAllowed` | selalu false di engine ini. `dispatch/common.beginCoalesce` memasang `writer.write_hook` di setiap batch, termasuk cleartext, jadi `sendfile` akan menaruh body mendahului frame yang sudah di-stage di sink |
+| `fallback` | pintu masuk router: `public_dir` kosong atau path root adalah false, selain itu membuang `/` di depan lalu memanggil `serve` dengan `ctx.max_frame_size` |
+| `acquireHit` | membaca `accept-encoding`, lalu menanyakan cache. Bila `zeroCopyAllowed` menolak, ia menanyakan `acquireMapped` dulu (snapshot resident) dan jatuh ke hit descriptor biasa di atas `SNAPSHOT_MAX_BYTES`, sehingga file besar tetap memakai descriptor yang di-cache |
+| `rangeAsk` | mengubah header `Range` menjadi `FULL` (tidak ada atau malformed, RFC 7233 bagian 3.1 meminta mengabaikannya), `PARTIAL` (range yang terpenuhi), atau `UNSATISFIABLE` (well-formed tapi melewati akhir file, dijawab 416) |
+| `encodeHead` | meng-encode blok HEADERS: status, content type, content encoding, `content-length`, plus `content-range` dan `accept-ranges` untuk 206. Mengembalikan null bila tidak muat |
+| `encodeUnsatisfiable` | meng-encode blok 416 dengan `Content-Range: bytes */length` |
+| `answer` | memilih segment, meng-encode blok, lalu memanggil `sendFramed`. Blok 206 yang tidak muat jatuh ke file utuh sebagai 200. Bila blok 200 pun tidak muat, stream ditutup dengan RST_STREAM `INTERNAL_ERROR` (`resetStream`) |
+| `sendFramed` | satu frame HEADERS, lalu frame DATA yang masing-masing dibatasi `max_frame_size`, yang terakhir berflag END_STREAM. Body resident dipotong dari byte-nya sendiri, selain itu `utils/static/static.sendBody` mengirim range-nya |
+| `zeroCopyAllowed` | true di Linux untuk fd asli (`fd >= 0`), false di platform lain. Saat ini frame ditulis langsung ke socket, jadi `sendfile` tidak bisa mendahului frame HEADERS-nya sendiri |
 
-`Segment` membawa `{ offset, length, status, content_range }`, sehingga 200 dan 206 berbagi satu jalur framing dan hanya blok header-nya yang berbeda. `Content-Length` membawa panjang segment, bukan ukuran file, kalau tidak client menunggu byte yang tidak pernah datang. File kosong menutup stream pada HEADERS tanpa frame DATA sama sekali.
+`Source` membawa `{ file, size, content_type, content_encoding, bytes }` dan `Segment` membawa `{ offset, length, status, content_range }`, sehingga file dari cache maupun tanpa cache, dan 200 maupun 206, berbagi satu jalur framing. `Content-Length` membawa panjang segment, bukan ukuran file, kalau tidak client menunggu byte yang tidak pernah datang. File kosong menutup stream pada HEADERS tanpa frame DATA sama sekali.
 
-Parsing Range sendiri tidak lokal: ia datang dari `src/utils/http_range.zig`, dipakai bersama engine lain. `parseSpec` (membaca header) dan `resolve` (clamp terhadap panjang yang diketahui) sengaja dipisah menjadi dua pemanggilan, karena menggabungkannya menjadi satu hasil nullable membuat perbedaan abaikan-versus-416 mustahil diungkapkan.
+Note: saat `mux.zig` masuk, hook batching frame-nya men-stage frame di buffer. `zeroCopyAllowed` harus menolak selama hook itu terpasang, kalau tidak body mendahului frame yang sudah di-stage.
+
+Parsing Range dipakai bersama engine lain: `utils/http/range_header.zig`. `parseSpec` (membaca header) dan `resolve` (clamp terhadap panjang yang diketahui) sengaja dipisah, karena satu hasil nullable tidak bisa membedakan "abaikan header" dari "jawab 416".
 
 ---
 
