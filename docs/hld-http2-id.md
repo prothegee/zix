@@ -41,16 +41,16 @@ Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchMode
 
 ### .ASYNC: Thread-per-connection di atas core blocking
 
-Satu task `io.async` memiliki koneksi sepanjang hidupnya dan menjalankan loop h2c blocking (`serveH2cLoop`), membaca satu frame sekaligus dan men-dispatch setiap stream yang lengkap secara inline. Ini model portabel, bentuk yang sama dengan `zix.Http1`.
+Satu task `io.async` memiliki koneksi sepanjang hidupnya dan menjalankan loop h2c blocking (`serveLoop`), membaca satu frame sekaligus dan men-dispatch setiap stream yang lengkap secara inline. Ini model portabel, bentuk yang sama dengan `zix.Http1`.
 
 ```mermaid
 flowchart TD
     MAIN["Server.run()"] --> A["1 accept thread\nio.async() per connection"]
-    A --> SERVE["core.serveConn(routes, fd, opts)"]
+    A --> SERVE["serve.serveConn(handler, fd, opts, io)"]
     SERVE --> PRE{"PRI preface?"}
     PRE -->|yes| DIRECT["h2c direct"]
     PRE -->|no| UP["h2c upgrade (Upgrade: h2c)"]
-    DIRECT --> LOOP["serveH2cLoop\nread frame -> dispatch complete stream"]
+    DIRECT --> LOOP["serveLoop\nread frame -> dispatch complete stream"]
     UP --> LOOP
     LOOP --> LOOP
 ```
@@ -92,7 +92,9 @@ Topologi shared-nothing, satu-listener-per-worker yang sama dengan `.EPOLL`, tet
 graph TD
     zix["src/lib.zig\npublic API root"] --> Http2["tcp/http2/Http2.zig\nzix.Http2 namespace"]
 
-    Http2 --> core["core.zig\nblocking h2c loop\nserveConn + Router"]
+    Http2 --> core["serve.zig + upgrade.zig + Stream.zig + stream_*\nblocking h2c loop\nserveConn"]
+    Http2 --> handler["handler.zig + cache.zig\nHandlerFn + invokeHandler\nresponse cache"]
+    Http2 --> router["router.zig\nRouter + Route"]
     Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
     Http2 --> frame["frame.zig + FrameHeader.zig\nframe constants + header codec"]
     Http2 --> writer["writer.zig\nwriteAllFD + sendResponseFD / sendResponseEncodedFD"]
@@ -117,6 +119,7 @@ graph TD
     core --> writer
     core --> control
     core --> hpack
+    core --> handler
     static --> writer
     writer --> frame
     writer --> hpack
@@ -219,9 +222,9 @@ try server.run();
 ```
 
 - `Server.init` menerima `handler: HandlerFn` runtime (ADR-063), dibangun via `Router(&[_]Route{...}).dispatch`. Route sendiri tetap comptime (dibakukan ke dalam tipe router), tapi server tidak lagi membakukan tabel route ke dalam tipenya sendiri, sehingga `Server` adalah satu struct konkret, bukan generik.
-- Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM), via `core.invokeHandler` yang membangun trio lalu men-dispatch. `req.method`, `req.headers`, dan `req.body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
+- Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM), via `handler.invokeHandler` yang membangun trio lalu men-dispatch. `req.method`, `req.headers`, dan `req.body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
 - `ctx.allocator` adalah stack arena per-request (`FixedBufferAllocator`, tanpa pemanggilan heap), `ctx.io` membawa `std.Io` koneksi, dan `ctx.deadline` / `isExpired()` mencakup timeout Layer B (lihat `handler_timeout_ms` di atas).
-- Handler mengembalikan `anyerror!void`. Saat error, `invokeHandler` otomatis menyelesaikan satu 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), tapi hanya ketika `!res.sent`, sehingga response yang sudah terkirim sebagian tidak pernah rusak.
+- Handler mengembalikan `anyerror!void`. Saat error, `invokeHandler` otomatis menyelesaikan satu 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), tapi hanya jika belum ada yang ditulis (bukan `res.sent` dan bukan `writer.respondedFD()`), sehingga response yang sudah terkirim sebagian tidak pernah rusak.
 - Response keluar melalui `Response.send` / `sendJson` / `sendText` / `sendNoContent`, builder tipis atas writer `writer.sendResponseFD` / `sendResponseEncodedFD` yang sama seperti sebelumnya (wire byte-identical, ADR-063 hanya mengubah apa yang membungkus pemanggilan). Body besar berumur proses tetap memakai escape hatch `mux.sendResponseStreamFD` mentah secara langsung (dipacu oleh flow control), tidak dibungkus oleh `Response`.
 - Engine memetakan path ke handler melalui `Router(routes).dispatch` sebelum pemanggilan (EXACT lalu PREFIX terpanjang, path tak cocok mencoba fallback static di bawah lalu mendapat 404 `text/plain`), sehingga handler tidak mem-parse atau mencocokkan path itu sendiri.
 
@@ -282,7 +285,7 @@ Di dalam fase `.h2` frame loop membaca header 9-byte, menunggu payload penuh tib
 - WINDOW_UPDATE: tumbuhkan send window koneksi atau stream dan resume response body yang terparkir.
 - RST_STREAM: lepaskan stream slot. PING: balas dengan ACK. GOAWAY: tutup koneksi.
 
-Pelanggaran protokol (stream id 0 di tempat yang ilegal, frame kelewat besar, preface yang buruk) mengirim GOAWAY atau RST_STREAM. `core.serveH2cLoop` blocking menjalankan protokol yang sama di atas blocking read dengan array stream per-connection alih-alih slot ter-pool.
+Pelanggaran protokol (stream id 0 di tempat yang ilegal, frame kelewat besar, preface yang buruk) mengirim GOAWAY atau RST_STREAM. `serve.serveLoop` blocking menjalankan protokol yang sama di atas blocking read dengan array stream per-connection alih-alih slot ter-pool.
 
 ---
 
