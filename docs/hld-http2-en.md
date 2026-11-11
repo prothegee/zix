@@ -41,7 +41,7 @@ Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enu
 
 `run()` checks in this order before it serves: `config.port` (0 returns `ZixHttp2_Server_PortNotConfigured`), the dispatch model, then `public_dir` (`ZixHttp2_Server_PublicDir*`). A rejected config leaves no listener and no static cache behind.
 
-Note: only `.ASYNC` is wired. `.EPOLL` and `.URING` land with the Linux dispatch. Until then `run()` returns `ZixHttp2_Server_DispatchModel_NotSupported` for them after these checks pass.
+Note: `.EPOLL` and `.URING` bind every worker listener on the calling thread, in worker order, before any worker starts. A bind failure returns from `run()` before anything serves. A worker that cannot start its loop ends the run with `ZixHttp2_Server_EpollSetupFailed` or `ZixHttp2_Server_UringSetupFailed`.
 
 ### .ASYNC: Thread-per-connection over the blocking core
 
@@ -66,27 +66,29 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    MAIN["Server.run()"] --> SPAWN["spawn workers mux workers"]
-    SPAWN --> W["epollMuxWorker\nprivate SO_REUSEPORT listener\nprivate epoll instance\nprivate ConnTable (fd -> MuxConn)"]
+    MAIN["Server.run()"] --> BIND["bind workers SO_REUSEPORT listeners\n(in worker order)"]
+    BIND --> SPAWN["spawn workers threads"]
+    SPAWN --> W["workerMain\nown listener\nown epoll instance\nown fd slot table (fd -> MuxConn)"]
     W --> WAIT["epoll_wait (drain up to 512 events)"]
     WAIT --> EV{"event fd?"}
     EV -->|listener| ACCEPT["acceptAll\naccept4 NONBLOCK to EAGAIN\nMuxConn.init, register in epoll"]
-    EV -->|connection| READ["beginCoalesce\nprocess.onReadable(routes, conn)\nendCoalesce (one write per batch)"]
+    EV -->|connection| READ["beginCoalesce\nprocess.onReadable(handler, conn)\nendCoalesce (one write per batch)"]
     ACCEPT --> WAIT
     READ --> WAIT
 ```
 
-- Each worker owns a private listener, epoll instance, and fd-indexed `ConnTable`. The kernel load-balances new connections across the per-worker `SO_REUSEPORT` listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff.
+- Each worker owns a private listener, epoll instance, and fd-indexed slot table. The kernel load-balances new connections across the per-worker `SO_REUSEPORT` listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff.
 - One worker drives many non-blocking connections through the resumable h2 state machine in `mux/`, one `MuxConn` per fd, so concurrency is bounded by connection count, not thread count.
 - Every frame a readable batch writes (HEADERS plus DATA per stream, times the streams in the batch) coalesces into a single `write()` through a per-worker sink (`beginCoalesce` / `endCoalesce`), instead of one write per frame.
-- `workers` is the mux worker count (0 = cpu count). A handler runs inline on the worker, so it must stay bounded: a long handler blocks that worker's other connections.
+- `workers` is the mux worker count (0 = available CPU count). Each worker pins to one allowed CPU, physical cores first. A handler runs inline on the worker, so it must stay bounded: a long handler blocks that worker's other connections.
+- `worker_stack_size_bytes` sets each worker thread stack, `busy_poll_us` sets `SO_BUSY_POLL` on accepted connections, and `reuseport_cbpf` attaches the CPU steering program to the listener group (a kernel that refuses it logs a warning and keeps the default hash).
 - Off Linux, `run()` returns `Error.ZixHttp2_Server_DispatchModel_NotSupported` after logging which model was rejected: pick `.ASYNC` there.
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
 Same shared-nothing, one-listener-per-worker topology as `.EPOLL`, but completion-based: a multishot accept and one recv per connection are submitted as SQEs and reaped as CQEs (ADR-037 Phase 4). Each recv fills the connection's read accumulator, then `process.processRing` drives the same resumable state machine. The handler still writes its reply straight to the (non-blocking) fd, batched by the same coalescing sink.
 
-`.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. That is a runtime capability gap on Linux. Off Linux the model is rejected outright with `Error.ZixHttp2_Server_DispatchModel_NotSupported`.
+`.URING` has no fallback. When a worker cannot build its ring (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), the run ends with `Error.ZixHttp2_Server_UringSetupFailed`: pick `.EPOLL` there. Off Linux the model is rejected outright with `Error.ZixHttp2_Server_DispatchModel_NotSupported`.
 
 ---
 
@@ -111,12 +113,15 @@ graph TD
     Http2 --> server["Server.zig\nServer + config gates + dispatch_model switch"]
     Http2 --> static["static.zig\npublic_dir fallback\nHEADERS + capped DATA frames"]
 
-    server --> dispatch["dispatch/\nasync pool mixed epoll uring + common"]
+    server --> dispatch["dispatch/\nasync epoll uring"]
     server --> tls_serve["tls_serve.zig\nthread-per-conn TLS terminator"]
     server --> tls_mux["tls_mux.zig\nmultiplexed per-core TLS terminator"]
 
     dispatch --> core
     dispatch --> mux
+    dispatch --> coalesce["coalesce.zig + CoalesceSink.zig\nper-worker frame batching"]
+    dispatch --> multiplexers["multiplexers/\nslab + reuseport + cpu_affinity"]
+    coalesce --> writer
     mux --> writer
     mux --> control
     mux --> hpack
@@ -268,7 +273,7 @@ flowchart TD
 - A 206 whose HEADERS block does not fit the encode scratch falls back to the whole file as 200. When even the 200 block does not fit, the stream is closed with RST_STREAM `INTERNAL_ERROR`.
 - Range (RFC 7233) is served: 206 for a satisfiable range, 416 with `Content-Range: bytes */length` for a well-formed range past the end, and a malformed header is ignored so the whole file is sent, which is what section 3.1 asks for. A multi-range header answers the first range only.
 - Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set. With it set, a repeat request costs a hash lookup instead of an open plus a stat, and `.br` / `.gz` siblings are resolved once at insert instead of probed per request. The HTTP/2 response does not carry `Vary: Accept-Encoding`, cached or not.
-- Zero copy (`sendfile`) is used on Linux while frames go straight to the socket. Once the batching hook lands with the Linux dispatch models (the mux itself never installs it), zero copy must be refused while a batch is staged, or the body overtakes frames already staged. The body is then cut from a resident snapshot instead.
+- Zero copy (`sendfile`) is used on Linux while frames go straight to the socket. While the `.EPOLL` / `.URING` batching hook is set, zero copy is refused, or the body would overtake frames already staged. The body is then cut from a resident snapshot instead.
 - Static sends use the same unmetered `writer` frame writes `Response.send` uses, not the window-paced `sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
 - `public_dir_upload` is not offered here. `zix.Http2` has no upload handler convention, unlike `zix.Http1`.
 
@@ -330,13 +335,13 @@ Setting `config.tls` (a `*Tls.Context`) opts into HTTP/2 over TLS (TLS 1.3 with 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. One `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker, with no socketpair and no thread per connection. The resumable h2 mux consumes the decrypted plaintext, and its reply frames are encrypted back into TLS records through the thread-local frame write hook. Outbound ciphertext that does not fit is staged per connection and flushed on the next EPOLLOUT, so a slow client never parks the worker.
 - `.ASYNC`: `tls_serve.runTls`. An accept loop hands each connection to its own worker thread, which runs the shared terminator (`tcp/tls/h2_terminator.zig`) with an inline-mux driver that drives the same resumable mux directly over the decrypted stream (one thread per connection, no socketpair). This path also serves TLS 1.2.
 
-The write hook (`writer.write_hook`) is the shared mechanism: the mux writes plaintext through `writer.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The hook lands with the Linux dispatch models, `mux/` only writes through `writer`. The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
+The write hook (`writer.write_hook`) is the shared mechanism: the mux writes plaintext through `writer.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The cleartext hook is installed by `coalesce.zig`, `mux/` only writes through `writer`. The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
 
 ---
 
 ## Logging
 
-`config.logger` receives server lifecycle lines only (listening notices, io_uring fallback, non-Linux fallback) via `logger.system()`. When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds.
+`config.logger` receives server lifecycle lines only (listening notices, a refused `reuseport_cbpf`) via `logger.system()`. When null, lifecycle lines print to stderr only in Debug builds and are silent in release builds.
 
 Per-stream access logging is the engine's, not the handler's. When `config.logger` is set the engine writes one `[http2:access]` record after every served stream, taking the status and byte count off the `Response`. A handler that frames its own bytes through `writer.sendResponseFD` is still recorded, but its byte count reads 0, so such a handler may call `logger.access()` itself where the real size is known. A file served by the static fallback is recorded the same way, with a byte count of 0.
 
