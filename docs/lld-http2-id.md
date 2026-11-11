@@ -13,13 +13,13 @@ State machine h2c resumable untuk `.EPOLL` / `.URING`, satu file per concern:
 | file | isi |
 | :- | :- |
 | `MuxStream.zig` | satu stream ter-pool: header, body, send window, body terparkir |
-| `MuxConn.zig` | state per-fd: read buffer, decoder HPACK, slot, window. Klaim, cari, dan lepas slot |
+| `MuxConn.zig` | state per-fd: read buffer, decoder HPACK, slot, window, `upgrade_slot` (stream 1 dari upgrade h2c, menunggu preface). Klaim, cari, dan lepas slot |
 | `stream_pool.zig` | freelist `MuxStream` threadlocal per-worker: `acquire`, `release` |
 | `conn_outcome.zig` | `ConnOutcome`: `keep_alive` atau `close` |
 | `mux_phase.zig` | `MuxPhase`: `await_preface`, `await_upgrade`, `await_preface2`, `h2` |
 | `flow.zig` | flow control sisi-kirim: `pumpBody`, `resumeStream`, `resumeAll` |
 | `send_stream.zig` | `active_conn` dan `sendResponseStreamFD` |
-| `mux_upgrade.zig` | `handleUpgrade`: upgrade h2c pada jalur mux (hanya 101) |
+| `mux_upgrade.zig` | `handleUpgrade`: upgrade h2c pada jalur mux (membuka stream 1, 101). `serveUpgradeStream`: menjawab stream 1 setelah preface |
 | `mux_dispatch.zig` | `dispatchWhole`, `hangupGoaway` |
 | `frame_loop.zig` | `run`: satu frame utuh sekaligus, satu fungsi `on*` per tipe frame |
 | `process.zig` | fase preface, `onReadable` (`.EPOLL`), `processRing` (`.URING`) |
@@ -93,9 +93,10 @@ Strategi alokasi kuncinya. Satu worker menggerakkan banyak koneksi dari satu thr
 
 `process` adalah mesin fase handshake, lalu loop frame:
 
-- `await_preface`: butuh 3 byte. Jika bukan `"PRI"`, set `await_upgrade` dan panggil `mux_upgrade.handleUpgrade`. Selain itu butuh `PREFACE` 24-byte, validasi (GOAWAY `PROTOCOL_ERROR` dan tutup saat salah), kirim SETTINGS server (`peer_settings.sendServerSettings`), set `h2`.
-- `await_upgrade`: `handleUpgrade` (akumulasi sampai `\r\n\r\n`, balas `400` saat `upgrade.isH2cUpgrade` false, `101` saat true, lalu `await_preface2`, dan request stream-1 tidak dilayani). Head yang memenuhi `rbuf` menutup koneksi.
-- `await_preface2`: setelah `101`, validasi preface, kirim SETTINGS, set `h2`.
+- `await_preface`: butuh 3 byte. Jika bukan `"PRI"`, set `await_upgrade`. Selain itu butuh `PREFACE` 24-byte, validasi (GOAWAY `PROTOCOL_ERROR` dan tutup saat salah), kirim SETTINGS server (`peer_settings.sendServerSettings`), set `h2`.
+- `await_upgrade`: `handleUpgrade` (akumulasi sampai `\r\n\r\n`, balas `400` saat `upgrade.isH2cUpgrade` false). Head h2c dibaca dengan `upgrade.parseHead`, `HTTP2-Settings` lewat `peer_settings.apply`, dan stream 1 dibuka dengan `:method`, `:path`, `:scheme` yang disalin ke scratch stream (byte head di `rbuf` dipakai ulang nanti). Request line yang melewati scratch, atau tidak ada slot kosong, dibalas `400` lalu tutup. Lalu `101`, `last_stream_id = 1`, `upgrade_slot` diset, `await_preface2`. Head yang memenuhi `rbuf` menutup koneksi.
+- `await_preface2`: setelah `101`, validasi preface, kirim SETTINGS, set `h2`, lalu `serveUpgradeStream` menjawab stream 1 (`mux_dispatch.dispatchWhole`) sebelum frame berikutnya.
+- Fase-fase ini fall through, jadi head upgrade, preface, dan frame yang terbaca bersamaan diproses dalam satu pass.
 - `h2`: `frame_loop.run`.
 
 `onReadable` (`.EPOLL`) berulang: `compact`, tutup saat `rbuf` masih penuh, `read` ke `rbuf[rend..]` (WouldBlock -> `keep_alive`, error -> `close`, 0 -> `hangupGoaway` lalu `close`), lalu `process`, mengulang sampai EAGAIN. Epoll level-triggered memicu ulang bila ada lagi. `processRing` (`.URING`) adalah pass pemrosesan yang sama tanpa loop baca: ring memiliki recv dan meng-arm ulang setelah ini kembali.
@@ -227,7 +228,7 @@ Pemrosesan request bersama dan jalur koneksi blocking, dipecah per tanggung jawa
 | :- | :- |
 | `ServeOpts.zig` | knob serving per-koneksi |
 | `serve.zig` | `serveConn`: preface atau upgrade, lalu satu frame sekaligus |
-| `upgrade.zig` + `UpgradeHead.zig` | sisi HTTP/1.1 dari upgrade h2c (`accept`, menjawab 101). `isH2cUpgrade`, `HEAD_END`, `BAD_REQUEST`, `SWITCHING_PROTOCOLS` publik, upgrade mux memakainya ulang |
+| `upgrade.zig` + `UpgradeHead.zig` | sisi HTTP/1.1 dari upgrade h2c (`accept`, menjawab 101). `isH2cUpgrade`, `parseHead`, `HEAD_END`, `BAD_REQUEST`, `SWITCHING_PROTOCOLS` publik, upgrade mux memakainya ulang |
 | `Stream.zig` | satu stream request: header yang sudah di-decode dan body |
 | `stream_state.zig` | `StreamState` (RFC 7540 section 5.1) |
 | `stream_slot.zig` | tabel stream `claim`, `find`, `requestInFlight` |
