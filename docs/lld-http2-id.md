@@ -320,7 +320,17 @@ Parsing Range dipakai bersama engine lain: `utils/http/range_header.zig`. `parse
 
 ## dispatch/ dan tls_mux.zig
 
-`server.zig` memuat tipe publik `Http2Server` dan `run()` switch tipis: `.ASYNC` mempertahankan struktur accept-thread (`common.ConnTask` plus `common.dispatchConn`) dan memanggil `serve.serveConn`, `.EPOLL` memanggil `epoll.runEpoll`, `.URING` memanggil `uring.runUring`, dan `config.tls != null` mengarahkan `.EPOLL` / `.URING` ke `tls_mux.runTlsMux`, selain itu semua ke `tls_serve.runTls`. Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
+`Server.zig` adalah `zix.Http2.Server` publik (field `config` dan `handler` di file scope). `run()` menjalankan tiga gate, lalu switch model:
+
+1. `gatePort`: port 0 menghasilkan `ZixHttp2_Server_PortNotConfigured`.
+2. `gateDispatchModel`: `.IOCP` dan `.KQUEUE` selalu, `.EPOLL` dan `.URING` di luar Linux, menghasilkan `ZixHttp2_Server_DispatchModel_NotSupported` (ADR-065). Gate ini berjalan sebelum apa pun disiapkan, sehingga config yang ditolak tidak meninggalkan apa pun.
+3. `gatePublicDir`: `public_dir` yang diatur tetapi tidak bisa dibuka menghasilkan `ZixHttp2_Server_PublicDirNotFound`, `PublicDirNotADirectory`, atau `PublicDirUnreadable`.
+
+Lalu `installStaticCache` memasang static cache proses saat `public_dir` dan TTL diatur (install yang gagal hanya berupa warning). Hanya server yang membangun tabel itu yang menutupnya saat `run()` selesai.
+
+Switch model memetakan `.ASYNC` ke `dispatch/async.zig` (lalu `serve.serveConn`), `.EPOLL` ke `dispatch/epoll.zig`, dan `.URING` ke `dispatch/uring.zig`. File-file itu belum di-port, jadi untuk sekarang setiap arm mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported`. Cabang `config.tls != null` (`tls_mux.runTlsMux` untuk `.EPOLL` / `.URING`, selain itu `tls_serve.runTls`) juga belum ada di `Server.zig`.
+
+`Http2.zig` adalah namespace `zix.Http2`. Ia me-re-export tipe dan fungsi publik dari file masing-masing dan mempertahankan nama lama `HpackEntry` (tipe yang sama dengan `Header`), `DEFAULT_WINDOW_SIZE`, dan `MAX_PAYLOAD`.
 
 ### dispatch/epoll.zig
 
