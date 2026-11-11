@@ -2,7 +2,7 @@
 
 Detail implementasi internal. Untuk rasional desain lihat [`docs/hld-http2-id.md`](hld-http2-id.md), ADR-043 (split `dispatch/` per-engine), dan ADR-052 (TLS multiplex).
 
-Model blocking (`.ASYNC`) memakai satu jalur koneksi (`core.serveConn` -> `serveH2cLoop`). Model `.EPOLL` dan `.URING` menggerakkan state machine terpisah, resumable, non-blocking (`mux.zig`) yang menjadi fokus utama dokumen ini. Keduanya bermuara ke satu `Router` comptime. Jalur TLS (`config.tls != null`) terminasi di tempat, baik secara multiplex (`tls_mux.zig`, untuk `.EPOLL` / `.URING`) atau thread-per-connection (`tls_serve.zig`, yang juga melayani TLS 1.2).
+Model blocking (`.ASYNC`) memakai satu jalur koneksi (`serve.serveConn` -> `serveLoop`). Model `.EPOLL` dan `.URING` menggerakkan state machine terpisah, resumable, non-blocking (`mux.zig`) yang menjadi fokus utama dokumen ini. Keduanya bermuara ke satu `Router` comptime. Jalur TLS (`config.tls != null`) terminasi di tempat, baik secara multiplex (`tls_mux.zig`, untuk `.EPOLL` / `.URING`) atau thread-per-connection (`tls_serve.zig`, yang juga melayani TLS 1.2).
 
 ---
 
@@ -43,7 +43,7 @@ State h2 per koneksi milik heap, satu per fd, privat bagi worker pemiliknya.
 ```zig
 pub const MuxConn = struct {
     fd: std.posix.fd_t,
-    opts: core.ServeOpts,
+    opts: ServeOpts,
 
     rbuf: []u8,                 // read accumulator, persisten lintas event, menyimpan frame parsial
     rstart: usize,
@@ -125,7 +125,7 @@ Kegagalan decode mengirim `RST_STREAM COMPRESSION_ERROR` dan membebaskan slot. `
 
 ### muxDispatch
 
-Mengekstrak method / path dari pseudo-header yang sudah di-decode (perbandingan ber-gate panjang: `:path` = 5, `:method` = 7), mengeset `active_conn = conn`, mencatat `tl_req_path` / `tl_req_body` hanya saat response cache terpasang, dan memanggil `core.Router(routes).dispatch`. Setelah handler kembali, slot dibebaskan kecuali body respons di-park pada window (`pending_body.len > 0`), yang dalam kasus itu `WINDOW_UPDATE` berikutnya melanjutkan dan membebaskannya.
+Mengekstrak method / path dari pseudo-header yang sudah di-decode (perbandingan ber-gate panjang: `:path` = 5, `:method` = 7), mengeset `active_conn = conn`, mencatat `tl_req_path` / `tl_req_body` hanya saat response cache terpasang, dan memanggil `router.Router(routes).dispatch`. Setelah handler kembali, slot dibebaskan kecuali body respons di-park pada window (`pending_body.len > 0`), yang dalam kasus itu `WINDOW_UPDATE` berikutnya melanjutkan dan membebaskannya.
 
 ### pumpBody / resumeStream / resumeAll / sendResponseStreamFD
 
@@ -207,11 +207,24 @@ max_size: usize = 4096,
 
 ---
 
-## core.zig
+## Blocking core (serve.zig dan bagiannya)
 
-Pemrosesan request bersama, router, dan jalur koneksi blocking.
+Pemrosesan request bersama dan jalur koneksi blocking, dipecah per tanggung jawab:
 
-### ServeOpts / Router / Route
+| file | isi |
+| :- | :- |
+| `ServeOpts.zig` | knob serving per-koneksi |
+| `serve.zig` | `serveConn`: preface atau upgrade, lalu satu frame sekaligus |
+| `upgrade.zig` + `UpgradeHead.zig` | sisi HTTP/1.1 dari upgrade h2c (`accept`, menjawab 101) |
+| `Stream.zig` | satu stream request: header yang sudah di-decode dan body |
+| `stream_state.zig` | `StreamState` (RFC 7540 section 5.1) |
+| `stream_slot.zig` | tabel stream `claim`, `find`, `requestInFlight` |
+| `declared.zig` + `stream_body.zig` | content-length terhadap byte DATA (`declared`, `isWhole`) |
+| `stream_invoke.zig` | `invokeWhole`: stream selesai menjadi `Request`, lalu handler |
+| `handler.zig` | `HandlerFn`, `invokeHandler`, `setAccessLogger` |
+| `cache.zig` | response cache per-worker |
+
+### ServeOpts
 
 `ServeOpts` menyimpan tuning per-koneksi dengan default berikut:
 
@@ -221,28 +234,47 @@ Pemrosesan request bersama, router, dan jalur koneksi blocking.
 | `max_frame_size` | 16384 (`DEFAULT_MAX_FRAME_SIZE`) |
 | `max_header_scratch` | 4096 |
 | `max_body` | 16384 |
+| `logger` | null (tidak mencatat apa pun) |
 | `conn_read_buf_min` | 32 * 1024 |
 | `tls_write_buf_initial` | 16 * 1024 |
 | `response_cache` | false |
+| `cache_max_entries` | 256 |
+| `cache_max_value_bytes` | 16 * 1024 |
+| `cache_ttl_ms` | 1000 |
+| `cache_max_total_bytes` | 0 (tanpa batas) |
+| `handler_timeout_ms` | 0 (tanpa deadline) |
 | `public_dir` | "" (kosong menonaktifkan fallback static) |
 
-`HandlerFn` adalah `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063, dibangun saat dispatch oleh `core.invokeHandler`). `Route` adalah `{ path, handler, kind = .EXACT }` dengan `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` membangun tabel comptime: route `EXACT` di-resolve lewat `StaticStringMap` (O(1)), route `PREFIX` mencocokkan prefix terdaftar terpanjang pada batas segment-path, query string dibuang dulu, dan path yang tak cocok mengirim `404`. `Router(routes).dispatch` sendiri cocok persis dengan `HandlerFn`, jadi `Server.init` menerima `router.dispatch` sebagai nilai runtime biasa, bukan tabel route.
+### handler.zig
 
-Response cache per-worker (ADR-036) juga berada di sini: `tl_cache`, `serveCached` / `sendCached`, dan `requestKey` (Wyhash atas path + body). Ia dipasang oleh worker `.EPOLL` / `.URING` dan di-key dari `tl_req_path` / `tl_req_body`, yang dicatat `muxDispatch`.
+`HandlerFn` adalah `fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063, dibangun saat dispatch oleh `handler.invokeHandler`). `invokeHandler` adalah satu-satunya tempat handler dipanggil, jadi setiap dispatch model membangun trio dengan cara yang sama. Saat handler error, ia mengirim satu 500, tapi hanya jika belum ada yang ditulis: bukan `Response.sent` dan bukan `writer.respondedFD()`. Lalu ia menulis access record jika `setAccessLogger` sudah memasang logger.
 
 `invokeHandler` menerima `peer_max_frame_size: u32` sebagai parameter eksplisit lalu menyalinnya ke `Context.max_frame_size`, yang dipakai fallback static untuk mengukur frame DATA. Ia sengaja dipisahkan dari `ServeOpts.max_frame_size`: field itu adalah iklan sisi-terima server ini, dan memakainya sebagai batas keluar justru yang dijawab peer patuh dengan `FRAME_SIZE_ERROR`. Tiga call site memasok nilai yang benar:
 
 | call site | sumber nilai peer |
 | :- | :- |
 | `mux.zig` (`.EPOLL` / `.URING`) | `conn.peer_max_frame_size`, yang memang sudah dilacak mux untuk `pumpBody` |
-| `core.serveH2cLoop` (model blocking) | variabel lokal berjalan, diperbarui dari setiap frame SETTINGS dengan validasi 16384..16777215 yang sama seperti mux, karena peer boleh menaikkannya di tengah koneksi |
-| `core.serveH2cUpgrade` | didekode dari header base64 `HTTP2-Settings`, sehingga response stream-1 yang dibawa sudah benar sebelum satu frame pun dipertukarkan |
+| `serve.serveLoop` (model blocking) | variabel lokal berjalan, diperbarui dari setiap frame SETTINGS dengan cek 16384..16777215 (`MAX_FRAME_SIZE_LIMIT`), karena peer boleh menaikkannya di tengah koneksi |
+| `serve.serveUpgrade` | didekode dari header base64 `HTTP2-Settings`, sehingga response stream-1 yang dibawa sudah benar sebelum satu frame pun dipertukarkan |
 
 `Context.public_dir` diisi dari `ServeOpts.public_dir` di titik yang sama, jadi router mencapai root static tanpa threadlocal (berbeda dengan `zix.Http1`, yang tetap memakai `tl_static_dir`).
 
-### Jalur blocking (serveConn / serveH2cLoop)
+### Router / Route (router.zig)
 
-`serveConn` mengeset `TCP_NODELAY` dan memanggil `serveConnInner`, yang membaca 3 byte: `"PRI"` menjalankan preface h2c-direct (validasi, `sendSettingsFD`, `serveH2cLoop`), selain itu menjalankan `serveH2cUpgrade` (handshake `Upgrade: h2c` HTTP/1.1, yang melayani request stream-1 awal lalu `serveH2cLoop`). `serveH2cLoop` mengalokasikan buffer payload plus tabel slot `[]Stream` dan menjalankan switch frame yang sama dengan mux memakai `readFrameHeader` + `recvExact` blocking, men-dispatch inline via `dispatchStream`. Perhatikan `Stream` blocking adalah struct inline tetap (`body: [65536]u8`, `header_scratch: [4096]u8`) yang ditahan sedalam `max_streams` per koneksi, berbeda dengan buffer ter-pool milik mux yang berukuran sesuai serve options.
+`Route` adalah `{ path, handler, kind = .EXACT }` dengan `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` membangun tabel comptime: route `EXACT` di-resolve lewat `StaticStringMap` (O(1)), route `PREFIX` mencocokkan prefix terdaftar terpanjang pada batas segment-path, query string dibuang dulu, dan path yang tak cocok mengirim `404`. `Router(routes).dispatch` sendiri cocok persis dengan `HandlerFn`, jadi `Server.init` menerima `router.dispatch` sebagai nilai runtime biasa, bukan tabel route.
+
+### cache.zig
+
+Response cache per-worker (ADR-036): `tl_cache`, `setCache`, `cacheTtl`, `serveCached` / `sendCachedFD`, dan `requestKey` (Wyhash atas path + body). Cache menyimpan body tanpa frame, jadi hit di-frame ulang untuk stream yang meminta dan satu entry melayani stream id mana pun. Handler tidak mengoper request-nya, jadi dispatcher mencatat `tl_req_path` / `tl_req_body` / `tl_req_io` di sekitar setiap pemanggilan handler. Path kosong atau io null mengubah setiap pemanggilan menjadi send biasa.
+
+### Jalur blocking (serveConn / serveLoop)
+
+`serveConn` mengeset `TCP_NODELAY` dan memanggil `serveInner`, yang membaca 3 byte: `"PRI"` menjalankan preface h2c-direct (validasi, kirim SETTINGS, `serveLoop`), selain itu menjalankan `serveUpgrade` (`upgrade.accept` untuk handshake `Upgrade: h2c` HTTP/1.1, yang melayani request stream-1 awal lalu `serveLoop`). `serveLoop` mengalokasikan buffer payload (`max_frame_size + FRAME_PAYLOAD_SLACK`) plus tabel `[]Stream` dan flag `[]bool` used, keduanya sedalam `max_streams`, lalu membaca dengan `readFrameHeader` + `recvExact` blocking. Stream yang selesai lewat `stream_invoke.invokeWhole`.
+
+- Satu `Stream` sekitar 70 KiB (`body: [BODY_BUF_SIZE]u8` 64 KiB, `header_scratch: [4096]u8`, sampai `MAX_HEADERS` 64 header), jadi tabelnya dialokasikan sekali per koneksi di heap dan setiap entry dipakai ulang, berbeda dengan buffer ter-pool milik mux yang berukuran sesuai serve options.
+- Body yang melebihi kapasitas stream dibuang dengan 413, tidak pernah dipotong, jadi handler tidak pernah menerima body parsial.
+- Stream yang kurang dari (atau melebihi) content-length-nya sendiri di-reset dengan PROTOCOL_ERROR dan tidak pernah sampai ke handler (RFC 9113 section 8.1.1).
+- Peer yang menutup koneksi dengan request belum selesai mendapat GOAWAY PROTOCOL_ERROR. Peer yang menutup saat idle tidak mendapat apa pun, itu close biasa.
 
 ---
 
@@ -268,7 +300,7 @@ Parsing Range sendiri tidak lokal: ia datang dari `src/utils/http_range.zig`, di
 
 ## dispatch/ dan tls_mux.zig
 
-`server.zig` memuat tipe publik `Http2Server` dan `run()` switch tipis: `.ASYNC` mempertahankan struktur accept-thread (`common.ConnTask` plus `common.dispatchConn`) dan memanggil `core.serveConn`, `.EPOLL` memanggil `epoll.runEpoll`, `.URING` memanggil `uring.runUring`, dan `config.tls != null` mengarahkan `.EPOLL` / `.URING` ke `tls_mux.runTlsMux`, selain itu semua ke `tls_serve.runTls`. Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
+`server.zig` memuat tipe publik `Http2Server` dan `run()` switch tipis: `.ASYNC` mempertahankan struktur accept-thread (`common.ConnTask` plus `common.dispatchConn`) dan memanggil `serve.serveConn`, `.EPOLL` memanggil `epoll.runEpoll`, `.URING` memanggil `uring.runUring`, dan `config.tls != null` mengarahkan `.EPOLL` / `.URING` ke `tls_mux.runTlsMux`, selain itu semua ke `tls_serve.runTls`. Sebelum semua itu, `run()` menolak `.EPOLL` / `.URING` di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
 
 ### dispatch/epoll.zig
 
@@ -280,7 +312,7 @@ Bentuk io_uring dari loop yang sama (ADR-037 Phase 4). `initUringRing` meminta `
 
 ### dispatch/common.zig
 
-`serveOpts(cfg)` memetakan `Config` (`Config.zig`) ke `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus field cache dan `public_dir`). Ia juga memuat `setNoDelay`, `setBusyPoll`, `pinToCpu` dan `getAvailableCpuCount` (keduanya sadar cgroup-mask), dan `effectiveCacheEntries` (menghormati `cache_max_total_bytes`).
+`serveOpts(cfg)` memetakan `Config` (`Config.zig`) ke `ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus field cache dan `public_dir`). Ia juga memuat `setNoDelay`, `setBusyPoll`, `pinToCpu` dan `getAvailableCpuCount` (keduanya sadar cgroup-mask), dan `effectiveCacheEntries` (menghormati `cache_max_total_bytes`).
 
 Sink write-coalescing adalah primitif batching untuk mux cleartext: `MuxCoalesceSink` (threadlocal 64 KiB, satu per worker) dipasang sebagai `writer.write_hook` oleh `beginCoalesce(fd)` dan dibongkar oleh `endCoalesce()`. Selama terpasang, setiap frame yang mux tulis dalam satu batch readable (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) di-stage ke satu buffer dan keluar sebagai satu write, sehingga batch banyak-stream menjadi satu segmen alih-alih satu segmen kecil per frame di bawah `TCP_NODELAY`. Ia flush saat penuh dan menulis frame kelewat besar langsung tembus, jadi kebenaran tidak pernah bergantung pada ukuran buffer. `endCoalesce` mengembalikan apakah sebuah write gagal selama batch.
 
