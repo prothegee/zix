@@ -33,8 +33,11 @@
 
 const std = @import("std");
 const dispatch_async = @import("dispatch/async.zig");
+const dispatch_epoll = @import("dispatch/epoll.zig");
+const dispatch_uring = @import("dispatch/uring.zig");
 const Config = @import("Config.zig");
 const DispatchModel = @import("../../../shared/dispatch.zig").Model;
+const OS = @import("builtin").target.os.tag;
 
 // --------------------------------------------------------- //
 // Private:
@@ -43,16 +46,18 @@ fn gatePort(config: Config) Error!void {
     if (config.port == 0) return Error.ZixHttp2_GrpcServer_PortNotConfigured;
 }
 
-/// Reject a model this server cannot run, before any listener is set up, so
-/// a rejected config leaves nothing behind.
+/// Reject a model this platform cannot run, before any listener is set up,
+/// so a rejected config leaves nothing behind.
 fn gateDispatchModel(model: DispatchModel) Error!void {
     switch (model) {
         .ASYNC => {},
-        // Not wired yet: .EPOLL and .URING land with their dispatch files.
-        // Listed one by one, so a new model in the enum fails to compile here
-        // until it is given its own arm.
         .EPOLL,
         .URING,
+        => if (comptime OS != .linux) {
+            return Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported;
+        },
+        // Not implemented yet. Listed one by one, so a new model in the enum
+        // fails to compile here until it is given its own arm.
         .IOCP,
         .KQUEUE,
         => return Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported,
@@ -70,6 +75,35 @@ fn dispatchError(err: dispatch_async.Error) Error {
     };
 }
 
+fn dispatchEpollError(err: dispatch_epoll.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_GrpcEpoll_ResolveFailed
+            => Error.ZixHttp2_GrpcServer_ResolveFailed,
+        error.ZixHttp2_GrpcEpoll_ListenFailed
+            => Error.ZixHttp2_GrpcServer_ListenFailed,
+        error.ZixHttp2_GrpcEpoll_OutOfMemory,
+        error.ZixHttp2_GrpcEpoll_SpawnFailed,
+        error.ZixHttp2_GrpcEpoll_SetupFailed,
+        error.ZixHttp2_GrpcEpoll_Unsupported,
+            => Error.ZixHttp2_GrpcServer_EpollSetupFailed,
+    };
+}
+
+fn dispatchUringError(err: dispatch_uring.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_GrpcUring_ResolveFailed
+            => Error.ZixHttp2_GrpcServer_ResolveFailed,
+        error.ZixHttp2_GrpcUring_ListenFailed
+            => Error.ZixHttp2_GrpcServer_ListenFailed,
+        error.ZixHttp2_GrpcUring_OutOfMemory,
+        error.ZixHttp2_GrpcUring_SpawnFailed,
+        error.ZixHttp2_GrpcUring_SetupFailed,
+        error.ZixHttp2_GrpcUring_WaitFailed,
+        error.ZixHttp2_GrpcUring_Unsupported,
+            => Error.ZixHttp2_GrpcServer_UringSetupFailed,
+    };
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -84,6 +118,10 @@ pub const Error = error {
     ZixHttp2_GrpcServer_ListenFailed,
     /// E.Q.: error.ZixHttp2_GrpcAsync_AcceptFailed
     ZixHttp2_GrpcServer_AcceptFailed,
+    /// E.Q.: error.ZixHttp2_GrpcEpoll_SetupFailed
+    ZixHttp2_GrpcServer_EpollSetupFailed,
+    /// E.Q.: error.ZixHttp2_GrpcUring_SetupFailed
+    ZixHttp2_GrpcServer_UringSetupFailed,
 };
 
 /// The server type for one Router.
@@ -111,14 +149,34 @@ pub fn GrpcServer(comptime RouterType: type) type {
         /// - Error.ZixHttp2_GrpcServer_PortNotConfigured when config.port is 0
         /// - Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported when the
         ///   model cannot run
-        /// - Error.ZixHttp2_GrpcServer_ResolveFailed, ListenFailed, or
-        ///   AcceptFailed from the .ASYNC model
+        /// - Error.ZixHttp2_GrpcServer_ResolveFailed or ListenFailed from any model
+        /// - Error.ZixHttp2_GrpcServer_AcceptFailed from the .ASYNC model
+        /// - Error.ZixHttp2_GrpcServer_EpollSetupFailed or UringSetupFailed
+        ///   when a Linux model could not start its workers
         pub fn run(self: *const Self) Error!void {
             try gatePort(self.config);
             try gateDispatchModel(self.config.dispatch_model);
 
-            dispatch_async.run(RouterType, self.config) catch |err| switch (err) {
-                else => return dispatchError(err),
+            return switch (self.config.dispatch_model) {
+                .ASYNC => {
+                    dispatch_async.run(RouterType, self.config) catch |err| switch (err) {
+                        else => return dispatchError(err),
+                    };
+                },
+                .EPOLL => {
+                    dispatch_epoll.run(RouterType, self.config) catch |err| switch (err) {
+                        else => return dispatchEpollError(err),
+                    };
+                },
+                .URING => {
+                    dispatch_uring.run(RouterType, self.config) catch |err| switch (err) {
+                        else => return dispatchUringError(err),
+                    };
+                },
+                // Never pass gateDispatchModel.
+                .IOCP,
+                .KQUEUE,
+                => Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported,
             };
         }
     };
@@ -175,6 +233,15 @@ fn testServer(port: u16, model: DispatchModel) GrpcServer(EmptyRouter) {
     });
 }
 
+fn testServerAt(ip: []const u8, model: DispatchModel) GrpcServer(EmptyRouter) {
+    return init(EmptyRouter, .{
+        .io = std.testing.io,
+        .ip = ip,
+        .port = 9036,
+        .dispatch_model = model,
+    });
+}
+
 test "zix http2 grpc: server, init keeps the config" {
     var server = testServer(9036, .ASYNC);
     defer server.deinit();
@@ -190,7 +257,9 @@ test "zix http2 grpc: server, run with port 0 is PortNotConfigured" {
     try std.testing.expectError(Error.ZixHttp2_GrpcServer_PortNotConfigured, server.run());
 }
 
-test "zix http2 grpc: server, EPOLL is not supported yet" {
+test "zix http2 grpc: server, EPOLL off Linux is not supported" {
+    if (comptime OS == .linux) return error.SkipZigTest;
+
     var server = testServer(9036, .EPOLL);
     defer server.deinit();
 
@@ -200,13 +269,54 @@ test "zix http2 grpc: server, EPOLL is not supported yet" {
     );
 }
 
-test "zix http2 grpc: server, URING is not supported yet" {
+test "zix http2 grpc: server, URING off Linux is not supported" {
+    if (comptime OS == .linux) return error.SkipZigTest;
+
     var server = testServer(9036, .URING);
     defer server.deinit();
 
     try std.testing.expectError(
         Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported,
         server.run(),
+    );
+}
+
+test "zix http2 grpc: server, EPOLL on Linux maps an unresolvable ip to ResolveFailed" {
+    if (comptime OS != .linux) return error.SkipZigTest;
+
+    var server = testServerAt("not-an-ip", .EPOLL);
+    defer server.deinit();
+
+    try std.testing.expectError(Error.ZixHttp2_GrpcServer_ResolveFailed, server.run());
+}
+
+test "zix http2 grpc: server, URING on Linux maps an unresolvable ip to ResolveFailed" {
+    if (comptime OS != .linux) return error.SkipZigTest;
+
+    var server = testServerAt("not-an-ip", .URING);
+    defer server.deinit();
+
+    try std.testing.expectError(Error.ZixHttp2_GrpcServer_ResolveFailed, server.run());
+}
+
+test "zix http2 grpc: server, dispatchEpollError maps SetupFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_GrpcServer_EpollSetupFailed,
+        dispatchEpollError(dispatch_epoll.Error.ZixHttp2_GrpcEpoll_SetupFailed),
+    );
+}
+
+test "zix http2 grpc: server, dispatchUringError maps WaitFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_GrpcServer_UringSetupFailed,
+        dispatchUringError(dispatch_uring.Error.ZixHttp2_GrpcUring_WaitFailed),
+    );
+}
+
+test "zix http2 grpc: server, dispatchUringError maps ListenFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_GrpcServer_ListenFailed,
+        dispatchUringError(dispatch_uring.Error.ZixHttp2_GrpcUring_ListenFailed),
     );
 }
 
