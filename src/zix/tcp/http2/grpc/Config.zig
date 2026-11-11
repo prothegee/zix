@@ -32,6 +32,7 @@
 const std = @import("std");
 const DispatchModel = @import("../../../shared/dispatch.zig").Model;
 const Logger = @import("../../../logger/Logger.zig");
+const ServeOpts = @import("ServeOpts.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -91,6 +92,33 @@ cache_max_total_bytes: usize = 0,
 logger: ?*Logger = null,
 
 const Self = @This();
+
+// --------------------------------------------------------- //
+// Public:
+
+/// The per-connection serve knobs this config asks for.
+///
+/// Note:
+/// - io is the pool that runs server-streaming calls.
+pub fn serveOpts(self: Self) ServeOpts {
+    return .{
+        .max_streams = self.max_streams,
+        .max_frame_size = self.max_frame_size,
+        .max_header_scratch = self.max_header_scratch,
+        .max_body = self.max_body,
+        .conn_read_buf_min = self.max_recv_buf,
+        .tls_write_buf_initial = self.tls_write_buf_initial_bytes,
+        .logger = self.logger,
+        .handler_timeout_ms = self.handler_timeout_ms,
+        .io = self.io,
+        .compress = self.compress,
+        .response_cache = self.response_cache,
+        .cache_max_entries = self.cache_max_entries,
+        .cache_max_value_bytes = self.cache_max_value_bytes,
+        .cache_ttl_ms = self.cache_ttl_ms,
+        .cache_max_total_bytes = self.cache_max_total_bytes,
+    };
+}
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -192,5 +220,61 @@ test "zix http2 grpc: Config, keeps the largest kernel backlog" {
     config.kernel_backlog = std.math.maxInt(u31);
 
     try std.testing.expectEqual(@as(u31, std.math.maxInt(u31)), config.kernel_backlog);
+}
+
+test "zix http2 grpc: Config, serveOpts carries the stream and frame knobs" {
+    var config = testConfig();
+    config.max_streams = 7;
+    config.max_frame_size = 32768;
+    config.max_header_scratch = 2048;
+    config.max_body = 1024;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expectEqual(@as(usize, 7), opts.max_streams);
+    try std.testing.expectEqual(@as(u32, 32768), opts.max_frame_size);
+    try std.testing.expectEqual(@as(usize, 2048), opts.max_header_scratch);
+    try std.testing.expectEqual(@as(usize, 1024), opts.max_body);
+}
+
+test "zix http2 grpc: Config, serveOpts maps the buffer knobs" {
+    var config = testConfig();
+    config.max_recv_buf = 128 * 1024;
+    config.tls_write_buf_initial_bytes = 4096;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expectEqual(@as(usize, 128 * 1024), opts.conn_read_buf_min);
+    try std.testing.expectEqual(@as(usize, 4096), opts.tls_write_buf_initial);
+}
+
+test "zix http2 grpc: Config, serveOpts carries the handler knobs" {
+    var config = testConfig();
+    config.handler_timeout_ms = 250;
+    config.compress = true;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expectEqual(@as(u32, 250), opts.handler_timeout_ms);
+    try std.testing.expect(opts.compress);
+    try std.testing.expect(opts.io != null);
+    try std.testing.expect(opts.logger == null);
+}
+
+test "zix http2 grpc: Config, serveOpts carries the cache knobs" {
+    var config = testConfig();
+    config.response_cache = true;
+    config.cache_max_entries = 64;
+    config.cache_max_value_bytes = 512;
+    config.cache_ttl_ms = 30;
+    config.cache_max_total_bytes = 8192;
+
+    const opts = config.serveOpts();
+
+    try std.testing.expect(opts.response_cache);
+    try std.testing.expectEqual(@as(u32, 64), opts.cache_max_entries);
+    try std.testing.expectEqual(@as(u32, 512), opts.cache_max_value_bytes);
+    try std.testing.expectEqual(@as(u32, 30), opts.cache_ttl_ms);
+    try std.testing.expectEqual(@as(usize, 8192), opts.cache_max_total_bytes);
 }
 
