@@ -49,7 +49,7 @@ pub const MuxConn = struct {
     rstart: usize,
     rend: usize,
 
-    hpack_dec: hpack.HpackDecoder,
+    hpack_dec: HpackDecoder,
     streams: []*MuxStream,      // array pointer: conn idle memesan max_streams pointer, bukan buffer
     slots: []bool,
 
@@ -134,7 +134,7 @@ Flow control sisi-kirim (`active_conn` adalah threadlocal yang mengikat send han
 - `pumpBody(conn, stream, body, end)`: menulis DATA hingga `min(conn.send_window, stream.send_window)` dan `max_frame_size`, mengurangi kedua window per chunk, mengeset END_STREAM hanya pada chunk terakhir setelah seluruh body keluar, dan mem-park sisanya di `pending_body` / `pending_end`.
 - `resumeStream(conn, slot)`: setelah window stream bertambah, mem-`pumpBody` ekor yang di-park dan membebaskan slot saat ia terkuras penuh.
 - `resumeAll(conn)`: setelah window koneksi bertambah, melanjutkan setiap stream yang di-park.
-- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: entry respons ber-flow-control. Tanpa `active_conn` atau tanpa slot yang cocok, ia jatuh kembali ke `frame.sendResponseEncodedFD` (langsung, tanpa meter). Selain itu ia menulis HEADERS (`sendRespHeadersFD` -> `hpack.respHeaderBlock`) lalu `pumpBody(..., true)`. Body direferensikan, tidak disalin, jadi ia harus hidup lebih lama dari stream (cache seumur-proses).
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)`: entry respons ber-flow-control. Tanpa `active_conn` atau tanpa slot yang cocok, ia jatuh kembali ke `writer.sendResponseEncodedFD` (langsung, tanpa meter). Selain itu ia menulis HEADERS (`sendRespHeadersFD` -> `response_block.respHeaderBlock`) lalu `pumpBody(..., true)`. Body direferensikan, tidak disalin, jadi ia harus hidup lebih lama dari stream (cache seumur-proses).
 
 ### onReadable / processRing
 
@@ -142,44 +142,68 @@ Flow control sisi-kirim (`active_conn` adalah threadlocal yang mengikat send han
 
 ---
 
-## hpack.zig
+## hpack/
 
-Tabel statik, codec Huffman, decoder (dengan eviction dynamic-table), encoder stateless, dan cache response-prefix.
+Codec HPACK, satu file per concern:
+
+| File | Isi |
+| :- | :- |
+| `Header.zig` | `{ name, value }`, juga entry static table dan dynamic table |
+| `HuffSym.zig` | `{ code: u32, bits: u5 }` |
+| `huffman_table.zig` | `HUFF: [256]HuffSym` (RFC 7541 appendix B), digabung saat comptime dari array code dan array bit-length |
+| `static_table.zig` | `HPACK_STATIC: [62]Header` (RFC 7541 appendix A), index 0 tidak dipakai |
+| `huffman.zig` | `huffEncode`, `huffDecode` |
+| `integer.zig` | `encodeInt`, `decodeInt` (prefix integer, RFC 7541 section 5.1) |
+| `DynamicTable.zig` | entry dynamic table, eviction, compaction |
+| `HpackDecoder.zig` | `decode`, `evictTo`, `max_size` |
+| `HpackEncoder.zig` | `writeHeader`, `encoded` |
+| `RespPrefix.zig` | satu prefix respons yang di-cache |
+| `response_block.zig` | `respHeaderBlock` plus cache prefix |
 
 ### respHeaderBlock + cache response-header
 
-`respHeaderBlock(dst, status, content_type, content_encoding, content_length)` mengenkode satu blok header respons penuh. Prefix `[:status, content-type, content-encoding]` dilayani dari cache append-only global-proses, hanya `content_length` (yang bervariasi) yang dienkode per panggilan. `content_length` yang null menghilangkan field itu (respons END_STREAM tanpa body).
+`respHeaderBlock(dst, status, content_type, content_encoding, content_length)` mengenkode satu blok header respons penuh. Prefix `[:status, content-type, content-encoding]` dilayani dari cache append-only global-proses, hanya `content_length` (yang bervariasi) yang dienkode per panggilan. `content_length` yang null menghilangkan field itu (respons END_STREAM tanpa body). `dst` yang terlalu kecil untuk blok mengembalikan `ZixHttp2_ResponseBlock_BufferFull`.
 
-Cache-nya adalah `g_resp_prefix: [32]RespPrefix` dengan count yang di-publish secara release dan sebuah spinlock (`g_resp_prefix_lock`). Reader men-scan `0..count` lock-free, spinlock hanya men-serialize insert yang langka (satu per triple berbeda). Ia byte-identik pada setiap koneksi karena `HpackEncoder` stateless: tabel statik plus literal-without-indexing, tidak pernah dynamic table atau size update, jadi byte ter-cache plus content-length per-panggilan adalah HPACK yang valid. Triple yang terlalu panjang atau cache penuh jatuh kembali ke encode langsung, jadi kebenaran tidak pernah bergantung pada hit. Sebuah test menegaskan `respHeaderBlock` cocok dengan empat panggilan `writeHeader` byte-per-byte.
+Cache-nya adalah `prefix_cache: [32]RespPrefix` dengan count yang di-publish secara release dan sebuah spinlock (`prefix_lock`). Reader men-scan `0..count` lock-free, spinlock hanya men-serialize insert yang langka (satu per triple berbeda). Ia byte-identik pada setiap koneksi karena `HpackEncoder` stateless: tabel statik plus literal-without-indexing, tidak pernah dynamic table atau size update, jadi byte ter-cache plus content-length per-panggilan adalah HPACK yang valid. Triple yang terlalu panjang atau cache penuh jatuh kembali ke encode langsung, jadi kebenaran tidak pernah bergantung pada hit. Sebuah test menegaskan `respHeaderBlock` cocok dengan panggilan `writeHeader` byte-per-byte.
+
+### DynamicTable
+
+```zig
+entries: [128]Header = undefined, // terbaru dulu, entries[0] adalah dynamic index 1
+count: usize = 0,
+size: usize = 0,                  // name.len + value.len + 32 per entry
+buf: [8192]u8 = undefined,        // entry selalu menunjuk ke sini, tidak pernah ke scratch per-panggilan
+buf_pos: usize = 0,
+```
+
+`add(name, value, max_size)` menyalin entry ke `buf` (seumur-koneksi), jadi lookup indexed tetap valid setelah scratch sebuah slot stream dipakai ulang. `evictTo(target)` membuang entry tertua sampai tabel muat. Saat `buf` habis, `compact` memadatkan ulang entry hidup di depan dengan forward copy (sumber dan tujuan bisa overlap). Entry yang lebih besar dari `max_size` mengosongkan tabel dan tidak disimpan.
 
 ### HpackDecoder
 
 ```zig
-pub const HpackDecoder = struct {
-    dyn: [128]HpackEntry = undefined,
-    dyn_count, dyn_size, max_size = 4096,
-    dyn_buf: [8192]u8 = undefined,   // entry dyn[] selalu slice ke sini, tidak pernah scratch per-panggilan
-    dyn_buf_pos,
-};
+table: DynamicTable = .{},
+max_size: usize = 4096,
 ```
 
-`decode(block, out, scratch)` menangani representasi indexed, literal-with-incremental-indexing, dynamic-table-size-update, dan literal-without-indexing. Setiap slice yang di-decode menunjuk ke `scratch` milik pemanggil. Entry dinamis disalin ke `dyn_buf` (seumur-koneksi), jadi lookup indexed tetap valid setelah scratch sebuah slot stream dipakai ulang (regresi yang sudah diperbaiki). `evictTo(target)` membuang entry tertua sampai tabel muat, `compactDynBuf` memadatkan ulang entry hidup di depan `dyn_buf` saat ia penuh, dan `addDynamic` mengukur entry sebagai `name.len + value.len + 32`. Literal Huffman lewat `huffDecode`.
+`decode(block, out, scratch)` menangani representasi indexed, literal-with-incremental-indexing, dynamic-table-size-update, dan literal-without-indexing. Setiap slice yang di-decode menunjuk ke `scratch` milik pemanggil, termasuk lookup tabel. `evictTo(target)` diteruskan ke tabel, jadi pemanggil yang menerapkan SETTINGS_HEADER_TABLE_SIZE tetap memakai `max_size` dan `evictTo`. Literal Huffman lewat `huffDecode`.
 
 ### HpackEncoder
 
-`init(buf)` atas buffer pemanggil, `writeHeader(name, value)`: kecocokan persis static-table dienkode sebagai indexed, kecocokan static name-only sebagai literal name-indexed (tidak pernah ditambahkan ke dynamic table), selain itu literal penuh. `writeString` memilih Huffman saat lebih pendek dan menandai hasil Huffman sebagai `?usize` agar evaluasi comptime (blok ter-cache) mempertahankan optional bahkan saat cabang error secara statik tak terjangkau. Stateless: tanpa dynamic table, tanpa size update.
+`init(buf)` atas buffer pemanggil, `writeHeader(name, value)`: kecocokan persis static-table dienkode sebagai indexed, kecocokan nama saja sebagai literal ber-index nama (tidak pernah ditambahkan ke dynamic table), selain itu literal penuh. `writeString` memilih Huffman saat lebih pendek dan memberi tipe `?usize` pada hasil Huffman agar evaluasi comptime (blok ter-cache) tetap mempertahankan optional meski cabang error tidak terjangkau secara statis. Stateless: tanpa dynamic table, tanpa size update.
 
 ---
 
-## frame.zig
+## frame.zig, writer.zig, reader.zig, control.zig
 
-Codec frame, pengirim control-frame, dan konstanta (`FRAME_TYPE_*`, `FLAG_*`, `ERR_*`, `SETTINGS_*`, `PREFACE`, `FRAME_HEADER_LEN` 9, `FRAME_PAYLOAD_SLACK` 256, `DEFAULT_MAX_FRAME_SIZE` 16384, `MAX_HEADERS` 64).
+`frame.zig` memegang konstanta (`FRAME_TYPE_*`, `FLAG_*`, `ERR_*`, `SETTINGS_*`, `PREFACE`, `FRAME_HEADER_LEN` 9, `DEFAULT_MAX_FRAME_SIZE` 16384, `HPACK_ENCODE_SCRATCH` 512, `SEND_STAGE_BODY_MAX` 4096) dan codec header. `FrameHeader.zig` adalah `{ length: u24, frame_type: u8, flags: u8, stream_id: u31 }`. `parseFrameHeader` / `encodeFrameHeader` tidak melakukan I/O (untuk write ter-buffer atau ter-stage).
 
-`FrameHeader` adalah `{ length: u24, frame_type: u8, flags: u8, stream_id: u31 }`. `parseFrameHeader` / `encodeFrameHeader` tidak melakukan I/O (untuk write ter-buffer atau ter-stage), `writeFrameHeader` dan `readFrameHeader` menambahkan I/O fd.
+`writer.zig` adalah sisi write. `writeAllFD` menandai stream sudah dijawab (`tl_responded`) dan memeriksa `write_hook` threadlocal: saat diset (jalur seal TLS, atau sink coalescing) ia menyerahkan plaintext ke hook, selain itu ia memanggil `writeAllDirectFD`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. `writeAllDirectFD` juga jalur flush milik hook itu sendiri, jadi flush coalescing tidak masuk ulang ke hook. `writeFrameHeaderFD` mengenkode dan menulis satu header.
 
-`writeAllFD` memeriksa `write_hook` threadlocal: saat diset (jalur seal TLS, atau sink coalescing) ia menyerahkan plaintext ke hook, selain itu ia memanggil `writeAllRawFD`, write-all blocking yang poll pada `POLL.OUT` untuk EAGAIN socket non-blocking dan retry saat INTR. `writeAllRawFD` juga jalur flush milik hook itu sendiri, jadi flush coalescing tidak masuk ulang ke hook.
+`sendResponseFD` -> `sendResponseEncodedFD` (juga di `writer.zig`) adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body di atau di bawah `SEND_STAGE_BODY_MAX` (4 KiB) keluar sebagai satu staged write, yang lebih besar sebagai satu vectored write per chunk DATA (blok HEADERS menumpang chunk pertama, write hook menerima tiap pasangan sebagai dua append). Body besar yang mungkin melebihi window peer memakai `mux.sendResponseStreamFD` sebagai gantinya.
 
-`sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` masing-masing mengenkode satu control frame. `sendResponseFD` -> `sendResponseEncodedFD` adalah respons langsung tanpa meter (tanpa flow control): HEADERS via `respHeaderBlock`, lalu body di-frame dalam chunk DATA `<= DEFAULT_MAX_FRAME_SIZE` dengan END_STREAM pada yang terakhir (atau pada HEADERS saat body kosong). Body di atau di bawah `SEND_STAGE_BODY_MAX` (4 KiB) keluar sebagai satu staged write, yang lebih besar sebagai satu vectored write per chunk DATA (blok HEADERS menumpang chunk pertama, write hook menerima tiap pasangan sebagai dua append). Body besar yang mungkin melebihi window peer memakai `mux.sendResponseStreamFD` sebagai gantinya.
+`reader.zig` adalah sisi read: `readOnceFD`, `recvExact` (mengisi buffer atau mengembalikan `Closed`), dan `readFrameHeader`.
+
+`control.zig` memegang `sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD`, masing-masing mengenkode satu control frame. Control frame berukuran tetap keluar sebagai satu write.
 
 ---
 
@@ -234,7 +258,7 @@ Fallback `public_dir` (ADR-064), dipanggil dari `Router.dispatch` setelah semua 
 | `segmentFor` | mengubah header `Range` menjadi `Segment`. Mengembalikan segment file utuh bila header tidak ada atau malformed (RFC 7233 bagian 3.1 meminta mengabaikannya), dan null bila well-formed tapi tak terpenuhi, yang menjadi isyarat bagi pemanggil untuk menjawab 416 |
 | `sendFramed` | satu frame HEADERS (status, content type, `content-length`, `accept-ranges`, dan `content-range` untuk 206) lalu frame DATA, masing-masing dibatasi `max_frame_size`, yang terakhir berflag END_STREAM |
 | `sendRangeNotSatisfiable` | 416 dengan `Content-Range: bytes */length`, header saja, END_STREAM pada frame HEADERS |
-| `zeroCopyAllowed` | selalu false di engine ini. `dispatch/common.beginCoalesce` memasang `frame.write_hook` di setiap batch, termasuk cleartext, jadi `sendfile` akan menaruh body mendahului frame yang sudah di-stage di sink |
+| `zeroCopyAllowed` | selalu false di engine ini. `dispatch/common.beginCoalesce` memasang `writer.write_hook` di setiap batch, termasuk cleartext, jadi `sendfile` akan menaruh body mendahului frame yang sudah di-stage di sink |
 
 `Segment` membawa `{ offset, length, status, content_range }`, sehingga 200 dan 206 berbagi satu jalur framing dan hanya blok header-nya yang berbeda. `Content-Length` membawa panjang segment, bukan ukuran file, kalau tidak client menunggu byte yang tidak pernah datang. File kosong menutup stream pada HEADERS tanpa frame DATA sama sekali.
 
@@ -258,11 +282,11 @@ Bentuk io_uring dari loop yang sama (ADR-037 Phase 4). `initUringRing` meminta `
 
 `serveOpts(cfg)` memetakan `Http2ServerConfig` ke `core.ServeOpts` (`max_recv_buf` -> `conn_read_buf_min`, `tls_write_buf_initial_bytes` -> `tls_write_buf_initial`, plus field cache dan `public_dir`). Ia juga memuat `setNoDelay`, `setBusyPoll`, `pinToCpu` dan `getAvailableCpuCount` (keduanya sadar cgroup-mask), dan `effectiveCacheEntries` (menghormati `cache_max_total_bytes`).
 
-Sink write-coalescing adalah primitif batching untuk mux cleartext: `MuxCoalesceSink` (threadlocal 64 KiB, satu per worker) dipasang sebagai `frame.write_hook` oleh `beginCoalesce(fd)` dan dibongkar oleh `endCoalesce()`. Selama terpasang, setiap frame yang mux tulis dalam satu batch readable (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) di-stage ke satu buffer dan keluar sebagai satu write, sehingga batch banyak-stream menjadi satu segmen alih-alih satu segmen kecil per frame di bawah `TCP_NODELAY`. Ia flush saat penuh dan menulis frame kelewat besar langsung tembus, jadi kebenaran tidak pernah bergantung pada ukuran buffer. `endCoalesce` mengembalikan apakah sebuah write gagal selama batch.
+Sink write-coalescing adalah primitif batching untuk mux cleartext: `MuxCoalesceSink` (threadlocal 64 KiB, satu per worker) dipasang sebagai `writer.write_hook` oleh `beginCoalesce(fd)` dan dibongkar oleh `endCoalesce()`. Selama terpasang, setiap frame yang mux tulis dalam satu batch readable (HEADERS, DATA, SETTINGS, WINDOW_UPDATE) di-stage ke satu buffer dan keluar sebagai satu write, sehingga batch banyak-stream menjadi satu segmen alih-alih satu segmen kecil per frame di bawah `TCP_NODELAY`. Ia flush saat penuh dan menulis frame kelewat besar langsung tembus, jadi kebenaran tidak pernah bergantung pada ukuran buffer. `endCoalesce` mengembalikan apakah sebuah write gagal selama batch.
 
 ### tls_mux.zig
 
-h2 multiplex atas TLS 1.3 (ADR-052): satu listener `SO_REUSEPORT` plus satu instance epoll per worker, tiap koneksi menerminasi TLS di tempat via `tls_session.Session` resumable (tanpa socketpair, tanpa thread per koneksi). Sebuah `TlsConn` memegang session, state h2 `?*MuxConn` (dialokasikan begitu handshake terbentuk dan ALPN memilih h2), buffer backpressure ciphertext-keluar (`wbuf` / `woff` / `wlen`, di-flush saat EPOLLOUT), dan buffer staging `plain`. Pass-nya: recv ciphertext -> `session.feed` mendekripsi -> `feedMux` meng-append plaintext ke `h2.rbuf` dan menjalankan `mux.processRing` -> frame reply mux di-route lewat `frame.write_hook = hookWrite` -> di-seal ke record TLS -> `sendRaw`.
+h2 multiplex atas TLS 1.3 (ADR-052): satu listener `SO_REUSEPORT` plus satu instance epoll per worker, tiap koneksi menerminasi TLS di tempat via `tls_session.Session` resumable (tanpa socketpair, tanpa thread per koneksi). Sebuah `TlsConn` memegang session, state h2 `?*MuxConn` (dialokasikan begitu handshake terbentuk dan ALPN memilih h2), buffer backpressure ciphertext-keluar (`wbuf` / `woff` / `wlen`, di-flush saat EPOLLOUT), dan buffer staging `plain`. Pass-nya: recv ciphertext -> `session.feed` mendekripsi -> `feedMux` meng-append plaintext ke `h2.rbuf` dan menjalankan `mux.processRing` -> frame reply mux di-route lewat `writer.write_hook = hookWrite` -> di-seal ke record TLS -> `sendRaw`.
 
 `hookWrite` adalah gather seal-in-place. Ia mengakumulasi plaintext ke `plain`, dan kapan pun prefix ter-stage plus write baru melengkapi satu record penuh ia menyeal record itu langsung dari sumber dengan `sealGather` -> `conn.tls.encrypt2(prefix, tail, sealed)` (yang menembus ke `connection.writeAppData2` dan `record.protect2`), meng-gather prefix ter-stage dengan slice dari sumber. Ini menghindari penyalinan payload DATA besar ke `plain` dulu, hanya sisa sub-record yang di-stage. Toggle `seal_in_place` adalah `const` comptime agar jalur gather bisa di-A/B terhadap fallback accumulate-then-seal (`flushPlain` -> `encrypt`) tanpa mengubah perilaku lain. `sendRaw` menjaga urutan record (nonce AEAD adalah nomor urut record): jika ciphertext sudah ter-stage ia meng-append alih-alih menulis langsung, jadi record berikutnya tidak pernah menyalip yang ter-stage di wire.
 
