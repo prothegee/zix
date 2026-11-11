@@ -35,7 +35,7 @@ graph LR
 | `src/zix/tcp/http2/grpc/server.zig` | `init(Router, config)`, `GrpcServer(Router)`: `run()` mengecek port dan model, lalu memanggil berkas per-model di bawah `dispatch/` |
 | `src/zix/tcp/http2/grpc/log.zig` | `logSystem`: baris server ke logger (tag `grpc`) atau ke `std.log` |
 | `src/zix/tcp/http2/grpc/mux/` | jalur multiplex non-blocking untuk `.EPOLL` / `.URING`: `MuxConn.zig`, `stream_pool.zig`, `settings_frame.zig`, `stage_frame.zig`, `tcp_cork.zig`, `mux_dispatch.zig`, `mux_upgrade.zig`, `frame_loop.zig`, `process.zig` (`onReadable`, `processRing`) |
-| `src/zix/tcp/http2/grpc/dispatch/` | berkas dispatch per-model: `async.zig` (`.ASYNC`). `epoll.zig` dan `uring.zig` belum di-port |
+| `src/zix/tcp/http2/grpc/dispatch/` | berkas dispatch per-model: `async.zig` (`.ASYNC`), `epoll.zig` (`.EPOLL`), `uring.zig` (`.URING`) |
 | `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: jalur handler TLS blocking (per koneksi) |
 | `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: jalur dispatch TLS multiplex |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
@@ -324,7 +324,7 @@ Saat handler memanggil `res.finish(status, msg)` tanpa mengirim data apa pun, se
 | `.EPOLL` | per worker | event loop multiplex (hanya Linux) | throughput tertinggi, lihat di bawah |
 | `.URING` | per worker | loop io_uring multiplex (hanya Linux) | bentuk sama dengan `.EPOLL`, berbasis completion |
 
-Baru `.ASYNC` yang di-port. `.EPOLL` dan `.URING` belum di-port: `run()` mengembalikan `ZixHttp2_GrpcServer_DispatchModel_NotSupported` untuk keduanya di semua platform, jadi pakai `.ASYNC`. Jalur multiplex yang nanti mereka jalankan sudah di-port (`mux/`). Desain di bawah adalah yang nanti mereka jalankan.
+Ketiga model sudah di-port. `.EPOLL` dan `.URING` hanya berjalan di Linux: di luar Linux, `run()` mengembalikan `ZixHttp2_GrpcServer_DispatchModel_NotSupported` sebelum apa pun di-bind. Keduanya menjalankan jalur multiplex di bawah `mux/`. `.URING` tidak punya fallback ke `.EPOLL`: kernel tanpa io_uring mengakhiri run dengan `ZixHttp2_GrpcServer_UringSetupFailed`.
 
 `.URING` adalah desain multiplex shared-nothing yang sama di atas ring io_uring: berbasis completion, bukan readiness, `workers` worker (0 = cpu_count), hanya Linux.
 
