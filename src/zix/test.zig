@@ -104,9 +104,11 @@ test {
     _ = @import("tcp/http2/Config.zig");
     _ = @import("tcp/http2/Context.zig");
     _ = @import("tcp/http2/FrameHeader.zig");
+    _ = @import("tcp/http2/Http2.zig");
     _ = @import("tcp/http2/Request.zig");
     _ = @import("tcp/http2/Response.zig");
     _ = @import("tcp/http2/ServeOpts.zig");
+    _ = @import("tcp/http2/Server.zig");
     _ = @import("tcp/http2/Stream.zig");
     _ = @import("tcp/http2/UpgradeHead.zig");
     _ = @import("tcp/http2/cache.zig");
