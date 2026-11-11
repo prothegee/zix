@@ -134,7 +134,7 @@ pub const HandlerFn = *const fn (
 /// fd - std.posix.fd_t (the connection)
 /// sid - u31 (the stream id)
 /// io - std.Io (the worker io, carried on Context)
-/// opts - ServeOpts (handler_timeout_ms and public_dir)
+/// opts - ServeOpts (logger, handler_timeout_ms, and public_dir)
 /// peer_max_frame_size - u32 (the peer's SETTINGS_MAX_FRAME_SIZE)
 ///
 /// Return:
@@ -155,6 +155,7 @@ pub inline fn invokeHandler(
     var arena_buf: [Context.CTX_ARENA_BYTES]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&arena_buf);
     var ctx = Context.init(io, fba.allocator(), fd, sid);
+    ctx.logger = opts.logger;
     ctx.public_dir = opts.public_dir;
     ctx.max_frame_size = peer_max_frame_size;
     if (opts.handler_timeout_ms > 0) ctx.setTimeout(opts.handler_timeout_ms);
@@ -342,6 +343,31 @@ test "zix http2: handler, context carries opts and peer frame size" {
     try std.testing.expectEqualStrings("public", seen.public_dir);
     try std.testing.expectEqual(frame.DEFAULT_MAX_FRAME_SIZE, seen.max_frame_size);
     try std.testing.expect(seen.deadline != null);
+}
+
+test "zix http2: handler, context carries the configured logger" {
+    var logger = try Logger.init(std.testing.allocator, .{
+        .console = .OFF,
+    });
+    defer logger.deinit();
+
+    var buf: [4096]u8 = undefined;
+    tl_seen_ctx = null;
+
+    _ = try wireOf(ctxProbeHandler, .{
+        .logger = &logger,
+    }, &buf);
+
+    try std.testing.expectEqual(@as(?*Logger, &logger), tl_seen_ctx.?.logger);
+}
+
+test "zix http2: handler, context logger is null without one" {
+    var buf: [4096]u8 = undefined;
+    tl_seen_ctx = null;
+
+    _ = try wireOf(ctxProbeHandler, .{}, &buf);
+
+    try std.testing.expectEqual(@as(?*Logger, null), tl_seen_ctx.?.logger);
 }
 
 test "zix http2: handler, zero timeout leaves no deadline" {
