@@ -2,78 +2,105 @@
 
 Internal implementation details. For design rationale see [`docs/hld-grpc-en.md`](hld-grpc-en.md) and ADR-031.
 
-The blocking model (`.ASYNC`) uses one connection path (`serveGrpcConn` -> `serveGrpcLoop`). The `.EPOLL` model is a separate, multiplexed, non-blocking path (`grpcMuxOnReadable`) that owns the bulk of this document.
+The blocking model (`.ASYNC`) uses one connection path (`serve.serveConn` -> `serveLoop`). The `.EPOLL` model is a separate, multiplexed, non-blocking path (`grpcMuxOnReadable`) that owns the bulk of this document.
 
 Every route-table-dependent internal function below still takes `comptime RouterType: type` (ADR-063), not a flattened runtime `handler: HandlerFn` like Http2's equivalents. This is deliberate: the engine reads `Route.is_server_streaming` off `RouterType.route_slice` before invoking the handler, to pick sync-inline vs task-spawn dispatch, and a bare `HandlerFn` pointer cannot carry that metadata. See `docs/hld-grpc-en.md`'s Handler Pattern section for the measured cost of losing it.
 
 ---
 
-## core.zig
+## Core files
 
-### GrpcContext
+| File | Role |
+| :- | :- |
+| `Context.zig` | per-call state: request messages, reply verbs, deadline, cache verbs |
+| `Request.zig`, `Response.zig` | thin views over `Context` |
+| `handler.zig` | `HandlerFn`, `invoke` (the one handler call site), `completeHandlerError`, `rpcStart` / `writeRpcRecord` |
+| `router.zig` | `Route`, `Router`, `routeIsStreaming` |
+| `serve.zig` | `serveConn`: preface or h2c upgrade, then `serveLoop` |
+| `stream_dispatch.zig` | `dispatchWhole` (content-length check), `dispatchStream`, `dispatchInline` |
+| `DispatchTask.zig` | one server-streaming call on its own task |
+| `ReplyStage.zig`, `ConnReader.zig`, `ConnMutex.zig` | cork buffer, buffered frame reader, connection write lock |
+| `Stream.zig`, `stream_slot.zig` | one request stream, stream table claim / find / in-flight |
+| `deadline.zig`, `encoding.zig`, `cache.zig`, `path.zig`, `content_type.zig`, `window.zig` | deadline, gzip headers, response cache key, path split, content-type, window sizes |
 
-The per-stream handler state. `GrpcRequest` (`recvMessage`) and `GrpcResponse` (`sendHeaders` / `sendMessage` / `finish` / `serveCached` / `sendCached`) are thin wrappers holding a `*GrpcContext` pointer, one-line delegations to the methods below: the public trio (ADR-063) adds no new logic here, it only renames the call site from `ctx.foo()` to `req.foo()` / `res.foo()`. Fields relevant to output:
+### Context
+
+The per-call handler state. `Request` (`header`, `recvMessage`) and `Response` (`sendHeaders` / `sendMessage` / `finish` / `serveCached` / `sendCached`) are thin wrappers holding a `*Context` pointer, one-line delegations to the methods below: the public trio (ADR-063) adds no new logic here. Fields relevant to output:
 
 ```zig
 fd: std.posix.fd_t,
 stream_id: u31,
-_hdr_sent: bool,
-_write_mutex: ?*ConnMutex = null,   // streaming models only; null on the mux path
-_out: ?*ReplyStage = null,          // set on the inline/mux path: stage instead of direct write
+deadline: ?std.Io.Clock.Timestamp = null,
+_hdr_sent: bool = false,
+_write_mutex: ?*ConnMutex = null,   // streaming task only, null on the inline and mux paths
+_out: ?*ReplyStage = null,          // set on the inline and mux paths: stage instead of write
 ```
 
-`sendMessage` / `sendHeaders` / `finish` branch on `_out`: when it is set they append the encoded frames to the cork (no per-call lock, no direct `write`). When it is null they write directly to the fd, taking `_write_mutex` if a concurrent streaming task may be writing. Unary inline dispatch and every mux dispatch use the staged path. Server-streaming under the blocking models uses the direct path.
+`sendMessage` / `sendHeaders` / `finish` branch on `_out`: when it is set they append the encoded frames to the cork (no per-call lock, no direct `write`). When it is null they write directly to the fd, taking `_write_mutex` when it is set. A streaming DATA frame of up to 4096 bytes (head plus payload) leaves in one write, a larger one in two.
 
-The per-worker unary response cache (ADR-036) also lives here: `tl_cache`, `GrpcContext.serveCached` / `sendCached`, keyed by `requestKey(path, body)` (Wyhash over the gRPC path plus the raw request body). `serveCached` looks up, replays via `sendMessage` and `finish(.OK, "")` on a hit, and returns false on a miss, no cache, or an empty path (the caller then builds the response as usual). `sendCached` sends then stores, skipping the store on the same conditions. Installed by the `.EPOLL` / `.URING` workers, opt-in via `response_cache`.
+Errors are `ZixHttp2_GrpcContext_*` (`BrokenPipe`, `UnexpectedEOF`, `Overflow`, `BufferFull`), translated to `ZixHttp2_GrpcResponse_*` by `Response`. A staged reply that already failed a write reports `BrokenPipe` on the next send. A content-type or grpc-message past the HPACK scratch is `BufferFull`.
+
+`finishIfOpen` closes a call the handler left open, and leaves a finished call alone. `handler.invoke` calls it through `completeHandlerError` (INTERNAL, `handler error`) when the handler returns an error.
+
+The per-worker unary response cache (ADR-036) lives in `cache.zig`: `tl_cache`, keyed by `requestKey(path, body)` (Wyhash over the gRPC path plus the raw request body). `Context.serveCached` looks up, replays via `sendMessage` and `finish(.OK, "")` on a hit, and returns false on a miss, no cache, or an empty path. `sendCached` sends then stores, skipping the store on the same conditions. The TTL clock is `nowMillis(ctx.io)`.
+
+### Deadline
+
+`deadline.computeDeadline(io, handler_timeout_ms, headers)` takes the tightest of the server budget and a valid `grpc-timeout` header. A `grpc-timeout` that does not parse is ignored. `Router.dispatch` then tightens it with `Route.timeout_ms` (`tightenMs`), so a route budget never loosens it.
 
 ### ReplyStage
 
-A corked writer for one connection. Used by inline unary dispatch (blocking models) and by every dispatch on the mux path.
+A corked writer for one reply. Used by inline unary dispatch and by every dispatch on the mux path.
 
 ```zig
-const ReplyStage = struct {
-    fd: std.posix.fd_t,
-    buf: []u8,                    // caller-owned backing, not an inline array
-    len: usize,
+fd: std.posix.fd_t,
+buf: []u8,                    // caller-owned backing, not an inline array
+len: usize = 0,
+failed: bool = false,         // set once a write failed, read by the next send
 
-    fn append(self, bytes) void   // flush first if it would overflow; pass a >buf payload straight through
-    fn flush(self) void           // one writeAllFD of buf[0..len]; len = 0
-};
+fn append(self, bytes) void   // flush first when it would overflow, a chunk past buf goes straight through
+fn flush(self) void           // one writeAllFD of buf[0..len], len = 0
 ```
 
-`buf` is a caller-supplied slice. The blocking inline path (`dispatchGrpcInline`) backs it with a 4096-byte stack array (unary replies are small). The mux path backs it with the connection's 64 KB `stage_buf` (see `GrpcMuxConn`). All response frames produced while handling one readable event accumulate here and leave in a single `write()`.
+The inline path (`stream_dispatch.dispatchInline`) backs `buf` with a 4096-byte stack array (unary replies are small). The mux path backs it with the connection's 64 KB `stage_buf` (see `GrpcMuxConn`).
 
-### ConnReader (blocking models)
+### ConnReader (blocking model)
 
-Buffered frame reader used by `serveGrpcLoop`. `ensure(n)` blocks until `n` bytes are buffered (compacting when needed), `take(n)` returns and advances. Replaces a 9-byte header read plus a payload read per frame with batched reads.
+Buffered frame reader used by `serveLoop`. `ensure(n)` blocks until `n` bytes are buffered (compacting when needed), `take(n)` returns and advances. `n` past the buffer is `TooLarge`, a peer that closes first is `Closed`.
+
+### ConnMutex
+
+Heap-allocated, ref-counted spinlock shared by the read loop and every streaming task of one connection. `active_streaming` counts the tasks writing now. The inline path takes the lock only while it is above 0. The last `release` frees it.
+
+### DispatchTask
+
+`spawn` deep-copies the stream's headers (rebased into its own 4 KiB scratch) and body (64 KiB, gunzipped first when the client sent `grpc-encoding: gzip`), so the read loop frees the slot at once. It runs on `opts.io` when set, on a detached thread otherwise. A call it cannot take is closed at once: INTERNAL when the task cannot be made or a header lies past the scratch, RESOURCE_EXHAUSTED when the body is past 64 KiB.
 
 ### Stream
 
-Per-stream parse state. `body` and `header_scratch` are buffers sized to `opts.max_body` / `opts.max_header_scratch`, not inline arrays. On the multiplexed (`.EPOLL` / `.URING`) path a `Stream` is borrowed from a per-worker pool while open and returned on close (`next_free` links it into the freelist while idle), so resident stream memory tracks concurrent streams on the worker, not `connections * max_streams`. On the blocking path the array is inline and the buffers are slices into per-connection backing.
+Per-stream parse state. `body` and `header_scratch` are borrowed slices sized to `opts.max_body` / `opts.max_header_scratch`. On the multiplexed (`.EPOLL` / `.URING`) path a `Stream` is borrowed from a per-worker pool while open (`next_free` links it into the freelist while idle). On the blocking path each table entry points into per-connection backing.
 
 ```zig
-const Stream = struct {
-    id: u31,
-    state: StreamState,
-    headers: [h2.MAX_HEADERS]h2.Header,
-    header_count: usize,
-    body: []u8,
-    body_len: usize,
-    header_scratch: []u8,
-    end_headers: bool,
-    end_stream: bool,
-    next_free: ?*Stream,        // freelist link while idle in the per-worker pool
-};
+id: u31 = 0,
+state: StreamState = .IDLE,
+headers: [frame.MAX_HEADERS]Header = undefined,
+header_count: usize = 0,
+body: []u8 = &.{},
+body_len: usize = 0,
+header_scratch: []u8 = &.{},
+end_headers: bool = false,
+end_stream: bool = false,
+next_free: ?*Self = null,     // freelist link while idle in the per-worker pool
 ```
 
-On the mux path `muxSlotFor(conn, stream_id)` borrows a `Stream` from the per-worker pool into the first free slot (`acquireGrpcStream` grows the freelist on a miss, `muxReleaseSlot` / `releaseGrpcStream` return it on close), and `muxFindSlot(stream_id, ...)` locates an open stream by id. The blocking path keeps the inline-array `slotFor` / `findSlot`. All are linear scans over `max_streams`.
+`open(sid)` resets it for a new stream, `appendBody` refuses a chunk past the body (nothing copied). The blocking path claims and finds entries with `stream_slot.claim` / `find`, both linear scans over `max_streams`.
 
-### Flow-control constants
+### Flow-control constants (`window.zig`)
 
 ```zig
-const STREAM_WINDOW_SIZE: u32 = 16 * 1024 * 1024;  // advertised SETTINGS_INITIAL_WINDOW_SIZE
-const CONN_WINDOW_BUMP: u31 = 1 << 30;             // one-time connection window bump after handshake
-const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;   // bulk connection-window replenish point
+pub const STREAM_WINDOW_SIZE: u32 = 16 * 1024 * 1024;  // advertised SETTINGS_INITIAL_WINDOW_SIZE
+pub const CONN_WINDOW_BUMP: u31 = 1 << 30;             // one-time connection window bump after handshake
+pub const CONN_REPLENISH_THRESHOLD: usize = 1 << 29;   // bulk connection-window replenish point
 ```
 
 Stream windows are large enough that small request bodies never need a per-DATA stream `WINDOW_UPDATE`. The connection window is bumped once and only replenished in bulk past the threshold.
@@ -165,15 +192,15 @@ Control frames are staged via `muxStageFrame` / `muxStageWindowUpdate` / `muxSta
 
 ### muxDispatch(comptime RouterType, conn, stream)
 
-Builds a `GrpcContext` with `_out = &conn.stage` and `_write_mutex = null` (the worker owns the connection, so there is no concurrent writer), wraps it in a `GrpcRequest` / `GrpcResponse` pair (thin delegating views, zero extra logic), then calls `RouterType.dispatch(&req, &res, &ctx)`. Every route, unary and streaming, runs inline. Optional `logger.rpc` timing wraps the call.
+Builds a `Context` with `_out = &conn.stage` and `_write_mutex = null` (the worker owns the connection, so there is no concurrent writer), wraps it in a `Request` / `Response` pair (thin delegating views, zero extra logic), then calls `RouterType.dispatch(&req, &res, &ctx)`. Every route, unary and streaming, runs inline. Optional `logger.rpc` timing wraps the call.
 
-Server-streaming replies coalesce at the gRPC layer. `muxDispatch` gives a streaming route a per-call coalesce buffer (`ctx._coal`), and `sendMessage` packs consecutive gRPC-framed messages into it, emitting one HTTP/2 DATA frame per `grpc_stream_coalesce_cap` (16 KiB, the HTTP/2 default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. Unary keeps one frame per message (`_coal` is null), so it is byte-for-byte unchanged.
+Server-streaming replies coalesce at the gRPC layer. `muxDispatch` gives a streaming route a per-call coalesce buffer (`ctx._coal`), and `sendMessage` packs consecutive gRPC-framed messages into it, emitting one HTTP/2 DATA frame per `Context.STREAM_COALESCE_CAP` (16 KiB, the HTTP/2 default max frame size) instead of one DATA frame per message. A `count = 5000` reply drops from 5000 tiny DATA frames to about 3, cutting the frame-header bytes on the wire and the client's per-frame parse cost. Unary keeps one frame per message (`_coal` is null), so it is byte-for-byte unchanged.
 
 For a streaming route (detected by `routeIsStreaming(RouterType.route_slice, path)`), the dispatch is wrapped in `setTcpCork(conn.fd, true)` / `setTcpCork(conn.fd, false)`: the kernel holds output until the MSS is full or cork clears, coalescing the multiple intermediate stage flushes a streaming handler produces into fewer TCP segments. Unary routes are not corked (they already leave in one write). `setTcpCork` is a no-op on non-Linux targets.
 
-### Blocking path (serveGrpcConn / serveGrpcLoop)
+### Blocking path (serveConn / serveLoop)
 
-Unchanged for `.ASYNC`. `serveGrpcConn` sets `TCP_NODELAY` and calls `serveGrpcConnInner`, which handles the h2c-direct preface or the h2c upgrade, then `serveGrpcLoop`. The loop uses a blocking `ConnReader` and the same frame switch, dispatching via `dispatchStream`: unary inline (`dispatchGrpcInline`, staged via a stack `ReplyStage`), server-streaming via `spawnGrpcStream` (one detached thread, deep-copies headers and body, writes under a shared `ConnMutex`).
+Used by `.ASYNC`. `serveConn` sets `TCP_NODELAY`, then handles the h2c-direct preface or the h2c upgrade (`upgrade.accept` from Http2, stream 1 is answered inline before the loop), then `serveLoop`. The loop uses a blocking `ConnReader` and one frame switch. Every write goes through the connection `ConnMutex`. A finished stream goes to `stream_dispatch.dispatchWhole`: a body short of (or past) its content-length is reset with PROTOCOL_ERROR, a unary route runs inline (`dispatchInline`, staged in a stack `ReplyStage`), a server-streaming route runs on a `DispatchTask`. A body past `max_body` is closed with RESOURCE_EXHAUSTED. A peer that hangs up with a request in flight gets GOAWAY PROTOCOL_ERROR, an idle hang-up gets nothing.
 
 ---
 
@@ -259,6 +286,7 @@ Server config record. `io`, `ip`, `port`, and `dispatch_model` are required, eve
 
 - `max_recv_buf` defaults to 64 KiB (Http2 uses 32 KiB).
 - `compress` and `handler_timeout_ms` are gRPC only. Http2 has no `compress`.
+- `serveOpts()` builds the `ServeOpts` for one connection. `io` becomes the pool that runs server-streaming calls.
 - `tls` and `tls_port` are not ported yet.
 
 ---
@@ -267,7 +295,7 @@ Server config record. `io`, `ip`, `port`, and `dispatch_model` are required, eve
 
 ### Dispatch (run)
 
-`server.zig` holds the public `GrpcServer` type and a thin `run()` switch on `dispatch_model`. The per-model implementations live in `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` keeps the accept-thread + `io.async` structure and calls `serveGrpcConn`. `.EPOLL` calls `epoll.runEpoll`. `.URING` calls `uring.runUring` (the io_uring completion-based shape of `.EPOLL`). When `cfg.tls != null`, `run()` instead branches to `tls_mux.runTlsMux` (multiplexed) or `tls_serve.runTls` (blocking per-connection). Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
+`server.zig` holds the public `GrpcServer` type and a thin `run()` switch on `dispatch_model`. The per-model implementations live in `dispatch/` (`async.zig`, `epoll.zig`, `uring.zig`). `.ASYNC` keeps the accept-thread + `io.async` structure and calls `serve.serveConn`. `.EPOLL` calls `epoll.runEpoll`. `.URING` calls `uring.runUring` (the io_uring completion-based shape of `.EPOLL`). When `cfg.tls != null`, `run()` instead branches to `tls_mux.runTlsMux` (multiplexed) or `tls_serve.runTls` (blocking per-connection). Before any of that, `run()` rejects `.EPOLL` / `.URING` off Linux with `error.ZixDispatchModelUnsupported` (ADR-065).
 
 The `GrpcConnTable`, `acceptAll`, `epollMuxWorkerFn`, and `runEpoll` symbols below all live in `dispatch/epoll.zig`.
 
