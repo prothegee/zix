@@ -26,18 +26,20 @@ graph LR
 
 | File | Role |
 | :- | :- |
-| `src/tcp/http2/grpc/Grpc.zig` | namespace: all public re-exports |
+| `src/zix/tcp/http2/grpc/Grpc.zig` | namespace: all public re-exports |
 | `src/zix/tcp/http2/grpc/Context.zig`, `Request.zig`, `Response.zig` | per-call trio: request messages, reply verbs, deadline, cache verbs |
 | `src/zix/tcp/http2/grpc/handler.zig`, `router.zig` | `HandlerFn`, the one handler call site, the `rpc` log line, `Route`, `Router`, `routeIsStreaming` |
 | `src/zix/tcp/http2/grpc/serve.zig`, `stream_dispatch.zig`, `DispatchTask.zig` | blocking connection loop (`serveConn`), inline unary dispatch, server-streaming task |
 | `src/zix/tcp/http2/grpc/` (helpers) | `path.zig` + `GrpcPath.zig` (`parsePath`, `headerPath`), `content_type.zig` (`detectContentType`), `encoding.zig` (gzip headers), `deadline.zig` (`computeDeadline`), `cache.zig`, `window.zig`, `ServeOpts.zig`, `Stream.zig`, `stream_slot.zig`, `ReplyStage.zig`, `ConnReader.zig`, `ConnMutex.zig` |
 | `src/zix/tcp/http2/grpc/Config.zig` | server `Config` (`GrpcServerConfig`) |
-| `src/tcp/http2/grpc/server.zig` | `GrpcServer`: thin `run()` switch that dispatches to the per-model files under `dispatch/` (and to the TLS serve paths when `cfg.tls != null`) |
-| `src/tcp/http2/grpc/dispatch/` | per-model dispatch files: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplexed `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (shared helpers) |
+| `src/zix/tcp/http2/grpc/server.zig` | `init(Router, config)`, `GrpcServer(Router)`: `run()` checks the port and the model, then calls the per-model file under `dispatch/` |
+| `src/zix/tcp/http2/grpc/log.zig` | `logSystem`: server lines to the logger (tag `grpc`) or to `std.log` |
+| `src/zix/tcp/http2/grpc/mux/` | multiplexed non-blocking path for `.EPOLL` / `.URING`: `MuxConn.zig`, `stream_pool.zig`, `settings_frame.zig`, `stage_frame.zig`, `tcp_cork.zig`, `mux_dispatch.zig`, `mux_upgrade.zig`, `frame_loop.zig`, `process.zig` (`onReadable`, `processRing`) |
+| `src/zix/tcp/http2/grpc/dispatch/` | per-model dispatch files: `async.zig` (`.ASYNC`). `epoll.zig` and `uring.zig` are not ported yet |
 | `src/tcp/http2/grpc/tls_serve.zig` | `runTls`: blocking TLS handler path (per-connection) |
 | `src/tcp/http2/grpc/tls_mux.zig` | `runTlsMux`: multiplexed TLS dispatch path |
 | `src/tcp/http2/grpc/client.zig` | `GrpcClient`: openStream, sendMessage, endStream, recvResponse, unary |
-| `src/zix/tcp/http2/grpc/frame/` | `GrpcPrefix.zig`, `prefix.zig` (`readGrpcPrefix`, `writeGrpcPrefix`, `PREFIX_LEN`), `reply_block.zig` (comptime cached reply blocks), `build.zig` (`buildGrpcHeaders`, `buildGrpcHeadersGzip`, `buildGrpcDataHeader`, `buildGrpcTrailer`, `buildGrpcError`), `send.zig` (`sendGrpcHeadersFD`, `sendGrpcDataFD`, `sendGrpcTrailerFD`, `sendGrpcErrorFD`), `gzip.zig` (`compressGrpcMessage`, `decompressGrpcBody`) |
+| `src/zix/tcp/http2/grpc/frame/` | `GrpcPrefix.zig`, `prefix.zig` (`readGrpcPrefix`, `writeGrpcPrefix`, `PREFIX_LEN`), `reply_block.zig` (comptime cached reply blocks), `builder.zig` (`buildGrpcHeaders`, `buildGrpcHeadersGzip`, `buildGrpcDataHeader`, `buildGrpcTrailer`, `buildGrpcError`), `send.zig` (`sendGrpcHeadersFD`, `sendGrpcDataFD`, `sendGrpcTrailerFD`, `sendGrpcErrorFD`), `gzip.zig` (`compressGrpcMessage`, `decompressGrpcBody`) |
 | `src/zix/tcp/http2/grpc/proto/` | `wire_type.zig` (`WT_*` wire type constants), `varint.zig` (`encodeVarint`, `decodeVarint`, `MAX_LEN`), `field.zig` (`encodeString`, `encodeInt32`, `encodeDouble`, `decodeDouble`), `ProtoField.zig`, `MessageReader.zig` |
 | `src/zix/tcp/http2/grpc/status.zig` | `GrpcStatus` enum (u8), OK=0 to UNAUTHENTICATED=16 |
 | `src/zix/tcp/http2/grpc/timeout.zig` | `parseTimeout`: grpc-timeout header parser, `MAX_DIGITS` |
@@ -47,7 +49,7 @@ graph LR
 | Symbol | Notes |
 | :- | :- |
 | `zix.Grpc.Server` | `init(Router(&routes), config)`, `deinit()`, `run()!void` (ADR-063: the one exception to the family's `init(handler, config)`, see Handler Pattern below) |
-| `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
+| `zix.Grpc.Client` | not ported yet. `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Request` | `{ path, headers }` view, `header(name)`, `recvMessage()`. Thin delegating wrapper over `Context`, zero internal logic moved |
 | `zix.Grpc.Response` | `sendHeaders()`, `sendMessage()`, `finish()`, `serveCached()`, `sendCached()`. Thin delegating wrapper over `Context`, byte-identical wire |
 | `zix.Grpc.Context` | `deadline: ?std.Io.Clock.Timestamp`, `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
@@ -55,7 +57,7 @@ graph LR
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | comptime type: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (sends UNIMPLEMENTED if no route matches). `Server.init` takes the Router TYPE itself, not `.dispatch`, because the engine reads `Route.is_server_streaming` off `route_slice` before dispatch |
 | `zix.Grpc.ServerConfig` | see config fields below |
-| `zix.Grpc.ClientConfig` | `ip`, `port` |
+| `zix.Grpc.ClientConfig` | not ported yet. `ip`, `port` |
 | `zix.Grpc.DispatchModel` | ASYNC=0 (portable), EPOLL=1 (Linux-only), URING=2 (Linux-only), required with no default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
@@ -72,7 +74,7 @@ graph LR
 | `zix.Grpc.detectContentType` | `fn(headers: []const Header) ContentType` |
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) Error!u64` (nanoseconds, `ZixHttp2_GrpcTimeout_*` on a bad value) |
 | `zix.Grpc.serveConn` | `fn(comptime RouterType, fd, opts, io) void`: direct connection entry point |
-| `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
+| `zix.Grpc.ClientResponse` | not ported yet. `union(enum) { data: []const u8, status: GrpcStatus }` |
 
 ## GrpcServerConfig Fields
 
@@ -322,11 +324,13 @@ When the handler calls `res.finish(status, msg)` without sending any data, the s
 | `.EPOLL` | per worker | multiplexed event loop (Linux only) | highest throughput, see below |
 | `.URING` | per worker | multiplexed io_uring loop (Linux only) | same shape as `.EPOLL`, completion-based |
 
-`.EPOLL` is Linux-specific. Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected, so pick `.ASYNC` there. `.URING` is the same shared-nothing multiplexed design on the io_uring ring (`runUring`, ADR-037 Phase 4): completion-based instead of readiness-based, `workers` workers (0 = cpu_count), Linux-only, and rejected off Linux the same way. When io_uring itself is unavailable on a Linux host, `.URING` folds to the `.EPOLL` loop with a logged notice.
+Only `.ASYNC` is ported. `.EPOLL` and `.URING` are not ported yet: `run()` returns `ZixHttp2_GrpcServer_DispatchModel_NotSupported` for them on every platform, so pick `.ASYNC`. The multiplexed path they will drive is ported (`mux/`). The design below is what they will run.
+
+`.URING` is the same shared-nothing multiplexed design on the io_uring ring: completion-based instead of readiness-based, `workers` workers (0 = cpu_count), Linux-only.
 
 ### `.EPOLL` is multiplexed and shared-nothing
 
-`.EPOLL` does not park one thread per connection. It runs `workers` worker threads (0 = cpu count), each owning a private `SO_REUSEPORT` listener, its own epoll instance, and a private fd-indexed connection table. The kernel load-balances new connections across the per-worker listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff. One worker drives many non-blocking connections through a resumable HTTP/2 state machine (`GrpcMuxConn`), so concurrency is bounded by connection count, not by thread count. Each worker's `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call (ADR-032). The low-level design is in `lld-grpc-en.md`.
+`.EPOLL` does not park one thread per connection. It runs `workers` worker threads (0 = cpu count), each owning a private `SO_REUSEPORT` listener, its own epoll instance, and a private fd-indexed connection table. The kernel load-balances new connections across the per-worker listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff. One worker drives many non-blocking connections through a resumable HTTP/2 state machine (`MuxConn`), so concurrency is bounded by connection count, not by thread count. Each worker's `epoll_wait` drains up to `EPOLL_MAX_EVENTS` (512) ready events per call (ADR-032). The low-level design is in `lld-grpc-en.md`.
 
 Two consequences differ from `.ASYNC`:
 
@@ -346,7 +350,7 @@ flowchart TD
     C --> F[serveConn blocking]
     D --> F
     E --> F
-    EP --> MX[grpcMuxOnReadable\nresumable per-conn state]
+    EP --> MX[process.onReadable\nresumable per-conn state]
     F --> G{h2c preface?}
     G -->|PRI| H[h2c direct]
     G -->|GET/POST| I[h2c upgrade]
@@ -358,7 +362,7 @@ flowchart TD
     L -->|is_server_streaming=true| LS[spawn thread]
     LI --> M[HandlerFn: req/res/ctx trio]
     LS --> M
-    MX -->|every complete frame| MI[muxDispatch inline\nreply staged to cork]
+    MX -->|every complete frame| MI[mux_dispatch inline\nreply staged to cork]
     MI --> M
     M --> N[res.finish sends trailers]
 ```
