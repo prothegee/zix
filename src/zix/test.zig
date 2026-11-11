@@ -126,7 +126,9 @@ test {
     _ = @import("tcp/http2/frame.zig");
     _ = @import("tcp/http2/handler.zig");
     _ = @import("tcp/http2/reader.zig");
+    _ = @import("tcp/http2/router.zig");
     _ = @import("tcp/http2/serve.zig");
+    _ = @import("tcp/http2/static.zig");
     _ = @import("tcp/http2/stream_body.zig");
     _ = @import("tcp/http2/stream_invoke.zig");
     _ = @import("tcp/http2/stream_slot.zig");
