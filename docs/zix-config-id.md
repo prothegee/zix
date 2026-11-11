@@ -72,7 +72,7 @@ Sebuah sel dibiarkan kosong saat tidak berlaku (handle wajib seperti `io` tidak 
 | tls_port | 0 | port bind https pendamping untuk dual listener (ADR-060) | satu worker fleet melayani cleartext + TLS | isi bersama tls untuk melayani keduanya dari satu server | 0 mempertahankan perilaku single-listener | | butuh tls diisi, harus beda dari port |
 | logger | null | logger opsional untuk baris lifecycle | | pasang untuk logging server | | | access logging per request adalah tugas handler |
 
-## HTTP/2 (`Http2ServerConfig`)
+## HTTP/2 (`zix.Http2` config)
 
 h2c cleartext secara default, h2-over-TLS saat `tls` diisi.
 
