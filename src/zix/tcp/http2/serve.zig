@@ -36,8 +36,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const control = @import("control.zig");
 const frame = @import("frame.zig");
+const frame_payload = @import("frame_payload.zig");
 const handler = @import("handler.zig");
+const peer_settings = @import("peer_settings.zig");
 const reader = @import("reader.zig");
+const send_best_effort = @import("send_best_effort.zig");
 const stream_invoke = @import("stream_invoke.zig");
 const stream_slot = @import("stream_slot.zig");
 const upgrade = @import("upgrade.zig");
@@ -51,7 +54,7 @@ const Stream = @import("Stream.zig");
 // --------------------------------------------------------- //
 // Private:
 
-const Inner = Error || reader.Error || control.Error || upgrade.Error;
+const Inner = Error || reader.Error || control.Error || upgrade.Error || peer_settings.Error;
 
 /// Decoded HTTP2-Settings scratch on an h2c upgrade.
 const SETTINGS_DECODE_SCRATCH: usize = 256;
@@ -62,62 +65,8 @@ const UPGRADE_HEAD_BUF: usize = 8192;
 /// Bytes read before deciding between the preface and an upgrade.
 const PEEK_LEN: usize = 3;
 
-/// Bytes a HEADERS PRIORITY block takes: stream dependency plus weight.
-const PRIORITY_LEN: usize = 5;
-
 /// Bytes in a PING payload.
 const PING_LEN: usize = 8;
-
-/// Send GOAWAY, best effort.
-fn goaway(fd: std.posix.fd_t, last_stream_id: u31, error_code: u32) void {
-    control.sendGoawayFD(fd, last_stream_id, error_code) catch |err| switch (err) {
-        // Best effort: the connection is closing either way.
-        error.ZixHttp2_Control_BrokenPipe,
-        error.ZixHttp2_Control_TooManySettings,
-        error.ZixHttp2_Control_UnexpectedEOF,
-        error.ZixHttp2_Control_Overflow,
-        error.ZixHttp2_Control_BufferFull,
-        => {},
-    };
-}
-
-/// Send RST_STREAM, best effort.
-fn rstStream(fd: std.posix.fd_t, sid: u31, error_code: u32) void {
-    control.sendRstStreamFD(fd, sid, error_code) catch |err| switch (err) {
-        // Best effort: a broken socket shows up on the next read.
-        error.ZixHttp2_Control_BrokenPipe,
-        error.ZixHttp2_Control_TooManySettings,
-        error.ZixHttp2_Control_UnexpectedEOF,
-        error.ZixHttp2_Control_Overflow,
-        error.ZixHttp2_Control_BufferFull,
-        => {},
-    };
-}
-
-/// Send WINDOW_UPDATE, best effort.
-fn windowUpdate(fd: std.posix.fd_t, sid: u31, increment: usize) void {
-    control.sendWindowUpdateFD(fd, sid, @intCast(increment)) catch |err| switch (err) {
-        // Best effort: a broken socket shows up on the next read.
-        error.ZixHttp2_Control_BrokenPipe,
-        error.ZixHttp2_Control_TooManySettings,
-        error.ZixHttp2_Control_UnexpectedEOF,
-        error.ZixHttp2_Control_Overflow,
-        error.ZixHttp2_Control_BufferFull,
-        => {},
-    };
-}
-
-/// Answer a stream with 413 and an empty body, best effort.
-fn sendTooLarge(fd: std.posix.fd_t, sid: u31) void {
-    writer.sendResponseFD(fd, sid, 413, "text/plain", "") catch |err| switch (err) {
-        // Best effort: a broken socket shows up on the next read.
-        error.ZixHttp2_Writer_BrokenPipe,
-        error.ZixHttp2_Writer_UnexpectedEOF,
-        error.ZixHttp2_Writer_Overflow,
-        error.ZixHttp2_Writer_BufferFull,
-        => {},
-    };
-}
 
 /// Turn TCP_NODELAY on, best effort.
 fn setNoDelay(fd: std.posix.fd_t) void {
@@ -138,51 +87,6 @@ fn setNoDelay(fd: std.posix.fd_t) void {
     }
 }
 
-/// Apply peer SETTINGS parameters: the HPACK table size and the frame size
-/// cap for outbound DATA.
-///
-/// Note:
-/// - RFC 7540 section 6.5.2: a valid SETTINGS_MAX_FRAME_SIZE is 16384 up to
-///   16777215. An out-of-range value keeps the last good one.
-///
-/// Param:
-/// params - []const u8 (SETTINGS payload, 6 bytes per parameter)
-/// decoder - *HpackDecoder (the connection's decoder)
-/// peer_max_frame_size - *u32 (updated in place)
-///
-/// Return:
-/// - void
-fn applySettings(params: []const u8, decoder: *HpackDecoder, peer_max_frame_size: *u32) void {
-    var pos: usize = 0;
-
-    while (pos + frame.SETTINGS_PARAM_LEN <= params.len) : (pos += frame.SETTINGS_PARAM_LEN) {
-        const id = std.mem.readInt(u16, params[pos..][0..2], .big);
-        const value = std.mem.readInt(u32, params[pos + 2 ..][0..4], .big);
-
-        if (id == frame.SETTINGS_HEADER_TABLE_SIZE) {
-            decoder.max_size = value;
-            decoder.evictTo(value);
-        }
-
-        const in_range =
-            value >= frame.DEFAULT_MAX_FRAME_SIZE and
-            value <= frame.MAX_FRAME_SIZE_LIMIT;
-        if (id == frame.SETTINGS_MAX_FRAME_SIZE and in_range) {
-            peer_max_frame_size.* = value;
-        }
-    }
-}
-
-/// Send this server's SETTINGS frame.
-fn sendServerSettings(fd: std.posix.fd_t, opts: ServeOpts) control.Error!void {
-    return control.sendSettingsFD(fd, &.{
-        .{ frame.SETTINGS_MAX_CONCURRENT_STREAMS, @as(u32, @intCast(opts.max_streams)) },
-        .{ frame.SETTINGS_INITIAL_WINDOW_SIZE, frame.DEFAULT_INITIAL_WINDOW },
-        .{ frame.SETTINGS_MAX_FRAME_SIZE, opts.max_frame_size },
-        .{ frame.SETTINGS_ENABLE_PUSH, 0 },
-    });
-}
-
 /// Read the rest of the client preface after `have` bytes were read.
 fn recvPreface(fd: std.posix.fd_t, have: []const u8) Inner!void {
     var preface: [frame.PREFACE.len]u8 = undefined;
@@ -190,47 +94,10 @@ fn recvPreface(fd: std.posix.fd_t, have: []const u8) Inner!void {
     try reader.recvExact(fd, preface[have.len..]);
 
     if (!std.mem.eql(u8, &preface, frame.PREFACE)) {
-        goaway(fd, 0, frame.ERR_PROTOCOL_ERROR);
+        send_best_effort.goaway(fd, 0, frame.ERR_PROTOCOL_ERROR);
 
         return Error.ZixHttp2_Serve_BadPreface;
     }
-}
-
-/// The header block of a HEADERS frame, with padding and priority removed.
-///
-/// Return:
-/// - ?[]const u8 (null when the padding runs past the payload)
-fn headerBlock(flags: u8, payload: []const u8) ?[]const u8 {
-    var offset: usize = 0;
-    var pad_len: usize = 0;
-
-    if ((flags & frame.FLAG_PADDED) != 0 and payload.len > 0) {
-        pad_len = payload[0];
-        offset = 1;
-    }
-    if ((flags & frame.FLAG_PRIORITY) != 0 and offset + PRIORITY_LEN <= payload.len) {
-        offset += PRIORITY_LEN;
-    }
-    if (pad_len + offset > payload.len) return null;
-
-    return payload[offset .. payload.len - pad_len];
-}
-
-/// The data of a DATA frame, with padding removed.
-///
-/// Return:
-/// - ?[]const u8 (null when the padding runs past the payload)
-fn dataBlock(flags: u8, payload: []const u8) ?[]const u8 {
-    var data = payload;
-    var pad_len: usize = 0;
-
-    if ((flags & frame.FLAG_PADDED) != 0 and data.len > 0) {
-        pad_len = data[0];
-        data = data[1..];
-    }
-    if (pad_len > data.len) return null;
-
-    return data[0 .. data.len - pad_len];
 }
 
 /// GOAWAY for a peer that hangs up part way through a request. A connection
@@ -243,7 +110,7 @@ fn hangupGoaway(
 ) void {
     if (!stream_slot.requestInFlight(streams, used)) return;
 
-    goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
+    send_best_effort.goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
 }
 
 /// Frame loop for one connection, after the preface and SETTINGS.
@@ -300,7 +167,7 @@ fn serveLoop(
         };
 
         if (header.length > max_payload) {
-            goaway(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR);
+            send_best_effort.goaway(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR);
 
             return Error.ZixHttp2_Serve_FrameTooLarge;
         }
@@ -315,7 +182,7 @@ fn serveLoop(
             frame.FRAME_TYPE_SETTINGS => {
                 if ((flags & frame.FLAG_ACK) != 0) continue;
 
-                applySettings(payload, decoder, &peer_max_frame_size);
+                _ = peer_settings.apply(payload, decoder, &peer_max_frame_size);
                 try control.sendSettingsAckFD(fd);
                 try control.sendWindowUpdateFD(fd, 0, frame.DEFAULT_INITIAL_WINDOW);
             },
@@ -323,7 +190,7 @@ fn serveLoop(
                 if ((flags & frame.FLAG_ACK) != 0) continue;
 
                 if (payload.len != PING_LEN) {
-                    goaway(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR);
+                    send_best_effort.goaway(fd, last_stream_id, frame.ERR_FRAME_SIZE_ERROR);
 
                     return Error.ZixHttp2_Serve_ProtocolError;
                 }
@@ -332,12 +199,12 @@ fn serveLoop(
             },
             frame.FRAME_TYPE_HEADERS => {
                 if (sid == 0) {
-                    goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
+                    send_best_effort.goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
 
                     return Error.ZixHttp2_Serve_ProtocolError;
                 }
                 if (sid <= last_stream_id and sid % 2 == 1) {
-                    rstStream(fd, sid, frame.ERR_STREAM_CLOSED);
+                    send_best_effort.rstStream(fd, sid, frame.ERR_STREAM_CLOSED);
 
                     continue;
                 }
@@ -345,15 +212,15 @@ fn serveLoop(
                 last_stream_id = @max(last_stream_id, sid);
 
                 const slot = stream_slot.claim(sid, streams, used) orelse {
-                    rstStream(fd, sid, frame.ERR_REFUSED_STREAM);
+                    send_best_effort.rstStream(fd, sid, frame.ERR_REFUSED_STREAM);
 
                     continue;
                 };
                 const stream = &streams[slot];
                 stream.open(sid);
 
-                const block = headerBlock(flags, payload) orelse {
-                    goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
+                const block = frame_payload.headerBlock(flags, payload) orelse {
+                    send_best_effort.goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
 
                     return Error.ZixHttp2_Serve_ProtocolError;
                 };
@@ -364,7 +231,7 @@ fn serveLoop(
                     &stream.header_scratch,
                 ) catch |err| switch (err) {
                     else => {
-                        rstStream(fd, sid, frame.ERR_COMPRESSION_ERROR);
+                        send_best_effort.rstStream(fd, sid, frame.ERR_COMPRESSION_ERROR);
                         used[slot] = false;
 
                         continue;
@@ -387,7 +254,7 @@ fn serveLoop(
             },
             frame.FRAME_TYPE_CONTINUATION => {
                 const slot = stream_slot.find(sid, streams, used) orelse {
-                    goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
+                    send_best_effort.goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
 
                     return Error.ZixHttp2_Serve_ProtocolError;
                 };
@@ -399,7 +266,7 @@ fn serveLoop(
                     &stream.header_scratch,
                 ) catch |err| switch (err) {
                     else => {
-                        rstStream(fd, sid, frame.ERR_COMPRESSION_ERROR);
+                        send_best_effort.rstStream(fd, sid, frame.ERR_COMPRESSION_ERROR);
                         used[slot] = false;
 
                         continue;
@@ -422,20 +289,20 @@ fn serveLoop(
             },
             frame.FRAME_TYPE_DATA => {
                 if (sid == 0) {
-                    goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
+                    send_best_effort.goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
 
                     return Error.ZixHttp2_Serve_ProtocolError;
                 }
 
                 const slot = stream_slot.find(sid, streams, used) orelse {
-                    rstStream(fd, sid, frame.ERR_STREAM_CLOSED);
+                    send_best_effort.rstStream(fd, sid, frame.ERR_STREAM_CLOSED);
 
                     continue;
                 };
                 const stream = &streams[slot];
 
-                const data = dataBlock(flags, payload) orelse {
-                    goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
+                const data = frame_payload.dataBlock(flags, payload) orelse {
+                    send_best_effort.goaway(fd, last_stream_id, frame.ERR_PROTOCOL_ERROR);
 
                     return Error.ZixHttp2_Serve_ProtocolError;
                 };
@@ -444,16 +311,16 @@ fn serveLoop(
                 // Only the connection window is credited for the dropped bytes,
                 // so the other streams keep flowing.
                 if (!stream.appendBody(data)) {
-                    if (data.len > 0) windowUpdate(fd, 0, data.len);
-                    sendTooLarge(fd, sid);
+                    if (data.len > 0) send_best_effort.windowUpdate(fd, 0, data.len);
+                    send_best_effort.sendTooLarge(fd, sid);
                     used[slot] = false;
 
                     continue;
                 }
 
                 if (data.len > 0) {
-                    windowUpdate(fd, 0, data.len);
-                    windowUpdate(fd, sid, data.len);
+                    send_best_effort.windowUpdate(fd, 0, data.len);
+                    send_best_effort.windowUpdate(fd, sid, data.len);
                 }
 
                 stream.end_stream = (flags & frame.FLAG_END_STREAM) != 0;
@@ -496,9 +363,9 @@ fn serveUpgrade(
     // the stream 1 response is known before any frame is exchanged.
     var decoder = HpackDecoder.init();
     var peer_max_frame_size: u32 = frame.DEFAULT_MAX_FRAME_SIZE;
-    applySettings(head.settings, &decoder, &peer_max_frame_size);
+    _ = peer_settings.apply(head.settings, &decoder, &peer_max_frame_size);
 
-    try sendServerSettings(fd, opts);
+    try peer_settings.sendServerSettings(fd, opts);
 
     const headers = [_]Header{
         .{
@@ -542,7 +409,7 @@ fn serveInner(
     }
 
     try recvPreface(fd, &peek);
-    try sendServerSettings(fd, opts);
+    try peer_settings.sendServerSettings(fd, opts);
 
     var decoder = HpackDecoder.init();
 
@@ -760,61 +627,6 @@ fn serveUpgradeProbe(fd: std.posix.fd_t) void {
     upgrade_calls = 0;
 
     serveConn(upgradeHandler, fd, .{}, std.testing.io);
-}
-
-test "zix http2: serve, headerBlock strips padding and priority" {
-    const payload = [_]u8{ 2, 0, 0, 0, 1, 16, 'a', 'b', 0, 0 };
-    const flags = frame.FLAG_PADDED | frame.FLAG_PRIORITY;
-
-    try std.testing.expectEqualStrings("ab", headerBlock(flags, &payload).?);
-}
-
-test "zix http2: serve, headerBlock padding past the payload is malformed" {
-    const payload = [_]u8{ 9, 'a' };
-
-    try std.testing.expect(headerBlock(frame.FLAG_PADDED, &payload) == null);
-}
-
-test "zix http2: serve, dataBlock strips padding" {
-    const payload = [_]u8{ 1, 'x', 'y', 0 };
-
-    try std.testing.expectEqualStrings("xy", dataBlock(frame.FLAG_PADDED, &payload).?);
-}
-
-test "zix http2: serve, dataBlock padding past the payload is malformed" {
-    const payload = [_]u8{ 5, 'x' };
-
-    try std.testing.expect(dataBlock(frame.FLAG_PADDED, &payload) == null);
-}
-
-test "zix http2: serve, applySettings takes a valid max frame size" {
-    var decoder = HpackDecoder.init();
-    var peer_max: u32 = frame.DEFAULT_MAX_FRAME_SIZE;
-    const params = [_]u8{ 0x00, 0x05, 0x00, 0x00, 0x80, 0x00 };
-
-    applySettings(&params, &decoder, &peer_max);
-
-    try std.testing.expectEqual(@as(u32, 32 * 1024), peer_max);
-}
-
-test "zix http2: serve, applySettings out of range keeps the last value" {
-    var decoder = HpackDecoder.init();
-    var peer_max: u32 = frame.DEFAULT_MAX_FRAME_SIZE;
-    const params = [_]u8{ 0x00, 0x05, 0x00, 0x00, 0x00, 0x10 };
-
-    applySettings(&params, &decoder, &peer_max);
-
-    try std.testing.expectEqual(frame.DEFAULT_MAX_FRAME_SIZE, peer_max);
-}
-
-test "zix http2: serve, applySettings sets the HPACK table size" {
-    var decoder = HpackDecoder.init();
-    var peer_max: u32 = frame.DEFAULT_MAX_FRAME_SIZE;
-    const params = [_]u8{ 0x00, 0x01, 0x00, 0x00, 0x00, 0x80 };
-
-    applySettings(&params, &decoder, &peer_max);
-
-    try std.testing.expectEqual(@as(usize, 128), decoder.max_size);
 }
 
 test "zix http2: serve, serveConn prior knowledge answers one request" {
