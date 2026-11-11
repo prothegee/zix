@@ -121,6 +121,12 @@ test {
     _ = @import("tcp/http2/dispatch/async.zig");
     _ = @import("tcp/http2/dispatch/epoll.zig");
     _ = @import("tcp/http2/dispatch/uring.zig");
+    _ = @import("tcp/http2/grpc/frame/GrpcPrefix.zig");
+    _ = @import("tcp/http2/grpc/frame/build.zig");
+    _ = @import("tcp/http2/grpc/frame/gzip.zig");
+    _ = @import("tcp/http2/grpc/frame/prefix.zig");
+    _ = @import("tcp/http2/grpc/frame/reply_block.zig");
+    _ = @import("tcp/http2/grpc/frame/send.zig");
     _ = @import("tcp/http2/grpc/proto/MessageReader.zig");
     _ = @import("tcp/http2/grpc/proto/ProtoField.zig");
     _ = @import("tcp/http2/grpc/proto/field.zig");
