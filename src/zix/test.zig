@@ -103,6 +103,17 @@ test {
     _ = @import("tcp/http1/websocket/upgrade.zig");
     _ = @import("tcp/http2/FrameHeader.zig");
     _ = @import("tcp/http2/control.zig");
+    _ = @import("tcp/http2/hpack/DynamicTable.zig");
+    _ = @import("tcp/http2/hpack/Header.zig");
+    _ = @import("tcp/http2/hpack/HpackDecoder.zig");
+    _ = @import("tcp/http2/hpack/HpackEncoder.zig");
+    _ = @import("tcp/http2/hpack/HuffSym.zig");
+    _ = @import("tcp/http2/hpack/RespPrefix.zig");
+    _ = @import("tcp/http2/hpack/huffman.zig");
+    _ = @import("tcp/http2/hpack/huffman_table.zig");
+    _ = @import("tcp/http2/hpack/integer.zig");
+    _ = @import("tcp/http2/hpack/response_block.zig");
+    _ = @import("tcp/http2/hpack/static_table.zig");
     _ = @import("tcp/http2/frame.zig");
     _ = @import("tcp/http2/reader.zig");
     _ = @import("tcp/http2/writer.zig");
