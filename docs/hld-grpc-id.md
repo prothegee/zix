@@ -20,14 +20,17 @@ graph LR
     Z --> TO[timeout.zig]
 ```
 
-`zix.Grpc` dibangun di atas `zix.Http2`. Frame loop gRPC (`serveGrpcConn`) mereplikasi h2c stream loop dari `zix.Http2.serveConn`, keduanya men-dispatch bentuk trio `req`/`res`/`ctx` yang sama (ADR-063), tapi engine gRPC tambahan membaca `Route.is_server_streaming` sebelum memanggil handler untuk mendukung streaming tanpa antrian antar thread (lihat Pola Handler).
+`zix.Grpc` dibangun di atas `zix.Http2`. Frame loop gRPC (`serveConn`) mereplikasi h2c stream loop dari `zix.Http2.serveConn`, keduanya men-dispatch bentuk trio `req`/`res`/`ctx` yang sama (ADR-063), tapi engine gRPC tambahan membaca `Route.is_server_streaming` sebelum memanggil handler untuk mendukung streaming tanpa antrian antar thread (lihat Pola Handler).
 
 ## Struktur Berkas
 
 | Berkas | Peran |
 | :- | :- |
 | `src/tcp/http2/grpc/Grpc.zig` | namespace: semua re-export publik |
-| `src/tcp/http2/grpc/core.zig` | `GrpcContext`, `GrpcRequest`, `GrpcResponse`, `HandlerFn`, `Router`, `serveGrpcConn` (model blocking), `GrpcMuxConn` + `grpcMuxOnReadable` (multiplex `.EPOLL`), `parsePath`, `detectContentType`, `wallClockNs`, `computeDeadline`, `peerStr` |
+| `src/zix/tcp/http2/grpc/Context.zig`, `Request.zig`, `Response.zig` | trio per call: pesan request, verb balasan, deadline, verb cache |
+| `src/zix/tcp/http2/grpc/handler.zig`, `router.zig` | `HandlerFn`, satu-satunya tempat handler dipanggil, baris log `rpc`, `Route`, `Router`, `routeIsStreaming` |
+| `src/zix/tcp/http2/grpc/serve.zig`, `stream_dispatch.zig`, `DispatchTask.zig` | connection loop blocking (`serveConn`), dispatch unary inline, task server-streaming |
+| `src/zix/tcp/http2/grpc/` (helper) | `path.zig` + `GrpcPath.zig` (`parsePath`, `headerPath`), `content_type.zig` (`detectContentType`), `encoding.zig` (header gzip), `deadline.zig` (`computeDeadline`), `cache.zig`, `window.zig`, `ServeOpts.zig`, `Stream.zig`, `stream_slot.zig`, `ReplyStage.zig`, `ConnReader.zig`, `ConnMutex.zig` |
 | `src/zix/tcp/http2/grpc/Config.zig` | `Config` server (`GrpcServerConfig`) |
 | `src/tcp/http2/grpc/server.zig` | `GrpcServer`: `run()` switch tipis yang men-dispatch ke berkas per-model di bawah `dispatch/` (dan ke jalur serve TLS saat `cfg.tls != null`) |
 | `src/tcp/http2/grpc/dispatch/` | berkas dispatch per-model: `async.zig`, `pool.zig`, `mixed.zig`, `epoll.zig` (multiplex `epollMuxWorkerFn` + `GrpcConnTable`), `uring.zig` (`.URING`), `common.zig` (helper bersama) |
@@ -47,7 +50,7 @@ graph LR
 | `zix.Grpc.Client` | `connect(config, io)!Self`, `deinit()`, `openStream`, `sendMessage`, `endStream`, `recvResponse`, `unary` |
 | `zix.Grpc.Request` | view `{ path, headers }`, `header(name)`, `recvMessage()`. Wrapper delegasi tipis atas `Context`, tanpa logika internal yang dipindah |
 | `zix.Grpc.Response` | `sendHeaders()`, `sendMessage()`, `finish()`, `serveCached()`, `sendCached()`. Wrapper delegasi tipis atas `Context`, wire byte-identical |
-| `zix.Grpc.Context` | `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
+| `zix.Grpc.Context` | `deadline: ?std.Io.Clock.Timestamp`, `withTimeout()` / `setTimeout()` / `withDeadline()` / `isExpired()` / `timedOut()`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
 | `zix.Grpc.HandlerFn` | `*const fn (req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063). Error yang dikembalikan menutup call yang masih terbuka dengan `grpc-status 13` |
 | `zix.Grpc.Route` | `struct { path: []const u8, handler: HandlerFn, timeout_ms: u32 = 0, is_server_streaming: bool = false }` |
 | `zix.Grpc.Router(routes)` | tipe comptime: `pub const route_slice`, `dispatch(req, res, ctx) anyerror!void` (mengirim UNIMPLEMENTED jika tidak ada route yang cocok). `Server.init` menerima TIPE Router itu sendiri, bukan `.dispatch`, karena engine membaca `Route.is_server_streaming` dari `route_slice` sebelum dispatch |
@@ -56,7 +59,7 @@ graph LR
 | `zix.Grpc.DispatchModel` | ASYNC=0 (portabel), EPOLL=1 (hanya Linux), URING=2 (hanya Linux), wajib tanpa default |
 | `zix.Grpc.Status` | enum(u8): OK=0 ... UNAUTHENTICATED=16 |
 | `zix.Grpc.ContentType` | PROTO, JSON, UNKNOWN |
-| `zix.Grpc.ServeOpts` | `GrpcServeOpts`: opsi per koneksi yang diteruskan ke `serveConn` |
+| `zix.Grpc.ServeOpts` | opsi per koneksi yang diteruskan ke `serveConn`, dibangun oleh `ServerConfig.serveOpts()` |
 | `zix.Grpc.Path` | `package_service: []const u8`, `method: []const u8` |
 | `zix.Grpc.Prefix` | `compress: bool`, `msg_len: u32` |
 | `zix.Grpc.readPrefix` | `fn(body: []const u8) Error!Prefix` (`ZixHttp2_GrpcPrefix_TooShort` saat body kurang dari 5 byte) |
@@ -70,7 +73,6 @@ graph LR
 | `zix.Grpc.parseTimeout` | `fn(value: []const u8) Error!u64` (nanodetik, `ZixHttp2_GrpcTimeout_*` untuk nilai yang salah) |
 | `zix.Grpc.serveConn` | `fn(comptime RouterType, fd, opts, io) void`: titik masuk koneksi langsung |
 | `zix.Grpc.ClientResponse` | `union(enum) { data: []const u8, status: GrpcStatus }` |
-| `zix.Grpc.wallClockNs` | `fn() u64`: waktu wall-clock saat ini dalam nanodetik (CLOCK_REALTIME). Digunakan untuk menimpa `ctx.deadline_ns` saat runtime. |
 
 ## Field GrpcServerConfig
 
@@ -136,7 +138,7 @@ Aturan penting:
 
 ## Deadline Konteks
 
-Tiga input menentukan `ctx.deadline_ns` saat dispatch:
+Tiga input menentukan `ctx.deadline` saat dispatch:
 
 | Input | Lokasi | Catatan |
 | :- | :- | :- |
@@ -144,7 +146,7 @@ Tiga input menentukan `ctx.deadline_ns` saat dispatch:
 | `Route.timeout_ms` | tabel route comptime | default per route (0 = gunakan batas global) |
 | header `grpc-timeout` | request client | di-parse oleh `parseTimeout` (berlaku jika lebih ketat) |
 
-`ctx.deadline_ns: ?u64` adalah yang paling ketat dari ketiganya (nanodetik CLOCK_REALTIME). `null` berarti tidak ada deadline. `Router.dispatch` menerapkan `Route.timeout_ms` setelah deadline global diatur, sehingga timeout per route hanya memperketat, tidak pernah memperlunak.
+`ctx.deadline: ?std.Io.Clock.Timestamp` adalah yang paling ketat dari ketiganya (wall clock, dibaca lewat `ctx.io`, sama dengan Http1 dan Http2). `null` berarti tidak ada deadline. `Router.dispatch` menerapkan `Route.timeout_ms` setelah deadline global diatur, sehingga timeout per route hanya memperketat, tidak pernah memperlunak.
 
 Handler memeriksa deadline secara eksplisit:
 
@@ -166,9 +168,9 @@ fn slowHandler(req: *zix.Grpc.Request, res: *zix.Grpc.Response, ctx: *zix.Grpc.C
 Pola penimpaan deadline handler (kanonik):
 
 ```zig
-ctx.deadline_ns = wallClockNs() + 60 * std.time.ns_per_s; // perpanjang ke 60 detik dari sekarang
-ctx.deadline_ns = null; // nonaktifkan untuk panggilan ini
-// atau lewat helper: ctx.setTimeout(60_000); ctx.withDeadline(deadline_ns);
+ctx.setTimeout(60_000); // perpanjang ke 60 detik dari sekarang
+ctx.deadline = null; // nonaktifkan untuk panggilan ini
+// atau dengan timestamp eksplisit: ctx.* = ctx.withDeadline(timestamp);
 ```
 
 Risiko saat menimpa:
@@ -341,7 +343,7 @@ flowchart TD
     A[GrpcServer.run] --> B{dispatch_model}
     B -->|ASYNC| C[single accept thread\nio.async per conn]
     B -->|EPOLL| EP[N workers\nlistener SO_REUSEPORT\n+ epoll masing-masing]
-    C --> F[serveGrpcConn blocking]
+    C --> F[serveConn blocking]
     D --> F
     E --> F
     EP --> MX[grpcMuxOnReadable\nstate per-conn resumable]
@@ -401,7 +403,7 @@ Reverse proxy tetap alternatif ketika TLS offload, routing, atau berbagi port de
 | :- | :- |
 | `examples/grpc_server.zig` | model dispatch dipilih per target (URING di Linux, ASYNC di platform lain): handler SayHello, Echo, dan StreamSum, port 9032 |
 | `examples/grpc_client.zig` | demo unary call dan manual streaming, port 8083 |
-| `examples/grpc_timeout.zig` | demo context timeout: handler_timeout_ms, Route.timeout_ms, ctx.isExpired(), penimpaan ctx.deadline_ns, port 8084 |
+| `examples/grpc_timeout.zig` | demo context timeout: handler_timeout_ms, Route.timeout_ms, ctx.isExpired(), penimpaan ctx.setTimeout, port 8084 |
 | `examples/grpc_location_server.zig` | location.Location/SendLocationAndSave, model dispatch dipilih per target, port 9038 |
 | `examples/grpc_location_client.zig` | client layanan lokasi: encode field double, decode respons bool |
 | `examples/grpc_multi_server.zig` | ASYNC, helloworld.Greeter + location.Location pada satu port (10102), logger terhubung |
