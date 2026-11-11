@@ -34,8 +34,8 @@
 //!
 
 const std = @import("std");
+const CacheSize = @import("../../utils/cache/CacheSize.zig");
 const ResponseCache = @import("../../utils/cache/ResponseCache.zig");
-const Http1Config = @import("../http1/Config.zig");
 const ServeOpts = @import("ServeOpts.zig");
 const writer = @import("writer.zig");
 
@@ -132,8 +132,6 @@ pub fn effectiveCacheEntries(
 /// cache when caching is off or the build failed.
 ///
 /// Note:
-/// - ResponseCache is sized from an Http1 Config. Only its cache size fields
-///   are read, so the address fields are left empty.
 /// - slot must outlive the worker loop, since the installed pointer points
 ///   into it.
 ///
@@ -152,20 +150,16 @@ pub fn installWorker(
     slot.* = null;
 
     if (opts.response_cache) {
-        const sizing: Http1Config = .{
-            .io = undefined,
-            .ip = "",
-            .port = 0,
-            .dispatch_model = .ASYNC,
-            .cache_max_entries = effectiveCacheEntries(
+        const size: CacheSize = .{
+            .max_entries = effectiveCacheEntries(
                 opts.cache_max_entries,
                 opts.cache_max_value_bytes,
                 opts.cache_max_total_bytes,
             ),
-            .cache_max_value_bytes = opts.cache_max_value_bytes,
+            .max_value_bytes = opts.cache_max_value_bytes,
         };
 
-        slot.* = ResponseCache.init(allocator, sizing) catch |err| switch (err) {
+        slot.* = ResponseCache.init(allocator, size) catch |err| switch (err) {
             error.ZixUtils_ResponseCache_OutOfMemory,
             error.ZixUtils_ResponseCache_MapFailed,
             => null,
@@ -270,16 +264,10 @@ const TEST_FD: std.posix.fd_t = if (builtin.os.tag == .windows)
 else
     -1;
 
-fn testCacheConfig() Http1Config {
-    return .{
-        .io = std.testing.io,
-        .ip = "127.0.0.1",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = 16,
-        .cache_max_value_bytes = 1024,
-    };
-}
+const TEST_SIZE: CacheSize = .{
+    .max_entries = 16,
+    .max_value_bytes = 1024,
+};
 
 fn setTestRequest(path: []const u8) void {
     tl_req_path = path;
@@ -348,7 +336,7 @@ test "zix http2: cache, serveCached misses without a cache" {
 }
 
 test "zix http2: cache, sendCachedFD then serveCached hits" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
@@ -370,7 +358,7 @@ test "zix http2: cache, sendCachedFD then serveCached hits" {
 }
 
 test "zix http2: cache, another path misses" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
@@ -391,7 +379,7 @@ test "zix http2: cache, another path misses" {
 }
 
 test "zix http2: cache, empty path stores nothing" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
@@ -411,7 +399,7 @@ test "zix http2: cache, empty path stores nothing" {
 }
 
 test "zix http2: cache, without an io misses" {
-    var resp_cache = try ResponseCache.init(std.testing.allocator, testCacheConfig());
+    var resp_cache = try ResponseCache.init(std.testing.allocator, TEST_SIZE);
     defer resp_cache.deinit();
 
     setCache(&resp_cache, 1000);
