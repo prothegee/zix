@@ -261,7 +261,7 @@ Shared request processing and the blocking connection path, split by responsibil
 
 ### Router / Route (router.zig)
 
-`Route` is `{ path, handler, kind = .EXACT }` with `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` builds a comptime table: `EXACT` routes resolve through a `StaticStringMap` (O(1)), `PREFIX` routes match the longest registered prefix on a path-segment boundary, the query string is stripped first, and an unmatched path sends `404`. `Router(routes).dispatch` itself matches `HandlerFn` exactly, so `Server.init` takes `router.dispatch` as a plain runtime value, not the route table.
+`Route` is `{ path, handler, kind = .EXACT }` with `RouteKind` `EXACT | PREFIX`. `Router(comptime routes)` builds a comptime table: `EXACT` routes resolve through a `StaticStringMap` (O(1)), `PREFIX` routes match the longest registered prefix on a path-segment boundary, the query string is stripped first, an unmatched path tries `static.fallback`, and a path still unmatched sends `404 text/plain`. `Router(routes).dispatch` itself matches `HandlerFn` exactly, so `Server.init` takes `router.dispatch` as a plain runtime value, not the route table.
 
 ### cache.zig
 
@@ -280,21 +280,26 @@ The per-worker response cache (ADR-036): `tl_cache`, `setCache`, `cacheTtl`, `se
 
 ## static.zig
 
-The `public_dir` fallback (ADR-064), called from `Router.dispatch` after every route misses and before the 404. `serve(req, ctx, req_path, max_frame_size) bool` returns false for a traversal attempt, an absent file, or an empty `ctx.public_dir`, and the router then sends its 404.
+The `public_dir` fallback (ADR-064). `Router.dispatch` calls `fallback(req, ctx)` after every route misses and before the 404. `fallback` returns false when `ctx.public_dir` is empty or the path is `/`, otherwise it strips the leading slash and calls `serve(req, ctx, req_path, max_frame_size)`. `serve` returns false for a traversal attempt, an absolute path, a path past `PUBLIC_PATH_MAX`, a directory, or an absent file, and the router then sends its 404. When `fallback` returns true, the router sets `res.sent`, so a handler error path never answers the stream a second time.
 
-`serve` tries `serveCached` first and falls back to a direct open when the process has no static cache installed. Both end at the same framing code, so `public_dir` behaves identically whether or not `public_dir_cache_ttl_ms` is set.
+`serve` tries `serveCached` first and falls back to `serveUncached` (open, stat, send) when no static cache is installed or the cache declines the path. Both end at `answer`, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set.
 
 | function | role |
 | :- | :- |
-| `acquireHit` | negotiates the encoding from `accept-encoding`, then asks the cache. Because `zeroCopyAllowed` is always false here, it asks `acquireMapped` first (a resident snapshot) and falls back to the plain descriptor hit past `SNAPSHOT_MAX_BYTES`, so a large file keeps its cached descriptor instead of dropping to the uncached path |
-| `segmentFor` | turns a `Range` header into a `Segment`. Returns a whole-file segment when the header is absent or malformed (RFC 7233 section 3.1 says ignore it), and null when it is well-formed but unsatisfiable, which is the caller's cue to answer 416 |
-| `sendFramed` | one HEADERS frame (status, content type, `content-length`, `accept-ranges`, and `content-range` for a 206) then DATA frames, each capped at `max_frame_size`, the last flagged END_STREAM |
-| `sendRangeNotSatisfiable` | 416 with `Content-Range: bytes */length`, headers only, END_STREAM on the HEADERS frame |
-| `zeroCopyAllowed` | always false on this engine. `dispatch/common.beginCoalesce` installs `writer.write_hook` on every batch, cleartext included, so a `sendfile` would put the body ahead of frames already staged in the sink |
+| `fallback` | the router entry: empty `public_dir` or root path is false, otherwise strips the leading `/` and calls `serve` with `ctx.max_frame_size` |
+| `acquireHit` | reads `accept-encoding`, then asks the cache. When `zeroCopyAllowed` refuses, it asks `acquireMapped` first (a resident snapshot) and falls back to the plain descriptor hit past `SNAPSHOT_MAX_BYTES`, so a large file keeps its cached descriptor |
+| `rangeAsk` | turns the `Range` header into `FULL` (absent or malformed, RFC 7233 section 3.1 says ignore it), `PARTIAL` (a satisfiable range), or `UNSATISFIABLE` (well-formed but past the end, answered with 416) |
+| `encodeHead` | encodes the HEADERS block: status, content type, content encoding, `content-length`, plus `content-range` and `accept-ranges` for a 206. Returns null when it does not fit |
+| `encodeUnsatisfiable` | encodes the 416 block with `Content-Range: bytes */length` |
+| `answer` | picks the segment, encodes the block, then calls `sendFramed`. A 206 block that does not fit falls back to the whole file as 200. When even the 200 block does not fit, the stream is closed with RST_STREAM `INTERNAL_ERROR` (`resetStream`) |
+| `sendFramed` | one HEADERS frame, then DATA frames each capped at `max_frame_size`, the last one flagged END_STREAM. A resident body is cut from its own bytes, otherwise `utils/static/static.sendBody` sends the range |
+| `zeroCopyAllowed` | true on Linux for a real fd (`fd >= 0`), false everywhere else. Frames are written straight to the socket today, so `sendfile` cannot overtake its own HEADERS frame |
 
-`Segment` carries `{ offset, length, status, content_range }`, so a 200 and a 206 share one framing path and only the header block differs. `Content-Length` carries the segment length, not the file size, or a client waits for bytes that never arrive. An empty file closes the stream on HEADERS with no DATA frame at all.
+`Source` carries `{ file, size, content_type, content_encoding, bytes }` and `Segment` carries `{ offset, length, status, content_range }`, so a cached and an uncached file, and a 200 and a 206, share one framing path. `Content-Length` carries the segment length, not the file size, or a client waits for bytes that never arrive. An empty file closes the stream on HEADERS with no DATA frame at all.
 
-Range parsing itself is not local: it comes from `src/utils/http_range.zig`, shared with the other engines. `parseSpec` (read the header) and `resolve` (clamp against a known length) are deliberately separate calls, because collapsing them into one nullable result makes the ignore-versus-416 distinction impossible to express.
+Note: when `mux.zig` lands, its frame batching hook stages frames in a buffer. `zeroCopyAllowed` must then refuse while the hook is set, or the body overtakes frames already staged.
+
+Range parsing is shared with the other engines: `utils/http/range_header.zig`. `parseSpec` (read the header) and `resolve` (clamp against a known length) are separate calls on purpose, because one nullable result cannot tell "ignore the header" apart from "answer 416".
 
 ---
 
