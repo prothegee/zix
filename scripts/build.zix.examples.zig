@@ -125,6 +125,42 @@ const EXAMPLES = .{
         "examples/http1_jzon.zig",
         "http1",
     },
+    // http2 and grpc
+    .{
+        "zix-example-http2_basic",
+        "examples/http2_basic.zig",
+        "http2",
+    },
+    .{
+        "zix-example-grpc_server",
+        "examples/grpc_server.zig",
+        "grpc",
+    },
+    .{
+        "zix-example-grpc_location_server",
+        "examples/grpc_location_server.zig",
+        "grpc",
+    },
+    .{
+        "zix-example-grpc_timeout",
+        "examples/grpc_timeout.zig",
+        "grpc",
+    },
+    .{
+        "zix-example-grpc_multi_server",
+        "examples/grpc_multi_server.zig",
+        "grpc",
+    },
+    .{
+        "zix-example-http2_logger",
+        "examples/http2_logger.zig",
+        "http2",
+    },
+    .{
+        "zix-example-grpc_logger",
+        "examples/grpc_logger.zig",
+        "grpc",
+    },
 };
 
 // --------------------------------------------------------- //
@@ -156,8 +192,8 @@ pub fn addSteps(
     // const group_tcp = b.step("zix-example-tcp", "ZIX: Build all tcp examples");
     // const group_fix = b.step("example-fix", "ZIX: Build all fix examples");
     const group_http1 = b.step("zix-example-http1", "ZIX: Build all http1 examples");
-    // const group_http2 = b.step("zix-example-http2", "ZIX: Build all http2 examples");
-    // const group_grpc = b.step("zix-example-grpc", "ZIX: Build all grpc examples");
+    const group_http2 = b.step("zix-example-http2", "ZIX: Build all http2 examples");
+    const group_grpc = b.step("zix-example-grpc", "ZIX: Build all grpc examples");
     // const group_udp = b.step("zix-example-udp", "ZIX: Build all udp examples");
     // const group_http3 = b.step("zix-example-http3", "ZIX: Build all http3 examples");
     // const group_webrtc = b.step("zix-example-webrtc", "ZIX: Build all webrtc examples");
@@ -168,8 +204,8 @@ pub fn addSteps(
     // step.dependOn(group_tcp);
     // step.dependOn(group_fix);
     step.dependOn(group_http1);
-    // step.dependOn(group_http2);
-    // step.dependOn(group_grpc);
+    step.dependOn(group_http2);
+    step.dependOn(group_grpc);
     // step.dependOn(group_udp);
     // step.dependOn(group_http3);
     // step.dependOn(group_webrtc);
@@ -195,6 +231,10 @@ pub fn addSteps(
 
         const group = if (comptime std.mem.eql(u8, pair[2], "http1"))
             group_http1
+        else if (comptime std.mem.eql(u8, pair[2], "http2"))
+            group_http2
+        else if (comptime std.mem.eql(u8, pair[2], "grpc"))
+            group_grpc
         // const group = if (comptime std.mem.eql(u8, pair[2], "tcp"))
         //     group_tcp
         // else if (comptime std.mem.eql(u8, pair[2], "fix"))
