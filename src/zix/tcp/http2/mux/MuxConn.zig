@@ -63,6 +63,9 @@ send_window: i64,
 peer_init_window: i64,
 /// The peer's SETTINGS_MAX_FRAME_SIZE: the largest DATA frame it accepts.
 peer_max_frame_size: u32,
+/// Slot of stream 1 opened by an h2c upgrade, answered once the preface
+/// arrives. Null when there is none.
+upgrade_slot: ?usize,
 
 const Self = @This();
 
@@ -126,6 +129,7 @@ pub fn init(fd: std.posix.fd_t, opts: ServeOpts, io: std.Io) Error!*Self {
         .send_window = frame.DEFAULT_INITIAL_WINDOW,
         .peer_init_window = frame.DEFAULT_INITIAL_WINDOW,
         .peer_max_frame_size = frame.DEFAULT_MAX_FRAME_SIZE,
+        .upgrade_slot = null,
     };
 
     return self;
@@ -267,6 +271,13 @@ test "zix http2 mux: MuxConn, init starts awaiting the preface" {
     try std.testing.expectEqual(MuxPhase.await_preface, conn.phase);
     try std.testing.expectEqual(@as(usize, 0), conn.buffered().len);
     try std.testing.expectEqual(frame.DEFAULT_MAX_FRAME_SIZE, conn.peer_max_frame_size);
+}
+
+test "zix http2 mux: MuxConn, init starts without an upgrade stream" {
+    const conn = try init(UNUSED_FD, TEST_OPTS, std.testing.io);
+    defer conn.deinit();
+
+    try std.testing.expectEqual(@as(?usize, null), conn.upgrade_slot);
 }
 
 test "zix http2 mux: MuxConn, rbuf holds one frame past the read floor" {
