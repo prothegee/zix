@@ -91,3 +91,5 @@ common_test.*
 ##
 !/src/zix/utils/cache/
 !/src/zix/utils/cache/**
+!/examples/grpc_*.bin
+
