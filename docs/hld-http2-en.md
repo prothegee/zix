@@ -67,20 +67,20 @@ flowchart TD
     W --> WAIT["epoll_wait (drain up to 512 events)"]
     WAIT --> EV{"event fd?"}
     EV -->|listener| ACCEPT["acceptAll\naccept4 NONBLOCK to EAGAIN\nMuxConn.init, register in epoll"]
-    EV -->|connection| READ["beginCoalesce\nmux.onReadable(routes, conn)\nendCoalesce (one write per batch)"]
+    EV -->|connection| READ["beginCoalesce\nprocess.onReadable(routes, conn)\nendCoalesce (one write per batch)"]
     ACCEPT --> WAIT
     READ --> WAIT
 ```
 
 - Each worker owns a private listener, epoll instance, and fd-indexed `ConnTable`. The kernel load-balances new connections across the per-worker `SO_REUSEPORT` listeners, so there is no accept thread, no shared queue, and no cross-thread fd handoff.
-- One worker drives many non-blocking connections through the resumable h2 state machine in `mux.zig`, one `MuxConn` per fd, so concurrency is bounded by connection count, not thread count.
+- One worker drives many non-blocking connections through the resumable h2 state machine in `mux/`, one `MuxConn` per fd, so concurrency is bounded by connection count, not thread count.
 - Every frame a readable batch writes (HEADERS plus DATA per stream, times the streams in the batch) coalesces into a single `write()` through a per-worker sink (`beginCoalesce` / `endCoalesce`), instead of one write per frame.
 - `workers` is the mux worker count (0 = cpu count). A handler runs inline on the worker, so it must stay bounded: a long handler blocks that worker's other connections.
 - Off Linux, `run()` returns `error.ZixDispatchModelUnsupported` after logging which model was rejected: pick `.ASYNC` there.
 
 ### .URING: Shared-Nothing io_uring Event Loop (Linux only)
 
-Same shared-nothing, one-listener-per-worker topology as `.EPOLL`, but completion-based: a multishot accept and one recv per connection are submitted as SQEs and reaped as CQEs (ADR-037 Phase 4). Each recv fills the connection's read accumulator, then `mux.processRing` drives the same resumable state machine. The handler still writes its reply straight to the (non-blocking) fd, batched by the same coalescing sink.
+Same shared-nothing, one-listener-per-worker topology as `.EPOLL`, but completion-based: a multishot accept and one recv per connection are submitted as SQEs and reaped as CQEs (ADR-037 Phase 4). Each recv fills the connection's read accumulator, then `process.processRing` drives the same resumable state machine. The handler still writes its reply straight to the (non-blocking) fd, batched by the same coalescing sink.
 
 `.URING` probes io_uring once at startup (`initUringRing`). When the ring is unavailable (an old kernel, a seccomp sandbox, or an `RLIMIT_MEMLOCK` cap too low for the ring), it folds to the `.EPOLL` shared-nothing loop, so selecting `.URING` never strands the server right after binding. That is a runtime capability gap on Linux. Off Linux the model is rejected outright with `error.ZixDispatchModelUnsupported`.
 
@@ -95,7 +95,8 @@ graph TD
     Http2 --> core["serve.zig + upgrade.zig + Stream.zig + stream_*\nblocking h2c loop\nserveConn"]
     Http2 --> handler["handler.zig + cache.zig\nHandlerFn + invokeHandler\nresponse cache"]
     Http2 --> router["router.zig\nRouter + Route"]
-    Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
+    Http2 --> mux["mux/\nresumable MuxConn state machine\nframe loop + flow control + stream pool"]
+    Http2 --> shared["send_best_effort.zig + frame_payload.zig + peer_settings.zig\nshared by serve and mux"]
     Http2 --> frame["frame.zig + FrameHeader.zig\nframe constants + header codec"]
     Http2 --> writer["writer.zig\nwriteAllFD + sendResponseFD / sendResponseEncodedFD"]
     Http2 --> reader["reader.zig\nrecvExact + readFrameHeader"]
@@ -115,6 +116,10 @@ graph TD
     mux --> writer
     mux --> control
     mux --> hpack
+    mux --> handler
+    mux --> shared
+    core --> shared
+    shared --> control
     core --> reader
     core --> writer
     core --> control
@@ -226,7 +231,7 @@ try server.run();
 - The handler is called once per completed stream (END_HEADERS plus END_STREAM), via `handler.invokeHandler` which builds the trio and dispatches. `req.method`, `req.headers`, and `req.body` all point into per-stream buffers and are valid only for the duration of the call.
 - `ctx.allocator` is a per-request stack arena (`FixedBufferAllocator`, no heap call), `ctx.io` carries the connection's `std.Io`, and `ctx.deadline` / `isExpired()` cover Layer B timeouts (see `handler_timeout_ms` above).
 - The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when nothing was written yet (neither `res.sent` nor `writer.respondedFD()`), so a partially sent response is never corrupted.
-- Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `writer.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `mux.sendResponseStreamFD` escape hatch directly (paced by flow control), not wrapped by `Response`.
+- Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `writer.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `sendResponseStreamFD` escape hatch (`mux/send_stream.zig`) directly (paced by flow control), not wrapped by `Response`.
 - The engine resolves the path to a handler through `Router(routes).dispatch` before the call (EXACT then longest-PREFIX match, unmatched paths try the static fallback below and then get 404 `text/plain`), so the handler does not parse or match the path itself.
 
 ---
@@ -257,15 +262,15 @@ flowchart TD
 - A 206 whose HEADERS block does not fit the encode scratch falls back to the whole file as 200. When even the 200 block does not fit, the stream is closed with RST_STREAM `INTERNAL_ERROR`.
 - Range (RFC 7233) is served: 206 for a satisfiable range, 416 with `Content-Range: bytes */length` for a well-formed range past the end, and a malformed header is ignored so the whole file is sent, which is what section 3.1 asks for. A multi-range header answers the first range only.
 - Both the cached and uncached paths are built, so `public_dir` behaves the same whether or not `public_dir_cache_ttl_ms` is set. With it set, a repeat request costs a hash lookup instead of an open plus a stat, and `.br` / `.gz` siblings are resolved once at insert instead of probed per request. The HTTP/2 response does not carry `Vary: Accept-Encoding`, cached or not.
-- Zero copy (`sendfile`) is used on Linux while frames go straight to the socket. Once the mux batching hook lands, zero copy must be refused while a batch is staged, or the body overtakes frames already staged. The body is then cut from a resident snapshot instead.
-- Static sends use the same unmetered `writer` frame writes `Response.send` uses, not the window-paced `mux.sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
+- Zero copy (`sendfile`) is used on Linux while frames go straight to the socket. Once the batching hook lands with the Linux dispatch models (the mux itself never installs it), zero copy must be refused while a batch is staged, or the body overtakes frames already staged. The body is then cut from a resident snapshot instead.
+- Static sends use the same unmetered `writer` frame writes `Response.send` uses, not the window-paced `sendResponseStreamFD`. That is consistent with the rest of the engine and is worth revisiting alongside that path rather than separately.
 - `public_dir_upload` is not offered here. `zix.Http2` has no upload handler convention, unlike `zix.Http1`.
 
 ---
 
 ## Multiplexed State Machine
 
-The `.EPOLL` / `.URING` models drive `mux.zig`, one `MuxConn` per fd. The read accumulator (`rbuf`, tracked by `rstart` / `rend`) persists across readable events and holds a partial frame until the rest arrives, so a worker can resume a connection mid-frame and drive many connections from one thread.
+The `.EPOLL` / `.URING` models drive `mux/` (`process.onReadable` or `process.processRing`, then `frame_loop.run`), one `MuxConn` per fd. The read accumulator (`rbuf`, tracked by `rstart` / `rend`) persists across readable events and holds a partial frame until the rest arrives, so a worker can resume a connection mid-frame and drive many connections from one thread.
 
 A connection advances through preface phases, then a frame loop:
 
@@ -287,7 +292,7 @@ Inside the `.h2` phase the frame loop reads a 9-byte header, waits for the full 
 - WINDOW_UPDATE: grow the connection or stream send window and resume any parked response body.
 - RST_STREAM: release the stream slot. PING: reply with an ACK. GOAWAY: close the connection.
 
-A protocol violation (stream id 0 where illegal, an oversize frame, a bad preface) sends GOAWAY or RST_STREAM. The blocking `serve.serveLoop` runs the same protocol over blocking reads with a per-connection stream array instead of the pooled slots.
+A protocol violation (stream id 0 where illegal, an oversize frame, a bad preface) sends GOAWAY or RST_STREAM. The blocking `serve.serveLoop` runs the same protocol over blocking reads with a per-connection stream array instead of the pooled slots. Both paths share the best-effort senders (`send_best_effort.zig`), the padding strip (`frame_payload.zig`), and the SETTINGS exchange (`peer_settings.zig`).
 
 ---
 
@@ -305,9 +310,9 @@ A protocol violation (stream id 0 where illegal, an oversize frame, a bad prefac
 
 Send-side flow control follows RFC 7540 6.9. Each `MuxConn` carries a connection-level send window, and each open stream carries its own send window, both starting at 65535 (adjusted by the peer's advertised initial window).
 
-- `pumpBody` sends DATA capped by `min(connection window, stream window, max_frame_size)`. What does not fit is parked on the stream (`pending_body`, `pending_end`) and the stream slot stays borrowed. END_STREAM rides the final frame only once the whole body has gone out.
+- `pumpBody` (`mux/flow.zig`) sends DATA capped by `min(connection window, stream window, peer max frame size)`. What does not fit is parked on the stream (`pending_body`, `pending_end`) and the stream slot stays borrowed. END_STREAM rides the final frame only once the whole body has gone out.
 - A WINDOW_UPDATE resumes parked work: `resumeStream` for a stream-level grant, `resumeAll` for a connection-level grant. The slot is freed once its body fully drains.
-- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)` is the public entry. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache, not a per-request scratch buffer). With no active connection context (the blocking non-mux serve paths) it falls back to an immediate, unmetered send.
+- `sendResponseStreamFD(fd, sid, status, content_type, content_encoding, body)` is the public entry. The body is referenced, not copied, so it must outlive the stream (a process-lifetime cache, not a per-request scratch buffer). With no active connection context (the blocking non-mux serve paths) it falls back to an immediate, unmetered send. A response header block that does not fit resets the stream with `INTERNAL_ERROR` and sends no DATA.
 - Inbound DATA returns a WINDOW_UPDATE for both the connection and the stream so the peer keeps sending.
 
 ---
@@ -319,7 +324,7 @@ Setting `config.tls` (a `*Tls.Context`) opts into HTTP/2 over TLS (TLS 1.3 with 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. One `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker, with no socketpair and no thread per connection. The resumable h2 mux consumes the decrypted plaintext, and its reply frames are encrypted back into TLS records through the thread-local frame write hook. Outbound ciphertext that does not fit is staged per connection and flushed on the next EPOLLOUT, so a slow client never parks the worker.
 - `.ASYNC`: `tls_serve.runTls`. An accept loop hands each connection to its own worker thread, which runs the shared terminator (`tcp/tls/h2_terminator.zig`) with an inline-mux driver that drives the same resumable mux directly over the decrypted stream (one thread per connection, no socketpair). This path also serves TLS 1.2.
 
-The write hook (`writer.write_hook`) is the shared mechanism: the mux writes plaintext through `writer.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
+The write hook (`writer.write_hook`) is the shared mechanism: the mux writes plaintext through `writer.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The hook lands with the Linux dispatch models, `mux/` only writes through `writer`. The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
 
 ---
 
