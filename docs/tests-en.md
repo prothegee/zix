@@ -153,7 +153,12 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 | Module | Coverage |
 | :- | :- |
 | `tcp/http2/grpc/status.zig` | each code maps to its canonical value, each canonical value maps back to its code, OK is the zero value, unknown code past 16 / max u8 keeps its value |
-| `tcp/http2/grpc/frame.zig` | `refAllDecls` + behavioral: `readGrpcPrefix` / `writeGrpcPrefix` roundtrip, compress flag preserved, message length preserved, `sendGrpcError` includes `content-type` header |
+| `tcp/http2/grpc/frame/GrpcPrefix.zig` | keeps its fields, holds the largest message length |
+| `tcp/http2/grpc/frame/prefix.zig` | round trip keeps the message length / compress flag, length is big-endian, max u32 length round trips, any non-zero flag byte reads as compressed, reads only the first 5 bytes, 4 bytes / empty body TooShort |
+| `tcp/http2/grpc/frame/reply_block.zig` | `HEADERS_PROTO_BLOCK` decodes to status 200 and the default content-type, `TRAILER_OK_BLOCK` decodes to grpc-status 0, both match the dynamic encoder |
+| `tcp/http2/grpc/frame/build.zig` | HEADERS with END_HEADERS, default type copies the cached block, other type decodes to status and type, gzip HEADERS carries grpc-encoding gzip, DATA length counts the prefix, prefix holds the message length, compress sets flag 1, `MAX_DATA_MSG_LEN` fills u24, OK trailer copies the cached block, trailer carries status and message, empty message omits grpc-message, max u8 status encodes 255, error carries status 200 and content-type, error ends the stream, out too small / block past the scratch BufferFull, length past `MAX_DATA_MSG_LEN` Overflow |
+| `tcp/http2/grpc/frame/send.zig` | HEADERS frame written, DATA writes prefix then message, empty message sends the head only, trailer ends the stream, error includes `content-type` header, message past the scratch BufferFull, closed peer BrokenPipe |
+| `tcp/http2/grpc/frame/gzip.zig` | round trip restores the message, decompressed prefix has flag 0, large message round trips whole, empty message round trips, uncompressed message passes through, mixed messages keep their order, empty body / short tail writes nothing, message past the body / max u32 length TruncatedBody, malformed gzip DecompressFailed, out too small BufferTooSmall, output starts with the gzip magic, headroom fits incompressible data, out too small CompressFailed |
 | `tcp/http2/grpc/proto/wire_type.zig` | ids match the protobuf encoding |
 | `tcp/http2/grpc/proto/varint.zig` | 1 is one byte, 300 is two bytes, max u64 is `MAX_LEN` bytes, round trip across sizes, decode stops at the first final byte, encode into empty buf / past the buf BufferFull, empty / truncated input UnexpectedEOF, 10th byte past bit 0 / 11 bytes Overflow |
 | `tcp/http2/grpc/proto/field.zig` | string encodes tag, length, and bytes, empty string zero length, int32 150 varint field, negative int32 10 value bytes, double round trip positive / negative, string / int32 / double / empty buf BufferFull |
@@ -862,8 +867,8 @@ Ports: 18220-18221.
 
 | Test | What it verifies |
 | :- | :- |
-| `readGrpcPrefix` with 4 bytes | returns `error.ZixTooShort` |
-| `readGrpcPrefix` with empty slice | returns `error.ZixTooShort` |
+| `readGrpcPrefix` with 4 bytes | returns `error.ZixHttp2_GrpcPrefix_TooShort` |
+| `readGrpcPrefix` with empty slice | returns `error.ZixHttp2_GrpcPrefix_TooShort` |
 | `GrpcContext.recvMessage` body shorter than prefix | body has 3 bytes (need 5 for prefix): returns null |
 | `GrpcContext.recvMessage` msg_len exceeds body | prefix claims 100 bytes but body has only 5: returns null |
 | `parsePath` empty string | returns null |
