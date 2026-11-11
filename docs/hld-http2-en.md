@@ -41,16 +41,16 @@ Three dispatch models, selected via `config.dispatch_model` (`DispatchModel` enu
 
 ### .ASYNC: Thread-per-connection over the blocking core
 
-One `io.async` task owns a connection for its whole lifetime and runs the blocking h2c loop (`serveH2cLoop`), reading one frame at a time and dispatching each completed stream inline. This is the portable model, the same shape as `zix.Http1`.
+One `io.async` task owns a connection for its whole lifetime and runs the blocking h2c loop (`serveLoop`), reading one frame at a time and dispatching each completed stream inline. This is the portable model, the same shape as `zix.Http1`.
 
 ```mermaid
 flowchart TD
     MAIN["Server.run()"] --> A["1 accept thread\nio.async() per connection"]
-    A --> SERVE["core.serveConn(routes, fd, opts)"]
+    A --> SERVE["serve.serveConn(handler, fd, opts, io)"]
     SERVE --> PRE{"PRI preface?"}
     PRE -->|yes| DIRECT["h2c direct"]
     PRE -->|no| UP["h2c upgrade (Upgrade: h2c)"]
-    DIRECT --> LOOP["serveH2cLoop\nread frame -> dispatch complete stream"]
+    DIRECT --> LOOP["serveLoop\nread frame -> dispatch complete stream"]
     UP --> LOOP
     LOOP --> LOOP
 ```
@@ -92,7 +92,9 @@ Same shared-nothing, one-listener-per-worker topology as `.EPOLL`, but completio
 graph TD
     zix["src/lib.zig\npublic API root"] --> Http2["tcp/http2/Http2.zig\nzix.Http2 namespace"]
 
-    Http2 --> core["core.zig\nblocking h2c loop\nserveConn + Router"]
+    Http2 --> core["serve.zig + upgrade.zig + Stream.zig + stream_*\nblocking h2c loop\nserveConn"]
+    Http2 --> handler["handler.zig + cache.zig\nHandlerFn + invokeHandler\nresponse cache"]
+    Http2 --> router["router.zig\nRouter + Route"]
     Http2 --> mux["mux.zig\nresumable MuxConn state machine\nflow control + stream pool"]
     Http2 --> frame["frame.zig + FrameHeader.zig\nframe constants + header codec"]
     Http2 --> writer["writer.zig\nwriteAllFD + sendResponseFD / sendResponseEncodedFD"]
@@ -117,6 +119,7 @@ graph TD
     core --> writer
     core --> control
     core --> hpack
+    core --> handler
     static --> writer
     writer --> frame
     writer --> hpack
@@ -219,9 +222,9 @@ try server.run();
 ```
 
 - `Server.init` takes a runtime `handler: HandlerFn` (ADR-063), built via `Router(&[_]Route{...}).dispatch`. Routes themselves stay comptime (baked into the router type), but the server no longer bakes the route table into its own type, so `Server` is one concrete struct, not a generic.
-- The handler is called once per completed stream (END_HEADERS plus END_STREAM), via `core.invokeHandler` which builds the trio and dispatches. `req.method`, `req.headers`, and `req.body` all point into per-stream buffers and are valid only for the duration of the call.
+- The handler is called once per completed stream (END_HEADERS plus END_STREAM), via `handler.invokeHandler` which builds the trio and dispatches. `req.method`, `req.headers`, and `req.body` all point into per-stream buffers and are valid only for the duration of the call.
 - `ctx.allocator` is a per-request stack arena (`FixedBufferAllocator`, no heap call), `ctx.io` carries the connection's `std.Io`, and `ctx.deadline` / `isExpired()` cover Layer B timeouts (see `handler_timeout_ms` above).
-- The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when `!res.sent`, so a partially sent response is never corrupted.
+- The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when nothing was written yet (neither `res.sent` nor `writer.respondedFD()`), so a partially sent response is never corrupted.
 - Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `writer.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `mux.sendResponseStreamFD` escape hatch directly (paced by flow control), not wrapped by `Response`.
 - The engine resolves the path to a handler through `Router(routes).dispatch` before the call (EXACT then longest-PREFIX match, unmatched paths try the static fallback below and then get 404 `text/plain`), so the handler does not parse or match the path itself.
 
@@ -282,7 +285,7 @@ Inside the `.h2` phase the frame loop reads a 9-byte header, waits for the full 
 - WINDOW_UPDATE: grow the connection or stream send window and resume any parked response body.
 - RST_STREAM: release the stream slot. PING: reply with an ACK. GOAWAY: close the connection.
 
-A protocol violation (stream id 0 where illegal, an oversize frame, a bad preface) sends GOAWAY or RST_STREAM. The blocking `core.serveH2cLoop` runs the same protocol over blocking reads with a per-connection stream array instead of the pooled slots.
+A protocol violation (stream id 0 where illegal, an oversize frame, a bad preface) sends GOAWAY or RST_STREAM. The blocking `serve.serveLoop` runs the same protocol over blocking reads with a per-connection stream array instead of the pooled slots.
 
 ---
 
