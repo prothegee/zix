@@ -41,7 +41,7 @@ Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchMode
 
 `run()` memeriksa dengan urutan ini sebelum melayani: `config.port` (0 menghasilkan `ZixHttp2_Server_PortNotConfigured`), dispatch model, lalu `public_dir` (`ZixHttp2_Server_PublicDir*`). Config yang ditolak tidak meninggalkan listener maupun static cache.
 
-Note: hanya `.ASYNC` yang sudah tersambung. `.EPOLL` dan `.URING` masuk bersama dispatch Linux. Sampai itu, `run()` mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported` untuk keduanya setelah pemeriksaan ini lolos.
+Note: `.EPOLL` dan `.URING` mem-bind setiap listener worker di thread pemanggil, sesuai urutan worker, sebelum worker mana pun mulai. Bind yang gagal kembali dari `run()` sebelum ada yang dilayani. Worker yang tidak bisa memulai loop-nya mengakhiri run dengan `ZixHttp2_Server_EpollSetupFailed` atau `ZixHttp2_Server_UringSetupFailed`.
 
 ### .ASYNC: Thread-per-connection di atas core blocking
 
@@ -66,27 +66,29 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    MAIN["Server.run()"] --> SPAWN["spawn workers mux workers"]
-    SPAWN --> W["epollMuxWorker\nprivate SO_REUSEPORT listener\nprivate epoll instance\nprivate ConnTable (fd -> MuxConn)"]
+    MAIN["Server.run()"] --> BIND["bind workers SO_REUSEPORT listeners\n(in worker order)"]
+    BIND --> SPAWN["spawn workers threads"]
+    SPAWN --> W["workerMain\nown listener\nown epoll instance\nown fd slot table (fd -> MuxConn)"]
     W --> WAIT["epoll_wait (drain up to 512 events)"]
     WAIT --> EV{"event fd?"}
     EV -->|listener| ACCEPT["acceptAll\naccept4 NONBLOCK to EAGAIN\nMuxConn.init, register in epoll"]
-    EV -->|connection| READ["beginCoalesce\nprocess.onReadable(routes, conn)\nendCoalesce (one write per batch)"]
+    EV -->|connection| READ["beginCoalesce\nprocess.onReadable(handler, conn)\nendCoalesce (one write per batch)"]
     ACCEPT --> WAIT
     READ --> WAIT
 ```
 
-- Setiap worker memiliki listener pribadi, instance epoll pribadi, dan `ConnTable` ter-index fd. Kernel menyeimbangkan koneksi baru di antara listener `SO_REUSEPORT` per-worker, sehingga tidak ada accept thread, tidak ada queue bersama, dan tidak ada handoff fd antar thread.
+- Setiap worker memiliki listener pribadi, instance epoll pribadi, dan slot table ter-index fd. Kernel menyeimbangkan koneksi baru di antara listener `SO_REUSEPORT` per-worker, sehingga tidak ada accept thread, tidak ada queue bersama, dan tidak ada handoff fd antar thread.
 - Satu worker menggerakkan banyak koneksi non-blocking melalui state machine h2 yang resumable di `mux/`, satu `MuxConn` per fd, sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread.
 - Setiap frame yang ditulis oleh readable batch (HEADERS plus DATA per stream, dikali jumlah stream dalam batch) di-coalesce menjadi satu `write()` melalui sink per-worker (`beginCoalesce` / `endCoalesce`), alih-alih satu write per frame.
-- `workers` adalah jumlah mux worker (0 = cpu count). Handler berjalan inline pada worker, jadi harus tetap terbatas: handler yang lama memblokir koneksi lain pada worker itu.
+- `workers` adalah jumlah mux worker (0 = jumlah CPU tersedia). Setiap worker di-pin ke satu CPU yang diizinkan, physical core lebih dulu. Handler berjalan inline pada worker, jadi harus tetap terbatas: handler yang lama memblokir koneksi lain pada worker itu.
+- `worker_stack_size_bytes` mengatur stack setiap thread worker, `busy_poll_us` mengeset `SO_BUSY_POLL` pada koneksi yang di-accept, dan `reuseport_cbpf` memasang program CPU steering ke grup listener (kernel yang menolaknya mencatat warning dan tetap memakai hash default).
 - Di luar Linux, `run()` mengembalikan `Error.ZixHttp2_Server_DispatchModel_NotSupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
 
 ### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
 
 Topologi shared-nothing, satu-listener-per-worker yang sama dengan `.EPOLL`, tetapi completion-based: satu multishot accept dan satu recv per koneksi disubmit sebagai SQE dan dipanen sebagai CQE (ADR-037 Phase 4). Setiap recv mengisi read accumulator koneksi, lalu `process.processRing` menggerakkan state machine yang resumable yang sama. Handler tetap menulis balasannya langsung ke fd (non-blocking), di-batch oleh coalescing sink yang sama.
 
-`.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Itu capability gap saat runtime di Linux. Di luar Linux model-nya ditolak langsung dengan `Error.ZixHttp2_Server_DispatchModel_NotSupported`.
+`.URING` tidak punya fallback. Saat sebuah worker tidak bisa membangun ring-nya (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), run berakhir dengan `Error.ZixHttp2_Server_UringSetupFailed`: pakai `.EPOLL` di sana. Di luar Linux model-nya ditolak langsung dengan `Error.ZixHttp2_Server_DispatchModel_NotSupported`.
 
 ---
 
@@ -111,12 +113,15 @@ graph TD
     Http2 --> server["Server.zig\nServer + config gates + dispatch_model switch"]
     Http2 --> static["static.zig\nfallback public_dir\nHEADERS + frame DATA yang dibatasi"]
 
-    server --> dispatch["dispatch/\nasync pool mixed epoll uring + common"]
+    server --> dispatch["dispatch/\nasync epoll uring"]
     server --> tls_serve["tls_serve.zig\nthread-per-conn TLS terminator"]
     server --> tls_mux["tls_mux.zig\nmultiplexed per-core TLS terminator"]
 
     dispatch --> core
     dispatch --> mux
+    dispatch --> coalesce["coalesce.zig + CoalesceSink.zig\nper-worker frame batching"]
+    dispatch --> multiplexers["multiplexers/\nslab + reuseport + cpu_affinity"]
+    coalesce --> writer
     mux --> writer
     mux --> control
     mux --> hpack
@@ -268,7 +273,7 @@ flowchart TD
 - Response 206 yang blok HEADERS-nya tidak muat di scratch encode jatuh ke file utuh sebagai 200. Bila blok 200 pun tidak muat, stream ditutup dengan RST_STREAM `INTERNAL_ERROR`.
 - Range (RFC 7233) disajikan: 206 untuk range yang terpenuhi, 416 dengan `Content-Range: bytes */length` untuk range well-formed yang melewati akhir file, dan header malformed diabaikan sehingga file utuh yang dikirim, sesuai bagian 3.1. Header multi-range dijawab range pertama saja.
 - Kedua jalur dibangun, yang di-cache maupun yang tidak, jadi `public_dir` berperilaku sama baik `public_dir_cache_ttl_ms` diatur maupun tidak. Bila diatur, request berulang berbiaya satu lookup hash alih-alih open plus stat, dan sibling `.br` / `.gz` di-resolve sekali saat insert alih-alih diprobe per request. Response HTTP/2 tidak membawa `Vary: Accept-Encoding`, baik dari cache maupun tidak.
-- Zero copy (`sendfile`) dipakai di Linux selama frame ditulis langsung ke socket. Saat hook batching masuk bersama model dispatch Linux (mux sendiri tidak pernah memasangnya), zero copy harus ditolak selama batch di-stage, kalau tidak body mendahului frame yang sudah di-stage. Body lalu dipotong dari snapshot resident sebagai gantinya.
+- Zero copy (`sendfile`) dipakai di Linux selama frame ditulis langsung ke socket. Selama hook batching `.EPOLL` / `.URING` terpasang, zero copy ditolak, kalau tidak body akan mendahului frame yang sudah di-stage. Body lalu dipotong dari snapshot resident sebagai gantinya.
 - Pengiriman static memakai write frame `writer` tanpa metering yang sama seperti `Response.send`, bukan `sendResponseStreamFD` yang dipacu window. Itu konsisten dengan bagian lain engine ini dan layak ditinjau bersama jalur tersebut, bukan terpisah.
 - `public_dir_upload` tidak ditawarkan di sini. `zix.Http2` tidak punya konvensi handler upload, tidak seperti `zix.Http1`.
 
@@ -330,13 +335,13 @@ Menyetel `config.tls` (sebuah `*Tls.Context`) opt-in ke HTTP/2 di atas TLS (TLS 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. Satu epoll worker `SO_REUSEPORT` per core melakukan terminasi TLS di tempat via session yang resumable (`tcp/tls/tls_session.zig`) dan mem-multiplex banyak koneksi per worker, tanpa socketpair dan tanpa thread per koneksi. Mux h2 yang resumable mengonsumsi plaintext hasil dekripsi, dan frame balasannya dienkripsi kembali menjadi TLS record melalui frame write hook thread-local. Ciphertext keluar yang tidak muat di-stage per koneksi dan di-flush pada EPOLLOUT berikutnya, sehingga klien lambat tidak pernah memarkir worker.
 - `.ASYNC`: `tls_serve.runTls`. Sebuah accept loop menyerahkan setiap koneksi ke worker thread-nya sendiri, yang menjalankan terminator bersama (`tcp/tls/h2_terminator.zig`) dengan driver inline-mux yang menggerakkan mux resumable yang sama langsung di atas stream hasil dekripsi (satu thread per koneksi, tanpa socketpair). Jalur ini juga menyajikan TLS 1.2.
 
-Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `writer.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Hook itu masuk bersama model dispatch Linux, `mux/` hanya menulis lewat `writer`. Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
+Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `writer.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Hook cleartext dipasang oleh `coalesce.zig`, `mux/` hanya menulis lewat `writer`. Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
 
 ---
 
 ## Logging
 
-`config.logger` hanya menerima baris lifecycle server (notice listening, fallback io_uring, fallback non-Linux) via `logger.system()`. Saat null, baris lifecycle dicetak ke stderr hanya pada Debug build dan diam pada release build.
+`config.logger` hanya menerima baris lifecycle server (notice listening, `reuseport_cbpf` yang ditolak) via `logger.system()`. Saat null, baris lifecycle dicetak ke stderr hanya pada Debug build dan diam pada release build.
 
 Access logging per-stream adalah tanggung jawab engine, bukan handler. Saat `config.logger` diisi, engine menulis satu record `[http2:access]` setelah setiap stream yang dilayani, mengambil status dan jumlah byte dari `Response`. Handler yang membingkai byte-nya sendiri lewat `writer.sendResponseFD` tetap tercatat, tetapi jumlah byte-nya terbaca 0, sehingga handler seperti itu boleh memanggil `logger.access()` sendiri di titik ukuran sebenarnya diketahui. File yang disajikan fallback static tercatat dengan cara yang sama, dengan jumlah byte 0.
 
