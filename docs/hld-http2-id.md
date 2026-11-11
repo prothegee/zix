@@ -99,7 +99,8 @@ graph TD
     Http2 --> reader["reader.zig\nrecvExact + readFrameHeader"]
     Http2 --> control["control.zig\ncontrol-frame senders"]
     Http2 --> hpack["hpack/\nstatic table + Huffman + integer\ndecoder + encoder + respHeaderBlock"]
-    Http2 --> config["config.zig\nHttp2ServerConfig"]
+    Http2 --> config["Config.zig\nServerConfig"]
+    Http2 --> types["Request.zig + Response.zig + Context.zig\nhandler trio"]
     Http2 --> server["server.zig\nServer + dispatch_model switch"]
     Http2 --> static["static.zig\nfallback public_dir\nHEADERS + frame DATA yang dibatasi"]
 
@@ -121,6 +122,7 @@ graph TD
     writer --> hpack
     reader --> frame
     control --> writer
+    types --> writer
     static --> static_cache["utils/static_cache.zig\ncache file terbuka bersama"]
 ```
 
@@ -133,15 +135,15 @@ Diakses melalui `const zix = @import("zix");`
 | Simbol | Tipe | Deskripsi |
 | :- | :- | :- |
 | `zix.Http2.Server` | struct | `init(handler, config)`, lalu `run()` / `deinit()` (ADR-063: `handler` adalah `HandlerFn` runtime, bukan tabel route comptime) |
-| `zix.Http2.ServerConfig` | struct | Konfigurasi server (lihat bagian Http2ServerConfig) |
+| `zix.Http2.ServerConfig` | struct | Konfigurasi server, `Config.zig` (lihat bagian ServerConfig) |
 | `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0, portabel) `.EPOLL`(1, hanya Linux) `.URING`(2, hanya Linux) |
 | `zix.Http2.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (trio ADR-063, mencerminkan Http1/ADR-062) |
 | `zix.Http2.Route` | struct | `{ path, handler, kind = .EXACT }` |
 | `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (tanpa `.PARAM` pada tahap ini) |
 | `zix.Http2.Router` | fn | `Router(comptime routes) type`, mengembalikan tipe dengan `dispatch` yang cocok persis dengan `HandlerFn` (bisa langsung dipakai sebagai handler `Server.init`); path tak cocok mendapat 404 `text/plain` |
-| `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, view zero-copy atas header/body stream yang di-decode, plus `header(name)` dan `queryParam(name)` |
-| `zix.Http2.Response` | struct | Builder tipis atas `writer.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, semuanya `!void`. `sent: bool` menjaga auto-500 |
-| `zix.Http2.Context` | struct | `fd`, `sid`, `deadline_ns` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`, `io`, dan `allocator` stack-arena (`FixedBufferAllocator`, tanpa pemanggilan heap) |
+| `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, view zero-copy atas header/body stream yang di-decode, plus `header(name)`, `queryParam(name)`, `queryParams(allocator)`, `pathSegments(allocator)`, dan `splitPath(raw_path)`. Kegagalan alokasi mengembalikan `ZixHttp2_Request_OutOfMemory` |
+| `zix.Http2.Response` | struct | Builder tipis atas `writer.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, semuanya `Error!void` (error writer menjadi `ZixHttp2_Response_*`). `sent: bool` menjaga auto-500 |
+| `zix.Http2.Context` | struct | `init(io, allocator, fd, sid)`, `deadline: ?std.Io.Clock.Timestamp` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut` (clock dibaca lewat `io`, sama seperti Http1), `public_dir`, `max_frame_size`, dan `allocator` stack-arena (`FixedBufferAllocator`, `CTX_ARENA_BYTES`, tanpa pemanggilan heap) |
 | `zix.Http2.ServeOpts` | struct | Opsi serve per-connection yang dibangun dari config |
 | `zix.Http2.serveConn` | fn | `serveConn(handler, fd, opts, io)`: entry point koneksi blocking langsung |
 | `zix.Http2.Header` | struct | `{ name: []const u8, value: []const u8 }` header request hasil decode |
@@ -159,40 +161,38 @@ Diakses melalui `const zix = @import("zix");`
 
 ---
 
-## Http2ServerConfig
+## ServerConfig
 
 Field utama (tabel lengkap ada di [`docs/zix-config-id.md`](zix-config-id.md)):
 
 ```zig
-pub const Http2ServerConfig = struct {
-    io:             std.Io,        // hanya plumbing listen/accept, harus hidup lebih lama dari server
-    ip:             []const u8,
-    port:           u16,           // harus non-zero
-    dispatch_model: DispatchModel, // wajib, tidak ada default
-    kernel_backlog: u31   = 1024,
-    workers:        usize = 0,     // 0 = cpu_count accept thread, diabaikan .ASYNC
-    workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux worker. Diabaikan oleh .ASYNC
-    worker_stack_size_bytes: usize = 512 * 1024,
-    busy_poll_us:   u32   = 0,     // window spin SO_BUSY_POLL (.EPOLL/.URING), 0 = tidak diset
-    max_streams:    u32   = 128,   // SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan
-    max_frame_size: u32   = 16384, // SETTINGS_MAX_FRAME_SIZE yang diiklankan
-    max_header_scratch: usize = 4096,       // scratch decode HPACK per koneksi
-    max_body:       usize = 16384, // body request maksimum yang di-buffer per stream (body di atas ini di-shed dengan 413)
-    max_recv_buf:   usize = 32 * 1024,      // floor read-buffer per-connection (.EPOLL/.URING)
-    tls_write_buf_initial_bytes: usize = 16 * 1024,
-    response_cache: bool  = false, // response cache per-worker (ADR-036), semua model
-    handler_timeout_ms: u32 = 0,   // deadline global yang diseed ke Context.deadline_ns, 0 = tanpa deadline
-    public_dir:     []const u8 = "",        // root file static, "" menonaktifkan penyajian static
-    public_dir_cache_ttl_ms:      u32 = 0,  // 0 = tidak pernah di-cache, default bawaan
-    public_dir_cache_max_entries: u32 = 256,// slot cache static, satu per file plus sibling-nya
-    tls:            ?*Tls.Context = null,   // non-null menyajikan h2 di atas TLS (ALPN h2), selain itu h2c cleartext
-    logger:         ?*Logger = null,        // baris lifecycle saja, lihat bagian Logging
-};
+// src/zix/tcp/http2/Config.zig, field di file scope (diekspor sebagai zix.Http2.ServerConfig)
+io:             std.Io,        // hanya plumbing listen/accept, harus hidup lebih lama dari server
+ip:             []const u8,
+port:           u16,           // harus non-zero
+dispatch_model: DispatchModel, // wajib, tidak ada default
+kernel_backlog: u31   = 1024,
+workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux worker. Diabaikan oleh .ASYNC
+worker_stack_size_bytes: usize = 512 * 1024,
+busy_poll_us:   u32   = 0,     // window spin SO_BUSY_POLL (.EPOLL/.URING), 0 = tidak diset
+max_streams:    u32   = 128,   // SETTINGS_MAX_CONCURRENT_STREAMS yang diiklankan
+max_frame_size: u32   = 16384, // SETTINGS_MAX_FRAME_SIZE yang diiklankan
+max_header_scratch: usize = 4096,       // scratch decode HPACK per koneksi
+max_body:       usize = 16384, // body request maksimum yang di-buffer per stream (body di atas ini di-shed dengan 413)
+max_recv_buf:   usize = 32 * 1024,      // floor read-buffer per-connection (.EPOLL/.URING)
+tls_write_buf_initial_bytes: usize = 16 * 1024,
+response_cache: bool  = false, // response cache per-worker (ADR-036), semua model
+handler_timeout_ms: u32 = 0,   // deadline global yang diseed ke Context.deadline, 0 = tanpa deadline
+public_dir:     []const u8 = "",        // root file static, "" menonaktifkan penyajian static
+public_dir_cache_ttl_ms:      u32 = 0,  // 0 = tidak pernah di-cache, default bawaan
+public_dir_cache_max_entries: u32 = 256,// slot cache static, satu per file plus sibling-nya
+tls:            ?*Tls.Context = null,   // non-null menyajikan h2 di atas TLS (ALPN h2), selain itu h2c cleartext
+logger:         ?*Logger = null,        // baris lifecycle saja, lihat bagian Logging
 ```
 
 Catatan: `workers` adalah jumlah mux worker pada `.EPOLL` / `.URING` (0 = cpu count), dan meng-oversubscribe-nya hanya menambah churn scheduler. `.ASYNC` mengabaikannya. `max_recv_buf` adalah floor: read accumulator mux diukur sebesar nilai yang lebih besar antara ia dan satu frame maksimum, sehingga floor yang lebih besar memangkas `read()` dan compaction buffer untuk frame besar. `tls` opt-in ke h2 di atas TLS: saat non-null server menyajikan pada jalur TLS ter-gate (model dispatch cleartext tidak tersentuh), dan untuk HTTP/2 ALPN context sebaiknya menyertakan `.H2`. Field `response_cache` dan `cache_*` mengonfigurasi cache per-worker yang opt-in (ADR-036), dibaca saat runtime pada `.EPOLL` dan `.URING`.
 
-`handler_timeout_ms` (ADR-063) adalah deadline global: diseed ke `Context.deadline_ns` saat dispatch, 0 berarti tanpa deadline. Handler bisa memperketat atau menghapus deadline-nya sendiri via `ctx.setTimeout` / `withDeadline`, dicek dengan `ctx.isExpired()` di antara langkah-langkah (engine tidak pernah menginterupsi handler yang sedang berjalan, ini opt-in).
+`handler_timeout_ms` (ADR-063) adalah deadline global: diseed ke `Context.deadline` saat dispatch, 0 berarti tanpa deadline. Handler bisa memperketat atau menghapus deadline-nya sendiri via `ctx.setTimeout` / `withDeadline`, dicek dengan `ctx.isExpired()` di antara langkah-langkah (engine tidak pernah menginterupsi handler yang sedang berjalan, ini opt-in).
 
 ---
 
@@ -220,7 +220,7 @@ try server.run();
 
 - `Server.init` menerima `handler: HandlerFn` runtime (ADR-063), dibangun via `Router(&[_]Route{...}).dispatch`. Route sendiri tetap comptime (dibakukan ke dalam tipe router), tapi server tidak lagi membakukan tabel route ke dalam tipenya sendiri, sehingga `Server` adalah satu struct konkret, bukan generik.
 - Handler dipanggil sekali per stream yang selesai (END_HEADERS plus END_STREAM), via `core.invokeHandler` yang membangun trio lalu men-dispatch. `req.method`, `req.headers`, dan `req.body` semuanya menunjuk ke buffer per-stream dan hanya valid selama pemanggilan berlangsung.
-- `ctx.allocator` adalah stack arena per-request (`FixedBufferAllocator`, tanpa pemanggilan heap), `ctx.io` membawa `std.Io` koneksi, dan `ctx.deadline_ns` / `isExpired()` mencakup timeout Layer B (lihat `handler_timeout_ms` di atas).
+- `ctx.allocator` adalah stack arena per-request (`FixedBufferAllocator`, tanpa pemanggilan heap), `ctx.io` membawa `std.Io` koneksi, dan `ctx.deadline` / `isExpired()` mencakup timeout Layer B (lihat `handler_timeout_ms` di atas).
 - Handler mengembalikan `anyerror!void`. Saat error, `invokeHandler` otomatis menyelesaikan satu 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), tapi hanya ketika `!res.sent`, sehingga response yang sudah terkirim sebagian tidak pernah rusak.
 - Response keluar melalui `Response.send` / `sendJson` / `sendText` / `sendNoContent`, builder tipis atas writer `writer.sendResponseFD` / `sendResponseEncodedFD` yang sama seperti sebelumnya (wire byte-identical, ADR-063 hanya mengubah apa yang membungkus pemanggilan). Body besar berumur proses tetap memakai escape hatch `mux.sendResponseStreamFD` mentah secara langsung (dipacu oleh flow control), tidak dibungkus oleh `Response`.
 - Engine memetakan path ke handler melalui `Router(routes).dispatch` sebelum pemanggilan (EXACT lalu PREFIX terpanjang, path tak cocok mencoba fallback static di bawah lalu mendapat 404 `text/plain`), sehingga handler tidak mem-parse atau mencocokkan path itu sendiri.
