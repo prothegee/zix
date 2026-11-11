@@ -328,9 +328,13 @@ Parsing Range dipakai bersama engine lain: `utils/http/range_header.zig`. `parse
 
 Lalu `installStaticCache` memasang static cache proses saat `public_dir` dan TTL diatur (install yang gagal hanya berupa warning). Hanya server yang membangun tabel itu yang menutupnya saat `run()` selesai.
 
-Switch model memetakan `.ASYNC` ke `dispatch/async.zig` (lalu `serve.serveConn`), `.EPOLL` ke `dispatch/epoll.zig`, dan `.URING` ke `dispatch/uring.zig`. File-file itu belum di-port, jadi untuk sekarang setiap arm mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported`. Cabang `config.tls != null` (`tls_mux.runTlsMux` untuk `.EPOLL` / `.URING`, selain itu `tls_serve.runTls`) juga belum ada di `Server.zig`.
+Switch model memetakan `.ASYNC` ke `dispatch/async.zig` (lalu `serve.serveConn`), `.EPOLL` ke `dispatch/epoll.zig`, dan `.URING` ke `dispatch/uring.zig`. Baru `dispatch/async.zig` yang di-port. Error-nya diterjemahkan oleh `dispatchError` (`ZixHttp2_Async_*` -> `ZixHttp2_Server_ResolveFailed`, `ListenFailed`, `AcceptFailed`). `.EPOLL` dan `.URING` mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported` sampai dispatch Linux masuk. Cabang `config.tls != null` (`tls_mux.runTlsMux` untuk `.EPOLL` / `.URING`, selain itu `tls_serve.runTls`) juga belum ada di `Server.zig`.
 
 `Http2.zig` adalah namespace `zix.Http2`. Ia me-re-export tipe dan fungsi publik dari file masing-masing dan mempertahankan nama lama `HpackEntry` (tipe yang sama dengan `Header`), `DEFAULT_WINDOW_SIZE`, dan `MAX_PAYLOAD`.
+
+### dispatch/async.zig
+
+`run(config, handler)` me-resolve `config.ip`, listen dengan `reuse_address` dan `kernel_backlog`, mencatat baris listening lewat `log.logSystem`, lalu menyerahkan setiap stream yang di-accept ke `io.async(connEntry, ...)`. Peer yang putus sebelum accept (`ConnectionAborted`) dilewati, kegagalan accept lainnya mengembalikan `ZixHttp2_Async_AcceptFailed`. `serveOpts(config)` memetakan `Config` ke `ServeOpts`. `connEntry` menyetel access logger, memegang response cache milik pool thread (`utils/cache/async.zig`, ukurannya dari `cache.effectiveCacheEntries`), menjalankan `serve.serveConn`, lalu menutup stream dan melepas cache. `async_cache.reclaim()` membebaskan cache per-thread saat accept loop berakhir.
 
 ### dispatch/epoll.zig
 
