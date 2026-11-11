@@ -91,10 +91,38 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `tcp/http2/frame.zig` | `refAllDecls` + behavioral: `FRAME_TYPE_HEADERS=0x01`, `FLAG_END_STREAM=0x01`, `ERR_NO_ERROR=0`, `writeFrameHeader`/`readFrameHeader` roundtrip via pipe, PREFACE starts with `PRI`, `sendSettings` writes a valid 9-byte SETTINGS frame via pipe |
-| `tcp/http2/hpack.zig` | `refAllDecls` + behavioral: Huffman encode/decode roundtrip, `HpackEncoder.writeHeader` produces indexed entry from static table, `HpackDecoder.decode` decodes indexed `:method GET`, dynamic table eviction respects max_size, `HPACK_STATIC` index 8 is `:status 200` |
-| `tcp/http2/core.zig` | `refAllDecls` + behavioral: `ServeOpts` struct defaults, `HandlerFn` is a function pointer type |
-| `tcp/http2/config.zig` | `refAllDecls` + behavioral: `Http2ServerConfig` required fields compile, dispatch_model required (set explicitly), workers defaults to 0, max_streams=128 and max_frame_size=16384 |
+| `tcp/http2/frame.zig` | PREFACE is the 24-byte preface, type / flag / error code / settings id values follow RFC 7540, `MAX_FRAME_SIZE_LIMIT` is the largest u24, header round trip / big endian / largest length and stream id, reserved bit dropped, unknown frame type passes through |
+| `tcp/http2/FrameHeader.zig` | keeps its fields, holds the largest length and stream id |
+| `tcp/http2/writer.zig` | `writeAllFD` delivers data / marks the stream answered / empty data writes nothing, `writeAllDirectFD` leaves the mark alone / closed peer BrokenPipe, `writeFrameHeaderFD` sends 9 bytes, `sendResponseFD` bodyless END_STREAM on HEADERS / small body one DATA / at `SEND_STAGE_BODY_MAX` one DATA / past the stage vectored / past the max frame size split / marks answered / content-type past the scratch BufferFull, `sendResponseEncodedFD` closed peer BrokenPipe |
+| `tcp/http2/reader.zig` | `readOnceFD` returns what arrived / 0 after close, `recvExact` fills / empty buffer / short is Closed, `readFrameHeader` parses / cut short is Closed |
+| `tcp/http2/control.zig` | `sendSettingsFD` empty / each param / past 24-bit TooManySettings, `sendSettingsAckFD` ACK no payload, `sendPingAckFD` echoes, `sendGoawayFD` last stream and code, `sendRstStreamFD` targets the stream, `sendWindowUpdateFD` increment / top bit clear, closed peer BrokenPipe |
+| `tcp/http2/hpack/Header.zig` | keeps its fields, holds an empty value |
+| `tcp/http2/hpack/HuffSym.zig` | keeps its fields, holds the longest 30-bit code |
+| `tcp/http2/hpack/huffman_table.zig` | known codes for space, `a`, byte 255, every code fits its bit length |
+| `tcp/http2/hpack/static_table.zig` | index 0 empty, index 2 `:method GET`, index 8 `:status 200`, index 16, last index, every name lowercase |
+| `tcp/http2/hpack/huffman.zig` | ascii and every byte round trip, RFC 7541 C.4.1 / C.4.2 vectors, empty input, OutputTooSmall on encode and decode, padding past 7 bits / long run of ones InvalidCode |
+| `tcp/http2/hpack/integer.zig` | RFC 7541 C.1.1 / C.1.2 vectors, decode ignores representation bits, round trip across prefix sizes, UnexpectedEOF empty and mid-continuation, Overflow past 64 bits, BufferFull |
+| `tcp/http2/hpack/DynamicTable.zig` | add is index 1, newest first, 32-byte overhead, bytes copied, out of range null, eviction past max_size, oversize entry empties, `evictTo` 0 empties, compaction keeps entries readable, full byte buffer skips |
+| `tcp/http2/hpack/HpackDecoder.zig` | indexed `:method GET`, RFC 7541 C.3.1 and C.4.2, literal without indexing, output in scratch, size update evicts, `evictTo` forwards, InvalidIndex (unknown, 0), TooManyHeaders, ScratchFull, UnexpectedEOF, InvalidCode |
+| `tcp/http2/hpack/HpackEncoder.zig` | exact static match one byte, static name index, literal name, name ignores case, round trip through decoder, past Huffman scratch plain literal, BufferFull (full, empty) |
+| `tcp/http2/hpack/RespPrefix.zig` | same triple matches, other status / content-encoding does not, empty triple matches |
+| `tcp/http2/hpack/response_block.zig` | matches `writeHeader` byte for byte, cached prefix same bytes / re-encodes length, content-encoding, null length omits content-length, round trip through decoder, five-digit status, long content-type bypasses cache, small dst BufferFull |
+| `tcp/http2/ServeOpts.zig` | defaults, explicit limits |
+| `tcp/http2/Stream.zig` | `open` resets and sets the id, `appendBody` accumulates / past the cap appends nothing / accepts an empty payload, `headerList` covers `header_count` |
+| `tcp/http2/UpgradeHead.zig` | `settings` defaults to empty |
+| `tcp/http2/stream_state.zig` | `IDLE` is the zero value, tag names match the enum |
+| `tcp/http2/stream_slot.zig` | `claim` first free entry / past the cap returns null, `find` live entry / skips a freed entry, `requestInFlight` unended stream / all ended / empty table |
+| `tcp/http2/declared.zig` | `LENGTH` carries the byte count, `ABSENT` and `BROKEN` are distinct |
+| `tcp/http2/stream_body.zig` | no content-length is whole, exact count only, zero with a body, not a bare decimal, past u64, too many digits, repeated equal counts once, disagreeing values, case-insensitive name |
+| `tcp/http2/stream_invoke.zig` | `buildRequest` pseudo-headers and fallback, whole body reaches the handler, short body is reset |
+| `tcp/http2/handler.zig` | error with nothing answered becomes one 500, no second response after an fd or `Response` answer, swallowed error gets nothing, context carries opts and peer frame size, zero timeout leaves no deadline, access record written / skipped without a logger |
+| `tcp/http2/cache.zig` | ttl defaults, key never zero, key separates bodies, miss without a cache, store then hit, another path misses, empty path stores nothing, miss without an io |
+| `tcp/http2/upgrade.zig` | `headerValue` case and trim / skips request line / missing, `decodeSettings` valid / malformed / too large, `requestLine` split and fallback, `accept` answers 101 / 400 without h2c / head too large / peer closed mid-head |
+| `tcp/http2/serve.zig` | `headerBlock` / `dataBlock` padding strip and malformed padding, `applySettings` valid / out of range / HPACK table size, `serveConn` prior knowledge / bad preface GOAWAY / h2c upgrade stream 1, short body reset, matching body served, body past the stream buffer 413, unfinished hang-up GOAWAY, idle hang-up no GOAWAY, PING ACK |
+| `tcp/http2/Config.zig` | required fields, explicit dispatch model, worker / buffer / stream and frame defaults, response cache off, logger null, `handler_timeout_ms` zero, static serving off |
+| `tcp/http2/Context.zig` | init keeps fd and stream id, no static dir and 16 KiB frame, no deadline at start, `withTimeout` zero expired / future not expired / original untouched, `withDeadline` past expired, `setTimeout` replaces the deadline |
+| `tcp/http2/Request.zig` | `splitPath` path and query / no query / trailing `?`, `header` case-insensitive / pseudo-header / missing, `queryParam` value / valueless / missing / empty query, `queryParams` pairs / skips empty / empty / out of memory, `pathSegments` split / root / out of memory |
+| `tcp/http2/Response.zig` | 200 and no content type by default, `setStatus`, `setContentType`, `send` matches `writer.sendResponseFD` / records sent and bytes_written / closed peer BrokenPipe, `sendJson`, `sendText`, `sendNoContent` 204 |
 | `tcp/http2/server.zig` | `refAllDecls` + behavioral: port zero -> `error.ZixPortNotConfigured`, valid config succeeds and deinit is safe |
 | `tcp/http2/static.zig` | `refAllDecls` + behavioral: zero copy is refused for a coalescing batch and the sentinel fd, a file is framed as HEADERS plus DATA with END_STREAM, traversal / a missing file / an oversize path are rejected, a body past the max frame size is chunked, an empty file closes the stream on HEADERS, the brotli sibling is picked from the cache |
 
