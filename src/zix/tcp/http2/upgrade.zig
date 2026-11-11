@@ -40,14 +40,6 @@ const UpgradeHead = @import("UpgradeHead.zig");
 
 const Inner = Error || reader.Error || writer.Error;
 
-const HEAD_END = "\r\n\r\n";
-
-const BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-
-const SWITCHING_PROTOCOLS =
-    "HTTP/1.1 101 Switching Protocols\r\n" ++
-    "Connection: Upgrade\r\nUpgrade: h2c\r\n\r\n";
-
 /// One HTTP/1.1 header value by name (case-insensitive), leading spaces
 /// trimmed. The request line is skipped.
 ///
@@ -175,10 +167,7 @@ fn acceptInner(
     const head_len = try readHead(fd, head_buf, prefix.len);
     const head = head_buf[0..head_len];
 
-    const upgrade_value = headerValue(head, "upgrade") orelse return rejectBadRequest(fd);
-    if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_value, " "), "h2c")) {
-        return rejectBadRequest(fd);
-    }
+    if (!isH2cUpgrade(head)) return rejectBadRequest(fd);
 
     var result = requestLine(head);
     if (headerValue(head, "http2-settings")) |value| {
@@ -225,6 +214,30 @@ pub const Error = error {
     ZixHttp2_Upgrade_Overflow,
     ZixHttp2_Upgrade_BufferFull,
 };
+
+/// End of an HTTP/1.1 head: the empty line after the last header.
+pub const HEAD_END = "\r\n\r\n";
+
+/// Reply to a request that is not an h2c upgrade.
+pub const BAD_REQUEST = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+
+/// Reply that accepts an h2c upgrade.
+pub const SWITCHING_PROTOCOLS =
+    "HTTP/1.1 101 Switching Protocols\r\n" ++
+    "Connection: Upgrade\r\nUpgrade: h2c\r\n\r\n";
+
+/// Whether an HTTP/1.1 head asks for an h2c upgrade.
+///
+/// Param:
+/// head - []const u8 (request line and headers, ending in an empty line)
+///
+/// Return:
+/// - bool (true when the Upgrade header is h2c, case-insensitive)
+pub fn isH2cUpgrade(head: []const u8) bool {
+    const upgrade_value = headerValue(head, "upgrade") orelse return false;
+
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, upgrade_value, " "), "h2c");
+}
 
 /// Read an HTTP/1.1 request that asks for h2c and answer 101.
 ///
@@ -293,6 +306,22 @@ test "zix http2: upgrade, headerValue skips the request line" {
 
 test "zix http2: upgrade, headerValue missing returns null" {
     try std.testing.expect(headerValue(TEST_HEAD, "x-missing") == null);
+}
+
+test "zix http2: upgrade, isH2cUpgrade accepts h2c in any case" {
+    const head = "GET / HTTP/1.1\r\nUpgrade:  H2C \r\n\r\n";
+
+    try std.testing.expect(isH2cUpgrade(head));
+}
+
+test "zix http2: upgrade, isH2cUpgrade refuses another protocol" {
+    const head = "GET / HTTP/1.1\r\nUpgrade: websocket\r\n\r\n";
+
+    try std.testing.expect(!isH2cUpgrade(head));
+}
+
+test "zix http2: upgrade, isH2cUpgrade without the header is false" {
+    try std.testing.expect(!isH2cUpgrade("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
 }
 
 test "zix http2: upgrade, decodeSettings reads two parameters" {
