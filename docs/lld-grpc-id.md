@@ -243,6 +243,16 @@ Blok berasal dari `HpackEncoder` asli yang dijalankan di comptime, jadi byte-nya
 
 ---
 
+## timeout.zig
+
+`parseTimeout` membaca `<digits><unit>` dan mengembalikan nanodetik. Satuan: `H`, `M`, `S`, `m`, `u`, `n` (case-sensitive).
+
+- Kurang dari 2 byte adalah `InvalidFormat`. Lebih dari `MAX_DIGITS` (8) digit adalah `TooManyDigits` (spec gRPC over HTTP/2).
+- Digit hanya ASCII 0-9, jadi `+5S`, `-5S`, dan `1_0S` adalah `InvalidNumber`. Nol adalah `NotPositive` (spec meminta positive integer). Satuan tak dikenal adalah `InvalidUnit`.
+- Perkalian dicek, jadi `99999999H` adalah `Overflow`, tidak pernah panic.
+
+---
+
 ## server.zig dan dispatch/
 
 ### Dispatch (run)
