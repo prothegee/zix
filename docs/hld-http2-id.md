@@ -37,7 +37,11 @@ Pakai `zix.Http2` untuk HTTP/2 kelas browser atau prior-knowledge dengan kontrol
 
 ## Model Runtime
 
-Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `error.ZixDispatchModelUnsupported` (ADR-065).
+Tiga model dispatch, dipilih melalui `config.dispatch_model` (enum `DispatchModel`). Wajib: pemanggil harus menyetelnya secara eksplisit (tidak ada default). `.EPOLL` dan `.URING` khusus Linux, dan `run()` menolak keduanya di luar Linux dengan `Error.ZixHttp2_Server_DispatchModel_NotSupported` (ADR-065).
+
+`run()` memeriksa dengan urutan ini sebelum melayani: `config.port` (0 menghasilkan `ZixHttp2_Server_PortNotConfigured`), dispatch model, lalu `public_dir` (`ZixHttp2_Server_PublicDir*`). Config yang ditolak tidak meninggalkan listener maupun static cache.
+
+Note: file dispatch model belum di-port. Sampai file itu masuk, `run()` mengembalikan `ZixHttp2_Server_DispatchModel_NotSupported` untuk setiap model setelah pemeriksaan ini lolos.
 
 ### .ASYNC: Thread-per-connection di atas core blocking
 
@@ -76,13 +80,13 @@ flowchart TD
 - Satu worker menggerakkan banyak koneksi non-blocking melalui state machine h2 yang resumable di `mux/`, satu `MuxConn` per fd, sehingga konkurensi dibatasi oleh jumlah koneksi, bukan jumlah thread.
 - Setiap frame yang ditulis oleh readable batch (HEADERS plus DATA per stream, dikali jumlah stream dalam batch) di-coalesce menjadi satu `write()` melalui sink per-worker (`beginCoalesce` / `endCoalesce`), alih-alih satu write per frame.
 - `workers` adalah jumlah mux worker (0 = cpu count). Handler berjalan inline pada worker, jadi harus tetap terbatas: handler yang lama memblokir koneksi lain pada worker itu.
-- Di luar Linux, `run()` mengembalikan `error.ZixDispatchModelUnsupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
+- Di luar Linux, `run()` mengembalikan `Error.ZixHttp2_Server_DispatchModel_NotSupported` setelah mencatat model mana yang ditolak: pakai `.ASYNC` di sana.
 
 ### .URING: Event Loop io_uring Shared-Nothing (khusus Linux)
 
 Topologi shared-nothing, satu-listener-per-worker yang sama dengan `.EPOLL`, tetapi completion-based: satu multishot accept dan satu recv per koneksi disubmit sebagai SQE dan dipanen sebagai CQE (ADR-037 Phase 4). Setiap recv mengisi read accumulator koneksi, lalu `process.processRing` menggerakkan state machine yang resumable yang sama. Handler tetap menulis balasannya langsung ke fd (non-blocking), di-batch oleh coalescing sink yang sama.
 
-`.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Itu capability gap saat runtime di Linux. Di luar Linux model-nya ditolak langsung dengan `error.ZixDispatchModelUnsupported`.
+`.URING` memeriksa io_uring sekali saat startup (`initUringRing`). Saat ring tidak tersedia (kernel lama, sandbox seccomp, atau cap `RLIMIT_MEMLOCK` yang terlalu rendah untuk ring), ia melipat ke loop shared-nothing `.EPOLL`, sehingga memilih `.URING` tidak pernah membuat server terdampar tepat setelah binding. Itu capability gap saat runtime di Linux. Di luar Linux model-nya ditolak langsung dengan `Error.ZixHttp2_Server_DispatchModel_NotSupported`.
 
 ---
 
@@ -104,7 +108,7 @@ graph TD
     Http2 --> hpack["hpack/\nstatic table + Huffman + integer\ndecoder + encoder + respHeaderBlock"]
     Http2 --> config["Config.zig\nServerConfig"]
     Http2 --> types["Request.zig + Response.zig + Context.zig\nhandler trio"]
-    Http2 --> server["server.zig\nServer + dispatch_model switch"]
+    Http2 --> server["Server.zig\nServer + config gates + dispatch_model switch"]
     Http2 --> static["static.zig\nfallback public_dir\nHEADERS + frame DATA yang dibatasi"]
 
     server --> dispatch["dispatch/\nasync pool mixed epoll uring + common"]
@@ -161,11 +165,13 @@ Diakses melalui `const zix = @import("zix");`
 | `zix.Http2.serveCached` / `sendCachedFD` / `cacheTtl` | fn | Response cache per-worker (ADR-036), opt-in via `response_cache` (`.EPOLL` / `.URING`) |
 | `zix.Http2.HpackEncoder` / `HpackDecoder` / `HpackEntry` | type | Tipe codec HPACK |
 | `zix.Http2.huffEncode` / `huffDecode` | fn | Codec Huffman HPACK |
-| `zix.Http2.respHeaderBlock` | fn | Meng-encode blok `[:status, content-type, content-encoding, content-length]` yang di-cache |
-| `zix.Http2.FrameHeader` + `parseFrameHeader` / `writeFrameHeader` / `encodeFrameHeader` / `readFrameHeader` | type / fn | Codec frame-header untuk framing kustom |
+| `zix.Http2.FrameHeader` + `parseFrameHeader` / `writeFrameHeaderFD` / `encodeFrameHeader` / `readFrameHeader` | type / fn | Codec frame-header untuk framing kustom |
+| `zix.Http2.writeAllFD` / `recvExact` | fn | Write-all dan read exact blocking pada sebuah fd |
 | `zix.Http2.sendSettingsFD` / `sendSettingsAckFD` / `sendPingAckFD` / `sendGoawayFD` / `sendRstStreamFD` / `sendWindowUpdateFD` | fn | Pengirim control-frame |
 | `zix.Http2.FRAME_TYPE_*` / `FLAG_*` / `ERR_*` / `SETTINGS_*` | const | Konstanta frame, flag, error, dan settings RFC 7540 |
 | `zix.Http2.PREFACE` / `HPACK_STATIC` | const | String connection preface, static table HPACK |
+| `zix.Http2.FRAME_HEADER_LEN` / `FRAME_PAYLOAD_SLACK` / `HPACK_ENCODE_SCRATCH` / `MAX_HEADERS` | const | Ukuran frame dan buffer |
+| `zix.Http2.DEFAULT_INITIAL_WINDOW` / `DEFAULT_MAX_FRAME_SIZE` | const | Default RFC 7540 (65535, 16384). `DEFAULT_WINDOW_SIZE` dan `MAX_PAYLOAD` adalah nama lama, dipertahankan untuk pemanggil |
 
 ---
 
@@ -319,7 +325,7 @@ Flow control sisi-kirim mengikuti RFC 7540 6.9. Setiap `MuxConn` membawa send wi
 
 ## h2 di atas TLS
 
-Menyetel `config.tls` (sebuah `*Tls.Context`) opt-in ke HTTP/2 di atas TLS (TLS 1.3 dengan fallback 1.2, ALPN h2). Switch `run()` di `server.zig` memilih salah satu dari dua terminator berdasarkan `dispatch_model`:
+Menyetel `config.tls` (sebuah `*Tls.Context`) opt-in ke HTTP/2 di atas TLS (TLS 1.3 dengan fallback 1.2, ALPN h2). Switch `run()` di `Server.zig` memilih salah satu dari dua terminator berdasarkan `dispatch_model`:
 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. Satu epoll worker `SO_REUSEPORT` per core melakukan terminasi TLS di tempat via session yang resumable (`tcp/tls/tls_session.zig`) dan mem-multiplex banyak koneksi per worker, tanpa socketpair dan tanpa thread per koneksi. Mux h2 yang resumable mengonsumsi plaintext hasil dekripsi, dan frame balasannya dienkripsi kembali menjadi TLS record melalui frame write hook thread-local. Ciphertext keluar yang tidak muat di-stage per koneksi dan di-flush pada EPOLLOUT berikutnya, sehingga klien lambat tidak pernah memarkir worker.
 - `.ASYNC`: `tls_serve.runTls`. Sebuah accept loop menyerahkan setiap koneksi ke worker thread-nya sendiri, yang menjalankan terminator bersama (`tcp/tls/h2_terminator.zig`) dengan driver inline-mux yang menggerakkan mux resumable yang sama langsung di atas stream hasil dekripsi (satu thread per koneksi, tanpa socketpair). Jalur ini juga menyajikan TLS 1.2.
