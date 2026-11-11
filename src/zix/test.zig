@@ -121,6 +121,7 @@ test {
     _ = @import("tcp/http2/dispatch/async.zig");
     _ = @import("tcp/http2/dispatch/epoll.zig");
     _ = @import("tcp/http2/dispatch/uring.zig");
+    _ = @import("tcp/http2/grpc/Config.zig");
     _ = @import("tcp/http2/grpc/frame/GrpcPrefix.zig");
     _ = @import("tcp/http2/grpc/frame/build.zig");
     _ = @import("tcp/http2/grpc/frame/gzip.zig");
