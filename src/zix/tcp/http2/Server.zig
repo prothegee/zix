@@ -12,9 +12,9 @@
 //!
 //! ### note:
 //!
-//! No dispatch model is wired yet: .ASYNC lands with the portable dispatch,
-//! .EPOLL and .URING with the Linux dispatch. Until then run returns
-//! DispatchModel_NotSupported after the config gates pass.
+//! Only .ASYNC is wired. .EPOLL and .URING land with the Linux dispatch.
+//! Until then they return DispatchModel_NotSupported after the config gates
+//! pass.
 //!
 //! ---------------------------------------------------------
 //!
@@ -35,6 +35,7 @@ const std = @import("std");
 const Config = @import("Config.zig");
 const DispatchModel = @import("../../shared/dispatch.zig").Model;
 const HandlerFn = @import("handler.zig").HandlerFn;
+const dispatch_async = @import("dispatch/async.zig");
 const StaticCacheRegistry = @import("../../utils/static/StaticCacheRegistry.zig");
 const OS = @import("builtin").target.os.tag;
 
@@ -132,6 +133,17 @@ fn installStaticCache(config: Config) bool {
     };
 }
 
+fn dispatchError(err: dispatch_async.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_Async_ResolveFailed
+            => Error.ZixHttp2_Server_ResolveFailed,
+        error.ZixHttp2_Async_ListenFailed
+            => Error.ZixHttp2_Server_ListenFailed,
+        error.ZixHttp2_Async_AcceptFailed
+            => Error.ZixHttp2_Server_AcceptFailed,
+    };
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -146,6 +158,12 @@ pub const Error = error {
     ZixHttp2_Server_PublicDirNotADirectory,
     /// config.public_dir cannot be opened (permission or other)
     ZixHttp2_Server_PublicDirUnreadable,
+    /// E.Q.: error.ZixHttp2_Async_ResolveFailed
+    ZixHttp2_Server_ResolveFailed,
+    /// E.Q.: error.ZixHttp2_Async_ListenFailed
+    ZixHttp2_Server_ListenFailed,
+    /// E.Q.: error.ZixHttp2_Async_AcceptFailed
+    ZixHttp2_Server_AcceptFailed,
 };
 
 /// Build the server. Validation happens in run.
@@ -196,6 +214,8 @@ pub fn deinit(self: *Self) void {
 /// - Error.ZixHttp2_Server_PortNotConfigured when config.port is 0
 /// - Error.ZixHttp2_Server_DispatchModel_NotSupported when the model cannot run
 /// - Error.ZixHttp2_Server_PublicDir* when config.public_dir cannot be entered
+/// - Error.ZixHttp2_Server_ResolveFailed, ListenFailed, or AcceptFailed from
+///   the .ASYNC model
 pub fn run(self: *const Self) Error!void {
     try gatePort(self.config);
     try gateDispatchModel(self.config.dispatch_model);
@@ -207,10 +227,13 @@ pub fn run(self: *const Self) Error!void {
     defer if (owns_static) StaticCacheRegistry.shared.shutdown(self.config.io);
 
     return switch (self.config.dispatch_model) {
-        // The model files are not ported yet: .ASYNC lands with the portable
-        // dispatch, .EPOLL and .URING with the Linux dispatch. .IOCP and
-        // .KQUEUE never pass gateDispatchModel.
-        .ASYNC,
+        .ASYNC => {
+            dispatch_async.run(self.config, self.handler) catch |err| switch (err) {
+                else => return dispatchError(err),
+            };
+        },
+        // .EPOLL and .URING land with the Linux dispatch. .IOCP and .KQUEUE
+        // never pass gateDispatchModel.
         .EPOLL,
         .URING,
         .IOCP,
@@ -371,5 +394,33 @@ test "zix http2: Server, installStaticCache owns the table it builds" {
 
     try std.testing.expect(installStaticCache(config));
     try std.testing.expect(!installStaticCache(config));
+}
+
+test "zix http2: Server, dispatchError maps ResolveFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ResolveFailed,
+        dispatchError(error.ZixHttp2_Async_ResolveFailed),
+    );
+}
+
+test "zix http2: Server, dispatchError maps ListenFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ListenFailed,
+        dispatchError(error.ZixHttp2_Async_ListenFailed),
+    );
+}
+
+test "zix http2: Server, dispatchError maps AcceptFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_AcceptFailed,
+        dispatchError(error.ZixHttp2_Async_AcceptFailed),
+    );
+}
+
+test "zix http2: Server, ASYNC with an unresolvable ip is ResolveFailed" {
+    var server = testServer(.ASYNC);
+    server.config.ip = "not-an-ip";
+
+    try std.testing.expectError(Error.ZixHttp2_Server_ResolveFailed, server.run());
 }
 
