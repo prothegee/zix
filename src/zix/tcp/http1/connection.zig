@@ -38,7 +38,7 @@ const head = @import("head.zig");
 const header = @import("header.zig");
 const serve = @import("serve.zig");
 const static = @import("static.zig");
-const Config = @import("Config.zig");
+const CacheSize = @import("../../utils/cache/CacheSize.zig");
 const ConnArgs = @import("ConnArgs.zig");
 const ConnEntry = @import("ConnEntry.zig");
 
@@ -49,8 +49,6 @@ const ConnEntry = @import("ConnEntry.zig");
 /// or the cache could not be built.
 ///
 /// Note:
-/// - Only the cache size fields of the Config are read, so the address fields
-///   are left empty.
 /// - A held cache is kept from being freed until releaseCache() runs.
 ///
 /// Param:
@@ -65,16 +63,12 @@ fn installCache(args: ConnArgs) bool {
         return false;
     }
 
-    const config: Config = .{
-        .io = args.io,
-        .ip = "",
-        .port = 0,
-        .dispatch_model = .ASYNC,
-        .cache_max_entries = args.cache_max_entries,
-        .cache_max_value_bytes = args.cache_max_value_bytes,
+    const size: CacheSize = .{
+        .max_entries = args.cache_max_entries,
+        .max_value_bytes = args.cache_max_value_bytes,
     };
 
-    if (async_cache.acquire(config)) |resp_cache| {
+    if (async_cache.acquire(size)) |resp_cache| {
         cache.setCache(resp_cache, args.cache_ttl_ms);
     } else {
         cache.setCache(null, 0);
