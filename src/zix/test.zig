@@ -106,7 +106,12 @@ test {
     _ = @import("tcp/http2/FrameHeader.zig");
     _ = @import("tcp/http2/Request.zig");
     _ = @import("tcp/http2/Response.zig");
+    _ = @import("tcp/http2/ServeOpts.zig");
+    _ = @import("tcp/http2/Stream.zig");
+    _ = @import("tcp/http2/UpgradeHead.zig");
+    _ = @import("tcp/http2/cache.zig");
     _ = @import("tcp/http2/control.zig");
+    _ = @import("tcp/http2/declared.zig");
     _ = @import("tcp/http2/hpack/DynamicTable.zig");
     _ = @import("tcp/http2/hpack/Header.zig");
     _ = @import("tcp/http2/hpack/HpackDecoder.zig");
@@ -119,7 +124,14 @@ test {
     _ = @import("tcp/http2/hpack/response_block.zig");
     _ = @import("tcp/http2/hpack/static_table.zig");
     _ = @import("tcp/http2/frame.zig");
+    _ = @import("tcp/http2/handler.zig");
     _ = @import("tcp/http2/reader.zig");
+    _ = @import("tcp/http2/serve.zig");
+    _ = @import("tcp/http2/stream_body.zig");
+    _ = @import("tcp/http2/stream_invoke.zig");
+    _ = @import("tcp/http2/stream_slot.zig");
+    _ = @import("tcp/http2/stream_state.zig");
+    _ = @import("tcp/http2/upgrade.zig");
     _ = @import("tcp/http2/writer.zig");
     _ = @import("utils/Multipart.zig");
     _ = @import("utils/MultipartField.zig");
