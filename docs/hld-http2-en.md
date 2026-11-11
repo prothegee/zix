@@ -99,7 +99,8 @@ graph TD
     Http2 --> reader["reader.zig\nrecvExact + readFrameHeader"]
     Http2 --> control["control.zig\ncontrol-frame senders"]
     Http2 --> hpack["hpack/\nstatic table + Huffman + integer\ndecoder + encoder + respHeaderBlock"]
-    Http2 --> config["config.zig\nHttp2ServerConfig"]
+    Http2 --> config["Config.zig\nServerConfig"]
+    Http2 --> types["Request.zig + Response.zig + Context.zig\nhandler trio"]
     Http2 --> server["server.zig\nServer + dispatch_model switch"]
     Http2 --> static["static.zig\npublic_dir fallback\nHEADERS + capped DATA frames"]
 
@@ -121,6 +122,7 @@ graph TD
     writer --> hpack
     reader --> frame
     control --> writer
+    types --> writer
     static --> static_cache["utils/static_cache.zig\nshared open-file cache"]
 ```
 
@@ -133,15 +135,15 @@ Access via `const zix = @import("zix");`
 | Symbol | Type | Description |
 | :- | :- | :- |
 | `zix.Http2.Server` | struct | `init(handler, config)`, then `run()` / `deinit()` (ADR-063: `handler` is a runtime `HandlerFn`, not a comptime route table) |
-| `zix.Http2.ServerConfig` | struct | Server configuration (see Http2ServerConfig section) |
+| `zix.Http2.ServerConfig` | struct | Server configuration, `Config.zig` (see ServerConfig section) |
 | `zix.Http2.DispatchModel` | enum(u8) | `.ASYNC`(0, portable) `.EPOLL`(1, Linux-only) `.URING`(2, Linux-only) |
 | `zix.Http2.HandlerFn` | type | `*const fn(req: *Request, res: *Response, ctx: *Context) anyerror!void` (ADR-063 trio, mirrors Http1/ADR-062) |
 | `zix.Http2.Route` | struct | `{ path, handler, kind = .EXACT }` |
 | `zix.Http2.RouteKind` | enum(u8) | `.EXACT` `.PREFIX` (no `.PARAM` this pass) |
 | `zix.Http2.Router` | fn | `Router(comptime routes) type`, returns a type whose `dispatch` matches `HandlerFn` exactly (usable directly as the `Server.init` handler); unmatched paths get a 404 `text/plain` |
-| `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, zero-copy view over the stream's decoded headers/body, plus `header(name)` and `queryParam(name)` |
-| `zix.Http2.Response` | struct | Thin builder over `writer.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, all `!void`. `sent: bool` guards the auto-500 |
-| `zix.Http2.Context` | struct | `fd`, `sid`, `deadline_ns` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut`, `io`, and a stack-arena `allocator` (`FixedBufferAllocator`, no heap call) |
+| `zix.Http2.Request` | struct | `{ method, path, query, headers, body }`, zero-copy view over the stream's decoded headers/body, plus `header(name)`, `queryParam(name)`, `queryParams(allocator)`, `pathSegments(allocator)`, and `splitPath(raw_path)`. An allocation failure returns `ZixHttp2_Request_OutOfMemory` |
+| `zix.Http2.Response` | struct | Thin builder over `writer.sendResponseFD` / `sendResponseEncodedFD`: `setStatus` / `setContentType` / `send` / `sendJson` / `sendText` / `sendNoContent`, all `Error!void` (writer errors become `ZixHttp2_Response_*`). `sent: bool` guards the auto-500 |
+| `zix.Http2.Context` | struct | `init(io, allocator, fd, sid)`, `deadline: ?std.Io.Clock.Timestamp` + `withTimeout` / `setTimeout` / `withDeadline` / `isExpired` / `timedOut` (clock read through `io`, same as Http1), `public_dir`, `max_frame_size`, and a stack-arena `allocator` (`FixedBufferAllocator`, `CTX_ARENA_BYTES`, no heap call) |
 | `zix.Http2.ServeOpts` | struct | Per-connection serve options built from the config |
 | `zix.Http2.serveConn` | fn | `serveConn(handler, fd, opts, io)`: direct blocking connection entry point |
 | `zix.Http2.Header` | struct | `{ name: []const u8, value: []const u8 }` decoded request header |
@@ -159,40 +161,38 @@ Access via `const zix = @import("zix");`
 
 ---
 
-## Http2ServerConfig
+## ServerConfig
 
 Key fields (the full table is in [`docs/zix-config-en.md`](zix-config-en.md)):
 
 ```zig
-pub const Http2ServerConfig = struct {
-    io:             std.Io,        // listen/accept plumbing only, must outlive the server
-    ip:             []const u8,
-    port:           u16,           // must be non-zero
-    dispatch_model: DispatchModel, // required, no default
-    kernel_backlog: u31   = 1024,
-    workers:        usize = 0,     // 0 = cpu_count accept threads, ignored by .ASYNC
-    workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux workers. Ignored by .ASYNC
-    worker_stack_size_bytes: usize = 512 * 1024,
-    busy_poll_us:   u32   = 0,     // SO_BUSY_POLL spin window (.EPOLL/.URING), 0 = unset
-    max_streams:    u32   = 128,   // advertised SETTINGS_MAX_CONCURRENT_STREAMS
-    max_frame_size: u32   = 16384, // advertised SETTINGS_MAX_FRAME_SIZE
-    max_header_scratch: usize = 4096,       // HPACK decode scratch per connection
-    max_body:       usize = 16384, // max request body buffered per stream (a body past this sheds the stream with 413)
-    max_recv_buf:   usize = 32 * 1024,      // per-connection read-buffer floor (.EPOLL/.URING)
-    tls_write_buf_initial_bytes: usize = 16 * 1024,
-    response_cache: bool  = false, // per-worker response cache (ADR-036), every model
-    handler_timeout_ms: u32 = 0,   // global deadline seeded onto Context.deadline_ns, 0 = no deadline
-    public_dir:     []const u8 = "",        // static file root, "" disables static serving
-    public_dir_cache_ttl_ms:      u32 = 0,  // 0 = never cached, the shipped default
-    public_dir_cache_max_entries: u32 = 256,// static cache slots, one per file plus its siblings
-    tls:            ?*Tls.Context = null,   // non-null serves h2 over TLS (ALPN h2), else h2c cleartext
-    logger:         ?*Logger = null,        // lifecycle lines only, see Logging section
-};
+// src/zix/tcp/http2/Config.zig, fields at file scope (exported as zix.Http2.ServerConfig)
+io:             std.Io,        // listen/accept plumbing only, must outlive the server
+ip:             []const u8,
+port:           u16,           // must be non-zero
+dispatch_model: DispatchModel, // required, no default
+kernel_backlog: u31   = 1024,
+workers:        usize = 0,     // .EPOLL/.URING: 0 = cpu_count mux workers. Ignored by .ASYNC
+worker_stack_size_bytes: usize = 512 * 1024,
+busy_poll_us:   u32   = 0,     // SO_BUSY_POLL spin window (.EPOLL/.URING), 0 = unset
+max_streams:    u32   = 128,   // advertised SETTINGS_MAX_CONCURRENT_STREAMS
+max_frame_size: u32   = 16384, // advertised SETTINGS_MAX_FRAME_SIZE
+max_header_scratch: usize = 4096,       // HPACK decode scratch per connection
+max_body:       usize = 16384, // max request body buffered per stream (a body past this sheds the stream with 413)
+max_recv_buf:   usize = 32 * 1024,      // per-connection read-buffer floor (.EPOLL/.URING)
+tls_write_buf_initial_bytes: usize = 16 * 1024,
+response_cache: bool  = false, // per-worker response cache (ADR-036), every model
+handler_timeout_ms: u32 = 0,   // global deadline seeded onto Context.deadline, 0 = no deadline
+public_dir:     []const u8 = "",        // static file root, "" disables static serving
+public_dir_cache_ttl_ms:      u32 = 0,  // 0 = never cached, the shipped default
+public_dir_cache_max_entries: u32 = 256,// static cache slots, one per file plus its siblings
+tls:            ?*Tls.Context = null,   // non-null serves h2 over TLS (ALPN h2), else h2c cleartext
+logger:         ?*Logger = null,        // lifecycle lines only, see Logging section
 ```
 
 Note: `workers` is the mux worker count under `.EPOLL` / `.URING` (0 = cpu count), and oversubscribing it only adds scheduler churn. `.ASYNC` ignores it. `max_recv_buf` is a floor: the mux read accumulator is sized to the larger of it and one max frame, so a larger floor cuts `read()` and buffer compaction for big frames. `tls` opts into h2 over TLS: when non-null the server serves on a gated TLS path (the cleartext dispatch models are untouched), and for HTTP/2 the context's ALPN should include `.H2`. The `response_cache` and `cache_*` fields configure the opt-in per-worker cache (ADR-036), read at runtime under `.EPOLL` and `.URING`.
 
-`handler_timeout_ms` (ADR-063) is the global deadline: seeded onto `Context.deadline_ns` at dispatch, 0 leaves no deadline. A handler may tighten or clear its own via `ctx.setTimeout` / `withDeadline`, checked with `ctx.isExpired()` between steps (the engine never interrupts a running handler, this is opt-in).
+`handler_timeout_ms` (ADR-063) is the global deadline: seeded onto `Context.deadline` at dispatch, 0 leaves no deadline. A handler may tighten or clear its own via `ctx.setTimeout` / `withDeadline`, checked with `ctx.isExpired()` between steps (the engine never interrupts a running handler, this is opt-in).
 
 ---
 
@@ -220,7 +220,7 @@ try server.run();
 
 - `Server.init` takes a runtime `handler: HandlerFn` (ADR-063), built via `Router(&[_]Route{...}).dispatch`. Routes themselves stay comptime (baked into the router type), but the server no longer bakes the route table into its own type, so `Server` is one concrete struct, not a generic.
 - The handler is called once per completed stream (END_HEADERS plus END_STREAM), via `core.invokeHandler` which builds the trio and dispatches. `req.method`, `req.headers`, and `req.body` all point into per-stream buffers and are valid only for the duration of the call.
-- `ctx.allocator` is a per-request stack arena (`FixedBufferAllocator`, no heap call), `ctx.io` carries the connection's `std.Io`, and `ctx.deadline_ns` / `isExpired()` cover Layer B timeouts (see `handler_timeout_ms` above).
+- `ctx.allocator` is a per-request stack arena (`FixedBufferAllocator`, no heap call), `ctx.io` carries the connection's `std.Io`, and `ctx.deadline` / `isExpired()` cover Layer B timeouts (see `handler_timeout_ms` above).
 - The handler returns `anyerror!void`. On error, `invokeHandler` auto-completes one 500 (`writer.sendResponseFD(fd, sid, 500, "text/plain", "Internal Server Error")`), but only when `!res.sent`, so a partially sent response is never corrupted.
 - Responses go out through `Response.send` / `sendJson` / `sendText` / `sendNoContent`, thin builders over the same `writer.sendResponseFD` / `sendResponseEncodedFD` writers as before (byte-identical wire, ADR-063 changed only what wraps the call). A large, process-lifetime body still uses the raw `mux.sendResponseStreamFD` escape hatch directly (paced by flow control), not wrapped by `Response`.
 - The engine resolves the path to a handler through `Router(routes).dispatch` before the call (EXACT then longest-PREFIX match, unmatched paths try the static fallback below and then get 404 `text/plain`), so the handler does not parse or match the path itself.
