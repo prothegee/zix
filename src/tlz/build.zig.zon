@@ -1,0 +1,18 @@
+.{
+    .name = .tlz,
+    .version = "0.1.0",
+    .semver = .{
+        .major = 0,
+        .minor = 1,
+        .patch = 0,
+        .release_candidate = null,
+    },
+    .fingerprint = 0xd521a51783d87bb3,
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
+
