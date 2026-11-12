@@ -92,5 +92,24 @@ test {
     _ = @import("crypto/certificate/signing_key.zig");
     _ = @import("crypto/cert_verify.zig");
     _ = @import("crypto/cert_verify/PathConstraints.zig");
+
+    _ = @import("tls12/prf.zig");
+    _ = @import("tls12/prf/KeyMaterial.zig");
+    _ = @import("tls12/record.zig");
+    _ = @import("tls12/version.zig");
+    _ = @import("tls12/version/selected.zig");
+    _ = @import("tls12/connection.zig");
+    _ = @import("tls12/connection/HandshakeOptions.zig");
+    _ = @import("tls12/connection/State.zig");
+    _ = @import("tls12/connection/Flight1.zig");
+    _ = @import("tls12/connection/FinishResult.zig");
+    _ = @import("tls12/connection/Connection.zig");
+    _ = @import("tls12/client.zig");
+    _ = @import("tls12/client/HandshakeOptions.zig");
+    _ = @import("tls12/client/State.zig");
+    _ = @import("tls12/client/StartResult.zig");
+    _ = @import("tls12/client/FinishResult.zig");
+    _ = @import("tls12/client/ClientConnection.zig");
+    _ = @import("tls12/client/ServerFlight.zig");
 }
 
