@@ -39,11 +39,15 @@ const std = @import("std");
 pub const ExtensionType = enum(u16) {
     SERVER_NAME = 0x0000,
     SUPPORTED_GROUPS = 0x000a,
+    /// TLS 1.2 ECDHE point formats (RFC 8422 5.1.2).
+    EC_POINT_FORMATS = 0x000b,
     SIGNATURE_ALGORITHMS = 0x000d,
     APPLICATION_LAYER_PROTOCOL_NEGOTIATION = 0x0010,
     RECORD_SIZE_LIMIT = 0x001c,
     SUPPORTED_VERSIONS = 0x002b,
     KEY_SHARE = 0x0033,
+    /// TLS 1.2 secure renegotiation (RFC 5746).
+    RENEGOTIATION_INFO = 0xff01,
     _,
 };
 
@@ -79,6 +83,17 @@ test "tlz: extension_type, record_size_limit value follows RFC 8449" {
     try std.testing.expectEqual(
         @as(u16, 0x001c),
         @intFromEnum(ExtensionType.RECORD_SIZE_LIMIT),
+    );
+}
+
+test "tlz: extension_type, TLS 1.2 values follow RFC 8422 and RFC 5746" {
+    try std.testing.expectEqual(
+        @as(u16, 0x000b),
+        @intFromEnum(ExtensionType.EC_POINT_FORMATS),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 0xff01),
+        @intFromEnum(ExtensionType.RENEGOTIATION_INFO),
     );
 }
 
