@@ -111,5 +111,44 @@ test {
     _ = @import("tls12/client/FinishResult.zig");
     _ = @import("tls12/client/ClientConnection.zig");
     _ = @import("tls12/client/ServerFlight.zig");
+
+    _ = @import("dtls/cookie.zig");
+    _ = @import("dtls/cookie/Signer.zig");
+    _ = @import("dtls/record.zig");
+    _ = @import("dtls/record/Header.zig");
+    _ = @import("dtls/record/Opened.zig");
+    _ = @import("dtls/record/RecordIterator.zig");
+    _ = @import("dtls/record/AntiReplay.zig");
+    _ = @import("dtls/handshake.zig");
+    _ = @import("dtls/handshake/message_type.zig");
+    _ = @import("dtls/handshake/Header.zig");
+    _ = @import("dtls/handshake/Fragment.zig");
+    _ = @import("dtls/handshake/FragmentIterator.zig");
+    _ = @import("dtls/handshake/Fragmenter.zig");
+    _ = @import("dtls/handshake/reassembler.zig");
+    _ = @import("dtls/hello.zig");
+    _ = @import("dtls/hello/ClientHello.zig");
+    _ = @import("dtls/flight.zig");
+    _ = @import("dtls/flight/state.zig");
+    _ = @import("dtls/flight/timeout_action.zig");
+    _ = @import("dtls/flight/Timer.zig");
+    _ = @import("dtls/flight/Flight.zig");
+    _ = @import("dtls/exporter.zig");
+    _ = @import("dtls/exporter/srtp_profile.zig");
+    _ = @import("dtls/exporter/SrtpKeys.zig");
+    _ = @import("dtls/use_srtp.zig");
+    _ = @import("dtls/use_srtp/Offered.zig");
+    _ = @import("dtls/connection.zig");
+    _ = @import("dtls/connection/HandshakeOptions.zig");
+    _ = @import("dtls/connection/State.zig");
+    _ = @import("dtls/connection/Flight.zig");
+    _ = @import("dtls/connection/FinishResult.zig");
+    _ = @import("dtls/connection/Connection.zig");
+    _ = @import("dtls/client.zig");
+    _ = @import("dtls/client/Options.zig");
+    _ = @import("dtls/client/ServerFlight.zig");
+    _ = @import("dtls/client/State.zig");
+    _ = @import("dtls/client/ClientConnection.zig");
+    _ = @import("dtls/client/FinishResult.zig");
 }
 
