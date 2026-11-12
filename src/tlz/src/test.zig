@@ -36,5 +36,21 @@
 
 test {
     _ = @import("lib.zig");
+
+    _ = @import("wire/Reader.zig");
+    _ = @import("wire/Writer.zig");
+    _ = @import("alert.zig");
+    _ = @import("alert/description.zig");
+    _ = @import("alert/Inbound.zig");
+    _ = @import("key_schedule.zig");
+    _ = @import("key_schedule/Transcript.zig");
+    _ = @import("record.zig");
+    _ = @import("record/content_type.zig");
+    _ = @import("record/Opened.zig");
+    _ = @import("cipher_suite.zig");
+    _ = @import("named_group.zig");
+    _ = @import("signature_scheme.zig");
+    _ = @import("extension_type.zig");
+    _ = @import("alpn.zig");
 }
 
