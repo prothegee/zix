@@ -250,7 +250,23 @@ gated, portable fallback elsewhere.
   683 signs/core is 0.86 s, well inside the 2 s reconnect window. OpenSSL on this
   box is 0.518 ms, so the raw primitive still trails ~2.4x (P3d / P3e close it).
 
-### P3d / P3e. The remaining OpenSSL-parity levers (from `x86_64-mont5.pl`). NOT STARTED
+### P3d / P3e. The remaining OpenSSL-parity levers (from `x86_64-mont5.pl`). P3e DONE in 0.6.x, P3d NOT NEEDED
+
+Update 2026-11-12 (0.6.x, `src/tlz`): P3e landed and OpenSSL parity is reached
+without P3d. The dedicated ADX square (`src/tlz/src/crypto/montgomery/asm_body.zig`,
+SOS form: upper triangle once, double plus diagonal in one pass, then the
+Montgomery reduction) runs 157 ns vs the fused multiply 201 ns at 16 limbs. With it,
+the CRT sign moved off std.crypto.ff (`src/tlz/src/crypto/rsa/crt.zig`), R^2 takes
+about ten operations, the window table read is SIMD, and the 3072 / 4096 primes use a
+5-bit window. Measured RSA sign (PSS, ReleaseFast, one core, this box):
+
+| RSA | 0.5.x P3c | 0.6.x | OpenSSL 3.6.5 |
+| :- | :- | :- | :- |
+| 2048 | 1.26 ms (0.72 ms on this box before 0.6.x) | 0.51 ms | 0.51 ms |
+| 3072 | not measured | 1.58 ms | 1.56 ms |
+| 4096 | not measured | 3.36 ms | 3.57 ms |
+
+The original notes below are kept as written.
 
 Read from the local OpenSSL tree (crypto/bn/asm/x86_64-mont5.pl). Two routines
 explain its edge over P3c:
@@ -347,6 +363,9 @@ its constant-time default. P3 is constant-time by construction (fixed asm
 schedule), so it is the one lever that can also ship as the library default.
 
 ## Current status (final for this pass)
+
+Superseded by the 0.6.x update in the P3d / P3e section: P3e done, OpenSSL parity
+reached. The status below is the 0.5.x snapshot.
 
 Correctness (R1-R6) and performance (P3a + P3c) are DONE and in the library:
 
