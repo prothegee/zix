@@ -40,8 +40,14 @@ pub const HandshakeType = enum(u8) {
     SERVER_HELLO = 2,
     ENCRYPTED_EXTENSIONS = 8,
     CERTIFICATE = 11,
+    /// TLS 1.2 only (RFC 5246 7.4.3).
+    SERVER_KEY_EXCHANGE = 12,
     CERTIFICATE_REQUEST = 13,
+    /// TLS 1.2 only (RFC 5246 7.4.5).
+    SERVER_HELLO_DONE = 14,
     CERTIFICATE_VERIFY = 15,
+    /// TLS 1.2 only (RFC 5246 7.4.7).
+    CLIENT_KEY_EXCHANGE = 16,
     FINISHED = 20,
     _,
 };
@@ -70,6 +76,18 @@ test "tlz handshake: handshake_type, authentication values follow RFC 8446" {
         @intFromEnum(HandshakeType.CERTIFICATE_VERIFY),
     );
     try std.testing.expectEqual(@as(u8, 20), @intFromEnum(HandshakeType.FINISHED));
+}
+
+test "tlz handshake: handshake_type, TLS 1.2 key exchange values follow RFC 5246" {
+    try std.testing.expectEqual(
+        @as(u8, 12),
+        @intFromEnum(HandshakeType.SERVER_KEY_EXCHANGE),
+    );
+    try std.testing.expectEqual(@as(u8, 14), @intFromEnum(HandshakeType.SERVER_HELLO_DONE));
+    try std.testing.expectEqual(
+        @as(u8, 16),
+        @intFromEnum(HandshakeType.CLIENT_KEY_EXCHANGE),
+    );
 }
 
 test "tlz handshake: handshake_type, unknown value round trips" {
