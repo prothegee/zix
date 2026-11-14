@@ -30,6 +30,7 @@
 //!
 
 const std = @import("std");
+const tlz = @import("tlz");
 const Config = @import("Config.zig");
 const HandlerFn = @import("handler.zig").HandlerFn;
 const StaticCacheRegistry = @import("../../utils/static/StaticCacheRegistry.zig");
@@ -37,6 +38,9 @@ const OS = @import("builtin").target.os.tag;
 const dispatch_async = @import("dispatch/async.zig");
 const dispatch_epoll = @import("dispatch/epoll.zig");
 const dispatch_uring = @import("dispatch/uring.zig");
+const log = @import("log.zig");
+const tls_mux = @import("tls_mux.zig");
+const tls_serve = @import("tls_serve.zig");
 
 // --------------------------------------------------------- //
 // Fields:
@@ -162,6 +166,153 @@ fn dispatchUringError(err: dispatch_uring.Error) Error {
     };
 }
 
+fn dispatchTlsServeError(err: tls_serve.Error) Error {
+    return switch (err) {
+        error.ZixHttp1_TlsServe_ResolveFailed
+            => Error.ZixHttp1_Server_ResolveFailed,
+        error.ZixHttp1_TlsServe_ListenFailed
+            => Error.ZixHttp1_Server_ListenFailed,
+        error.ZixHttp1_TlsServe_AcceptFailed
+            => Error.ZixHttp1_Server_AcceptFailed,
+        error.ZixHttp1_TlsServe_EntropyUnavailable,
+        error.ZixHttp1_TlsServe_Canceled,
+        error.ZixHttp1_TlsServe_Closed,
+        error.ZixHttp1_TlsServe_HeaderTooLarge,
+        error.ZixHttp1_TlsServe_ReadFailed,
+        error.ZixHttp1_TlsServe_SetBufFailed,
+        error.ZixHttp1_TlsServe_BrokenPipe,
+        error.ZixHttp1_TlsServe_HeadBuild,
+        error.ZixHttp1_TlsServe_RecordTooLarge,
+        error.ZixHttp1_TlsServe_UnexpectedRecord,
+        error.ZixHttp1_TlsServe_PeerAlert,
+        error.ZixHttp1_TlsServe_Tls12RequiresEcdsa,
+        error.ZixHttp1_TlsServe_RecordSealFailed,
+        error.ZixHttp1_TlsServe_InvalidRequest,
+        error.ZixHttp1_TlsServe_UnknownMethod,
+        error.ZixHttp1_TlsServe_ResponseTooLarge,
+        error.ZixHttp1_TlsServe_StreamingNotSupported,
+        error.ZixHttp1_TlsServe_WsFrameTooLarge,
+        error.ZixHttp1_TlsServe_MissingKeyShare,
+        error.ZixHttp1_TlsServe_BadKeyShare,
+        error.ZixHttp1_TlsServe_UnsupportedCipher,
+        error.ZixHttp1_TlsServe_UnsupportedGroup,
+        error.ZixHttp1_TlsServe_NoCommonSignatureScheme,
+        error.ZixHttp1_TlsServe_NoApplicationProtocol,
+        error.ZixHttp1_TlsServe_HelloRetryRequestUnsupported,
+        error.ZixHttp1_TlsServe_HelloRetryGroupMismatch,
+        error.ZixHttp1_TlsServe_UnsupportedTlsVersion,
+        error.ZixHttp1_TlsServe_MissingExtension,
+        error.ZixHttp1_TlsServe_HandshakeFailure,
+        error.ZixHttp1_TlsServe_IllegalParameter,
+        error.ZixHttp1_TlsServe_DecodeError,
+        error.ZixHttp1_TlsServe_SignFailed,
+        error.ZixHttp1_TlsServe_InvalidKey,
+        error.ZixHttp1_TlsServe_MessageTooLong,
+        error.ZixHttp1_TlsServe_PeerClosed,
+        error.ZixHttp1_TlsServe_UnexpectedMessage,
+        error.ZixHttp1_TlsServe_UnexpectedHandshakeMessage,
+        error.ZixHttp1_TlsServe_Decode,
+        error.ZixHttp1_TlsServe_RecordOverflow,
+        error.ZixHttp1_TlsServe_BadRecordMac,
+        error.ZixHttp1_TlsServe_Truncated,
+        error.ZixHttp1_TlsServe_ClientFinishedMismatch,
+        error.ZixHttp1_TlsServe_ClientCertificateMissing,
+        error.ZixHttp1_TlsServe_CertificateTooLarge,
+        error.ZixHttp1_TlsServe_UnsupportedSignatureScheme,
+        error.ZixHttp1_TlsServe_SignatureFailed,
+        error.ZixHttp1_TlsServe_UnsupportedPeerKey,
+        error.ZixHttp1_TlsServe_CertificateMalformed,
+        error.ZixHttp1_TlsServe_CertificateHasUnrecognizedObjectId,
+        error.ZixHttp1_TlsServe_ClientHelloInvalid,
+        error.ZixHttp1_TlsServe_BadRecord,
+        error.ZixHttp1_TlsServe_AuthenticationFailed,
+            => Error.ZixHttp1_Server_TlsSetupFailed,
+    };
+}
+
+fn dispatchTlsMuxError(err: tls_mux.Error) Error {
+    return switch (err) {
+        error.ZixHttp1_TlsMux_ResolveFailed
+            => Error.ZixHttp1_Server_ResolveFailed,
+        error.ZixHttp1_TlsMux_ListenFailed
+            => Error.ZixHttp1_Server_ListenFailed,
+        error.ZixHttp1_TlsMux_Unsupported,
+        error.ZixHttp1_TlsMux_OutOfMemory,
+        error.ZixHttp1_TlsMux_SpawnFailed,
+        error.ZixHttp1_TlsMux_SetupFailed,
+            => Error.ZixHttp1_Server_TlsSetupFailed,
+    };
+}
+
+/// Thread body for the .ASYNC dual listener: https on tls_port while the
+/// cleartext model serves port. A failure is logged, cleartext keeps serving.
+fn serveTlsThread(config: Config, handler: HandlerFn, ctx: *const tlz.Context) void {
+    tls_serve.runTls(config, handler, ctx) catch |err| {
+        log.logSystem(
+            config,
+            .ERROR,
+            "https listener on {s}:{d} stopped ({s}), cleartext still serving",
+            .{ config.ip, config.port, @errorName(err) },
+        );
+    };
+}
+
+/// Serve TLS only on config.port.
+fn runTlsOnly(self: *const Self, ctx: *const tlz.Context) Error!void {
+    return switch (self.config.dispatch_model) {
+        .ASYNC => tls_serve.runTls(self.config, self.handler, ctx) catch |err| {
+            return dispatchTlsServeError(err);
+        },
+        .EPOLL,
+        .URING,
+        => {
+            if (comptime OS == .linux) {
+                tls_mux.run(self.config, self.handler, ctx) catch |err| {
+                    return dispatchTlsMuxError(err);
+                };
+            } else {
+                return Error.ZixHttp1_Server_DispatchModel_NotSupported;
+            }
+        },
+        .IOCP,
+        .KQUEUE,
+        => Error.ZixHttp1_Server_DispatchModel_NotSupported,
+    };
+}
+
+/// Start the https side of the dual listener (config.tls_port).
+///
+/// Note:
+/// - .ASYNC: one extra accept thread serves https on tls_port.
+/// - .EPOLL and .URING host the TLS connections in the cleartext workers, so
+///   their dispatch binds tls_port itself. Nothing starts here.
+fn startTlsSide(self: *const Self, ctx: *const tlz.Context) Error!void {
+    if (self.config.tls_port == self.config.port) return Error.ZixHttp1_Server_TlsPortConflict;
+
+    switch (self.config.dispatch_model) {
+        .ASYNC => {
+            var tls_config = self.config;
+            tls_config.port = self.config.tls_port;
+            tls_config.tls_port = 0;
+
+            const thread = std.Thread.spawn(
+                .{},
+                serveTlsThread,
+                .{ tls_config, self.handler, ctx },
+            ) catch |err| switch (err) {
+                else => return Error.ZixHttp1_Server_TlsSetupFailed,
+            };
+            thread.detach();
+        },
+        .EPOLL,
+        .URING,
+        => {},
+        .IOCP,
+        .KQUEUE,
+        => return Error.ZixHttp1_Server_DispatchModel_NotSupported,
+    }
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -219,6 +370,10 @@ pub const Error = error {
     ZixHttp1_Server_PublicDirNotADirectory,
     /// config.public_dir cannot be opened (permission or other)
     ZixHttp1_Server_PublicDirUnreadable,
+    /// config.tls_port equals config.port
+    ZixHttp1_Server_TlsPortConflict,
+    /// E.Q.: error.ZixHttp1_TlsMux_SetupFailed
+    ZixHttp1_Server_TlsSetupFailed,
 };
 
 pub fn init(comptime handler: HandlerFn, config: Config) Self {
@@ -248,7 +403,11 @@ pub fn run(self: *const Self) Error!void {
     const owns_static = installStaticCache(self.config);
     defer if (owns_static) StaticCacheRegistry.shared.shutdown(self.config.io);
 
-    std.log.info("TODO: gateTLS", .{});
+    if (self.config.tls) |ctx| {
+        if (self.config.tls_port == 0) return self.runTlsOnly(ctx);
+
+        try self.startTlsSide(ctx);
+    }
 
     return switch (self.config.dispatch_model) {
         .ASYNC => {
@@ -426,5 +585,49 @@ test "zix http1: Server, installStaticCache owns the table it builds" {
 
     try std.testing.expect(installStaticCache(config));
     try std.testing.expect(!installStaticCache(config));
+}
+
+test "zix http1: Server, tls_port equal to port is TlsPortConflict" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(.ASYNC);
+    server.config.tls = &ctx;
+    server.config.tls_port = server.config.port;
+
+    try std.testing.expectError(Error.ZixHttp1_Server_TlsPortConflict, server.run());
+}
+
+test "zix http1: Server, TLS on IOCP is not supported" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(.IOCP);
+    server.config.tls = &ctx;
+
+    try std.testing.expectError(Error.ZixHttp1_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http1: Server, dual listener on KQUEUE is not supported" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(.KQUEUE);
+    server.config.tls = &ctx;
+    server.config.tls_port = 8443;
+
+    try std.testing.expectError(Error.ZixHttp1_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http1: Server, maps a TLS bind failure" {
+    try std.testing.expectEqual(
+        Error.ZixHttp1_Server_ListenFailed,
+        dispatchTlsServeError(error.ZixHttp1_TlsServe_ListenFailed),
+    );
+    try std.testing.expectEqual(
+        Error.ZixHttp1_Server_ResolveFailed,
+        dispatchTlsMuxError(error.ZixHttp1_TlsMux_ResolveFailed),
+    );
+}
+
+test "zix http1: Server, maps TLS mux setup failures" {
+    try std.testing.expectEqual(
+        Error.ZixHttp1_Server_TlsSetupFailed,
+        dispatchTlsMuxError(error.ZixHttp1_TlsMux_SpawnFailed),
+    );
 }
 
