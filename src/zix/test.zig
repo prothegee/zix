@@ -48,6 +48,7 @@ test {
     _ = @import("multiplexers/cpu_affinity.zig");
     _ = @import("multiplexers/reuseport.zig");
     _ = @import("multiplexers/slab.zig");
+    _ = @import("multiplexers/tls_conn/conn_table.zig");
     _ = @import("shared/dispatch.zig");
     _ = @import("tcp/http1/BodyInfo.zig");
     _ = @import("tcp/http1/ChunkedFrame.zig");
@@ -69,6 +70,9 @@ test {
     _ = @import("tcp/http1/ServeOpts.zig");
     _ = @import("tcp/http1/Server.zig");
     _ = @import("tcp/http1/SseWriter.zig");
+    _ = @import("tcp/http1/TlsPeerSlot.zig");
+    _ = @import("tcp/http1/TlsPeers.zig");
+    _ = @import("tcp/http1/TlsStreamSink.zig");
     _ = @import("tcp/http1/cache.zig");
     _ = @import("tcp/http1/chunk.zig");
     _ = @import("tcp/http1/compress.zig");
@@ -78,6 +82,13 @@ test {
     if (builtin.target.os.tag == .linux) {
         _ = @import("tcp/http1/dispatch/epoll.zig");
         _ = @import("tcp/http1/dispatch/uring.zig");
+        _ = @import("multiplexers/tls_conn.zig");
+        _ = @import("multiplexers/tls_conn/Transport.zig");
+        _ = @import("tcp/http1/tls_mux.zig");
+        _ = @import("tcp/http1/tls_mux/AcceptOpts.zig");
+        _ = @import("tcp/http1/tls_mux/TlsConn.zig");
+        _ = @import("tcp/http1/tls_mux/WorkerCtx.zig");
+        _ = @import("tcp/http1/dispatch/UringTlsConn.zig");
     }
     _ = @import("tcp/http1/handler.zig");
     _ = @import("tcp/http1/head.zig");
@@ -103,6 +114,14 @@ test {
     _ = @import("tcp/http1/websocket/pump.zig");
     _ = @import("tcp/http1/websocket/send.zig");
     _ = @import("tcp/http1/websocket/upgrade.zig");
+    _ = @import("tcp/http1/tls_feed.zig");
+    _ = @import("tcp/http1/tls_feed/Serve.zig");
+    _ = @import("tcp/http1/tls_feed/State.zig");
+    _ = @import("tcp/http1/tls_feed/step.zig");
+    _ = @import("tcp/http1/tls_serve.zig");
+    _ = @import("tcp/http1/tls_serve/ConnCtx.zig");
+    _ = @import("tcp/http1/tls_serve/HandlerResult.zig");
+    _ = @import("tcp/http1/tls_serve/Record.zig");
     _ = @import("tcp/http2/CoalesceSink.zig");
     _ = @import("tcp/http2/Config.zig");
     _ = @import("tcp/http2/Context.zig");
@@ -209,6 +228,11 @@ test {
     _ = @import("tcp/http2/stream_state.zig");
     _ = @import("tcp/http2/upgrade.zig");
     _ = @import("tcp/http2/writer.zig");
+    _ = @import("tls/tls_session.zig");
+    _ = @import("tls/tls_session/FeedResult.zig");
+    _ = @import("tls/tls_session/Session.zig");
+    _ = @import("tls/tls_session/outcome.zig");
+    _ = @import("tls/tls_session/phase.zig");
     _ = @import("utils/Multipart.zig");
     _ = @import("utils/MultipartField.zig");
     _ = @import("utils/cache/ResponseCache.zig");
