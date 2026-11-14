@@ -76,10 +76,14 @@ fn nowMillis(io: std.Io) u64 {
 }
 
 /// Whether the body may go straight from the file to the socket.
+///
+/// Note:
+/// - A negative fd is never a socket the kernel can send to.
+/// - A TLS connection needs every write sealed into a TLS record.
 fn zeroCopyAllowed(fd: std.posix.fd_t) bool {
     if (comptime builtin.os.tag != .linux) return false;
 
-    return fd >= 0;
+    return fd >= 0 and !writer.tlsRouted(fd);
 }
 
 /// Flush anything staged in this worker's sink for fd, so a zero-copy body
@@ -495,6 +499,10 @@ fn serveWire(
     return readPeer(fds[1], wire_buf);
 }
 
+fn refuseStream(_: *anyopaque, _: []const u8) bool {
+    return false;
+}
+
 test "zix http1: static, renderPartial states the range" {
     var buf: [HEADER_STAGING_BUF]u8 = undefined;
     const header = renderPartial(&buf, "text/plain", null, false, .{
@@ -846,5 +854,26 @@ test "zix http1: static, fallback strips the leading slash" {
     var wire_buf: [256]u8 = undefined;
 
     try std.testing.expect(std.mem.endsWith(u8, readPeer(fds[1], &wire_buf), "fallback"));
+}
+
+test "zix http1: static, zeroCopyAllowed refuses a negative fd" {
+    try std.testing.expect(!zeroCopyAllowed(-1));
+}
+
+test "zix http1: static, zeroCopyAllowed refuses while a TLS stream is armed" {
+    var dummy: u8 = 0;
+    var stream: @import("TlsStreamSink.zig") = .{
+        .ctx = &dummy,
+        .writeFn = refuseStream,
+        .fd = 3,
+    };
+    writer.tl_tls_stream = &stream;
+    defer writer.tl_tls_stream = null;
+
+    try std.testing.expect(!zeroCopyAllowed(3));
+}
+
+test "zix http1: static, zeroCopyAllowed accepts a cleartext fd on Linux" {
+    try std.testing.expectEqual(builtin.os.tag == .linux, zeroCopyAllowed(3));
 }
 
