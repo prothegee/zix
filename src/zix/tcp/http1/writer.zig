@@ -34,6 +34,8 @@ const Status = @import("../../utils/http/status.zig");
 const head = @import("head.zig");
 const cache = @import("cache.zig");
 const RespSink = @import("RespSink.zig");
+const TlsStreamSink = @import("TlsStreamSink.zig");
+const TlsPeers = @import("TlsPeers.zig");
 
 // --------------------------------------------------------- //
 // Private:
@@ -66,6 +68,24 @@ pub threadlocal var tl_responded: bool = false;
 /// Coalescing sink for the current worker. null sends every write straight to
 /// the fd.
 pub threadlocal var tl_resp_sink: ?*RespSink = null;
+
+/// TLS stream sink for the connection in flight on this thread. null for
+/// cleartext, so writeAllFD never routes through it there. Once beginStream
+/// detaches the buffered sink, writes to its fd are sealed into TLS records here.
+pub threadlocal var tl_tls_stream: ?*TlsStreamSink = null;
+
+/// Whether writes to fd must be sealed into TLS records: fd is a TLS socket
+/// (marked or a registered peer), or the connection of this thread TLS stream.
+///
+/// Return:
+/// - bool
+pub fn tlsRouted(fd: std.posix.fd_t) bool {
+    if (TlsPeers.shared.isTls(fd)) return true;
+
+    const stream = tl_tls_stream orelse return false;
+
+    return stream.fd == fd;
+}
 
 /// Record that response bytes for the request in flight reached the wire.
 pub fn markResponded() void {
@@ -110,8 +130,9 @@ pub fn writeAllDirectFD(fd: std.posix.fd_t, data: []const u8) Error!void {
 }
 
 /// Write response bytes to fd, the canonical write behind every send helper.
-/// Routes through the coalescing sink (tl_resp_sink) when one is installed for
-/// this worker, otherwise writes directly.
+/// Routes through the coalescing sink (tl_resp_sink) or the TLS stream sink
+/// (tl_tls_stream) when one is installed for this worker, otherwise writes
+/// directly.
 ///
 /// Note:
 /// - Marks the request in flight as answered, so a handler that writes here
@@ -145,6 +166,26 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) Error!void {
         }
     }
 
+    // A registered TLS peer (WebSocket over TLS): sealed with that connection
+    // session under its lock, from whichever thread writes.
+    if (TlsPeers.shared.write(fd, data)) |sent| {
+        if (!sent) return Error.ZixHttp1_Writer_BrokenPipe;
+
+        return;
+    }
+
+    if (tl_tls_stream) |stream| {
+        if (stream.fd == fd) {
+            if (!stream.write(data)) return Error.ZixHttp1_Writer_BrokenPipe;
+
+            return;
+        }
+    }
+
+    // A TLS socket with no writer for it here (another connection mid-upgrade):
+    // refused, because plaintext on a TLS stream breaks it for good.
+    if (TlsPeers.shared.isTls(fd)) return Error.ZixHttp1_Writer_BrokenPipe;
+
     return writeAllDirectFD(fd, data);
 }
 
@@ -154,6 +195,8 @@ pub fn writeAllFD(fd: std.posix.fd_t, data: []const u8) Error!void {
 /// - Detaches the coalescing sink, so each subsequent writeAllFD flushes
 ///   immediately. An SSE handler never returns, so a buffered sink would never
 ///   flush.
+/// - Over TLS the staged bytes leave through the sink spill, and later writes
+///   go to tl_tls_stream, one sealed write each.
 /// - A no-op when no sink is installed.
 pub fn beginStream() void {
     if (tl_resp_sink) |sink| {
@@ -217,6 +260,13 @@ pub fn sendSimpleFD(
     ) catch |err| switch (err) {
         error.ZixHttp1_Head_DateFormat => return Error.ZixHttp1_Writer_HeadBuild,
     };
+
+    // A TLS connection: the direct writes below would put plaintext on the wire.
+    if (tlsRouted(fd)) {
+        try writeAllFD(fd, hdr);
+
+        return writeAllFD(fd, body);
+    }
 
     if (body.len <= SMALL_BODY_INLINE_BUF - head.HEADER_BUF_SIZE) {
         var buf: [SMALL_BODY_INLINE_BUF]u8 = undefined;
@@ -307,6 +357,25 @@ pub fn send100ContinueFD(fd: std.posix.fd_t) Error!void {
 
 const pair = @import("../../utils/socket/pair.zig");
 
+const StreamCollector = struct {
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+
+    fn write(ctx: *anyopaque, plaintext: []const u8) bool {
+        const self: *StreamCollector = @ptrCast(@alignCast(ctx));
+        if (self.len + plaintext.len > self.buf.len) return false;
+
+        @memcpy(self.buf[self.len..][0..plaintext.len], plaintext);
+        self.len += plaintext.len;
+
+        return true;
+    }
+
+    fn refuse(_: *anyopaque, _: []const u8) bool {
+        return false;
+    }
+};
+
 test "zix http1: writer, sends a simple response" {
     var fds: [2]std.posix.fd_t = undefined;
     try pair.open(std.testing.io, &fds);
@@ -370,5 +439,154 @@ test "zix http1: writer, streams a body past the inline buffer" {
 
     try std.testing.expectEqual(expected, total);
     try std.testing.expect(std.mem.endsWith(u8, buf[0..total], &body));
+}
+
+test "zix http1: writer, writeAllFD routes through the TLS stream sink" {
+    var collector: StreamCollector = .{};
+    var stream: TlsStreamSink = .{
+        .ctx = &collector,
+        .writeFn = StreamCollector.write,
+        .fd = -1,
+    };
+    tl_tls_stream = &stream;
+    defer tl_tls_stream = null;
+
+    try writeAllFD(-1, "data: one\n\n");
+
+    try std.testing.expectEqualStrings("data: one\n\n", collector.buf[0..collector.len]);
+}
+
+test "zix http1: writer, a refused TLS stream write is BrokenPipe" {
+    var collector: StreamCollector = .{};
+    var stream: TlsStreamSink = .{
+        .ctx = &collector,
+        .writeFn = StreamCollector.refuse,
+        .fd = -1,
+    };
+    tl_tls_stream = &stream;
+    defer tl_tls_stream = null;
+
+    try std.testing.expectError(Error.ZixHttp1_Writer_BrokenPipe, writeAllFD(-1, "x"));
+}
+
+test "zix http1: writer, the buffered sink wins over the TLS stream" {
+    var collector: StreamCollector = .{};
+    var stream: TlsStreamSink = .{
+        .ctx = &collector,
+        .writeFn = StreamCollector.write,
+        .fd = -1,
+    };
+    tl_tls_stream = &stream;
+    defer tl_tls_stream = null;
+
+    var stage: [64]u8 = undefined;
+    var sink: RespSink = .{
+        .fd = -1,
+        .buf = &stage,
+    };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    try writeAllFD(-1, "staged");
+
+    try std.testing.expectEqualStrings("staged", sink.buf[0..sink.len]);
+    try std.testing.expectEqual(@as(usize, 0), collector.len);
+}
+
+test "zix http1: writer, beginStream carries staged bytes through the spill" {
+    var collector: StreamCollector = .{};
+    var stream: TlsStreamSink = .{
+        .ctx = &collector,
+        .writeFn = StreamCollector.write,
+        .fd = -1,
+    };
+    tl_tls_stream = &stream;
+    defer tl_tls_stream = null;
+
+    var stage: [64]u8 = undefined;
+    var sink: RespSink = .{
+        .fd = -1,
+        .buf = &stage,
+        .spill = &stream,
+    };
+    tl_resp_sink = &sink;
+    defer tl_resp_sink = null;
+
+    try writeAllFD(-1, "head\r\n\r\n");
+    beginStream();
+    try writeAllFD(-1, "data: hello\n\n");
+
+    try std.testing.expect(tl_resp_sink == null);
+    try std.testing.expectEqualStrings(
+        "head\r\n\r\ndata: hello\n\n",
+        collector.buf[0..collector.len],
+    );
+}
+
+test "zix http1: writer, a write to another fd skips this thread TLS stream" {
+    var fds: [2]std.posix.fd_t = undefined;
+    try pair.open(std.testing.io, &fds);
+    defer _ = std.posix.system.close(fds[0]);
+    defer _ = std.posix.system.close(fds[1]);
+
+    var collector: StreamCollector = .{};
+    var stream: TlsStreamSink = .{
+        .ctx = &collector,
+        .writeFn = StreamCollector.write,
+        .fd = -1,
+    };
+    tl_tls_stream = &stream;
+    defer tl_tls_stream = null;
+
+    try writeAllFD(fds[0], "other");
+
+    var out: [16]u8 = undefined;
+    const n = try std.posix.read(fds[1], &out);
+
+    try std.testing.expectEqualStrings("other", out[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), collector.len);
+}
+
+test "zix http1: writer, a registered TLS peer gets the write sealed by its session" {
+    const peer_fd: std.posix.fd_t = 60000;
+
+    var collector: StreamCollector = .{};
+    try TlsPeers.shared.register(peer_fd, std.testing.io, &collector, StreamCollector.write);
+    defer TlsPeers.shared.unregister(peer_fd);
+
+    try writeAllFD(peer_fd, "to peer");
+
+    try std.testing.expect(tlsRouted(peer_fd));
+    try std.testing.expectEqualStrings("to peer", collector.buf[0..collector.len]);
+}
+
+test "zix http1: writer, sendSimpleFD to a TLS fd never writes plaintext directly" {
+    head.setDateHeader(false);
+    defer head.setDateHeader(true);
+
+    var collector: StreamCollector = .{};
+    var stream: TlsStreamSink = .{
+        .ctx = &collector,
+        .writeFn = StreamCollector.write,
+        .fd = 61000,
+    };
+    tl_tls_stream = &stream;
+    defer tl_tls_stream = null;
+
+    try sendSimpleFD(std.testing.io, 61000, .OK, "text/plain", "hi");
+
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nhi",
+        collector.buf[0..collector.len],
+    );
+}
+
+test "zix http1: writer, a TLS fd with no writer refuses plaintext" {
+    const peer_fd: std.posix.fd_t = 62000;
+
+    TlsPeers.shared.mark(peer_fd);
+    defer TlsPeers.shared.unregister(peer_fd);
+
+    try std.testing.expectError(Error.ZixHttp1_Writer_BrokenPipe, writeAllFD(peer_fd, "x"));
 }
 
