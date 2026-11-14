@@ -101,6 +101,9 @@ pub const utils = @import("utils/Utils.zig");
 /// JZON, the JSON package, the same module as `@import("jzon")`
 pub const jzon = @import("jzon");
 
+/// TLZ, the TLS package, the same module as `@import("tlz")`
+pub const tlz = @import("tlz");
+
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
 // Test:
@@ -121,6 +124,14 @@ test "zix: jzon, export carries the package version" {
 
 test "zix: jzon, export has the package semver fields" {
     try std.testing.expect(@hasDecl(jzon.VERSION, "MAJOR"));
+}
+
+test "zix: tlz, export carries the package version" {
+    try std.testing.expect(tlz.VERSION_STRING.len > 0);
+}
+
+test "zix: tlz, export has the TLS server context" {
+    try std.testing.expect(@hasDecl(tlz, "Context"));
 }
 
 test "zix: Http2, exports the h2c server" {
