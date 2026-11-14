@@ -79,6 +79,21 @@ pub fn build(b: *std.Build) void {
     jzon.addOptions("jzon_options", jzon_options);
     zix.addImport("jzon", jzon);
 
+    // Tlz module: the same package src/tlz builds on its own, used as `zix.tlz`
+    const tlz_zon = @import("src/tlz/build.zig.zon");
+    const tlz_options = b.addOptions();
+    tlz_options.addOption(usize, "version_major", tlz_zon.semver.major);
+    tlz_options.addOption(usize, "version_minor", tlz_zon.semver.minor);
+    tlz_options.addOption(usize, "version_patch", tlz_zon.semver.patch);
+
+    const tlz = b.addModule("tlz", .{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/tlz/src/lib.zig"),
+    });
+    tlz.addOptions("tlz_options", tlz_options);
+    zix.addImport("tlz", tlz);
+
     // Brotli static dictionary (RFC 7932 Appendix A): generated into the build cache
     // and bound to the `brotli_dictionary.bin` import, so no binary file is tracked.
     const brotli_dict_gen = b.addExecutable(.{
@@ -110,6 +125,7 @@ pub fn build(b: *std.Build) void {
     });
     zix_unit_and_edge_test_mod.addOptions("zix_options", zix_options);
     zix_unit_and_edge_test_mod.addImport("jzon", jzon);
+    zix_unit_and_edge_test_mod.addImport("tlz", tlz);
     zix_unit_and_edge_test_mod.addAnonymousImport("brotli_dictionary.bin", .{
         .root_source_file = brotli_dict,
     });
@@ -191,6 +207,56 @@ pub fn build(b: *std.Build) void {
 
         const jzon_step = b.step(entry[0], entry[2]);
         jzon_step.dependOn(&jzon_cmd.step);
+    }
+
+    // Tlz unit & edge test, built in this graph like zix-unit_edge-test
+    const tlz_unit_and_edge_test_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/tlz/src/test.zig"),
+    });
+    tlz_unit_and_edge_test_mod.addOptions("tlz_options", tlz_options);
+
+    const tlz_unit_and_edge_test = b.addTest(.{
+        .root_module = tlz_unit_and_edge_test_mod,
+    });
+
+    const tlz_unit_and_edge_test_artifact = b.addRunArtifact(tlz_unit_and_edge_test);
+
+    const tlz_unit_and_edge_test_step =
+        b.step("tlz-unit_edge-test", "TLZ: Run unit & edge tests.");
+    tlz_unit_and_edge_test_step.dependOn(&tlz_unit_and_edge_test_artifact.step);
+
+    // Tlz package steps: each one runs `zig build <step>` inside src/tlz
+    const tlz_steps = [_][3][]const u8{
+        .{
+            "tlz-behaviour-test",
+            "behaviour-test",
+            "TLZ: Run behaviour tests.",
+        },
+        .{
+            "tlz-all-test",
+            "all-test",
+            "TLZ: Run unit, edge, and behaviour tests.",
+        },
+        .{
+            "tlz-examples",
+            "examples",
+            "TLZ: Build all examples into src/tlz/zig-out/bin.",
+        },
+    };
+
+    for (tlz_steps) |entry| {
+        const tlz_cmd = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build",
+            entry[1],
+            b.fmt("-Doptimize={s}", .{@tagName(optimize)}),
+        });
+        tlz_cmd.setCwd(b.path("src/tlz"));
+
+        const tlz_step = b.step(entry[0], entry[2]);
+        tlz_step.dependOn(&tlz_cmd.step);
     }
 
     // --------------------------------------------------------- //
