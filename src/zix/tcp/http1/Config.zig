@@ -30,6 +30,7 @@
 //!
 
 const std = @import("std");
+const tlz = @import("tlz");
 const DispatchModel = @import("../../shared/dispatch.zig").Model;
 const Logger = @import("../../logger/Logger.zig");
 const HeaderSize = @import("header.zig").Size;
@@ -42,8 +43,13 @@ const WS_RECV_BUF_DEFAULT = @import("ServeOpts.zig").WS_RECV_BUF_DEFAULT;
 io: std.Io,
 ip: []const u8,
 port: u16,
-// TODO: tls: ?Tls = null,
-// TODO: tls_port: u16,
+/// https, opt in. When set, the server serves HTTP/1.1 over TLS (zix.tlz). The
+/// context carries the cert, key, ALPN, and policy. Caller owns, must outlive.
+tls: ?*tlz.Context = null,
+/// Companion https port for the dual listener. 0 keeps one listener (with tls
+/// set, TLS only on port). Non-zero serves cleartext on port and https on
+/// tls_port. Ignored when tls is null.
+tls_port: u16 = 0,
 // TODO: tls_redirect: bool = false,
 logger: ?*Logger = null,
 dispatch_model: DispatchModel,
@@ -241,5 +247,13 @@ test "zix http1: Config, wsRecvBufSize ignores a larger max_recv_buf" {
     config.max_recv_buf = 4 * 1024 * 1024;
 
     try std.testing.expectEqual(WS_RECV_BUF_DEFAULT, config.wsRecvBufSize());
+}
+
+
+test "zix http1: Config, TLS is off by default" {
+    const config = testConfig();
+
+    try std.testing.expect(config.tls == null);
+    try std.testing.expectEqual(@as(u16, 0), config.tls_port);
 }
 
