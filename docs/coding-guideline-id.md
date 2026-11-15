@@ -434,6 +434,6 @@ defer std.Io.Dir.cwd().deleteFile(io, cert_path) catch {};
 
 Aturan yang sama berlaku untuk path unix domain socket yang diberikan ke `std.Io.net.UnixAddress`: Windows mendukung AF_UNIX, tapi bind-nya me-resolve path persis seperti open file, jadi path socket `/tmp/...` gagal juga di sana. Ini juga berarti UDS server harus membersihkan socket file-nya lewat `cwd().deleteFile`, jangan `deleteFileAbsolute`, karena path relative bakal gagal kena assert absolute-path milik fungsi itu sendiri.
 
-Path production mengikuti pemanggil: `Tls.Context.init` membaca `cert_path` / `key_path` lewat `cwd().readFileAlloc`, jadi config boleh membawa bentuk mana pun dan bentuk yang tepat adalah urusan deployment, bukan urusan zix.
+Path production mengikuti pemanggil: `tlz.Context.init` membaca `cert_path` / `key_path` lewat `cwd().readFileAlloc`, jadi config boleh membawa bentuk mana pun dan bentuk yang tepat adalah urusan deployment, bukan urusan zix.
 
 > Arahkan setiap operasi file lewat `std.Io.Dir.cwd()` dan biarkan path-nya yang menentukan relative vs absolute. Jangan pernah hardcode `/tmp` untuk apa pun yang disentuh Windows: pakai path cwd-relative di mana-mana.
