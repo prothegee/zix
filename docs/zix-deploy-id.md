@@ -2,7 +2,7 @@
 
 Cara membangun aplikasi zix menjadi Docker image (dengan git, curl, dan zig fetch) dan cara
 mengonfigurasi TLS context untuk masing-masing dari tiga tipe certificate yang didukung. Untuk
-referensi field config TLS lengkap lihat `zix-config-id.md`. Untuk desain TLS lihat `hld-tls-id.md`.
+referensi field config TLS lengkap lihat `zix-config-id.md`. Untuk desain TLS lihat `../src/tlz/docs/hld-id.md`.
 
 ## Menambahkan zix ke project
 
@@ -159,13 +159,13 @@ Catatan:
 
 ## Mengonfigurasi TLS
 
-Lampirkan `zix.Tls.Context` ke server untuk opt-in ke TLS pada jalur ter-gate. Context memuat cert
+Lampirkan `zix.tlz.Context` ke server untuk opt-in ke TLS pada jalur ter-gate. Context memuat cert
 dan key sekali saat startup, memvalidasi policy, dan setiap connection memakai ulang. Tipe key
 certificate dideteksi dari certificate, jadi tiga tipe di bawah hanya beda pada file cert / key dan
 version floor.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/server.crt",
     .key_path = "certs/server.key",
     .alpn = &.{.HTTP_1_1}, // .H2 untuk server Http2, atau .{ .H2, .HTTP_1_1 }
@@ -203,7 +203,7 @@ Ed25519 menandatangani hanya pada TLS 1.3 (jalur ServerKeyExchange TLS 1.2 ditan
 jadi floor context di 1.3.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/ed25519_cert.pem",
     .key_path = "certs/ed25519_key.pem",
     .alpn = &.{.HTTP_1_1},
@@ -218,7 +218,7 @@ Tipe certificate default. Ia menandatangani di TLS 1.2 dan 1.3, jadi tidak butuh
 (default-nya floor 1.2 dan ceiling 1.3, 1.3 diutamakan).
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/ecdsa_p256_cert.pem",
     .key_path = "certs/ecdsa_p256_key.pem",
     .alpn = &.{.HTTP_1_1},
@@ -233,7 +233,7 @@ RSA, jadi certificate RSA butuh floor 1.3 (klien 1.2-only ditolak). RSA-2048 ada
 image dengan `+adx` agar signature memakai jalur Montgomery fused.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/rsa_2048_cert.pem",
     .key_path = "certs/rsa_2048_key.pem",
     .alpn = &.{.HTTP_1_1},
@@ -244,7 +244,7 @@ defer tls.deinit();
 
 ### Opsi umum
 
-Ketiganya menerima sisa `Tls.Context.Config` (lihat `zix-config-id.md` untuk tabel lengkap):
+Ketiganya menerima sisa `tlz.Context.Config` (lihat `zix-config-id.md` untuk tabel lengkap):
 `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, dan `hsts_max_age_s`. Curve dan cipher
 adalah allow-list tervalidasi, jadi value yang tidak didukung adalah error saat startup. Untuk server
 Http2 set `alpn = &.{.H2}` (atau `&.{ .H2, .HTTP_1_1 }` untuk juga menawarkan https/1.1).
