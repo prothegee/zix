@@ -285,7 +285,7 @@ Sampai backend macOS dan Windows hadir, `.ASYNC` adalah model untuk setiap targe
 `zix.Channel` **bukan** model konkurensi. Channel adalah primitif pengiriman pesan dalam proses yang bekerja berdampingan dengan ketiga model dispatch. Channel menghubungkan producer dan consumer task (OS thread atau fiber `io.async()`) di dalam proses yang sama. Channel tidak melintasi batas jaringan atau batas proses.
 
 ```
-Producer task --> [ Channel(T) ring buffer ] --> Consumer task
+Producer task --> [ Channel ring buffer ] --> Consumer task
 ```
 
 Ketiga model dispatch dapat menghasilkan task `io.async()` atau OS thread yang berkomunikasi melalui Channel. Channel itu sendiri tidak bergantung pada model dispatch yang sedang digunakan.
