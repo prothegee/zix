@@ -81,7 +81,7 @@ Connection close, stateless reset, and anti-amplification (RFC 9000 19.19 / 10.2
 
 ### keyschedule.zig
 
-The QUIC handshake key schedule (RFC 8446 7.1 secret tree + RFC 9001 5.1 quic labels). Reuses `src/tls/key_schedule.zig` (`Transcript`, `HkdfSha256`, `deriveSecret`) for the TLS 1.3 machinery, then layers the QUIC per-level key derivation on top via `crypto.AesKeys.fromSecret`.
+The QUIC handshake key schedule (RFC 8446 7.1 secret tree + RFC 9001 5.1 quic labels). Reuses `src/tlz/src/key_schedule.zig` (`Transcript`, `HkdfSha256`, `deriveSecret`) for the TLS 1.3 machinery, then layers the QUIC per-level key derivation on top via `crypto.AesKeys.fromSecret`.
 
 - `handshakeKeys(shared, transcript_hash)`: `early = Extract(0, 0)`, `derived = deriveSecret(early, "derived", "")`, `handshake_secret = Extract(derived, shared)`, then `"s hs traffic"` / `"c hs traffic"` traffic secrets, returning `HandshakeKeys { server, client, handshake_secret, server_traffic, client_traffic }`.
 - `applicationKeys(handshake_secret, transcript_through_finished)`: the 1-RTT master secret and `"s ap traffic"` / `"c ap traffic"` application secrets, returning `AppKeys { server, client }`.
@@ -97,7 +97,7 @@ The join between the TLS 1.3 handshake and QUIC (RFC 9001 section 4): the handsh
 
 ServerHello generation, the start of the server send path.
 
-- `buildServerHelloInitial(...)`: from the parsed ClientHello, run the server side of X25519 ECDHE, `handshake.negotiate` + `handshake.serializeServerHello` (reusing `src/tls`), wrap the ServerHello in a CRYPTO frame at offset 0, and `protection.sealInitial` it. Updates the transcript with ClientHello + ServerHello and derives Handshake keys via `keyschedule.handshakeKeys`. Returns the packet bytes plus the ECDHE shared secret. Handles the common X25519 path (curl's default).
+- `buildServerHelloInitial(...)`: from the parsed ClientHello, run the server side of X25519 ECDHE, `handshake.negotiate` + `handshake.serializeServerHello` (reusing `src/tlz/src`), wrap the ServerHello in a CRYPTO frame at offset 0, and `protection.sealInitial` it. Updates the transcript with ClientHello + ServerHello and derives Handshake keys via `keyschedule.handshakeKeys`. Returns the packet bytes plus the ECDHE shared secret. Handles the common X25519 path (curl's default).
 
 ### flight.zig
 
@@ -105,7 +105,7 @@ The server's Handshake-level TLS flight.
 
 - `encodeTransportParams(...)`: the QUIC transport parameters (RFC 9000 18.2): `original_destination_connection_id` (0x00) and `initial_source_connection_id` (0x0f) carry the client's first DCID and the server SCID byte-exact (curl validates them), plus `max_idle_timeout` (0x01), `initial_max_data` (0x04), the three `initial_max_stream_data_*` (0x05 / 0x06 / 0x07), and `initial_max_streams_bidi` / `_uni` (0x08 / 0x09).
 - `buildEncryptedExtensions(...)`: EncryptedExtensions with the ALPN `h3` extension and the `quic_transport_parameters` extension (0x0039), hand-built here because QUIC needs both, which the TLS record layer omits.
-- `buildHandshakeFlight(...)`: EncryptedExtensions + `certificate.buildCertificate` + `buildCertificateVerify` + `buildFinished` (from `src/tls/certificate.zig`), each fed into the transcript, wrapped in one CRYPTO frame and sealed with the Handshake keys (`protection.sealHandshake`).
+- `buildHandshakeFlight(...)`: EncryptedExtensions + `certificate.buildCertificate` + `buildCertificateVerify` + `buildFinished` (from `src/tlz/src/crypto/certificate.zig`), each fed into the transcript, wrapped in one CRYPTO frame and sealed with the Handshake keys (`protection.sealHandshake`).
 
 ### transport_params.zig
 
