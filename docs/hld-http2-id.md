@@ -206,7 +206,7 @@ handler_timeout_ms: u32 = 0,   // deadline global yang diseed ke Context.deadlin
 public_dir:     []const u8 = "",        // root file static, "" menonaktifkan penyajian static
 public_dir_cache_ttl_ms:      u32 = 0,  // 0 = tidak pernah di-cache, default bawaan
 public_dir_cache_max_entries: u32 = 256,// slot cache static, satu per file plus sibling-nya
-tls:            ?*Tls.Context = null,   // non-null menyajikan h2 di atas TLS (ALPN h2), selain itu h2c cleartext
+tls:            ?*tlz.Context = null,   // non-null menyajikan h2 di atas TLS (ALPN h2), selain itu h2c cleartext
 logger:         ?*Logger = null,        // baris lifecycle saja, lihat bagian Logging
 ```
 
@@ -330,12 +330,12 @@ Flow control sisi-kirim mengikuti RFC 7540 6.9. Setiap `MuxConn` membawa send wi
 
 ## h2 di atas TLS
 
-Menyetel `config.tls` (sebuah `*Tls.Context`) opt-in ke HTTP/2 di atas TLS (TLS 1.3 dengan fallback 1.2, ALPN h2). Switch `run()` di `Server.zig` memilih salah satu dari dua terminator berdasarkan `dispatch_model`:
+Menyetel `config.tls` (sebuah `*tlz.Context`) opt-in ke HTTP/2 di atas TLS (TLS 1.3 dengan fallback 1.2, ALPN h2). Switch `run()` di `Server.zig` memilih salah satu dari dua terminator berdasarkan `dispatch_model`:
 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. Satu epoll worker `SO_REUSEPORT` per core melakukan terminasi TLS di tempat via session yang resumable (`tcp/tls/tls_session.zig`) dan mem-multiplex banyak koneksi per worker, tanpa socketpair dan tanpa thread per koneksi. Mux h2 yang resumable mengonsumsi plaintext hasil dekripsi, dan frame balasannya dienkripsi kembali menjadi TLS record melalui frame write hook thread-local. Ciphertext keluar yang tidak muat di-stage per koneksi dan di-flush pada EPOLLOUT berikutnya, sehingga klien lambat tidak pernah memarkir worker.
 - `.ASYNC`: `tls_serve.runTls`. Sebuah accept loop menyerahkan setiap koneksi ke worker thread-nya sendiri, yang menjalankan terminator bersama (`tcp/tls/h2_terminator.zig`) dengan driver inline-mux yang menggerakkan mux resumable yang sama langsung di atas stream hasil dekripsi (satu thread per koneksi, tanpa socketpair). Jalur ini juga menyajikan TLS 1.2.
 
-Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `writer.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Hook cleartext dipasang oleh `coalesce.zig`, `mux/` hanya menulis lewat `writer`. Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
+Write hook (`writer.write_hook`) adalah mekanisme bersama: mux menulis plaintext melalui `writer.writeAllFD`, dan hook menyegelnya menjadi record pada jalur TLS (hook yang sama mem-batch frame menjadi satu write per readable batch pada jalur cleartext `.EPOLL` / `.URING`). Hook cleartext dipasang oleh `coalesce.zig`, `mux/` hanya menulis lewat `writer`. Cert / key / policy berada di `tlz.Context` (ADR-047), dipakai ulang lintas engine. TLS berjalan pada performance band-nya sendiri. Lihat [`src/tlz/docs/hld-id.md`](../src/tlz/docs/hld-id.md).
 
 ---
 
@@ -374,11 +374,11 @@ Mux `.EPOLL` / `.URING` meminjam tiap stream slot dari pool thread-local per-wor
 | Scratch blok header | `.EPOLL` / `.URING`: `max_header_scratch` per koneksi (default 4 KB). `.ASYNC`: tetap 4 KiB per stream (`Stream.HEADER_SCRATCH_SIZE`). Set header yang meluapkannya dijawab dengan `COMPRESSION_ERROR` dan RST_STREAM |
 | Ukuran frame | Frame yang lebih besar dari `max_frame_size` plus slack adalah `FRAME_SIZE_ERROR` dan menutup koneksi dengan GOAWAY. DATA keluar diukur dengan nilai yang diiklankan peer, tidak pernah dengan nilai ini |
 | File static | `public_dir` menyajikan file utuh dan range tunggal. Header multi-range dijawab range pertama saja, dan tidak ada companion `public_dir_upload` di engine ini |
-| TLS | h2 di atas TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, pada perf band-nya sendiri. `.EPOLL` / `.URING` melakukan terminasi di worker epoll-mux event-driven, `.ASYNC` per koneksi di worker thread. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
+| TLS | h2 di atas TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, pada perf band-nya sendiri. `.EPOLL` / `.URING` melakukan terminasi di worker epoll-mux event-driven, `.ASYNC` per koneksi di worker thread. Lihat [`src/tlz/docs/hld-id.md`](../src/tlz/docs/hld-id.md) |
 
 Endpoint yang membutuhkan body request besar sebaiknya membacanya dalam frame DATA di dalam `max_body`, atau memindahkan transfer besar ke desain streaming (model ter-buffer mencakup body yang terbatas).
 
-Untuk detail implementasi lihat [`docs/lld-http2-id.md`](lld-http2-id.md). Untuk terminator TLS lihat [`docs/hld-tls-id.md`](hld-tls-id.md).
+Untuk detail implementasi lihat [`docs/lld-http2-id.md`](lld-http2-id.md). Untuk terminator TLS lihat [`src/tlz/docs/hld-id.md`](../src/tlz/docs/hld-id.md).
 
 ---
 
