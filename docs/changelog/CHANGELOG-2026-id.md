@@ -267,6 +267,31 @@ __**Update:**__
       behaviour di `src/jzon/tests/behaviour` (183).
     - Docs: README, HLD, LLD, dan benchmark di `src/jzon` (EN + ID).
 
+    ---
+
+- **`tlz` 0.1.0**:
+    - TLS keluar dari zix ke `src/tlz`, package mandiri untuk Zig 0.17, juga
+      di-export sebagai `zix.tlz`.
+    - Breaking: `zix.Tls` sekarang `zix.tlz`. `zix.Tls.Context` sekarang `zix.tlz.Context`,
+      dan field engine-nya `tls: ?*zix.tlz.Context`.
+    - Breaking: nama error mengikuti `Tlz_<Module>_<Condition>`. `TlsUnsupportedCurve`
+      sekarang `Tlz_Context_UnsupportedCurve`, dan error policy lain mengikuti cara yang sama.
+    - Source mengikuti tree baru: `crypto/`, `tls12/`, dan `dtls/`, dengan satu record per
+      file. DTLS publik sebagai `tlz.Dtls`.
+    - Serve path TLS di-port untuk `zix.Http1`, `zix.Http2`, dan `zix.Grpc` di `.ASYNC`,
+      `.EPOLL`, dan `.URING`, termasuk dual listener `tls_port`. SSE, WebSocket, dan
+      broadcast WebSocket berjalan lewat TLS di `zix.Http1`.
+    - Contoh di `examples/tls`, di-build dengan `zig build zix-example-tls`:
+      `tls_http1_basic`, `tls_http1_dual`, `tls_http1_ed25519`, `tls_http1_sse`,
+      `tls_http1_ws`, `tls_http2_basic`, dan `tls_grpc_basic`.
+    - Contoh di `src/tlz/examples`: `tls13_loopback`, `tls12_loopback`,
+      `dtls_loopback`, `cert_verify`, `tls13_echo_server`, `tls13_echo_client`, dan bench
+      `bench_rsa`, `bench_ecdsa_p256`, `bench_ed25519`, dan `bench_record`.
+    - Build step root: `tlz-unit_edge-test`, `tlz-behaviour-test`, `tlz-all-test`,
+      dan `tlz-examples`.
+    - Docs: README, HLD, LLD, dan bench di `src/tlz` (EN + ID). `docs/hld-tls-*.md`
+      dan `docs/lld-tls-*.md` pindah ke sana dan dihapus dari root.
+
 <br>
 
 __**Fix:**__
