@@ -68,55 +68,55 @@ The four ICE attributes plus `read`, `writeRequest`, `requestLen`.
 
 ---
 
-## Layer: DTLS 1.2 (in `src/tls/`)
+## Layer: DTLS 1.2 (in `src/tlz/src/dtls/`)
 
-Nine files, flat `dtls_` prefix, beside the TLS code they share primitives with.
+Nine functions files in `src/tlz/src/dtls/` (each with its records in the directory of the same name), beside the TLS code they share primitives with.
 
-### dtls_record.zig
+### dtls/record.zig
 
 The 13-byte header, epoch, 48-bit sequence, AEAD, anti-replay, plus `writePlaintext` for epoch 0.
 
 - Anti-replay must be **isNew before AEAD, then accept after**. Doing it in one step lets a forged far-ahead sequence clear the window.
 
-### dtls_handshake.zig
+### dtls/handshake.zig
 
 The 12-byte header, `Fragmenter`, and an overlap-safe `Reassembler`.
 
 - Reassembly tracks **which bytes arrived** with a bitmap, not how many, because overlapping fragments are legal.
 
-### dtls_hello.zig
+### dtls/hello.zig
 
 ClientHello with the cookie field, plus HelloVerifyRequest.
 
 - A DTLS ClientHello carries a cookie vector between `session_id` and `cipher_suites`, so the TLS parser misparses it.
 
-### dtls_cookie.zig
+### dtls/cookie.zig
 
 Stateless HMAC cookies with rotation.
 
-### dtls_flight.zig
+### dtls/flight.zig
 
 The retransmit timer and the RFC 6347 section 4.2.4 state machine.
 
-### dtls_exporter.zig
+### dtls/exporter.zig
 
 RFC 5705 keying material export plus the RFC 5764 SRTP key split.
 
 - RFC 5705 has **two** seed forms and DTLS-SRTP uses the **no-context** one. Passing an empty slice appends a 2-byte zero and silently breaks interop.
 
-### dtls_use_srtp.zig
+### dtls/use_srtp.zig
 
-The RFC 5764 `use_srtp` extension. It lives in `src/tls/` because it is a TLS extension, not a WebRTC concept.
+The RFC 5764 `use_srtp` extension. It lives in `src/tlz/src/dtls/` because it is a TLS extension, not a WebRTC concept.
 
-### dtls_connection.zig
+### dtls/connection.zig
 
 The server driver: flights 2, 4 and 6.
 
-- It composes its **own** flights and reuses only leaf primitives (`tls12_prf`, certificate plus ECDSA signing, P-256 ECDHE). `tls12_connection.zig` is untouched, because it hashes TLS-framed bytes while RFC 6347 section 4.2.6 needs the transcript over DTLS 12-byte headers as-if-unfragmented, excluding the first ClientHello and the HelloVerifyRequest.
+- It composes its **own** flights and reuses only leaf primitives (`tls12/prf.zig`, certificate plus ECDSA signing, P-256 ECDHE). `tls12/connection.zig` is untouched, because it hashes TLS-framed bytes while RFC 6347 section 4.2.6 needs the transcript over DTLS 12-byte headers as-if-unfragmented, excluding the first ClientHello and the HelloVerifyRequest.
 - `HandshakeOptions.first_record_seq` exists because the cookie exchange stays stateless by answering on the sequence its ClientHello arrived with, and the server flight must then continue that numbering rather than restart at 0.
 - SRTP keys are exported inside `serverFinish` through `dtls_exporter.srtpKeys` when `use_srtp` was negotiated.
 
-### dtls_client.zig
+### dtls/client.zig
 
 The client half, so `examples/webrtc/webrtc_native_pair.zig` can dial. It is **not** certificate validating: RFC 8122 carries the fingerprint out of band and nothing checks against one yet.
 
@@ -223,7 +223,7 @@ Policy: media is refused by default. Offered formats are **echoed, not chosen be
 
 ## Layer: media
 
-Sixteen files under `media/`. The `use_srtp` extension itself is `dtls_use_srtp.zig` in `src/tls/`, counted with the DTLS files above, because it is a TLS extension and not a WebRTC concept.
+Sixteen files under `media/`. The `use_srtp` extension itself is `dtls/use_srtp.zig` in `src/tlz/src/`, counted with the DTLS files above, because it is a TLS extension and not a WebRTC concept.
 
 | File | Owns |
 | :- | :- |
