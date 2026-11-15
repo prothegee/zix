@@ -296,7 +296,7 @@ pub fn sendSimpleFD(
             nvec = 1;
         }
         const rc = std.os.linux.writev(fd, &iovs, nvec);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {
                 const n: usize = @intCast(rc);
                 if (n == 0) return Error.ZixHttp1_Writer_BrokenPipe;
