@@ -71,7 +71,7 @@ fn sendFileLinux(
         const remaining: usize = @intCast(end - cursor);
         const rc = std.os.linux.sendfile(sock, file_fd, &cursor, remaining);
 
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => if (rc == 0) return Error.ZixUtils_Static_FileTruncated,
             .INTR => {},
             .AGAIN => try waitWritable(sock),
