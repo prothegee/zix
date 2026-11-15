@@ -103,7 +103,7 @@ fn clockNs() u64 {
     if (comptime builtin.os.tag == .linux) {
         var spec: std.os.linux.timespec = undefined;
         const rc = std.os.linux.clock_gettime(.REALTIME, &spec);
-        switch (std.posix.errno(rc)) {
+        switch (std.os.linux.errno(rc)) {
             .SUCCESS => {},
             else => return 0,
         }
