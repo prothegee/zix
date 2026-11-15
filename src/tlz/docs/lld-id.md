@@ -2,7 +2,7 @@
 
 Detail internal per modul. Untuk arsitektur dan tujuan lihat [`hld-id.md`](hld-id.md).
 
-tlz bersifat sans-I/O. Handshake server digerakkan oleh `connection.serverHandshake`, client oleh `client.zig` dan `tls12/client.zig`. Pemanggil memiliki socket. Path di bawah relatif terhadap `src/tlz/src/` kecuali yang diawali `src/zix/`.
+tlz bersifat sans-I/O. Handshake server digerakkan oleh `connection.serverHandshake`, client oleh `client.zig` dan `tls12/client.zig`. Backend OpenSSL opsional ada di `openssl/` dan dijangkau lewat `binding.zig`. Pemanggil memiliki socket. Path di bawah relatif terhadap `src/tlz/src/` kecuali yang diawali `src/zix/`.
 
 ## Jenis file
 
@@ -10,7 +10,7 @@ File lower_snake_case berisi fungsi, file PascalCase adalah satu record. File fu
 
 ## Error
 
-Setiap modul yang bisa gagal mendeklarasikan `pub const Error` miliknya sendiri. Nama member berbentuk `Tlz_<Module>_<Condition>`, misalnya `Tlz_Context_KeyFileNotFound` atau `Tlz_Record_BadMac`. Modul tidak pernah meng-alias set error modul lain: error dari callee diterjemahkan ke member milik pemanggil, sekali, di fungsi publik pemanggil. Jadi `Context.init` melaporkan `Tlz_Context_InvalidKey`, bukan `Tlz_RsaPrivateKey_InvalidKey` yang diterimanya dari parser kunci.
+Setiap modul yang bisa gagal mendeklarasikan `pub const Error` miliknya sendiri. Nama member berbentuk `Tlz_<Module>_<Condition>`, misalnya `Tlz_Context_KeyFileNotFound` atau `Tlz_Record_BadMac`. Modul tidak pernah meng-alias set error modul lain: error dari callee diterjemahkan ke member milik pemanggil, sekali, di fungsi publik pemanggil. Jadi `Context.init` melaporkan `Tlz_Context_InvalidKey`, bukan `Tlz_RsaPrivateKey_InvalidKey` yang diterimanya dari parser kunci. Dengan cara yang sama, `Context.initWith` mengubah `Tlz_OpensslContext_KeyMismatch` menjadi `Tlz_Context_KeyMismatch`, dan `Client.connectWith` mengubah `Tlz_OpensslClient_*` menjadi `Tlz_Client_*`.
 
 ## wire/
 
@@ -179,6 +179,67 @@ Tiga jebakan yang perlu diketahui:
 - `dtls/connection.zig` membangun flight-nya sendiri dan hanya memakai ulang primitive dasar dari jalur 1.2. Transcript DTLS diambil atas header DTLS 12 byte seolah tidak terfragmentasi, tanpa ClientHello pertama dan HelloVerifyRequest (RFC 6347 4.2.6). Kesalahan di sini tidak terlihat sampai peer sungguhan menolak Finished.
 - Window anti-replay di `dtls/record.zig` dicek sebelum AEAD dan diperbarui sesudahnya. Memperbarui lebih dulu akan membiarkan sequence palsu yang jauh di depan menghapus window.
 - Ekspor DTLS-SRTP memakai bentuk seed tanpa context. Memberi slice context kosong menambahkan panjang nol dua byte dan merusak interop.
+
+## binding.zig
+
+`Binding` adalah `enum(u8) { DEFAULT, OPENSSL }`. `isBuilt(binding)` bernilai `true` untuk `.DEFAULT` dan mengikuti `c.ENABLED` untuk `.OPENSSL`. `requireBuilt(binding)` memunculkan `@compileError` (pasang paket dev libssl supaya `pkg-config openssl` menemukannya) jika backend tidak ikut di-build.
+
+- `context/Context.zig`: `ContextFor(binding)` adalah `Self` untuk `.DEFAULT` dan `openssl/Context.zig` untuk `.OPENSSL`. `initWith(allocator, io, config, binding)` memanggil `init` atau `init` OpenSSL, dan menerjemahkan error OpenSSL ke `Tlz_Context_*`.
+- `client.zig`: `ConnectionFor(.OPENSSL)` adalah `openssl/Connection.zig`, `.DEFAULT` adalah `@compileError` yang menunjuk ke `start` ditambah `finish`. `connectWith(ca_path, host, alpn_prefs, binding)` memanggil `openssl/client.connect` dan menerjemahkan error-nya ke `Tlz_Client_*`.
+- `lib.zig` me-re-export `Binding`.
+
+## openssl/
+
+Backend OpenSSL. Hanya dikompilasi jika `build.zig` mendeteksi OpenSSL.
+
+### Build
+
+`build.zig` menyediakan `detectOpenssl(b, target)` dan `linkOpenssl(b, target, optimize, module)`. `detectOpenssl` mengembalikan `false` untuk target cross, selain itu menjalankan `pkg-config --exists openssl` lalu jatuh ke path `ssl.h` standar. Hasilnya masuk ke modul `tlz_options` sebagai `openssl`. Zig 0.17 tidak punya `@cImport`, jadi `linkOpenssl` menulis header kecil (`ssl.h`, `err.h`, `x509v3.h`) ke build cache, menerjemahkannya dengan `addTranslateC`, menambahkannya sebagai modul `openssl_c`, dan me-link libssl, libcrypto, dan libc. Tidak ada header C yang disimpan di tree. `build.zig` root zix memanggil dua fungsi yang sama.
+
+### c.zig
+
+Satu-satunya yang meng-import `openssl_c`. `ENABLED` adalah `tlz_options.openssl`. `raw` adalah modul hasil terjemahan jika aktif, dan namespace kosong jika tidak. Blok `comptime` menolak `OPENSSL_VERSION_NUMBER` di bawah `0x30000000` (OpenSSL 3.0). Semua file openssl lain memakai `c.raw`, tidak pernah header OpenSSL secara langsung.
+
+### error.zig
+
+Membaca error queue OpenSSL, yang berlaku per thread. `clearQueue` dijalankan sebelum setiap pemanggilan OpenSSL supaya pembacaan berikutnya hanya melihat pemanggilan itu. `drainMatch(lib, reasons)` mengosongkan queue dan melaporkan apakah ada entri yang cocok dengan reason sebuah library (dipakai untuk kegagalan ALPN). `describe` dan `drainLastLine` menyalin baris yang bisa dibaca ke buffer milik pemanggil (`LINE_BUF_LEN = 256`), tidak pernah pointer C pinjaman. Teksnya untuk log, alur kontrol memakai kodenya. File ini tidak bisa gagal, jadi tidak punya set error.
+
+### Context.zig
+
+`SSL_CTX` server di atas `TLS_server_method`. `init(allocator, config)`:
+
+1. Menyalin `cert_path` dan `key_path` ke buffer berakhiran nol (`PathTooLong` jika melebihi `PATH_MAX`).
+2. `SSL_CTX_use_certificate_chain_file`, `SSL_CTX_use_PrivateKey_file`, dan `SSL_CTX_check_private_key` (`CertLoadFailed`, `KeyLoadFailed`, `KeyMismatch`).
+3. Memetakan `min_version` dan `max_version` ke versi proto OpenSSL (`InvalidVersionRange`, `VersionSetFailed`).
+4. Membangun daftar wire ALPN dengan `allocator` dan memasang select callback. Callback memilih protokol server pertama yang juga ditawarkan client (RFC 7301 3.2). Tidak ada irisan berarti alert fatal `no_application_protocol`, sama seperti server native.
+
+Curve dan cipher memakai default OpenSSL. `newConnection` mengembalikan `Connection` server. `deinit` membebaskan `SSL_CTX` dan daftar ALPN. `Connection` yang masih hidup menjaga `SSL_CTX` tetap hidup, tapi tidak daftar ALPN, jadi bebaskan semua koneksi sebelum context.
+
+### Connection.zig
+
+Field: `ssl`, `network_in`, `network_out`. `SSL_set_bio` memasang dua memory BIO: byte dari peer ditulis ke `network_in`, OpenSSL menulis byte yang harus dikirim ke `network_out`. `initServer` dan `initClient` mengatur state accept atau connect.
+
+- `handshake(incoming, out)`: tulis `incoming` ke `network_in`, jalankan `SSL_do_handshake`, lalu `drain(out)`. `WANT_READ` dan `WANT_WRITE` bukan error, keduanya mengembalikan apa pun yang mengantre (bisa kosong). Client mulai dengan `incoming` kosong, yang menghasilkan ClientHello.
+- Handshake yang gagal dipetakan dengan urutan ini: `ZERO_RETURN` ke `PeerClosed`, hasil verify yang buruk ke `PeerVerifyFailed`, reason ALPN di queue ke `NoProtocolNegotiated`, selain itu `HandshakeFailed`. Alert mungkin masih mengantre setelah error, jadi `drain` untuk memberi tahu peer.
+- `pendingLen` dan `drain`: OpenSSL bisa mengantrekan lebih dari kapasitas `out` (flight besar, alert, session ticket setelah read). Lakukan `drain` sampai `pendingLen` bernilai 0 sebelum menunggu peer.
+- `writeAppData`, `readAppData`, `closeNotify`, `selectedAlpn` adalah cermin dari `Connection` native. `readAppData` mengembalikan slice kosong sampai satu record penuh tiba. Input yang lebih panjang dari `c_int` adalah `InputTooLarge`.
+- `deinit` memanggil `SSL_free`, yang membebaskan kedua BIO.
+
+### client.zig
+
+`connect(ca_path, host, alpn_prefs)` membangun `SSL_CTX` baru di atas `TLS_client_method` untuk setiap pemanggilan:
+
+1. `SSL_CTX_load_verify_file(ca_path)` dan `SSL_VERIFY_PEER` (`CaLoadFailed`).
+2. Versi minimum TLS 1.2 (`VersionSetFailed`).
+3. Satu `Connection` client. Context dibebaskan di akhir `connect`, `SSL` menyimpan referensinya sendiri.
+4. `host` wajib (`HostMissing`, karena OpenSSL akan melewati cek nama jika host kosong) dan paling panjang 253 byte (`HostTooLong`). Nilainya dipasang sebagai SNI (`SSL_set_tlsext_host_name`) dan sebagai nama yang diverifikasi (`SSL_set1_host`).
+5. Penawaran ALPN, jika tidak kosong (`AlpnTooLong`, `AlpnSetFailed`).
+
+`Connection` yang dikembalikan belum melakukan handshake. `handshake(&.{}, out)` pertama menulis ClientHello.
+
+### Test
+
+Test unit dan edge ada di setiap file dan dilewati dengan `error.SkipZigTest` jika OpenSSL tidak ikut di-build. Test loopback menjalankan client OpenSSL melawan server OpenSSL dalam satu proses: TLS 1.2 dan 1.3, ALPN (urutan server, tanpa irisan), hostname yang tidak cocok, chain yang tidak dipercaya, dan close_notify. Test cek silang memakai tool `openssl s_client` dan `openssl s_server` sebagai peer. Test ALPN parity menjalankan `s_client` (menawarkan h2 dan http/1.1) melawan server native dan server OpenSSL dengan urutan server yang sama, dan mengharapkan protokol yang sama dari keduanya.
 
 ## Pemakaian di zix
 
