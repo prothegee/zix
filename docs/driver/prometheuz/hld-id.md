@@ -63,7 +63,7 @@ flowchart TB
 `http_client.zig` adalah client HTTP/1.1 standalone, bukan pemakaian ulang `zix.Http.Client`. Ada dua penghalang yang menyingkirkan opsi itu untuk paket standalone (batasan yang sama yang sudah dibawa `postgrez` dan `rediz`: tidak boleh bergantung balik ke zix sendiri):
 
 - `client_config.zig` milik `zix.Http.Client` butuh `zon_options`, yang hanya disuntikkan oleh `build.zig` di root.
-- `client.zig` milik `zix.Http.Client` selalu meng-import `h2_client.zig`, yang menyeret masuk `zix.Tls` dan HTTP/2.
+- `client.zig` milik `zix.Http.Client` selalu meng-import `h2_client.zig`, yang menyeret masuk `zix.tlz` dan HTTP/2.
 
 `http_client.zig` meniru bentuk publik `zix.Http.Client` (`get`/`post`, `ClientResponse` dengan `status()`/`header()`/`body()`/`deinit()`) tanpa meng-import-nya, teknik yang sama dipakai `zix.Http.Client` sendiri di jalur `requestUds`-nya: connect, tulis byte request mentah, baca head response sampai `"\r\n\r\n"`, parse status line dan framing, lalu baca body.
 
