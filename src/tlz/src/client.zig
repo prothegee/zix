@@ -624,7 +624,7 @@ fn readExactFd(fd: std.posix.fd_t, buf: []u8) !void {
 
     while (done < buf.len) {
         const rc = std.os.linux.read(fd, buf[done..].ptr, buf.len - done);
-        if (std.posix.errno(rc) != .SUCCESS) return error.ReadFailed;
+        if (std.os.linux.errno(rc) != .SUCCESS) return error.ReadFailed;
         if (rc == 0) return error.EndOfStream;
 
         done += rc;
@@ -645,7 +645,7 @@ fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
 
     while (done < bytes.len) {
         const rc = std.os.linux.write(fd, bytes[done..].ptr, bytes.len - done);
-        if (std.posix.errno(rc) != .SUCCESS) return error.WriteFailed;
+        if (std.os.linux.errno(rc) != .SUCCESS) return error.WriteFailed;
 
         done += rc;
     }
@@ -870,7 +870,7 @@ test "tlz: client, handshake over a socketpair with real fds" {
     const cert_der = try std.fmt.hexToBytes(&cert_buf, FIXTURE_CERT_HEX);
     var pair: [2]std.posix.fd_t = undefined;
     const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair);
-    try std.testing.expect(std.posix.errno(rc) == .SUCCESS);
+    try std.testing.expect(std.os.linux.errno(rc) == .SUCCESS);
     const client_fd = pair[0];
     defer _ = linux.close(client_fd);
 
