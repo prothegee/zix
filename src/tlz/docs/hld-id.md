@@ -1,10 +1,10 @@
 # tlz high-level design
 
-tlz adalah TLS 1.3, TLS 1.2, dan DTLS 1.2 yang ditulis dalam Zig murni di atas `std.crypto`. tlz adalah package mandiri di `src/tlz`, dan zix menjangkaunya sebagai `zix.tlz`.
+tlz adalah TLS 1.3, TLS 1.2, dan DTLS 1.2 yang ditulis dalam Zig murni di atas `std.crypto`. tlz adalah package mandiri di `src/tlz`, dan zix menjangkaunya sebagai `zix.tlz`. Backend OpenSSL opsional bisa dipilih per context (lihat [Model backend](#model-backend)).
 
 ## Tujuan
 
-- Zig murni di atas primitive `std.crypto`. Tanpa OpenSSL, tanpa BoringSSL, tanpa C FFI.
+- Zig murni di atas primitive `std.crypto` secara default. Jalur default tanpa OpenSSL, tanpa BoringSSL, dan tanpa C FFI. Backend OpenSSL bersifat opt-in per context.
 - TLS 1.3 (RFC 8446) ditambah TLS 1.2 sebagai batas bawah (RFC 5246, RFC 5288). 1.3 diutamakan, tidak ada yang di bawah 1.2, dan TLS 1.0, TLS 1.1, serta SSL tidak pernah ditawarkan (RFC 8996).
 - Sans-I/O: pemanggilan handshake menerima byte yang diterima dan mengembalikan byte yang harus dikirim. tlz tidak memiliki socket maupun loop, jadi kode yang sama melayani blocking task, epoll worker, atau io_uring ring.
 - Konfigurasi server adalah satu `tlz.Context` milik pengguna (cert dan key yang sudah dimuat ditambah policy yang sudah divalidasi), dibuat sekali dan dibagikan lewat pointer.
@@ -56,6 +56,8 @@ Setiap direktori di bawah berisi record (satu file PascalCase per record) dari f
 | `alert.zig`, `alert/` | Kode alert, record alert keluar, klasifikasi alert masuk |
 | `cipher_suite.zig`, `named_group.zig`, `signature_scheme.zig`, `extension_type.zig`, `alpn.zig` | Enum wire |
 | `wire/` | `Reader` dan `Writer`, big-endian, di atas buffer milik pemanggil |
+| `binding.zig` | Enum `Binding` (`DEFAULT`, `OPENSSL`), `isBuilt`, `requireBuilt` |
+| `openssl/` | Backend OpenSSL opsional: `Context` (SSL_CTX), `Connection` (SSL di atas sepasang memory BIO), `client.zig`, pembaca error queue, dan `c.zig` (satu-satunya yang meng-import C) |
 | `crypto/certificate.zig`, `crypto/certificate/` | Builder Certificate, CertificateVerify, dan Finished, serta `SigningKey` |
 | `crypto/cert_verify.zig`, `crypto/cert_verify/` | Rantai peer (RFC 5280) dan identitas hostname atau IP (RFC 6125) |
 | `crypto/pem.zig` | PEM ke DER, ekstraksi scalar ECDSA SEC1 dan seed Ed25519 PKCS#8 |
@@ -138,6 +140,58 @@ sequenceDiagram
 
 `tlz.Client` (1.3) dan `tlz.Client12` (1.2) adalah cermin dari server. `start` membangun ClientHello (ALPN ditambah daftar signature_algorithms berisi ecdsa_secp256r1_sha256 dan ed25519). `finish` menerima flight server, memverifikasi signature server (CertificateVerify untuk 1.3, ServerKeyExchange untuk 1.2) lewat `std.crypto.Certificate`, dan mengembalikan `ClientConnection`. Cek rantai dan identitas adalah `verifyChain`, `verifyCertChain`, `verifyCertHostname`, dan `verifyCertIdentity` (RFC 5280, RFC 6125). Cek SAN IP dikerjakan manual, karena std hanya mendukung DNS.
 
+## Model backend
+
+Dua backend berbagi satu permukaan publik. Native adalah default dan tidak butuh apa pun di luar standard library Zig.
+
+| Backend | Model I/O | Dipilih oleh |
+| :- | :- | :- |
+| native | sans-I/O, pemanggil memiliki socket | `Context.init`, atau `Context.initWith(..., .DEFAULT)` |
+| openssl | sans-I/O di atas sepasang memory BIO, pemanggil memiliki socket | `Context.initWith(..., .OPENSSL)`, `Client.connectWith(..., .OPENSSL)` |
+
+```mermaid
+graph TD
+    APP[Pemanggil] --> INIT[Context.init]
+    APP --> WITH[Context.initWith binding]
+    APP --> CW[Client.connectWith binding]
+    INIT --> NAT[Context native]
+    WITH -->|.DEFAULT| NAT
+    WITH -->|.OPENSSL| OCTX[openssl/Context.zig]
+    CW -->|.OPENSSL| OCLI[openssl/client.zig]
+    OCTX --> OCONN[openssl/Connection.zig]
+    OCLI --> OCONN
+    OCONN --> CIMP[openssl/c.zig]
+    CIMP --> LIB[libssl dan libcrypto]
+```
+
+- Deteksi: `build.zig` mencari OpenSSL di host build, pertama dengan `pkg-config openssl`, lalu di path header standar. Tidak ada build flag. Jika ditemukan, package me-link libssl, libcrypto, dan libc, dan binding ikut dikompilasi. Jika tidak ditemukan, tidak ada apa pun dari OpenSSL yang di-link atau di-include. Target cross tidak pernah terdeteksi.
+- Pemilihan: binding adalah parameter `comptime`, diletakkan paling akhir. Tipe kembalian mengikuti binding, jadi tidak ada switch saat runtime. `Context.ContextFor(binding)` dan `Client.ConnectionFor(binding)` menamai tipe itu, untuk field struct.
+- `Context.init` dan `Context.initWith(..., .DEFAULT)` membangun context native yang sama, bahkan ketika OpenSSL ikut dikompilasi.
+- Memilih `.OPENSSL` di build tanpa OpenSSL adalah build error dengan pesan yang jelas, tidak pernah error saat runtime. Build yang tidak pernah memilih `.OPENSSL` selalu bisa dikompilasi.
+- `Client.connectWith(..., .DEFAULT)` adalah build error: client native adalah `Client.start` ditambah `Client.finish`.
+- Batas versi: OpenSSL 3.0. OpenSSL yang lebih lama adalah build error.
+- Context OpenSSL hanya membaca `cert_path`, `key_path`, `alpn`, `min_version`, dan `max_version` dari `Config`. Curve dan cipher memakai default OpenSSL.
+- Tanpa fallback diam-diam: handshake OpenSSL yang gagal mengembalikan error, tidak pernah berpindah ke native.
+
+```zig
+var ssl_ctx = try tlz.Context.initWith(allocator, io, .{
+    .cert_path = "certs/ecdsa_p256_cert.pem",
+    .key_path = "certs/ecdsa_p256_key.pem",
+    .alpn = &.{.H2},
+}, .OPENSSL);
+defer ssl_ctx.deinit();
+
+var conn = try ssl_ctx.newConnection();
+defer conn.deinit();
+
+// Satu langkah per read: berikan byte dari peer, kirim yang dikembalikan.
+const to_send = try conn.handshake(peer_bytes, &out);
+```
+
+Setelah handshake, nama-namanya sama dengan native: `readAppData`, `writeAppData`, `closeNotify`, `selectedAlpn`, `deinit`. Handshake-nya berbeda: native adalah satu pemanggilan `serverHandshake`, openssl adalah loop `handshake(incoming, out)` sampai `handshakeDone()`. OpenSSL bisa mengantrekan output lebih banyak dari kapasitas `out`, jadi pemanggil memeriksa `pendingLen` dan memanggil `drain` sampai 0 sebelum menunggu peer.
+
+Error: `initWith` melaporkan `Tlz_Context_*` dan `connectWith` melaporkan `Tlz_Client_*`, dengan nama kondisi yang sama dengan kegagalan di modul OpenSSL (contohnya `Tlz_Context_KeyMismatch`, `Tlz_Client_PeerVerifyFailed`). Pemanggilan pada nilai OpenSSL yang dikembalikan melaporkan set-nya sendiri: `Tlz_OpensslContext_*` dan `Tlz_OpensslConnection_*`. Teks error OpenSSL disimpan untuk baris log, alur kontrol memakai kodenya.
+
 ## Alert masuk (RFC 8446 6)
 
 `parseInboundAlert` mengklasifikasikan alert yang diterima: `close_notify` (description 0) adalah penutupan bersih, selain itu fatal. `Connection.readAppData` melaporkan record alert sebagai `PeerClosed`, jadi pemanggil tidak pernah membaca alert sebagai data.
@@ -147,6 +201,7 @@ sequenceDiagram
 - Tidak ada allocator di jalur handshake maupun record. Keduanya bekerja di buffer tetap milik pemanggil.
 - `Context` memiliki satu alokasi heap: salinan DER sertifikat, dibebaskan oleh `deinit`. Signing key dan slice policy adalah nilai atau slice pinjaman.
 - Transcript dan key schedule berukuran tetap (`Secret = [32]u8`, SHA-256 di semua tempat).
+- Aturan di atas berlaku untuk backend native. Backend OpenSSL mengalokasi di dalam OpenSSL (`SSL_CTX`, setiap `SSL`, dan dua memory BIO-nya), semuanya dibebaskan oleh `deinit`.
 
 ## Pemakaian di zix
 
@@ -163,6 +218,8 @@ zix meng-import tlz dan memiliki semua socket. Serve path ada di zix, bukan di t
 | `src/zix/tcp/http2/grpc/tls_mux.zig`, `tls_serve.zig` | gRPC lewat TLS untuk `.EPOLL` / `.URING` dan untuk `.ASYNC` |
 
 Server mengaktifkannya dengan `tls: ?*zix.tlz.Context` di config `Http1`, `Http2`, atau `Grpc`. Jika `tls_port` juga diisi, satu server melayani cleartext di `port` dan TLS di `tls_port` dari worker yang sama. Hot path cleartext tidak berubah oleh semua ini. Detailnya ada di [`lld-id.md`](lld-id.md).
+
+Server zix menerima `*zix.tlz.Context` native, jadi backend OpenSSL tidak dipasang ke `Http1`, `Http2`, atau `Grpc`. Backend ini adalah opt-in di tlz. Jika host build memiliki OpenSSL, build zix juga me-link libssl, libcrypto, dan libc.
 
 ## Referensi
 
