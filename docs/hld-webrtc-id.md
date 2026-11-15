@@ -7,10 +7,10 @@ Peer WebRTC pure-Zig: ICE-lite (RFC 8445) di atas STUN (RFC 8489), DTLS 1.2 (RFC
 ## Tujuan
 
 - Menjangkau browser. Itulah alasan engine ini ada: browser tidak bisa membuka socket mentah, dan WebRTC satu-satunya transport yang ia tawarkan yang memberi pengiriman tidak reliabel, pilihan urutan per channel, serta audio dan video.
-- Satu keluarga engine yang konsisten: enum `DispatchModel` yang sama, `Tls.Context` yang sama, bentuk config datar yang sama seperti engine zix lainnya.
+- Satu keluarga engine yang konsisten: enum `DispatchModel` yang sama, `tlz.Context` yang sama, bentuk config datar yang sama seperti engine zix lainnya.
 - Pure-Zig dari RFC, dengan 32 RFC WebRTC generasi terkini dibaca, bukan library dibungkus.
 - Server adalah produknya, primitifnya tetap terbuka: blok bangunan STUN, ICE, SCTP, DCEP, SDP dan SRTP bersifat publik supaya peer atau harness test bisa membangun sisi seberang.
-- Pemisahan concern: satu berkas memiliki satu format wire. 84 berkas di bawah `src/udp/webrtc/`, plus 9 berkas `dtls_*` yang tinggal di `src/tls/` bersebelahan dengan kode TLS yang primitifnya dipakai bersama.
+- Pemisahan concern: satu berkas memiliki satu format wire. 84 berkas di bawah `src/udp/webrtc/`, plus berkas DTLS yang tinggal di `src/tlz/src/dtls/` bersebelahan dengan kode TLS yang primitifnya dipakai bersama.
 - Meneruskan media, tidak pernah mendekodenya. Engine ini tidak punya codec dan tidak punya pendapat tentang isi payload.
 
 ---
@@ -148,7 +148,7 @@ pub const WebrtcServerConfig = struct {
     ice_ufrag:    []const u8,           // ufrag agent ini, wajib
     ice_password: []const u8,           // password agent ini, wajib
 
-    tls: ?*Tls.Context,                 // certificate dan kunci ECDSA P-256, wajib
+    tls: ?*tlz.Context,                 // certificate dan kunci ECDSA P-256, wajib
 
     carry_media: bool = false,          // meneruskan audio dan video antar peer
     max_peers:   usize = 64,            // per worker
