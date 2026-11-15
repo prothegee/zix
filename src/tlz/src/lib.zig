@@ -85,6 +85,10 @@ pub const SigningKey = @import("crypto/certificate/signing_key.zig").SigningKey;
 /// Built once with `Context.init`, then shared by pointer.
 pub const Context = context.Context;
 
+/// The TLS backend `Context.initWith` and `Client.connectWith` take, chosen at compile
+/// time: `DEFAULT` is native, `OPENSSL` needs OpenSSL at build time.
+pub const Binding = @import("binding.zig").Binding;
+
 /// The TLS protocol versions a `Context` can allow.
 pub const Version = context.Version;
 
@@ -266,6 +270,7 @@ test "tlz: exports, carry every type of the public surface" {
         Client,
         Client12,
         Server12,
+        Binding,
     };
 
     inline for (types) |exported| {
@@ -293,6 +298,43 @@ test "tlz: exports, carry every function of the public surface" {
 
     inline for (functions) |exported| {
         try std.testing.expect(@typeInfo(@TypeOf(exported)) == .@"fn");
+    }
+}
+
+test "tlz: exports, carry every binding function" {
+    const functions = .{
+        Context.initWith,
+        Context.ContextFor,
+        Client.connectWith,
+        Client.ConnectionFor,
+    };
+
+    inline for (functions) |exported| {
+        try std.testing.expect(@typeInfo(@TypeOf(exported)) == .@"fn");
+    }
+}
+
+test "tlz: Binding, is the same enum the context takes" {
+    try std.testing.expect(Binding == @import("binding.zig").Binding);
+}
+
+test "tlz: Binding, DEFAULT builds the native context" {
+    try std.testing.expect(Context.ContextFor(.DEFAULT) == Context);
+}
+
+test "tlz: Binding, OPENSSL builds a different context" {
+    if (comptime @import("binding.zig").isBuilt(.OPENSSL)) {
+        try std.testing.expect(Context.ContextFor(.OPENSSL) != Context);
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "tlz: Binding, OPENSSL client returns a connection type" {
+    if (comptime @import("binding.zig").isBuilt(.OPENSSL)) {
+        try std.testing.expect(@TypeOf(Client.ConnectionFor(.OPENSSL)) == type);
+    } else {
+        return error.SkipZigTest;
     }
 }
 
