@@ -110,6 +110,22 @@
 <h4 align="center">
     <b><i>ZIX Internal Library/Module</i></b>
 </h4>
+
+<div align="center">
+
+[TLZ](src/tlz/README.md)
+
+<div align="center">
+    <img src="src/tlz/tlz-logo.svg" alt="zix-logo" style="display: block; margin: auto;" align="center" width="256px">
+</div>
+<p align="center">
+    <b>
+        <i>TLS 1.3, TLS 1.2, and DTLS 1.2, written in Zig</i>
+    </b>
+</p>
+
+</div>
+
 <div align="center">
 
 [JZON](src/jzon/README.md)
