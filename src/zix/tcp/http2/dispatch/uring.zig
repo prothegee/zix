@@ -545,7 +545,7 @@ fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
 
 fn setNonBlock(fd: std.posix.fd_t) bool {
     const rc = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (std.posix.errno(rc) != .SUCCESS) return false;
+    if (linux.errno(rc) != .SUCCESS) return false;
 
     const flags: linux.O = @bitCast(@as(u32, @intCast(rc)));
     var nonblock = flags;
@@ -553,7 +553,7 @@ fn setNonBlock(fd: std.posix.fd_t) bool {
     const bits: u32 = @bitCast(nonblock);
     const set_rc = linux.fcntl(fd, linux.F.SETFL, @intCast(bits));
 
-    return std.posix.errno(set_rc) == .SUCCESS;
+    return linux.errno(set_rc) == .SUCCESS;
 }
 
 fn initRing() Error!IoUring {
