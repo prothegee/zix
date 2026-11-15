@@ -288,9 +288,9 @@ ICE-lite, DTLS 1.2, SCTP data channels, optional SRTP media forwarding, all on o
 | send_timeout_ms | 0 | socket send timeout (SO_SNDTIMEO), 0 = disabled | blocks send past this | set to drop slow consumers | consumers dropped sooner | slow consumers tolerated | 0 waits indefinitely |
 | logger | null | optional logger for lifecycle lines | | attach for logging | | | |
 
-## TLS context (`Tls.Context.Config`)
+## TLS context (`tlz.Context.Config`)
 
-Server-side TLS policy, validated once at init. Attach the built `Tls.Context` by pointer to an engine's `tls` field. Omitting the optional fields yields the secure default (forward secrecy, AEAD, ECDHE-only).
+Server-side TLS policy, validated once at init. Attach the built `tlz.Context` by pointer to an engine's `tls` field. Omitting the optional fields yields the secure default (forward secrecy, AEAD, ECDHE-only).
 
 | field | default | controls | perf impact | how to tweak | if lower | if higher | knob consequence |
 | :- | :- | :- | :- | :- | :- | :- | :- |
