@@ -63,7 +63,7 @@ flowchart TB
 `http_client.zig` is a standalone HTTP/1.1 client, not a reuse of `zix.Http.Client`. Two blockers rule that out for a standalone package (the same constraint `postgrez` and `rediz` already carry: no dependency back onto zix itself):
 
 - `zix.Http.Client`'s `client_config.zig` needs `zon_options`, which only the root `build.zig` injects.
-- `zix.Http.Client`'s `client.zig` unconditionally imports `h2_client.zig`, which drags in `zix.Tls` and HTTP/2.
+- `zix.Http.Client`'s `client.zig` unconditionally imports `h2_client.zig`, which drags in `zix.tlz` and HTTP/2.
 
 `http_client.zig` mirrors `zix.Http.Client`'s public shape (`get`/`post`, a `ClientResponse` with `status()`/`header()`/`body()`/`deinit()`) without importing it, the same technique `zix.Http.Client` itself uses for its `requestUds` path: connect, write the request bytes raw, read the response head up to `"\r\n\r\n"`, parse the status line and framing, then read the body.
 
