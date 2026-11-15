@@ -2,7 +2,7 @@
 
 How to build a zix application into a Docker image (with git, curl, and zig fetch) and how to
 configure the TLS context for each of the three supported certificate types. For the full TLS
-config-field reference see `zix-config-en.md`. For the TLS design see `hld-tls-en.md`.
+config-field reference see `zix-config-en.md`. For the TLS design see `../src/tlz/docs/hld-en.md`.
 
 ## Add zix to your project
 
@@ -161,13 +161,13 @@ Notes:
 
 ## Configure TLS
 
-Attach a `zix.Tls.Context` to a server to opt into TLS on a gated path. The context loads the cert
+Attach a `zix.tlz.Context` to a server to opt into TLS on a gated path. The context loads the cert
 and key once at startup, validates the policy, and every connection reuses it. The certificate key
 type is detected from the certificate, so the three types below differ only by the cert / key files
 and the version floor.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/server.crt",
     .key_path = "certs/server.key",
     .alpn = &.{.HTTP_1_1}, // .H2 for the Http2 server, or .{ .H2, .HTTP_1_1 }
@@ -205,7 +205,7 @@ Ed25519 signs only on TLS 1.3 (the TLS 1.2 ServerKeyExchange path is ECDSA-signe
 context at 1.3.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/ed25519_cert.pem",
     .key_path = "certs/ed25519_key.pem",
     .alpn = &.{.HTTP_1_1},
@@ -220,7 +220,7 @@ The default certificate type. It signs on both TLS 1.2 and 1.3, so it needs no v
 defaults are a 1.2 floor and 1.3 ceiling, 1.3 preferred).
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/ecdsa_p256_cert.pem",
     .key_path = "certs/ecdsa_p256_key.pem",
     .alpn = &.{.HTTP_1_1},
@@ -235,7 +235,7 @@ so an RSA certificate requires a 1.3 floor (a 1.2-only client is rejected). RSA-
 Build the image with `+adx` so the signature takes the fused Montgomery path.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "certs/rsa_2048_cert.pem",
     .key_path = "certs/rsa_2048_key.pem",
     .alpn = &.{.HTTP_1_1},
@@ -246,7 +246,7 @@ defer tls.deinit();
 
 ### Common options
 
-All three accept the rest of `Tls.Context.Config` (see `zix-config-en.md` for the full table):
+All three accept the rest of `tlz.Context.Config` (see `zix-config-en.md` for the full table):
 `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, and `hsts_max_age_s`. Curves and
 ciphers are validated allow-lists, so an unsupported value is a startup error. For the Http2 server
 set `alpn = &.{.H2}` (or `&.{ .H2, .HTTP_1_1 }` to also offer https/1.1).
