@@ -31,12 +31,16 @@
 //!
 
 const std = @import("std");
+const tlz = @import("tlz");
 const Config = @import("Config.zig");
 const DispatchModel = @import("../../shared/dispatch.zig").Model;
 const HandlerFn = @import("handler.zig").HandlerFn;
 const dispatch_async = @import("dispatch/async.zig");
 const dispatch_epoll = @import("dispatch/epoll.zig");
 const dispatch_uring = @import("dispatch/uring.zig");
+const log = @import("log.zig");
+const tls_mux = @import("tls_mux.zig");
+const tls_serve = @import("tls_serve.zig");
 const StaticCacheRegistry = @import("../../utils/static/StaticCacheRegistry.zig");
 const OS = @import("builtin").target.os.tag;
 
@@ -174,6 +178,100 @@ fn dispatchUringError(err: dispatch_uring.Error) Error {
     };
 }
 
+fn dispatchTlsServeError(err: tls_serve.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_TlsServe_ResolveFailed
+            => Error.ZixHttp2_Server_ResolveFailed,
+        error.ZixHttp2_TlsServe_ListenFailed
+            => Error.ZixHttp2_Server_ListenFailed,
+        error.ZixHttp2_TlsServe_AcceptFailed
+            => Error.ZixHttp2_Server_AcceptFailed,
+    };
+}
+
+fn dispatchTlsMuxError(err: tls_mux.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_TlsMux_ResolveFailed
+            => Error.ZixHttp2_Server_ResolveFailed,
+        error.ZixHttp2_TlsMux_ListenFailed
+            => Error.ZixHttp2_Server_ListenFailed,
+        error.ZixHttp2_TlsMux_Unsupported,
+        error.ZixHttp2_TlsMux_OutOfMemory,
+        error.ZixHttp2_TlsMux_SpawnFailed,
+        error.ZixHttp2_TlsMux_SetupFailed,
+            => Error.ZixHttp2_Server_TlsSetupFailed,
+    };
+}
+
+/// Thread body for the .ASYNC dual listener: h2 over TLS on tls_port while the
+/// cleartext model serves port. A failure is logged, cleartext keeps serving.
+fn serveTlsThread(config: Config, handler: HandlerFn, ctx: *const tlz.Context) void {
+    tls_serve.runTls(config, handler, ctx) catch |err| {
+        log.logSystem(
+            config,
+            .ERROR,
+            "h2 TLS listener on {s}:{d} stopped ({s}), h2c still serving",
+            .{ config.ip, config.port, @errorName(err) },
+        );
+    };
+}
+
+/// Serve h2 over TLS only, on config.port.
+///
+/// Note:
+/// - .ASYNC runs one task per connection and also serves TLS 1.2.
+/// - .EPOLL and .URING run the multiplexed TLS workers (TLS 1.3).
+fn runTlsOnly(self: *const Self, ctx: *const tlz.Context) Error!void {
+    return switch (self.config.dispatch_model) {
+        .ASYNC => tls_serve.runTls(self.config, self.handler, ctx) catch |err| {
+            return dispatchTlsServeError(err);
+        },
+        .EPOLL,
+        .URING,
+        => tls_mux.run(self.config, self.handler, ctx) catch |err| {
+            return dispatchTlsMuxError(err);
+        },
+        // Never pass gateDispatchModel.
+        .IOCP,
+        .KQUEUE,
+        => Error.ZixHttp2_Server_DispatchModel_NotSupported,
+    };
+}
+
+/// Start the TLS side of the dual listener (config.tls_port).
+///
+/// Note:
+/// - .ASYNC: one extra accept thread serves h2 over TLS on tls_port.
+/// - .EPOLL and .URING host the TLS connections in the cleartext workers, so
+///   their dispatch binds tls_port itself. Nothing starts here.
+fn startTlsSide(self: *const Self, ctx: *const tlz.Context) Error!void {
+    if (self.config.tls_port == self.config.port) return Error.ZixHttp2_Server_TlsPortConflict;
+
+    switch (self.config.dispatch_model) {
+        .ASYNC => {
+            var tls_config = self.config;
+            tls_config.port = self.config.tls_port;
+            tls_config.tls_port = 0;
+
+            const thread = std.Thread.spawn(
+                .{},
+                serveTlsThread,
+                .{ tls_config, self.handler, ctx },
+            ) catch |err| switch (err) {
+                else => return Error.ZixHttp2_Server_TlsSetupFailed,
+            };
+            thread.detach();
+        },
+        .EPOLL,
+        .URING,
+        => {},
+        // Never pass gateDispatchModel.
+        .IOCP,
+        .KQUEUE,
+        => return Error.ZixHttp2_Server_DispatchModel_NotSupported,
+    }
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -198,6 +296,10 @@ pub const Error = error {
     ZixHttp2_Server_EpollSetupFailed,
     /// E.Q.: error.ZixHttp2_Uring_SetupFailed
     ZixHttp2_Server_UringSetupFailed,
+    /// config.tls_port equals config.port
+    ZixHttp2_Server_TlsPortConflict,
+    /// E.Q.: error.ZixHttp2_TlsMux_SetupFailed
+    ZixHttp2_Server_TlsSetupFailed,
 };
 
 /// Build the server. Validation happens in run.
@@ -252,6 +354,8 @@ pub fn deinit(self: *Self) void {
 /// - Error.ZixHttp2_Server_AcceptFailed from the .ASYNC model
 /// - Error.ZixHttp2_Server_EpollSetupFailed or UringSetupFailed when a Linux
 ///   model could not start its workers
+/// - Error.ZixHttp2_Server_TlsPortConflict when tls_port equals port
+/// - Error.ZixHttp2_Server_TlsSetupFailed when the TLS side could not start
 pub fn run(self: *const Self) Error!void {
     try gatePort(self.config);
     try gateDispatchModel(self.config.dispatch_model);
@@ -261,6 +365,12 @@ pub fn run(self: *const Self) Error!void {
     // it must not close files another server is still serving.
     const owns_static = installStaticCache(self.config);
     defer if (owns_static) StaticCacheRegistry.shared.shutdown(self.config.io);
+
+    if (self.config.tls) |ctx| {
+        if (self.config.tls_port == 0) return self.runTlsOnly(ctx);
+
+        try self.startTlsSide(ctx);
+    }
 
     return switch (self.config.dispatch_model) {
         .ASYNC => {
@@ -533,5 +643,58 @@ test "zix http2: Server, URING with an unresolvable ip is ResolveFailed" {
     server.config.ip = "not-an-ip";
 
     try std.testing.expectError(Error.ZixHttp2_Server_ResolveFailed, server.run());
+}
+
+test "zix http2: Server, tls_port equal to port is TlsPortConflict" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(.ASYNC);
+    server.config.tls = &ctx;
+    server.config.tls_port = server.config.port;
+
+    try std.testing.expectError(Error.ZixHttp2_Server_TlsPortConflict, server.run());
+}
+
+test "zix http2: Server, TLS on IOCP is not supported" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(.IOCP);
+    server.config.tls = &ctx;
+
+    try std.testing.expectError(Error.ZixHttp2_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http2: Server, dual listener on KQUEUE is not supported" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(.KQUEUE);
+    server.config.tls = &ctx;
+    server.config.tls_port = 9443;
+
+    try std.testing.expectError(Error.ZixHttp2_Server_DispatchModel_NotSupported, server.run());
+}
+
+test "zix http2: Server, TLS with an unresolvable ip is ResolveFailed" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(.ASYNC);
+    server.config.ip = "not-an-ip";
+    server.config.tls = &ctx;
+
+    try std.testing.expectError(Error.ZixHttp2_Server_ResolveFailed, server.run());
+}
+
+test "zix http2: Server, maps a TLS bind failure" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ListenFailed,
+        dispatchTlsServeError(error.ZixHttp2_TlsServe_ListenFailed),
+    );
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_ResolveFailed,
+        dispatchTlsMuxError(error.ZixHttp2_TlsMux_ResolveFailed),
+    );
+}
+
+test "zix http2: Server, maps TLS mux setup failures" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_Server_TlsSetupFailed,
+        dispatchTlsMuxError(error.ZixHttp2_TlsMux_SpawnFailed),
+    );
 }
 
