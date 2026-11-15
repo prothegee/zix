@@ -6,11 +6,11 @@ Pure-Zig HTTP/3 (RFC 9114) server over QUIC (RFC 9000 / 9001 / 9002), built on t
 
 ## Goals
 
-- One coherent engine family: the same comptime `Router`, the same `DispatchModel` enum, and the same `Tls.Context` as `zix.Http1` / `zix.Http2`.
+- One coherent engine family: the same comptime `Router`, the same `DispatchModel` enum, and the same `tlz.Context` as `zix.Http1` / `zix.Http2`.
 - Pure-Zig from the RFCs: the QUIC transport, packet protection, TLS 1.3 handshake glue, and QPACK header compression are all written from the specifications and proven byte-exact against the RFC worked examples in-file.
 - The server is the product, the primitives are exposed: the low-level QUIC / TLS / QPACK building blocks are public so a peer (a hand-rolled client, a test harness) can build the other side of the wire, mirroring how `zix.Http2` exposes its frame / HPACK primitives.
 - Explicit over implicit: every behavior named in config, `dispatch_model` required with no default.
-- Separation of concern: `src/udp/http3/` sits on `src/udp/datagram.zig` (the raw datagram socket) and reuses `src/tls/` for the TLS 1.3 message builders and key schedule.
+- Separation of concern: `src/udp/http3/` sits on `src/udp/datagram.zig` (the raw datagram socket) and reuses `src/tlz/src/` for the TLS 1.3 message builders and key schedule.
 
 ---
 
@@ -133,7 +133,7 @@ pub const Http3ServerConfig = struct {
     socket_sndbuf:           usize = 4 * 1024 * 1024, // requested SO_SNDBUF (kernel clamps)
     gso_enabled:             bool  = true,       // UDP GSO on send, probed at worker start
 
-    tls: ?*Tls.Context = null, // TLS 1.3 context (cert / key / ALPN), required, null rejected at run
+    tls: ?*tlz.Context = null, // TLS 1.3 context (cert / key / ALPN), required, null rejected at run
 
     cid_len:              u8    = 8,     // server-issued connection-id length (RFC 9000 5.1)
     max_idle_ms:          u32   = 30000, // idle timeout (RFC 9000 10.1)
@@ -286,7 +286,7 @@ The single-worker `.ASYNC` model is the migration-safe reference. The per-core m
 
 ## Handshake Overview
 
-QUIC folds TLS 1.3 into the transport. The deterministic layers are pure-Zig from the RFCs, the TLS 1.3 message builders and key schedule are the existing, tested `src/tls/` code, only the framing changes (raw handshake bytes go into a CRYPTO frame instead of a TLS record).
+QUIC folds TLS 1.3 into the transport. The deterministic layers are pure-Zig from the RFCs, the TLS 1.3 message builders and key schedule are the existing, tested `src/tlz/src/` code, only the framing changes (raw handshake bytes go into a CRYPTO frame instead of a TLS record).
 
 | Step | What happens |
 | :- | :- |
@@ -296,7 +296,7 @@ QUIC folds TLS 1.3 into the transport. The deterministic layers are pure-Zig fro
 | Handshake flight | EncryptedExtensions (ALPN `h3` + `quic_transport_parameters`), Certificate, CertificateVerify, Finished, all in one CRYPTO frame sealed with the Handshake keys. 1-RTT application keys derived. |
 | 1-RTT | Short-header packets, application keys, requests served. |
 
-The certificate can be ECDSA P-256, Ed25519, or RSA, from the same `Tls.Context` as the TCP engines (an RSA cert signs with `rsa_pss_rsae_sha256`). 0-RTT is rejected by default.
+The certificate can be ECDSA P-256, Ed25519, or RSA, from the same `tlz.Context` as the TCP engines (an RSA cert signs with `rsa_pss_rsae_sha256`). 0-RTT is rejected by default.
 
 ---
 
@@ -345,7 +345,7 @@ The allocator must be general-purpose (e.g. `std.heap.smp_allocator`), the same 
 - **RFC 9002 (QUIC recovery)**: RTT estimation, loss detection, Probe Timeout, NewReno congestion control.
 - **RFC 9114 (HTTP/3)**: the framing and semantics layer (HEADERS / DATA / SETTINGS, control stream, message validation).
 - **RFC 9204 (QPACK)** and **RFC 7541 (Huffman table)**: header compression.
-- **RFC 8446 (TLS 1.3)**: the handshake and key schedule, reused from `src/tls/`.
+- **RFC 8446 (TLS 1.3)**: the handshake and key schedule, reused from `src/tlz/src/`.
 
 ---
 
