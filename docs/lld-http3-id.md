@@ -81,7 +81,7 @@ Connection close, stateless reset, dan anti-amplification (RFC 9000 19.19 / 10.2
 
 ### keyschedule.zig
 
-Key schedule handshake QUIC (secret tree RFC 8446 7.1 + label quic RFC 9001 5.1). Memakai ulang `src/tls/key_schedule.zig` (`Transcript`, `HkdfSha256`, `deriveSecret`) untuk machinery TLS 1.3, lalu melapisi derivasi key per-level QUIC di atasnya via `crypto.AesKeys.fromSecret`.
+Key schedule handshake QUIC (secret tree RFC 8446 7.1 + label quic RFC 9001 5.1). Memakai ulang `src/tlz/src/key_schedule.zig` (`Transcript`, `HkdfSha256`, `deriveSecret`) untuk machinery TLS 1.3, lalu melapisi derivasi key per-level QUIC di atasnya via `crypto.AesKeys.fromSecret`.
 
 - `handshakeKeys(shared, transcript_hash)`: `early = Extract(0, 0)`, `derived = deriveSecret(early, "derived", "")`, `handshake_secret = Extract(derived, shared)`, lalu traffic secret `"s hs traffic"` / `"c hs traffic"`, mengembalikan `HandshakeKeys { server, client, handshake_secret, server_traffic, client_traffic }`.
 - `applicationKeys(handshake_secret, transcript_through_finished)`: master secret 1-RTT dan application secret `"s ap traffic"` / `"c ap traffic"`, mengembalikan `AppKeys { server, client }`.
@@ -97,7 +97,7 @@ Sambungan antara handshake TLS 1.3 dan QUIC (RFC 9001 bagian 4): pesan handshake
 
 Generasi ServerHello, awal jalur kirim server.
 
-- `buildServerHelloInitial(...)`: dari ClientHello terparse, jalankan sisi server X25519 ECDHE, `handshake.negotiate` + `handshake.serializeServerHello` (memakai ulang `src/tls`), bungkus ServerHello dalam CRYPTO frame pada offset 0, dan `protection.sealInitial`. Memperbarui transcript dengan ClientHello + ServerHello dan menurunkan Handshake keys via `keyschedule.handshakeKeys`. Mengembalikan byte packet plus shared secret ECDHE. Menangani jalur X25519 umum (default curl).
+- `buildServerHelloInitial(...)`: dari ClientHello terparse, jalankan sisi server X25519 ECDHE, `handshake.negotiate` + `handshake.serializeServerHello` (memakai ulang `src/tlz/src`), bungkus ServerHello dalam CRYPTO frame pada offset 0, dan `protection.sealInitial`. Memperbarui transcript dengan ClientHello + ServerHello dan menurunkan Handshake keys via `keyschedule.handshakeKeys`. Mengembalikan byte packet plus shared secret ECDHE. Menangani jalur X25519 umum (default curl).
 
 ### flight.zig
 
@@ -105,7 +105,7 @@ Handshake-level TLS flight server.
 
 - `encodeTransportParams(...)`: transport parameter QUIC (RFC 9000 18.2): `original_destination_connection_id` (0x00) dan `initial_source_connection_id` (0x0f) membawa DCID pertama client dan SCID server byte-exact (curl memvalidasinya), plus `max_idle_timeout` (0x01), `initial_max_data` (0x04), ketiga `initial_max_stream_data_*` (0x05 / 0x06 / 0x07), dan `initial_max_streams_bidi` / `_uni` (0x08 / 0x09).
 - `buildEncryptedExtensions(...)`: EncryptedExtensions dengan ekstensi ALPN `h3` dan ekstensi `quic_transport_parameters` (0x0039), dibangun manual di sini karena QUIC butuh keduanya, yang dihilangkan TLS record layer.
-- `buildHandshakeFlight(...)`: EncryptedExtensions + `certificate.buildCertificate` + `buildCertificateVerify` + `buildFinished` (dari `src/tls/certificate.zig`), masing-masing dimasukkan ke transcript, dibungkus dalam satu CRYPTO frame dan di-seal dengan Handshake keys (`protection.sealHandshake`).
+- `buildHandshakeFlight(...)`: EncryptedExtensions + `certificate.buildCertificate` + `buildCertificateVerify` + `buildFinished` (dari `src/tlz/src/crypto/certificate.zig`), masing-masing dimasukkan ke transcript, dibungkus dalam satu CRYPTO frame dan di-seal dengan Handshake keys (`protection.sealHandshake`).
 
 ### transport_params.zig
 
