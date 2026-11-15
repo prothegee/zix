@@ -51,6 +51,9 @@ const ResponseCache = @import("../../../utils/cache/ResponseCache.zig");
 const cpu_affinity = @import("../../../multiplexers/cpu_affinity.zig");
 const reuseport = @import("../../../multiplexers/reuseport.zig");
 const slab = @import("../../../multiplexers/slab.zig");
+const tlz = @import("tlz");
+const tls_mux = @import("../tls_mux.zig");
+const tls_conn = @import("../../../multiplexers/tls_conn.zig");
 const HandlerFn = handler.HandlerFn;
 
 // --------------------------------------------------------- //
@@ -69,12 +72,19 @@ const EPOLL_WAIT_TIMEOUT_MS: i32 = 1000;
 /// SO_BUSY_POLL option name (asm-generic/socket.h).
 const SO_BUSY_POLL: u32 = 46;
 
+/// Data word of the dual-listener TLS listener: tagged, with no real fd under it.
+const TLS_LISTENER_DATA: u64 = tls_conn.TLS_EVENT_TAG | std.math.maxInt(u32);
+
 /// One worker's setup, passed by value to the spawned thread.
 const WorkerCtx = struct {
     io: std.Io,
     opts: ServeOpts,
     handler: HandlerFn,
     listener: std.Io.net.Server,
+    /// Dual listener (config.tls_port): h2 over TLS connections served in this loop.
+    tls_listener: ?std.Io.net.Server = null,
+    /// Borrowed identity of the TLS side. Set together with tls_listener.
+    tls_ctx: ?*const tlz.Context = null,
     worker_id: usize,
     busy_poll_us: u32,
     stop: *std.atomic.Value(bool),
@@ -130,6 +140,28 @@ fn setNonBlock(fd: std.posix.fd_t) bool {
 
 fn closeListeners(listeners: []std.Io.net.Server, io: std.Io) void {
     for (listeners) |*listener| listener.deinit(io);
+}
+
+/// Whether config asks for the dual listener (h2c on port, h2 over TLS on tls_port).
+fn dualListener(config: Config) bool {
+    return config.tls != null and config.tls_port != 0;
+}
+
+/// One event on a dual-listener TLS connection, handed to the tls_mux machinery.
+fn serveTlsEvent(
+    handler_fn: HandlerFn,
+    table: *tls_mux.ConnTable,
+    epfd: std.posix.fd_t,
+    event: linux.epoll_event,
+) void {
+    const fd: std.posix.fd_t = @intCast(event.data.u64 & (tls_conn.TLS_EVENT_TAG - 1));
+    const conn = table.get(fd) orelse return;
+
+    if (tls_mux.onEvent(handler_fn, conn, epfd, event.events)) return;
+
+    _ = linux.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null);
+    table.drop(fd);
+    _ = linux.close(fd);
 }
 
 fn failSetup(ctx: *const WorkerCtx) void {
@@ -281,6 +313,46 @@ fn workerMain(ctx: WorkerCtx) void {
     defer slab.unmapSlots(slots);
     defer closeAll(slots);
 
+    // Dual listener: a second listener whose connections terminate TLS here.
+    var tls_table: ?tls_mux.ConnTable = null;
+    defer if (tls_table) |*table| table.deinit();
+    defer if (worker.tls_listener) |*tls_listener| tls_listener.deinit(io);
+
+    const tls_listener_fd: std.posix.fd_t = if (worker.tls_listener) |tls_listener|
+        tls_listener.socket.handle
+    else
+        -1;
+    if (worker.tls_listener != null) {
+        if (!setNonBlock(tls_listener_fd)) {
+            failSetup(&worker);
+            return;
+        }
+
+        var tls_event = linux.epoll_event{
+            .events = linux.EPOLL.IN,
+            .data = .{ .u64 = TLS_LISTENER_DATA },
+        };
+        const tls_add_rc = linux.epoll_ctl(
+            epfd,
+            linux.EPOLL.CTL_ADD,
+            tls_listener_fd,
+            &tls_event,
+        );
+        if (std.posix.errno(tls_add_rc) != .SUCCESS) {
+            failSetup(&worker);
+            return;
+        }
+
+        tls_table = tls_mux.ConnTable.init() catch |err| switch (err) {
+            error.ZixMultiplexers_ConnTable_OutOfMemory,
+            error.ZixMultiplexers_ConnTable_MapFailed,
+            => {
+                failSetup(&worker);
+                return;
+            },
+        };
+    }
+
     var events: [EPOLL_MAX_EVENTS]linux.epoll_event = undefined;
     var timeout_ms: i32 = EPOLL_WAIT_TIMEOUT_MS;
     while (!worker.stop.load(.acquire)) {
@@ -301,6 +373,23 @@ fn workerMain(ctx: WorkerCtx) void {
         timeout_ms = if (event_count == 0) EPOLL_WAIT_TIMEOUT_MS else 0;
 
         for (events[0..event_count]) |event| {
+            if (tls_table) |*table| {
+                if (event.data.u64 == TLS_LISTENER_DATA) {
+                    tls_mux.acceptAll(table, epfd, tls_listener_fd, .{
+                        .io = io,
+                        .ctx = worker.tls_ctx.?,
+                        .opts = worker.opts,
+                        .ev_tag = tls_conn.TLS_EVENT_TAG,
+                    });
+                    continue;
+                }
+
+                if ((event.data.u64 & tls_conn.TLS_EVENT_TAG) != 0) {
+                    serveTlsEvent(worker.handler, table, epfd, event);
+                    continue;
+                }
+            }
+
             const fd: std.posix.fd_t = @intCast(event.data.u64);
             if (fd == listener_fd) {
                 acceptAll(epfd, listener_fd, slots, worker.opts, worker.busy_poll_us, io);
@@ -313,6 +402,51 @@ fn workerMain(ctx: WorkerCtx) void {
             }
         }
     }
+}
+
+/// Bind one h2 TLS listener per worker on config.tls_port.
+///
+/// Return:
+/// - []std.Io.net.Server (owned by the caller, one per worker)
+/// - Error.ZixHttp2_Epoll_ResolveFailed, ListenFailed, or OutOfMemory
+fn bindTlsListeners(
+    config: Config,
+    workers: usize,
+    allocator: std.mem.Allocator,
+) Error![]std.Io.net.Server {
+    const io = config.io;
+    const address = std.Io.net.IpAddress.resolve(
+        io,
+        config.ip,
+        config.tls_port,
+    ) catch |err| switch (err) {
+        else => return Error.ZixHttp2_Epoll_ResolveFailed,
+    };
+
+    const tls_listeners = allocator.alloc(
+        std.Io.net.Server,
+        workers,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return Error.ZixHttp2_Epoll_OutOfMemory,
+    };
+
+    var bound: usize = 0;
+    while (bound < workers) : (bound += 1) {
+        tls_listeners[bound] = address.listen(io, .{
+            .mode = .stream,
+            .reuse_address = true,
+            .kernel_backlog = config.kernel_backlog,
+        }) catch |err| switch (err) {
+            else => {
+                closeListeners(tls_listeners[0..bound], io);
+                allocator.free(tls_listeners);
+
+                return Error.ZixHttp2_Epoll_ListenFailed;
+            },
+        };
+    }
+
+    return tls_listeners;
 }
 
 // --------------------------------------------------------- //
@@ -400,12 +534,26 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
         );
     }
 
+    // Dual listener: one h2 TLS listener per worker on tls_port, bound here so a
+    // failed bind is reported before any worker starts.
+    const tls_listeners: []std.Io.net.Server = if (dualListener(config))
+        bindTlsListeners(config, workers, allocator) catch |err| {
+            closeListeners(listeners, io);
+            allocator.free(listeners);
+
+            return err;
+        }
+    else
+        &.{};
+    defer if (tls_listeners.len > 0) allocator.free(tls_listeners);
+
     const threads = allocator.alloc(
         std.Thread,
         workers,
     ) catch |err| switch (err) {
         error.OutOfMemory => {
             closeListeners(listeners, io);
+            closeListeners(tls_listeners, io);
             allocator.free(listeners);
 
             return Error.ZixHttp2_Epoll_OutOfMemory;
@@ -428,6 +576,8 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
                 .opts = opts,
                 .handler = handler_fn,
                 .listener = listeners[spawned],
+                .tls_listener = if (tls_listeners.len > 0) tls_listeners[spawned] else null,
+                .tls_ctx = config.tls,
                 .worker_id = spawned,
                 .busy_poll_us = config.busy_poll_us,
                 .stop = &stop,
@@ -437,6 +587,7 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
             else => {
                 stop.store(true, .release);
                 closeListeners(listeners[spawned..], io);
+                if (tls_listeners.len > 0) closeListeners(tls_listeners[spawned..], io);
                 for (threads[0..spawned]) |thread| thread.join();
                 allocator.free(listeners);
 
@@ -451,6 +602,15 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
         "listening on {s}:{d} (epoll, {d} workers)",
         .{ config.ip, config.port, workers },
     );
+
+    if (tls_listeners.len > 0) {
+        log.logSystem(
+            config,
+            .INFO,
+            "dual listener: h2 TLS on {s}:{d} (same workers)",
+            .{ config.ip, config.tls_port },
+        );
+    }
 
     for (threads) |thread| thread.join();
 
@@ -816,5 +976,49 @@ test "zix http2: epoll, worker serves one connection end to end" {
 
     try std.testing.expectEqual(@as(usize, 1), try testServeOverWorker());
     try std.testing.expectEqual(@as(usize, 1), ok_calls);
+}
+
+test "zix http2: epoll, dualListener needs both tls and tls_port" {
+    var ctx: tlz.Context = undefined;
+    var config = testConfig();
+    try std.testing.expect(!dualListener(config));
+
+    config.tls = &ctx;
+    try std.testing.expect(!dualListener(config));
+
+    config.tls_port = 9443;
+    try std.testing.expect(dualListener(config));
+}
+
+test "zix http2: epoll, TLS_LISTENER_DATA is tagged and never a connection fd" {
+    try std.testing.expect((TLS_LISTENER_DATA & tls_conn.TLS_EVENT_TAG) != 0);
+    try std.testing.expect(TLS_LISTENER_DATA > std.math.maxInt(u31));
+}
+
+test "zix http2: epoll, serveTlsEvent on an unknown fd is a no-op" {
+    var table = try tls_mux.ConnTable.init();
+    defer table.deinit();
+
+    const event = linux.epoll_event{
+        .events = linux.EPOLL.IN,
+        .data = .{ .u64 = tls_conn.TLS_EVENT_TAG | 42 },
+    };
+
+    serveTlsEvent(mockHandler, &table, -1, event);
+
+    try std.testing.expect(table.get(42) == null);
+}
+
+test "zix http2: epoll, a dual listener with an unresolvable ip is ResolveFailed" {
+    var ctx: tlz.Context = undefined;
+    var config = testConfig();
+    config.ip = "not-an-ip";
+    config.tls = &ctx;
+    config.tls_port = 9443;
+
+    try std.testing.expectError(
+        Error.ZixHttp2_Epoll_ResolveFailed,
+        bindTlsListeners(config, 1, std.testing.allocator),
+    );
 }
 
