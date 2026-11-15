@@ -52,6 +52,7 @@ test {
     _ = @import("signature_scheme.zig");
     _ = @import("extension_type.zig");
     _ = @import("alpn.zig");
+    _ = @import("binding.zig");
 
     _ = @import("handshake.zig");
     _ = @import("handshake/handshake_type.zig");
