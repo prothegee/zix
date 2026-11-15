@@ -124,7 +124,7 @@ fn setBusyPoll(fd: std.posix.fd_t, us: u32) void {
 
 fn setNonBlock(fd: std.posix.fd_t) bool {
     const rc = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (std.posix.errno(rc) != .SUCCESS) return false;
+    if (linux.errno(rc) != .SUCCESS) return false;
 
     const flags: linux.O = @bitCast(@as(u32, @intCast(rc)));
     var nonblock = flags;
@@ -132,7 +132,7 @@ fn setNonBlock(fd: std.posix.fd_t) bool {
     const bits: u32 = @bitCast(nonblock);
     const set_rc = linux.fcntl(fd, linux.F.SETFL, @intCast(bits));
 
-    return std.posix.errno(set_rc) == .SUCCESS;
+    return linux.errno(set_rc) == .SUCCESS;
 }
 
 fn closeListeners(listeners: []std.Io.net.Server, io: std.Io) void {
@@ -251,7 +251,7 @@ fn acceptAll(
             null,
             std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
         );
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {},
             .AGAIN => return,
             .INTR, .CONNABORTED => continue,
@@ -280,7 +280,7 @@ fn acceptAll(
             .data = .{ .u64 = @intCast(fd) },
         };
         const add_rc = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &event);
-        if (std.posix.errno(add_rc) != .SUCCESS) {
+        if (linux.errno(add_rc) != .SUCCESS) {
             conn.deinit();
             _ = linux.close(fd);
             continue;
@@ -330,7 +330,7 @@ fn WorkerEntry(comptime RouterType: type) type {
             }
 
             const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-            if (std.posix.errno(epfd_rc) != .SUCCESS) {
+            if (linux.errno(epfd_rc) != .SUCCESS) {
                 failSetup(&worker);
                 return;
             }
@@ -347,7 +347,7 @@ fn WorkerEntry(comptime RouterType: type) type {
                 listener_fd,
                 &listener_event,
             );
-            if (std.posix.errno(add_rc) != .SUCCESS) {
+            if (linux.errno(add_rc) != .SUCCESS) {
                 failSetup(&worker);
                 return;
             }
@@ -388,7 +388,7 @@ fn WorkerEntry(comptime RouterType: type) type {
                     tls_listener_fd,
                     &tls_event,
                 );
-                if (std.posix.errno(tls_add_rc) != .SUCCESS) {
+                if (linux.errno(tls_add_rc) != .SUCCESS) {
                     failSetup(&worker);
                     return;
                 }
@@ -407,7 +407,7 @@ fn WorkerEntry(comptime RouterType: type) type {
             var timeout_ms: i32 = EPOLL_WAIT_TIMEOUT_MS;
             while (!worker.stop.load(.acquire)) {
                 const wait_rc = linux.epoll_wait(epfd, &events, EPOLL_MAX_EVENTS, timeout_ms);
-                switch (std.posix.errno(wait_rc)) {
+                switch (linux.errno(wait_rc)) {
                     .SUCCESS => {},
                     .INTR => continue,
                     else => {
@@ -768,7 +768,7 @@ fn testListener() !std.Io.net.Server {
 
 fn testEpoll() !std.posix.fd_t {
     const rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-    if (std.posix.errno(rc) != .SUCCESS) return error.SkipZigTest;
+    if (linux.errno(rc) != .SUCCESS) return error.SkipZigTest;
 
     return @intCast(rc);
 }
