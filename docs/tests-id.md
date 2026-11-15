@@ -75,7 +75,8 @@ Sumber: `src/lib.zig`. Setiap modul diuji melalui `std.testing.refAllDecls`, yan
 
 | Modul | Cakupan |
 | :- | :- |
-| `channel/channel.zig` | `refAllDecls` + perilaku: kapasitas dan jumlah init `Channel(u32)`, aritmetika tail ring buffer |
+| `channel/Channel.zig` | test di dalam file: default init, aritmetika tail ring, capacity 1, wrap FIFO, tipe elemen slice / struct / zero-size, TypeMismatch pada send dan recv, Closed setelah close, drain setelah close, send dan recv yang blocking lanjut lagi (`std.Io.concurrent`), close membangunkan recv yang menunggu, dua OS thread mengirim 100 item |
+| `utils/socket/path.zig` | test di dalam file: separator per platform, path absolut dan konsisten, direktori tetap ada di path, PathTooLong pada buffer kecil, clear pada file yang tidak ada atau sisa |
 
 ### zix.Fix
 
@@ -471,18 +472,6 @@ Port: 18200-18206.
 | gRPC error trailers-only diterima sebagai INVALID_ARGUMENT | `errorOnlyHandler` memanggil `res.finish(INVALID_ARGUMENT, ...)` tanpa mengirim data, client menerima status error |
 | gRPC dua stream pada koneksi yang sama keduanya mengembalikan OK | dua RPC unary berurutan pada satu koneksi, kedua stream menerima respons yang benar |
 
-### tests/integration/channel/
-
-#### `channel_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Kapasitas init `Channel(u32)` | `buf.len == 8`, `count == 0`, `head == 0` |
-| `Channel([]const u8)` berhasil dikompilasi | tipe elemen slice diterima |
-| `Channel(struct)` berhasil dikompilasi | tipe elemen struct diterima |
-| Round-trip send dan recv `Channel(u32)` | send lalu recv mengembalikan nilai yang dikirim |
-| `Channel(u32)` drain setelah close | kirim dua item, close, recv keduanya, recv ketiga menghasilkan `error.ZixClosed` |
-
 ---
 
 ## Pengujian Perilaku
@@ -690,19 +679,6 @@ Dukungan QUERY RFC 10008 lewat permukaan publik `zix.Http1`.
 | Round-trip `GrpcPrefix` | writePrefix -> readPrefix mempertahankan flag compress dan panjang pesan |
 | `parsePath` path valid | `/helloworld.Greeter/SayHello` -> `package_service="helloworld.Greeter"`, `method="SayHello"` |
 | `parseTimeout` detik | `"2S"` -> 2.000.000.000 nanodetik |
-
-### tests/behaviour/channel/
-
-#### `channel_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Field `closed` default ke false | invarian `init()` |
-| `head` dimulai dari nol | invarian `init()` |
-| Rumus tail ring adalah `(head + count) % buf.len` | state yang diset secara manual memverifikasi aritmetika |
-| `send` menaikkan count | count naik dari 0 ke 1 setelah satu send |
-| `recv` menurunkan count | count kembali ke 0 setelah recv |
-| `close` mengeset field closed | `ch.closed == true` setelah close |
 
 ---
 
@@ -928,18 +904,6 @@ Port: 18220-18221.
 | `GrpcClient.connect` port nol | menghasilkan `error.ZixPortNotConfigured` |
 | `serveConn` menutup dengan bersih saat client langsung memutus koneksi | server menerima, client memutus koneksi segera, tanpa crash atau error |
 | gRPC handler finish-only menyampaikan status error ke client | handler hanya memanggil `res.finish(INVALID_ARGUMENT, ...)`, client menerima status error tanpa frame data apa pun |
-
-### tests/edge/channel/
-
-#### `channel_test.zig`
-
-| Pengujian | Yang diverifikasi |
-| :- | :- |
-| Kapasitas 1 mengalokasikan tepat satu slot | `buf.len == 1`, `count == 0` |
-| Head ring membungkus di `buf.len` | `(3+1) % 4 == 0` |
-| Batas penuh: `count == buf.len` | indeks tail membungkus kembali ke head |
-| `send` setelah close | menghasilkan `error.ZixClosed` |
-| `recv` pada channel tertutup yang kosong | menghasilkan `error.ZixClosed` |
 
 ---
 
