@@ -308,6 +308,170 @@ fn runHandshake(client_conn: *Connection, server_conn: *Connection) !void {
     return error.TestUnexpectedResult;
 }
 
+const builtin = @import("builtin");
+
+/// Seconds a socket read waits before the `s_server` cross-check is called stuck.
+const PEER_TIMEOUT_S: isize = 5;
+
+/// Buffer for one read from the peer or one flight to it.
+const PEER_BUF_LEN: usize = 16 * 1024;
+
+/// Connect attempts while `s_server` starts, one every `CONNECT_RETRY_MS`.
+const CONNECT_RETRIES: usize = 100;
+const CONNECT_RETRY_MS: i64 = 50;
+
+/// Fail when a raw Linux call returned an errno.
+fn checkRc(rc: usize) !usize {
+    if (std.os.linux.errno(rc) != .SUCCESS) return error.TestUnexpectedResult;
+
+    return rc;
+}
+
+/// Make reads on `fd` give up after `PEER_TIMEOUT_S`.
+fn setReadTimeout(fd: std.posix.fd_t) !void {
+    const linux = std.os.linux;
+    const timeout: linux.timeval = .{
+        .sec = PEER_TIMEOUT_S,
+        .usec = 0,
+    };
+
+    _ = try checkRc(linux.setsockopt(
+        fd,
+        linux.SOL.SOCKET,
+        linux.SO.RCVTIMEO,
+        std.mem.asBytes(&timeout),
+        @sizeOf(linux.timeval),
+    ));
+}
+
+/// One connect to the Unix socket at `addr`.
+fn connectOnce(addr: *const std.os.linux.sockaddr.un) !std.posix.fd_t {
+    const linux = std.os.linux;
+    const sock_type = linux.SOCK.STREAM | linux.SOCK.CLOEXEC;
+    const fd: std.posix.fd_t = @intCast(try checkRc(linux.socket(linux.AF.UNIX, sock_type, 0)));
+    errdefer _ = linux.close(fd);
+
+    _ = try checkRc(linux.connect(fd, addr, @sizeOf(linux.sockaddr.un)));
+    try setReadTimeout(fd);
+
+    return fd;
+}
+
+/// Connect to the Unix socket at `path`, retrying while `s_server` starts.
+fn connectUnix(path: []const u8) !std.posix.fd_t {
+    var addr: std.os.linux.sockaddr.un = .{
+        .path = @splat(0),
+    };
+    if (path.len >= addr.path.len) return error.NameTooLong;
+
+    @memcpy(addr.path[0..path.len], path);
+
+    for (0..CONNECT_RETRIES) |_| {
+        return connectOnce(&addr) catch |err| switch (err) {
+            // The socket file is not there or not listening yet: wait and retry.
+            error.TestUnexpectedResult => {
+                const wait = std.Io.Duration.fromMilliseconds(CONNECT_RETRY_MS);
+                try std.Io.sleep(std.testing.io, wait, .awake);
+                continue;
+            },
+        };
+    }
+
+    return error.TestUnexpectedResult;
+}
+
+fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var done: usize = 0;
+
+    while (done < bytes.len) {
+        done += try checkRc(std.os.linux.write(fd, bytes[done..].ptr, bytes.len - done));
+    }
+}
+
+/// Read what the peer has sent so far. A closed peer is `error.EndOfStream`.
+fn readSomeFd(fd: std.posix.fd_t, buf: []u8) ![]const u8 {
+    const read = try checkRc(std.os.linux.read(fd, buf.ptr, buf.len));
+    if (read == 0) return error.EndOfStream;
+
+    return buf[0..read];
+}
+
+/// Run the client handshake over `fd` until OpenSSL calls it done.
+fn clientHandshake(conn: *Connection, fd: std.posix.fd_t) !void {
+    var in_buf: [PEER_BUF_LEN]u8 = undefined;
+    var out_buf: [PEER_BUF_LEN]u8 = undefined;
+
+    try writeAllFd(fd, try conn.handshake(&.{}, &out_buf));
+
+    while (!conn.handshakeDone()) {
+        const incoming = try readSomeFd(fd, &in_buf);
+        const outgoing = try conn.handshake(incoming, &out_buf);
+
+        try writeAllFd(fd, outgoing);
+    }
+}
+
+/// Read application data from `fd` until `want` shows up in `plain_buf`.
+fn readAppUntil(
+    conn: *Connection,
+    fd: std.posix.fd_t,
+    want: []const u8,
+    plain_buf: []u8,
+) ![]const u8 {
+    var in_buf: [PEER_BUF_LEN]u8 = undefined;
+    var len: usize = 0;
+
+    while (std.mem.find(u8, plain_buf[0..len], want) == null) {
+        var incoming = try readSomeFd(fd, &in_buf);
+
+        // One call opens one record: keep calling until the buffered bytes run out.
+        while (true) {
+            const plain = try conn.readAppData(incoming, plain_buf[len..]);
+            incoming = &.{};
+            if (plain.len == 0) break;
+
+            len += plain.len;
+        }
+    }
+
+    return plain_buf[0..len];
+}
+
+/// The socket name `s_server` listens on, inside the fixture tmp dir.
+const SOCK_NAME = "s.sock";
+
+/// Start `openssl s_server -rev` on the Unix socket: it answers each line reversed.
+///
+/// It runs inside the tmp dir, because OpenSSL refuses a long socket path.
+fn spawnSServer(fixture: *Fixture) !std.process.Child {
+    return std.process.spawn(std.testing.io, .{
+        .argv = &.{
+            "openssl",
+            "s_server",
+            "-unix",
+            SOCK_NAME,
+            "-cert",
+            "cert.pem",
+            "-key",
+            "key.pem",
+            "-alpn",
+            "h2",
+            "-naccept",
+            "1",
+            "-rev",
+        },
+        .cwd = .{
+            .dir = fixture.tmp.dir,
+        },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch |err| switch (err) {
+        error.FileNotFound => error.SkipZigTest,
+        else => err,
+    };
+}
+
 test "tlz openssl: client, handshake with a trusted server completes" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
@@ -659,5 +823,87 @@ test "tlz openssl: client, connect sends SNI in the ClientHello" {
     const hello = try conn.handshake(&.{}, &out);
 
     try std.testing.expect(std.mem.find(u8, hello, "localhost") != null);
+}
+
+test "tlz openssl: client, s_server handshake negotiates h2" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var sock_buf: [256]u8 = undefined;
+    const sock_path = try fixture.path(&sock_buf, SOCK_NAME);
+    var child = try spawnSServer(&fixture);
+    defer child.kill(std.testing.io);
+    const fd = try connectUnix(sock_path);
+    defer _ = std.os.linux.close(fd);
+    var conn = try connect(try fixture.certPath(), "localhost", &.{ .H2, .HTTP_1_1 });
+    defer conn.deinit();
+
+    try clientHandshake(&conn, fd);
+
+    try std.testing.expectEqual(@as(?alpn.Alpn, .H2), conn.selectedAlpn());
+}
+
+test "tlz openssl: client, s_server answers application data" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var sock_buf: [256]u8 = undefined;
+    const sock_path = try fixture.path(&sock_buf, SOCK_NAME);
+    var child = try spawnSServer(&fixture);
+    defer child.kill(std.testing.io);
+    const fd = try connectUnix(sock_path);
+    defer _ = std.os.linux.close(fd);
+    var conn = try connect(try fixture.certPath(), "localhost", &.{.H2});
+    defer conn.deinit();
+
+    try clientHandshake(&conn, fd);
+    var out_buf: [PEER_BUF_LEN]u8 = undefined;
+    try writeAllFd(fd, try conn.writeAppData("ping\n", &out_buf));
+    var plain_buf: [256]u8 = undefined;
+    const reply = try readAppUntil(&conn, fd, "\n", &plain_buf);
+
+    try std.testing.expectEqualStrings("gnip\n", reply);
+}
+
+test "tlz openssl: client, s_server with a hostname mismatch is PeerVerifyFailed" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var sock_buf: [256]u8 = undefined;
+    const sock_path = try fixture.path(&sock_buf, SOCK_NAME);
+    var child = try spawnSServer(&fixture);
+    defer child.kill(std.testing.io);
+    const fd = try connectUnix(sock_path);
+    defer _ = std.os.linux.close(fd);
+    var conn = try connect(try fixture.certPath(), "other.example", &.{});
+    defer conn.deinit();
+
+    try std.testing.expectError(
+        Connection.Error.Tlz_OpensslConnection_PeerVerifyFailed,
+        clientHandshake(&conn, fd),
+    );
+}
+
+test "tlz openssl: client, s_server with an untrusted chain is PeerVerifyFailed" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var sock_buf: [256]u8 = undefined;
+    const sock_path = try fixture.path(&sock_buf, SOCK_NAME);
+    var child = try spawnSServer(&fixture);
+    defer child.kill(std.testing.io);
+    const fd = try connectUnix(sock_path);
+    defer _ = std.os.linux.close(fd);
+    var conn = try connect(try fixture.otherCaPath(), "localhost", &.{});
+    defer conn.deinit();
+
+    try std.testing.expectError(
+        Connection.Error.Tlz_OpensslConnection_PeerVerifyFailed,
+        clientHandshake(&conn, fd),
+    );
 }
 
