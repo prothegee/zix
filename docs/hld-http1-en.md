@@ -449,7 +449,7 @@ Per-request access logging is the engine's, not the handler's. When `config.logg
 | Large request body (uploads) | The drain widens the receive window via `large_body_recv_buf` (SO_RCVBUF), see [`docs/zix-config-en.md`](zix-config-en.md) |
 | Chunked request body | Decoded into the body buffer. A frame the decoder cannot walk answers `400`, a chunked body past the buffer answers `413` (chunked declares no length up front, so the buffer stands in for `max_request_body`) |
 | HTTP versions | HTTP/1.0 and HTTP/1.1 only, anything else is `400` |
-| TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` terminates per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
+| TLS | Native https/1.1 (TLS 1.3 + 1.2), opt-in via `config.tls`, on its own perf band. `.ASYNC` terminates per connection in a worker thread, `.EPOLL` / `.URING` in an event-driven epoll-mux worker. See [`src/tlz/docs/hld-en.md`](../src/tlz/docs/hld-en.md) |
 
 Endpoints that accept large uploads read `req.bodyReceived()` on every dispatch model (the drained bytes are counted, not buffered) and `req.bodyComplete()` to tell a finished upload from one the peer cut short.
 
