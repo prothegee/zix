@@ -68,55 +68,55 @@ Empat atribut ICE plus `read`, `writeRequest`, `requestLen`.
 
 ---
 
-## Lapis: DTLS 1.2 (di `src/tls/`)
+## Lapis: DTLS 1.2 (di `src/tlz/src/dtls/`)
 
-Sembilan berkas, prefix datar `dtls_`, bersebelahan dengan kode TLS yang primitifnya dipakai bersama.
+Sembilan berkas fungsi di `src/tlz/src/dtls/` (masing-masing dengan record-nya di direktori bernama sama), bersebelahan dengan kode TLS yang primitifnya dipakai bersama.
 
-### dtls_record.zig
+### dtls/record.zig
 
 Header 13 byte, epoch, sequence 48 bit, AEAD, anti-replay, plus `writePlaintext` untuk epoch 0.
 
 - Anti-replay harus **isNew sebelum AEAD, lalu accept sesudahnya**. Menggabungkannya jadi satu langkah membuat sequence palsu yang jauh di depan membersihkan window.
 
-### dtls_handshake.zig
+### dtls/handshake.zig
 
 Header 12 byte, `Fragmenter`, dan `Reassembler` yang aman terhadap tumpang tindih.
 
 - Perakitan ulang melacak **byte mana yang sudah datang** dengan bitmap, bukan berapa banyak, karena fragment yang tumpang tindih itu sah.
 
-### dtls_hello.zig
+### dtls/hello.zig
 
 ClientHello dengan field cookie, plus HelloVerifyRequest.
 
 - ClientHello DTLS membawa vector cookie di antara `session_id` dan `cipher_suites`, jadi parser TLS salah mengurainya.
 
-### dtls_cookie.zig
+### dtls/cookie.zig
 
 Cookie HMAC stateless dengan rotasi.
 
-### dtls_flight.zig
+### dtls/flight.zig
 
 Timer retransmit dan state machine RFC 6347 bagian 4.2.4.
 
-### dtls_exporter.zig
+### dtls/exporter.zig
 
 Ekspor keying material RFC 5705 plus pemisahan kunci SRTP RFC 5764.
 
 - RFC 5705 punya **dua** bentuk seed dan DTLS-SRTP memakai bentuk **tanpa context**. Mengoper slice kosong menambahkan dua byte nol dan diam-diam merusak interop.
 
-### dtls_use_srtp.zig
+### dtls/use_srtp.zig
 
-Ekstensi `use_srtp` RFC 5764. Ia tinggal di `src/tls/` karena ia ekstensi TLS, bukan konsep WebRTC.
+Ekstensi `use_srtp` RFC 5764. Ia tinggal di `src/tlz/src/dtls/` karena ia ekstensi TLS, bukan konsep WebRTC.
 
-### dtls_connection.zig
+### dtls/connection.zig
 
 Driver sisi server: flight 2, 4 dan 6.
 
-- Ia menyusun flight-nya **sendiri** dan hanya memakai ulang primitif daun (`tls12_prf`, certificate plus penandatanganan ECDSA, ECDHE P-256). `tls12_connection.zig` tidak disentuh, karena berkas itu meng-hash byte berbingkai TLS sementara RFC 6347 bagian 4.2.6 menuntut transcript di atas header DTLS 12 byte seolah tidak terfragmentasi, tanpa ClientHello pertama dan HelloVerifyRequest.
+- Ia menyusun flight-nya **sendiri** dan hanya memakai ulang primitif daun (`tls12/prf.zig`, certificate plus penandatanganan ECDSA, ECDHE P-256). `tls12/connection.zig` tidak disentuh, karena berkas itu meng-hash byte berbingkai TLS sementara RFC 6347 bagian 4.2.6 menuntut transcript di atas header DTLS 12 byte seolah tidak terfragmentasi, tanpa ClientHello pertama dan HelloVerifyRequest.
 - `HandshakeOptions.first_record_seq` ada karena pertukaran cookie tetap stateless dengan menjawab pada sequence tempat ClientHello-nya tiba, dan server flight setelah itu harus melanjutkan penomoran tersebut, bukan mulai lagi dari 0.
 - Kunci SRTP diekspor di dalam `serverFinish` lewat `dtls_exporter.srtpKeys` ketika `use_srtp` dinegosiasikan.
 
-### dtls_client.zig
+### dtls/client.zig
 
 Sisi client, supaya `examples/webrtc/webrtc_native_pair.zig` bisa memanggil. Ia **tidak** memvalidasi certificate: RFC 8122 membawa fingerprint di luar jalur dan belum ada yang memeriksanya.
 
@@ -223,7 +223,7 @@ Kebijakan: media ditolak secara default. Format yang ditawarkan **diulang, bukan
 
 ## Lapis: media
 
-Enam belas berkas di bawah `media/`. Ekstensi `use_srtp` sendiri berupa `dtls_use_srtp.zig` di `src/tls/`, terhitung bersama berkas DTLS di atas, karena ia ekstensi TLS dan bukan konsep WebRTC.
+Enam belas berkas di bawah `media/`. Ekstensi `use_srtp` sendiri berupa `dtls/use_srtp.zig` di `src/tlz/src/`, terhitung bersama berkas DTLS di atas, karena ia ekstensi TLS dan bukan konsep WebRTC.
 
 | Berkas | Memiliki |
 | :- | :- |
