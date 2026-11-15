@@ -49,6 +49,10 @@ const ExtensionType = @import("extension_type.zig").ExtensionType;
 const SignatureScheme = @import("signature_scheme.zig").SignatureScheme;
 const NamedGroup = @import("named_group.zig").NamedGroup;
 const CipherSuite = @import("cipher_suite.zig").CipherSuite;
+const binding_mod = @import("binding.zig");
+const Binding = binding_mod.Binding;
+const OpensslConnection = @import("openssl/Connection.zig");
+const openssl_client = @import("openssl/client.zig");
 
 const X25519 = std.crypto.dh.X25519;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
@@ -91,6 +95,26 @@ fn innerError(err: Inner) Error {
         error.Tlz_Client_RecordOverflow,
         error.Tlz_Client_BadRecordMac,
         error.Tlz_Client_Decode,
+        error.Tlz_Client_ContextCreateFailed,
+        error.Tlz_Client_PathTooLong,
+        error.Tlz_Client_CaLoadFailed,
+        error.Tlz_Client_VersionSetFailed,
+        error.Tlz_Client_HostMissing,
+        error.Tlz_Client_HostTooLong,
+        error.Tlz_Client_HostSetFailed,
+        error.Tlz_Client_AlpnTooLong,
+        error.Tlz_Client_AlpnSetFailed,
+        error.Tlz_Client_SslCreateFailed,
+        error.Tlz_Client_BioCreateFailed,
+        error.Tlz_Client_BioWriteFailed,
+        error.Tlz_Client_InputTooLarge,
+        error.Tlz_Client_HandshakeFailed,
+        error.Tlz_Client_PeerVerifyFailed,
+        error.Tlz_Client_NoProtocolNegotiated,
+        error.Tlz_Client_PeerClosed,
+        error.Tlz_Client_ReadFailed,
+        error.Tlz_Client_WriteFailed,
+        error.Tlz_Client_ShutdownFailed,
         => |own| own,
     };
 }
@@ -487,6 +511,36 @@ fn finishInner(state: *State, server_flight: []const u8, out: []u8) Inner!Finish
     return result;
 }
 
+/// Map an error from the OpenSSL client into this module's set.
+fn opensslError(err: openssl_client.Error) Error {
+    @branchHint(.cold);
+
+    return switch (err) {
+        error.Tlz_OpensslClient_ContextCreateFailed => Error.Tlz_Client_ContextCreateFailed,
+        error.Tlz_OpensslClient_PathTooLong => Error.Tlz_Client_PathTooLong,
+        error.Tlz_OpensslClient_CaLoadFailed => Error.Tlz_Client_CaLoadFailed,
+        error.Tlz_OpensslClient_VersionSetFailed => Error.Tlz_Client_VersionSetFailed,
+        error.Tlz_OpensslClient_HostMissing => Error.Tlz_Client_HostMissing,
+        error.Tlz_OpensslClient_HostTooLong => Error.Tlz_Client_HostTooLong,
+        error.Tlz_OpensslClient_HostSetFailed => Error.Tlz_Client_HostSetFailed,
+        error.Tlz_OpensslClient_AlpnTooLong => Error.Tlz_Client_AlpnTooLong,
+        error.Tlz_OpensslClient_AlpnSetFailed => Error.Tlz_Client_AlpnSetFailed,
+        error.Tlz_OpensslClient_SslCreateFailed => Error.Tlz_Client_SslCreateFailed,
+        error.Tlz_OpensslClient_BioCreateFailed => Error.Tlz_Client_BioCreateFailed,
+        error.Tlz_OpensslClient_BioWriteFailed => Error.Tlz_Client_BioWriteFailed,
+        error.Tlz_OpensslClient_InputTooLarge => Error.Tlz_Client_InputTooLarge,
+        error.Tlz_OpensslClient_HandshakeFailed => Error.Tlz_Client_HandshakeFailed,
+        error.Tlz_OpensslClient_PeerVerifyFailed => Error.Tlz_Client_PeerVerifyFailed,
+        error.Tlz_OpensslClient_NoProtocolNegotiated => {
+            return Error.Tlz_Client_NoProtocolNegotiated;
+        },
+        error.Tlz_OpensslClient_PeerClosed => Error.Tlz_Client_PeerClosed,
+        error.Tlz_OpensslClient_ReadFailed => Error.Tlz_Client_ReadFailed,
+        error.Tlz_OpensslClient_WriteFailed => Error.Tlz_Client_WriteFailed,
+        error.Tlz_OpensslClient_ShutdownFailed => Error.Tlz_Client_ShutdownFailed,
+    };
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -510,6 +564,26 @@ pub const Error = error{
     Tlz_Client_RecordOverflow,
     Tlz_Client_BadRecordMac,
     Tlz_Client_Decode,
+    Tlz_Client_ContextCreateFailed,
+    Tlz_Client_PathTooLong,
+    Tlz_Client_CaLoadFailed,
+    Tlz_Client_VersionSetFailed,
+    Tlz_Client_HostMissing,
+    Tlz_Client_HostTooLong,
+    Tlz_Client_HostSetFailed,
+    Tlz_Client_AlpnTooLong,
+    Tlz_Client_AlpnSetFailed,
+    Tlz_Client_SslCreateFailed,
+    Tlz_Client_BioCreateFailed,
+    Tlz_Client_BioWriteFailed,
+    Tlz_Client_InputTooLarge,
+    Tlz_Client_HandshakeFailed,
+    Tlz_Client_PeerVerifyFailed,
+    Tlz_Client_NoProtocolNegotiated,
+    Tlz_Client_PeerClosed,
+    Tlz_Client_ReadFailed,
+    Tlz_Client_WriteFailed,
+    Tlz_Client_ShutdownFailed,
 };
 
 /// The largest server end-entity certificate DER `finish` keeps.
@@ -571,6 +645,60 @@ pub fn start(opts: HandshakeOptions, out: []u8) Error!StartResult {
 /// - Error.Tlz_Client_ServerFinishedMismatch when the server Finished fails
 pub fn finish(state: *State, server_flight: []const u8, out: []u8) Error!FinishResult {
     return finishInner(state, server_flight, out) catch |err| innerError(err);
+}
+
+/// The connection type `connectWith` returns for a binding.
+///
+/// Param:
+/// binding - Binding (the backend, a build error when it is not compiled in)
+///
+/// Return:
+/// - the OpenSSL connection for `.OPENSSL`
+/// - a build error for `.DEFAULT` (the native client is `start` plus `finish`)
+pub fn ConnectionFor(comptime binding: Binding) type {
+    binding_mod.requireBuilt(binding);
+
+    return switch (binding) {
+        .DEFAULT => @compileError("tlz: Client.connectWith has no native backend. " ++
+            "Use Client.start and Client.finish."),
+        .OPENSSL => OpensslConnection,
+    };
+}
+
+/// Start one client connection on the chosen backend, with chain and name verify.
+///
+/// Note:
+/// - Only `.OPENSSL` is valid. `.DEFAULT` is a build error, the native client is
+///   `start` plus `finish`.
+/// - The first `handshake(&.{}, out)` on the result writes the ClientHello.
+///
+/// Param:
+/// ca_path - []const u8 (PEM file with the trust anchors for the server chain)
+/// host - []const u8 (the server DNS name, sent as SNI and checked in the certificate)
+/// alpn_prefs - []const Alpn (the protocols to offer, empty means no ALPN)
+/// binding - Binding (the backend, a build error when it is not compiled in)
+///
+/// Usage:
+/// ```zig
+/// var conn = try tlz.Client.connectWith("ca.pem", "example.com", &.{.H2}, .OPENSSL);
+/// defer conn.deinit();
+///
+/// const hello = try conn.handshake(&.{}, &out);
+/// // send hello, read the server flight into `flight`, then:
+/// const finished = try conn.handshake(flight, &out);
+/// ```
+///
+/// Return:
+/// - ConnectionFor(binding) (not yet handshaken)
+/// - Error.Tlz_Client_CaLoadFailed when the CA file cannot be loaded
+/// - Error.Tlz_Client_HostMissing or HostTooLong on a bad host
+pub fn connectWith(
+    ca_path: []const u8,
+    host: []const u8,
+    alpn_prefs: []const Alpn,
+    comptime binding: Binding,
+) Error!ConnectionFor(binding) {
+    return openssl_client.connect(ca_path, host, alpn_prefs) catch |err| opensslError(err);
 }
 
 // --------------------------------------------------------- //
@@ -689,6 +817,31 @@ const SocketServer = struct {
         try writeAllFd(self.fd, result.connection.writeAppData(reply, &reply_buf));
     }
 };
+
+/// Self-signed ECDSA P-256 CN=localhost, used as the trust anchor.
+const EC_CERT_PEM =
+    \\-----BEGIN CERTIFICATE-----
+    \\MIIB1DCCAXugAwIBAgIUeibuSR8JGsfJFPSoEMHs5xNAJXQwCgYIKoZIzj0EAwIw
+    \\KjESMBAGA1UEAwwJbG9jYWxob3N0MRQwEgYDVQQKDAt6aXgtdGxzLXBvYzAeFw0y
+    \\NjA2MjIxMjU0MjBaFw0zNjA2MTkxMjU0MjBaMCoxEjAQBgNVBAMMCWxvY2FsaG9z
+    \\dDEUMBIGA1UECgwLeml4LXRscy1wb2MwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC
+    \\AATCoBIbKYrJzTiSAOeNlOe94cx82AdHlfq0+Rl5nUD9wjHFqQmQrIxhZq5HLzP3
+    \\T87Ql/Ltt7ihl0vmakqwfyU7o38wfTAdBgNVHQ4EFgQUw04dCjakOUdwm1OeFt0C
+    \\E6pBlqowHwYDVR0jBBgwFoAUw04dCjakOUdwm1OeFt0CE6pBlqowDwYDVR0TAQH/
+    \\BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwDgYDVR0PAQH/BAQD
+    \\AgeAMAoGCCqGSM49BAMCA0cAMEQCIAsBLxGdubldmQvEgstj6PgeM3oIY0kE5Mr1
+    \\E9wQyKqDAiAv3+ef9tVAPnU93yqlJnGSO4osKBJry/GWvW+37LyxTg==
+    \\-----END CERTIFICATE-----
+    \\
+;
+
+/// Path of a file inside a testing tmp dir, relative to the working directory.
+fn tmpPath(buf: []u8, tmp: *const std.testing.TmpDir, name: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}/{s}", .{
+        tmp.sub_path,
+        name,
+    });
+}
 
 test "tlz: client, handshake against the tlz server in memory" {
     var cert_buf: [512]u8 = undefined;
@@ -914,5 +1067,68 @@ test "tlz: client, handshake over a socketpair with real fds" {
     );
 
     try std.testing.expect(std.mem.find(u8, reply, "200 OK") != null);
+}
+
+test "tlz: client, ConnectionFor OPENSSL is the OpenSSL connection" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        try std.testing.expect(ConnectionFor(.OPENSSL) == OpensslConnection);
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "tlz: client, connectWith OPENSSL writes a ClientHello" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "ca.pem",
+            .data = EC_CERT_PEM,
+        });
+        var ca_path_buf: [128]u8 = undefined;
+        const ca_path = try tmpPath(&ca_path_buf, &tmp, "ca.pem");
+
+        var conn = try connectWith(ca_path, "localhost", &.{.H2}, .OPENSSL);
+        defer conn.deinit();
+
+        var out: [4096]u8 = undefined;
+        const hello = try conn.handshake(&.{}, &out);
+
+        try std.testing.expect(hello.len > 0);
+        try std.testing.expectEqual(CONTENT_TYPE_HANDSHAKE, hello[0]);
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "tlz: client, connectWith OPENSSL with a missing CA fails to load" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        try std.testing.expectError(
+            Error.Tlz_Client_CaLoadFailed,
+            connectWith("tlz-does-not-exist-ca.pem", "localhost", &.{}, .OPENSSL),
+        );
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "tlz: client, connectWith OPENSSL with an empty host is missing" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "ca.pem",
+            .data = EC_CERT_PEM,
+        });
+        var ca_path_buf: [128]u8 = undefined;
+        const ca_path = try tmpPath(&ca_path_buf, &tmp, "ca.pem");
+
+        try std.testing.expectError(
+            Error.Tlz_Client_HostMissing,
+            connectWith(ca_path, "", &.{}, .OPENSSL),
+        );
+    } else {
+        return error.SkipZigTest;
+    }
 }
 
