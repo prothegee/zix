@@ -55,6 +55,10 @@ const ResponseCache = @import("../../../utils/cache/ResponseCache.zig");
 const cpu_affinity = @import("../../../multiplexers/cpu_affinity.zig");
 const reuseport = @import("../../../multiplexers/reuseport.zig");
 const slab = @import("../../../multiplexers/slab.zig");
+const tlz = @import("tlz");
+const tls_mux = @import("../tls_mux.zig");
+const tls_conn = @import("../../../multiplexers/tls_conn.zig");
+const UringTlsConn = @import("UringTlsConn.zig");
 const HandlerFn = handler.HandlerFn;
 
 // --------------------------------------------------------- //
@@ -82,6 +86,9 @@ const SO_BUSY_POLL: u32 = 46;
 const OpKind = enum(u8) {
     accept,
     recv,
+    tls_accept,
+    tls_recv,
+    tls_send,
 };
 
 /// Decoded user_data fields.
@@ -97,12 +104,23 @@ const RingConn = struct {
     gen: u24,
 };
 
+fn freeUringTlsConn(ring_conn: *UringTlsConn) void {
+    ring_conn.destroy();
+}
+
+/// Per-worker fd to UringTlsConn map for the dual-listener TLS side.
+const TlsConnTable = tls_conn.ConnTable(UringTlsConn, MAX_FD, freeUringTlsConn);
+
 /// One worker's setup, passed by value to the spawned thread.
 const WorkerCtx = struct {
     io: std.Io,
     opts: ServeOpts,
     handler: HandlerFn,
     listener: std.Io.net.Server,
+    /// Dual listener (config.tls_port): h2 over TLS connections served on this ring.
+    tls_listener: ?std.Io.net.Server = null,
+    /// Borrowed identity of the TLS side. Set together with tls_listener.
+    tls_ctx: ?*const tlz.Context = null,
     worker_id: usize,
     busy_poll_us: u32,
     stop: *std.atomic.Value(bool),
@@ -122,6 +140,13 @@ const Worker = struct {
     /// The multishot accept re-arm was lost to a full SQ. Retried on the
     /// next loop pass, so the worker never stops accepting.
     accept_pending: bool = false,
+    /// Dual-listener TLS side (config.tls + config.tls_port). Inactive at -1 / null.
+    tls_listener_fd: std.posix.fd_t = -1,
+    tls_ctx: ?*const tlz.Context = null,
+    tls_conns: ?TlsConnTable = null,
+    tls_gen_counter: u24 = 0,
+    /// Same lost-re-arm guard as accept_pending, for the TLS listener.
+    tls_accept_pending: bool = false,
 
     const allocator = std.heap.smp_allocator;
 
@@ -265,6 +290,155 @@ const Worker = struct {
         self.armRecv(ring_conn);
     }
 
+    // Dual-listener TLS side: ciphertext recv and the staged ciphertext flush
+    // ride the ring (tls_recv, tls_send), the connection logic is tls_mux. One
+    // direction at a time per connection: while a flush send is in flight no
+    // recv is armed, so the staged buffer never moves under the kernel.
+
+    fn lookupTls(self: *Worker, decoded: Decoded) ?*UringTlsConn {
+        const table = if (self.tls_conns) |*tls_table| tls_table else return null;
+        const ring_conn = table.get(decoded.fd) orelse return null;
+        if (ring_conn.gen != decoded.gen) return null;
+
+        return ring_conn;
+    }
+
+    fn armTlsAccept(self: *Worker) void {
+        const sqe = self.getSqe() orelse {
+            self.tls_accept_pending = true;
+
+            return;
+        };
+
+        // Non-blocking: the transport writes records directly, staging on EAGAIN.
+        const flags = linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC;
+        sqe.prep_multishot_accept(self.tls_listener_fd, null, null, flags);
+        sqe.user_data = packUserData(.tls_accept, 0, self.tls_listener_fd);
+    }
+
+    fn handleTlsAccept(self: *Worker, cqe: linux.io_uring_cqe) void {
+        const rearm = (cqe.flags & linux.IORING_CQE_F_MORE) == 0;
+        defer if (rearm) self.armTlsAccept();
+        if (cqe.res < 0) return;
+
+        const conn_fd: std.posix.fd_t = cqe.res;
+        const table = if (self.tls_conns) |*tls_table| tls_table else {
+            _ = linux.close(conn_fd);
+
+            return;
+        };
+        const idx: usize = @intCast(conn_fd);
+        if (idx >= table.slots.len) {
+            _ = linux.close(conn_fd);
+
+            return;
+        }
+
+        setNoDelay(conn_fd);
+
+        self.tls_gen_counter +%= 1;
+        const ring_conn = UringTlsConn.create(
+            self.io,
+            conn_fd,
+            self.tls_ctx.?,
+            self.opts,
+            self.tls_gen_counter,
+        ) orelse {
+            _ = linux.close(conn_fd);
+
+            return;
+        };
+        table.put(conn_fd, ring_conn);
+
+        self.armTlsRecv(ring_conn);
+    }
+
+    /// Drop the connection from the table, then close the fd.
+    fn closeTls(self: *Worker, ring_conn: *UringTlsConn) void {
+        const fd = ring_conn.conn.transport.fd;
+        if (self.tls_conns) |*tls_table| tls_table.drop(fd);
+
+        _ = linux.close(fd);
+    }
+
+    /// Arm a recv sized by what the session can take, not by the staging
+    /// buffer, so one completion never hands the session two records.
+    fn armTlsRecv(self: *Worker, ring_conn: *UringTlsConn) void {
+        const transport = &ring_conn.conn.transport;
+        const room = transport.tls.readRoom();
+        if (room == 0) return self.closeTls(ring_conn);
+
+        const sqe = self.getSqe() orelse return self.closeTls(ring_conn);
+        const target = ring_conn.cipher_buf[0..@min(ring_conn.cipher_buf.len, room)];
+
+        sqe.prep_recv(transport.fd, target, 0);
+        sqe.user_data = packUserData(.tls_recv, ring_conn.gen, transport.fd);
+    }
+
+    /// Flush the staged ciphertext (wbuf[woff..wlen]) with an on-ring send.
+    /// inflight pins the sent bytes until the completion arrives.
+    fn submitTlsSend(self: *Worker, ring_conn: *UringTlsConn) void {
+        const transport = &ring_conn.conn.transport;
+        const sqe = self.getSqe() orelse return self.closeTls(ring_conn);
+
+        const staged = transport.wbuf[transport.woff..transport.wlen];
+        transport.inflight = true;
+
+        sqe.prep_send(transport.fd, staged, linux.MSG.NOSIGNAL);
+        sqe.user_data = packUserData(.tls_send, ring_conn.gen, transport.fd);
+    }
+
+    fn handleTlsRecv(self: *Worker, cqe: linux.io_uring_cqe, decoded: Decoded) void {
+        const ring_conn = self.lookupTls(decoded) orelse return;
+
+        if (cqe.res <= 0) {
+            // A request still arriving when the peer left is answered first.
+            if (cqe.res == 0 and tls_mux.hangupGoaway(ring_conn.conn)) {
+                return self.submitTlsSend(ring_conn);
+            }
+
+            return self.closeTls(ring_conn);
+        }
+
+        const received: usize = @intCast(cqe.res);
+        const keep = tls_mux.onCiphertext(
+            self.handler_fn,
+            ring_conn.conn,
+            ring_conn.cipher_buf[0..received],
+        );
+        const transport = &ring_conn.conn.transport;
+
+        if (!keep) return self.closeTls(ring_conn);
+
+        // Backpressure-staged ciphertext: flush it on the ring before the next recv.
+        if (transport.wlen > transport.woff) return self.submitTlsSend(ring_conn);
+        if (transport.wclose) return self.closeTls(ring_conn);
+
+        self.armTlsRecv(ring_conn);
+    }
+
+    fn handleTlsSend(self: *Worker, cqe: linux.io_uring_cqe, decoded: Decoded) void {
+        const ring_conn = self.lookupTls(decoded) orelse return;
+        const transport = &ring_conn.conn.transport;
+
+        if (cqe.res <= 0) return self.closeTls(ring_conn);
+
+        transport.inflight = false;
+        transport.releaseRetired();
+        transport.woff += @intCast(cqe.res);
+
+        if (transport.woff < transport.wlen) return self.submitTlsSend(ring_conn);
+
+        // Drained. The buffer is kept for reuse and freed at close.
+        transport.woff = 0;
+        transport.wlen = 0;
+        transport.want_out = false;
+
+        if (transport.wclose) return self.closeTls(ring_conn);
+
+        self.armTlsRecv(ring_conn);
+    }
+
     fn deinitConns(self: *Worker) void {
         for (self.slots) |slot| {
             const ring_conn = slot orelse continue;
@@ -275,6 +449,7 @@ const Worker = struct {
 
     fn service(self: *Worker, stop: *std.atomic.Value(bool)) void {
         self.armAccept();
+        if (self.tls_listener_fd != -1) self.armTlsAccept();
 
         var cqes: [CQE_BATCH]linux.io_uring_cqe = undefined;
         while (!stop.load(.acquire)) {
@@ -291,6 +466,11 @@ const Worker = struct {
                 self.armAccept();
             }
 
+            if (self.tls_accept_pending) {
+                self.tls_accept_pending = false;
+                self.armTlsAccept();
+            }
+
             const count = self.ring.copy_cqes(&cqes, 0) catch |err| switch (err) {
                 else => {
                     stop.store(true, .release);
@@ -304,6 +484,9 @@ const Worker = struct {
                 switch (decoded.op) {
                     .accept => self.handleAccept(cqe),
                     .recv => self.handleRecv(cqe, decoded),
+                    .tls_accept => self.handleTlsAccept(cqe),
+                    .tls_recv => self.handleTlsRecv(cqe, decoded),
+                    .tls_send => self.handleTlsSend(cqe, decoded),
                 }
             }
         }
@@ -435,6 +618,56 @@ fn closeListeners(listeners: []std.Io.net.Server, io: std.Io) void {
     for (listeners) |*listener| listener.deinit(io);
 }
 
+/// Whether config asks for the dual listener (h2c on port, h2 over TLS on tls_port).
+fn dualListener(config: Config) bool {
+    return config.tls != null and config.tls_port != 0;
+}
+
+/// Bind one h2 TLS listener per worker on config.tls_port.
+///
+/// Return:
+/// - []std.Io.net.Server (owned by the caller, one per worker)
+/// - Error.ZixHttp2_Uring_ResolveFailed, ListenFailed, or OutOfMemory
+fn bindTlsListeners(
+    config: Config,
+    workers: usize,
+    allocator: std.mem.Allocator,
+) Error![]std.Io.net.Server {
+    const io = config.io;
+    const address = std.Io.net.IpAddress.resolve(
+        io,
+        config.ip,
+        config.tls_port,
+    ) catch |err| switch (err) {
+        else => return Error.ZixHttp2_Uring_ResolveFailed,
+    };
+
+    const tls_listeners = allocator.alloc(
+        std.Io.net.Server,
+        workers,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return Error.ZixHttp2_Uring_OutOfMemory,
+    };
+
+    var bound: usize = 0;
+    while (bound < workers) : (bound += 1) {
+        tls_listeners[bound] = address.listen(io, .{
+            .mode = .stream,
+            .reuse_address = true,
+            .kernel_backlog = config.kernel_backlog,
+        }) catch |err| switch (err) {
+            else => {
+                closeListeners(tls_listeners[0..bound], io);
+                allocator.free(tls_listeners);
+
+                return Error.ZixHttp2_Uring_ListenFailed;
+            },
+        };
+    }
+
+    return tls_listeners;
+}
+
 fn failSetup(ctx: *const WorkerCtx) void {
     ctx.failed.store(true, .release);
     ctx.stop.store(true, .release);
@@ -482,6 +715,25 @@ fn workerMain(ctx: WorkerCtx) void {
     };
     defer worker.ring.deinit();
     defer worker.deinitConns();
+
+    // Dual listener: a second listener whose connections terminate TLS on this ring.
+    var tls_listener = ctx.tls_listener;
+    defer if (tls_listener) |*server| server.deinit(io);
+    defer if (worker.tls_conns) |*table| table.deinit();
+
+    if (tls_listener) |server| {
+        worker.tls_listener_fd = server.socket.handle;
+        worker.tls_ctx = ctx.tls_ctx;
+        worker.tls_conns = TlsConnTable.init() catch |err| switch (err) {
+            error.ZixMultiplexers_ConnTable_OutOfMemory,
+            error.ZixMultiplexers_ConnTable_MapFailed,
+            => {
+                failSetup(&ctx);
+
+                return;
+            },
+        };
+    }
 
     worker.service(ctx.stop);
 
@@ -574,12 +826,26 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
         );
     }
 
+    // Dual listener: one h2 TLS listener per worker on tls_port, bound here so a
+    // failed bind is reported before any worker starts.
+    const tls_listeners: []std.Io.net.Server = if (dualListener(config))
+        bindTlsListeners(config, workers, allocator) catch |err| {
+            closeListeners(listeners, io);
+            allocator.free(listeners);
+
+            return err;
+        }
+    else
+        &.{};
+    defer if (tls_listeners.len > 0) allocator.free(tls_listeners);
+
     const threads = allocator.alloc(
         std.Thread,
         workers,
     ) catch |err| switch (err) {
         error.OutOfMemory => {
             closeListeners(listeners, io);
+            closeListeners(tls_listeners, io);
             allocator.free(listeners);
 
             return Error.ZixHttp2_Uring_OutOfMemory;
@@ -602,6 +868,8 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
                 .opts = opts,
                 .handler = handler_fn,
                 .listener = listeners[spawned],
+                .tls_listener = if (tls_listeners.len > 0) tls_listeners[spawned] else null,
+                .tls_ctx = config.tls,
                 .worker_id = spawned,
                 .busy_poll_us = config.busy_poll_us,
                 .stop = &stop,
@@ -611,6 +879,7 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
             else => {
                 stop.store(true, .release);
                 closeListeners(listeners[spawned..], io);
+                if (tls_listeners.len > 0) closeListeners(tls_listeners[spawned..], io);
                 for (threads[0..spawned]) |thread| thread.join();
                 allocator.free(listeners);
 
@@ -625,6 +894,15 @@ pub fn run(config: Config, handler_fn: HandlerFn) Error!void {
         "listening on {s}:{d} (io_uring, {d} workers)",
         .{ config.ip, config.port, workers },
     );
+
+    if (tls_listeners.len > 0) {
+        log.logSystem(
+            config,
+            .INFO,
+            "dual listener: h2 TLS on {s}:{d} (same workers, on-ring)",
+            .{ config.ip, config.tls_port },
+        );
+    }
 
     for (threads) |thread| thread.join();
 
@@ -1019,5 +1297,45 @@ test "zix http2: uring, worker serves one connection end to end" {
 
     try std.testing.expectEqual(@as(usize, 1), try testServeOverWorker());
     try std.testing.expectEqual(@as(usize, 1), ok_calls);
+}
+
+test "zix http2: uring, dualListener needs both tls and tls_port" {
+    var ctx: tlz.Context = undefined;
+    var config = testConfig();
+    try std.testing.expect(!dualListener(config));
+
+    config.tls = &ctx;
+    try std.testing.expect(!dualListener(config));
+
+    config.tls_port = 9443;
+    try std.testing.expect(dualListener(config));
+}
+
+test "zix http2: uring, TLS ops round trip through user_data" {
+    const ops = [_]OpKind{
+        .tls_accept,
+        .tls_recv,
+        .tls_send,
+    };
+    for (ops) |op| {
+        const decoded = unpackUserData(packUserData(op, 77, 123));
+
+        try std.testing.expectEqual(op, decoded.op);
+        try std.testing.expectEqual(@as(u24, 77), decoded.gen);
+        try std.testing.expectEqual(@as(linux.fd_t, 123), decoded.fd);
+    }
+}
+
+test "zix http2: uring, a dual listener with an unresolvable ip is ResolveFailed" {
+    var ctx: tlz.Context = undefined;
+    var config = testConfig();
+    config.ip = "not-an-ip";
+    config.tls = &ctx;
+    config.tls_port = 9443;
+
+    try std.testing.expectError(
+        Error.ZixHttp2_Uring_ResolveFailed,
+        bindTlsListeners(config, 1, std.testing.allocator),
+    );
 }
 
