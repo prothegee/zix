@@ -54,6 +54,7 @@ config.yaml
 *.bak*
 *.zip
 *.pem
+!examples/certs/*.pem
 *.bin
 *.sock
 
