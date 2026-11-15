@@ -1,6 +1,6 @@
 # tlz
 
-TLS 1.3, TLS 1.2, and DTLS 1.2, written in pure Zig on `std.crypto`. No OpenSSL, no C.
+TLS 1.3, TLS 1.2, and DTLS 1.2, written in pure Zig on `std.crypto`. The default path has no OpenSSL and no C.
 
 - Sans-I/O: a handshake call takes the bytes received and returns the bytes to send. The caller owns the socket, so tlz fits a blocking task, an epoll worker, or an io_uring ring the same way.
 - Server: TLS 1.3 with a TLS 1.2 floor. Nothing below 1.2 is ever offered.
@@ -8,6 +8,7 @@ TLS 1.3, TLS 1.2, and DTLS 1.2, written in pure Zig on `std.crypto`. No OpenSSL,
 - DTLS 1.2 for datagram transports, with the SRTP key export.
 - Certificates: ECDSA P-256, Ed25519, or RSA (2048 and up).
 - No allocator in the handshake or the record path. Everything works in caller buffers.
+- Optional OpenSSL backend, chosen per context with `initWith(..., .OPENSSL)`, used only when the system provides libssl (see [OpenSSL backend](#openssl-backend-optional)).
 - Builds on Zig 0.17.
 
 For the architecture see [`docs/hld-en.md`](docs/hld-en.md), for the internals see [`docs/lld-en.md`](docs/lld-en.md), for measured cost see [`docs/bench-en.md`](docs/bench-en.md).
@@ -105,11 +106,41 @@ try client.verifyServerCert(trust_anchor_der, "example.com", now_sec);
 
 `tlz.Client12` is the TLS 1.2 client with the same `start` and `finish` shape.
 
+## OpenSSL backend (optional)
+
+The native backend is the default. When the build host has OpenSSL 3.0 or newer (found by `pkg-config openssl`), the build also compiles an OpenSSL backend and links libssl, libcrypto, and libc. There is no build flag. A context or a client opts in with the last parameter:
+
+```zig
+// Same config as Context.init, the binding is the last parameter.
+var ssl_ctx = try tlz.Context.initWith(allocator, io, .{
+    .cert_path = "certs/ecdsa_p256_cert.pem",
+    .key_path = "certs/ecdsa_p256_key.pem",
+    .alpn = &.{.H2},
+}, .OPENSSL);
+defer ssl_ctx.deinit();
+
+var conn = try ssl_ctx.newConnection();
+defer conn.deinit();
+
+// Client: CA file, server name (SNI and name check), ALPN offer.
+var client = try tlz.Client.connectWith("ca.pem", "example.com", &.{.H2}, .OPENSSL);
+defer client.deinit();
+```
+
+- `Context.init` and `initWith(..., .DEFAULT)` stay native, even when OpenSSL is built.
+- Choosing `.OPENSSL` without OpenSSL on the build host is a build error, not a runtime error.
+- The handshake is a loop: `conn.handshake(incoming, &out)` until `conn.handshakeDone()`. A client starts with `handshake(&.{}, &out)`, which writes the ClientHello. While `conn.pendingLen()` is above 0, call `conn.drain(&out)` and send the bytes.
+- After the handshake: `readAppData`, `writeAppData`, `closeNotify`, `selectedAlpn`, the same names as native.
+- Only `cert_path`, `key_path`, `alpn`, `min_version`, and `max_version` apply. Curves and ciphers keep the OpenSSL defaults.
+
+Details are in [`docs/hld-en.md`](docs/hld-en.md#backend-model) and [`docs/lld-en.md`](docs/lld-en.md#openssl).
+
 ## Public surface
 
 | Name | What it is |
 | :- | :- |
 | `Context`, `Version`, `DEFAULT_CURVES`, `DEFAULT_CIPHERS` | server context and its policy |
+| `Binding`, `Context.initWith`, `Context.ContextFor`, `Client.connectWith`, `Client.ConnectionFor` | backend choice (native or OpenSSL) |
 | `serverHandshake`, `serverHelloRetry`, `serverHandshakeAfterRetry` | TLS 1.3 server handshake |
 | `Connection`, `HandshakeOptions`, `HandshakeResult`, `RetryState`, `RetryFlight` | handshake input, output, and the established connection |
 | `alertForError`, `alertRecordForError`, `parseInboundAlert` | alerts out and in |
