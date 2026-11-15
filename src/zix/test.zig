@@ -89,6 +89,20 @@ test {
         _ = @import("tcp/http1/tls_mux/TlsConn.zig");
         _ = @import("tcp/http1/tls_mux/WorkerCtx.zig");
         _ = @import("tcp/http1/dispatch/UringTlsConn.zig");
+        _ = @import("tcp/http2/tls_mux.zig");
+        _ = @import("tcp/http2/tls_mux/AcceptOpts.zig");
+        _ = @import("tcp/http2/tls_mux/TlsConn.zig");
+        _ = @import("tcp/http2/tls_mux/WorkerCtx.zig");
+        _ = @import("tcp/http2/tls_serve.zig");
+        _ = @import("tcp/http2/tls_serve/MuxDriver.zig");
+        _ = @import("tcp/http2/dispatch/UringTlsConn.zig");
+        _ = @import("tcp/http2/grpc/tls_mux.zig");
+        _ = @import("tcp/http2/grpc/tls_mux/AcceptOpts.zig");
+        _ = @import("tcp/http2/grpc/tls_mux/TlsConn.zig");
+        _ = @import("tcp/http2/grpc/tls_mux/WorkerCtx.zig");
+        _ = @import("tcp/http2/grpc/tls_serve.zig");
+        _ = @import("tcp/http2/grpc/tls_serve/mux_driver.zig");
+        _ = @import("tcp/http2/grpc/dispatch/UringTlsConn.zig");
     }
     _ = @import("tcp/http1/handler.zig");
     _ = @import("tcp/http1/head.zig");
@@ -189,6 +203,7 @@ test {
     _ = @import("tcp/http2/grpc/stream_dispatch.zig");
     _ = @import("tcp/http2/grpc/stream_slot.zig");
     _ = @import("tcp/http2/grpc/timeout.zig");
+    _ = @import("tcp/http2/grpc/tls_serve/ConnCtx.zig");
     _ = @import("tcp/http2/grpc/window.zig");
     _ = @import("tcp/http2/hpack/DynamicTable.zig");
     _ = @import("tcp/http2/hpack/Header.zig");
@@ -226,8 +241,11 @@ test {
     _ = @import("tcp/http2/stream_invoke.zig");
     _ = @import("tcp/http2/stream_slot.zig");
     _ = @import("tcp/http2/stream_state.zig");
+    _ = @import("tcp/http2/tls_serve/ConnCtx.zig");
     _ = @import("tcp/http2/upgrade.zig");
     _ = @import("tcp/http2/writer.zig");
+    _ = @import("tls/h2_terminator.zig");
+    _ = @import("tls/h2_terminator/Record.zig");
     _ = @import("tls/tls_session.zig");
     _ = @import("tls/tls_session/FeedResult.zig");
     _ = @import("tls/tls_session/Session.zig");
