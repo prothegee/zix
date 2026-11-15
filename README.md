@@ -111,6 +111,8 @@
     <b><i>ZIX Internal Library/Module</i></b>
 </h4>
 
+<hr>
+
 <div align="center">
 
 [TLZ](src/tlz/README.md)
@@ -125,6 +127,8 @@
 </p>
 
 </div>
+
+<br>
 
 <div align="center">
 
@@ -141,11 +145,12 @@
 
 </div>
 
-<hr>
+<br>
 
 <h2 align="center">
     <b><i>Benchmark</i></b>
 </h2>
+
 <h4 align="center">
     <a href="https://github.com/MDA2AV/HttpArena">
         <b><i>HttpArena</i></b>
@@ -164,7 +169,7 @@
 
 </div>
 
-<hr>
+<br>
 
 <h2 align="center">
     <b><i>Sponsor This Project</i></b>
