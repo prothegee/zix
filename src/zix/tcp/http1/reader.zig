@@ -127,7 +127,7 @@ pub fn drainBody(fd: std.posix.fd_t, owed: usize) usize {
         while (remaining > 0) {
             const want = @min(remaining, MAX_DRAIN_RECV);
             const rc = linux.recvfrom(fd, &scratch, want, linux.MSG.TRUNC, null, null);
-            switch (std.posix.errno(rc)) {
+            switch (std.os.linux.errno(rc)) {
                 .SUCCESS => {
                     const n: usize = @intCast(rc);
                     if (n == 0) return consumed;
