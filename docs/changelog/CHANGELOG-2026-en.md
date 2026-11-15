@@ -261,6 +261,31 @@ __**Update:**__
       behaviour suites in `src/jzon/tests/behaviour` (183).
     - Docs: README, HLD, LLD, and benchmark under `src/jzon` (EN + ID).
 
+    ---
+
+- **`tlz` 0.1.0**:
+    - TLS moves out of zix into `src/tlz`, a standalone package for Zig 0.17, also
+      exported as `zix.tlz`.
+    - Breaking: `zix.Tls` is now `zix.tlz`. `zix.Tls.Context` is now `zix.tlz.Context`,
+      and the engine field is `tls: ?*zix.tlz.Context`.
+    - Breaking: error names follow `Tlz_<Module>_<Condition>`. `TlsUnsupportedCurve` is now
+      `Tlz_Context_UnsupportedCurve`, and the other policy errors follow the same way.
+    - Sources follow the new tree: `crypto/`, `tls12/`, and `dtls/`, with one record per
+      file. DTLS is public as `tlz.Dtls`.
+    - TLS serve paths ported for `zix.Http1`, `zix.Http2`, and `zix.Grpc` under `.ASYNC`,
+      `.EPOLL`, and `.URING`, including the `tls_port` dual listener. SSE, WebSocket, and
+      WebSocket broadcast run over TLS on `zix.Http1`.
+    - Examples under `examples/tls`, built with `zig build zix-example-tls`:
+      `tls_http1_basic`, `tls_http1_dual`, `tls_http1_ed25519`, `tls_http1_sse`,
+      `tls_http1_ws`, `tls_http2_basic`, and `tls_grpc_basic`.
+    - Examples under `src/tlz/examples`: `tls13_loopback`, `tls12_loopback`,
+      `dtls_loopback`, `cert_verify`, `tls13_echo_server`, `tls13_echo_client`, and the
+      benches `bench_rsa`, `bench_ecdsa_p256`, `bench_ed25519`, and `bench_record`.
+    - Root build steps: `tlz-unit_edge-test`, `tlz-behaviour-test`, `tlz-all-test`,
+      and `tlz-examples`.
+    - Docs: README, HLD, LLD, and bench under `src/tlz` (EN + ID). `docs/hld-tls-*.md`
+      and `docs/lld-tls-*.md` move there and are removed from the root.
+
 <br>
 
 __**Fix:**__
