@@ -1,6 +1,6 @@
 # Reverse proxy: nginx dan haproxy di depan zix
 
-`zix.Http1` dan `zix.Grpc` sama-sama melayani TLS secara native (set `tls: ?*Tls.Context`, lihat [`docs/hld-tls-id.md`](hld-tls-id.md)). Menaruh nginx atau haproxy di depan adalah opsi, bukan keharusan, dan menjadi pilihan tepat saat ingin TLS offload ke proxy, routing per host atau path, load balancing antar backend, atau berbagi port 443 dengan service lain. Server zix lalu berjalan cleartext di belakang proxy: HTTP/1.1 untuk `zix.Http1`, atau h2c (HTTP/2 cleartext) untuk `zix.Grpc`. Client eksternal terhubung ke proxy lewat TLS, dan proxy meneruskan ke backend.
+`zix.Http1` dan `zix.Grpc` sama-sama melayani TLS secara native (set `tls: ?*tlz.Context`, lihat [`src/tlz/docs/hld-id.md`](../src/tlz/docs/hld-id.md)). Menaruh nginx atau haproxy di depan adalah opsi, bukan keharusan, dan menjadi pilihan tepat saat ingin TLS offload ke proxy, routing per host atau path, load balancing antar backend, atau berbagi port 443 dengan service lain. Server zix lalu berjalan cleartext di belakang proxy: HTTP/1.1 untuk `zix.Http1`, atau h2c (HTTP/2 cleartext) untuk `zix.Grpc`. Client eksternal terhubung ke proxy lewat TLS, dan proxy meneruskan ke backend.
 
 ## Arsitektur
 
