@@ -1,10 +1,10 @@
 # tlz high-level design
 
-tlz is TLS 1.3, TLS 1.2, and DTLS 1.2 written in pure Zig on `std.crypto`. It is a standalone package under `src/tlz`, and zix reaches it as `zix.tlz`.
+tlz is TLS 1.3, TLS 1.2, and DTLS 1.2 written in pure Zig on `std.crypto`. It is a standalone package under `src/tlz`, and zix reaches it as `zix.tlz`. An optional OpenSSL backend can be chosen per context (see [Backend model](#backend-model)).
 
 ## Goals
 
-- Pure Zig on `std.crypto` primitives. No OpenSSL, no BoringSSL, no C FFI.
+- Pure Zig on `std.crypto` primitives by default. The default path has no OpenSSL, no BoringSSL, and no C FFI. The OpenSSL backend is opt-in per context.
 - TLS 1.3 (RFC 8446) plus a TLS 1.2 floor (RFC 5246, RFC 5288). 1.3 is preferred, nothing below 1.2 is offered, and TLS 1.0, TLS 1.1, and SSL are never offered (RFC 8996).
 - Sans-I/O: a handshake call takes the bytes received and returns the bytes to send. tlz owns no socket and no loop, so the same code serves a blocking task, an epoll worker, or an io_uring ring.
 - Server configuration is one user-owned `tlz.Context` (the loaded cert and key plus the validated policy), built once and shared by pointer.
@@ -56,6 +56,8 @@ Every directory below holds the records (one PascalCase file each) of the functi
 | `alert.zig`, `alert/` | Alert codes, outbound alert records, inbound alert classification |
 | `cipher_suite.zig`, `named_group.zig`, `signature_scheme.zig`, `extension_type.zig`, `alpn.zig` | Wire enums |
 | `wire/` | `Reader` and `Writer`, big-endian, over a caller buffer |
+| `binding.zig` | `Binding` enum (`DEFAULT`, `OPENSSL`), `isBuilt`, `requireBuilt` |
+| `openssl/` | Optional OpenSSL backend: `Context` (SSL_CTX), `Connection` (SSL over a memory BIO pair), `client.zig`, the error queue reader, and `c.zig` (the only C importer) |
 | `crypto/certificate.zig`, `crypto/certificate/` | Certificate, CertificateVerify, and Finished builders, the `SigningKey` |
 | `crypto/cert_verify.zig`, `crypto/cert_verify/` | Peer chain (RFC 5280) and hostname or IP identity (RFC 6125) |
 | `crypto/pem.zig` | PEM to DER, ECDSA SEC1 scalar and Ed25519 PKCS#8 seed extraction |
@@ -138,6 +140,58 @@ sequenceDiagram
 
 `tlz.Client` (1.3) and `tlz.Client12` (1.2) mirror the server. `start` builds the ClientHello (ALPN plus a signature_algorithms list of ecdsa_secp256r1_sha256 and ed25519). `finish` takes the server flight, verifies the server signature (CertificateVerify for 1.3, ServerKeyExchange for 1.2) through `std.crypto.Certificate`, and returns a `ClientConnection`. Chain and identity checks are `verifyChain`, `verifyCertChain`, `verifyCertHostname`, and `verifyCertIdentity` (RFC 5280, RFC 6125). The IP SAN check is done by hand, since std is DNS only.
 
+## Backend model
+
+Two backends share one public surface. Native is the default and needs nothing outside the Zig standard library.
+
+| Backend | I/O model | Selected by |
+| :- | :- | :- |
+| native | sans-I/O, caller owns the socket | `Context.init`, or `Context.initWith(..., .DEFAULT)` |
+| openssl | sans-I/O over a memory BIO pair, caller owns the socket | `Context.initWith(..., .OPENSSL)`, `Client.connectWith(..., .OPENSSL)` |
+
+```mermaid
+graph TD
+    APP[Caller] --> INIT[Context.init]
+    APP --> WITH[Context.initWith binding]
+    APP --> CW[Client.connectWith binding]
+    INIT --> NAT[native Context]
+    WITH -->|.DEFAULT| NAT
+    WITH -->|.OPENSSL| OCTX[openssl/Context.zig]
+    CW -->|.OPENSSL| OCLI[openssl/client.zig]
+    OCTX --> OCONN[openssl/Connection.zig]
+    OCLI --> OCONN
+    OCONN --> CIMP[openssl/c.zig]
+    CIMP --> LIB[libssl and libcrypto]
+```
+
+- Detection: `build.zig` looks for OpenSSL on the build host, first with `pkg-config openssl`, then in the standard header paths. There is no build flag. When found, the package links libssl, libcrypto, and libc, and the binding is compiled in. When not found, nothing from OpenSSL is linked or included. A cross target is never detected.
+- Selection: the binding is a `comptime` parameter, placed last. The return type follows the binding, so there is no runtime switch. `Context.ContextFor(binding)` and `Client.ConnectionFor(binding)` name that type, for a struct field.
+- `Context.init` and `Context.initWith(..., .DEFAULT)` build the same native context, even when OpenSSL is compiled in.
+- Choosing `.OPENSSL` on a build without OpenSSL is a build error with a clear message, never a runtime error. A build that never chooses `.OPENSSL` always compiles.
+- `Client.connectWith(..., .DEFAULT)` is a build error: the native client is `Client.start` plus `Client.finish`.
+- Version floor: OpenSSL 3.0. An older OpenSSL is a build error.
+- The OpenSSL context reads only `cert_path`, `key_path`, `alpn`, `min_version`, and `max_version` from `Config`. Curves and ciphers keep the OpenSSL defaults.
+- No silent fallback: a failed OpenSSL handshake returns an error, it never switches to native.
+
+```zig
+var ssl_ctx = try tlz.Context.initWith(allocator, io, .{
+    .cert_path = "certs/ecdsa_p256_cert.pem",
+    .key_path = "certs/ecdsa_p256_key.pem",
+    .alpn = &.{.H2},
+}, .OPENSSL);
+defer ssl_ctx.deinit();
+
+var conn = try ssl_ctx.newConnection();
+defer conn.deinit();
+
+// One step per read: feed the peer bytes, send what comes back.
+const to_send = try conn.handshake(peer_bytes, &out);
+```
+
+After the handshake the names match native: `readAppData`, `writeAppData`, `closeNotify`, `selectedAlpn`, `deinit`. The handshake differs: native is one `serverHandshake` call, openssl is a `handshake(incoming, out)` loop until `handshakeDone()`. OpenSSL can queue more output than `out` holds, so the caller checks `pendingLen` and calls `drain` until it is 0 before waiting on the peer.
+
+Errors: `initWith` reports `Tlz_Context_*` and `connectWith` reports `Tlz_Client_*`, with the same condition name the OpenSSL module failed on (for example `Tlz_Context_KeyMismatch`, `Tlz_Client_PeerVerifyFailed`). Calls on the returned OpenSSL values report their own sets: `Tlz_OpensslContext_*` and `Tlz_OpensslConnection_*`. The OpenSSL error text is kept for the log line, control flow uses the codes.
+
 ## Inbound alerts (RFC 8446 6)
 
 `parseInboundAlert` classifies a received alert: `close_notify` (description 0) is a clean close, any other is fatal. `Connection.readAppData` reports an alert record as `PeerClosed`, so a caller never reads an alert as data.
@@ -147,6 +201,7 @@ sequenceDiagram
 - No allocator in the handshake or record path. Both work in caller-provided fixed buffers.
 - `Context` owns one heap allocation: the duplicated certificate DER, freed by `deinit`. The signing key and the policy slices are values or borrowed slices.
 - The transcript and key schedule are fixed size (`Secret = [32]u8`, SHA-256 throughout).
+- The rules above are for the native backend. The OpenSSL backend allocates inside OpenSSL (the `SSL_CTX`, each `SSL`, and its two memory BIOs), all freed by `deinit`.
 
 ## Use in zix
 
@@ -163,6 +218,8 @@ zix imports tlz and owns every socket. The serve paths live in zix, not in tlz:
 | `src/zix/tcp/http2/grpc/tls_mux.zig`, `tls_serve.zig` | gRPC over TLS for `.EPOLL` / `.URING` and for `.ASYNC` |
 
 A server opts in with `tls: ?*zix.tlz.Context` on `Http1`, `Http2`, or `Grpc` config. With `tls_port` set as well, one server serves cleartext on `port` and TLS on `tls_port` from the same workers. The cleartext hot path is unchanged by any of this. Details are in [`lld-en.md`](lld-en.md).
+
+zix servers take the native `*zix.tlz.Context`, so the OpenSSL backend is not attached to `Http1`, `Http2`, or `Grpc`. It is a tlz opt-in. When the build host has OpenSSL, the zix build links libssl, libcrypto, and libc as well.
 
 ## References
 
