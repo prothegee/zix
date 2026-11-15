@@ -6,11 +6,11 @@ Server HTTP/3 (RFC 9114) pure-Zig di atas QUIC (RFC 9000 / 9001 / 9002), dibangu
 
 ## Tujuan
 
-- Satu keluarga engine yang konsisten: `Router` comptime yang sama, enum `DispatchModel` yang sama, dan `Tls.Context` yang sama seperti `zix.Http1` / `zix.Http2`.
+- Satu keluarga engine yang konsisten: `Router` comptime yang sama, enum `DispatchModel` yang sama, dan `tlz.Context` yang sama seperti `zix.Http1` / `zix.Http2`.
 - Pure-Zig dari RFC: transport QUIC, packet protection, glue handshake TLS 1.3, dan kompresi header QPACK semuanya ditulis dari spesifikasi dan dibuktikan byte-exact terhadap worked example RFC di dalam file.
 - Server adalah produknya, primitive diekspos: building block QUIC / TLS / QPACK level rendah bersifat public sehingga sebuah peer (client buatan sendiri, test harness) dapat membangun sisi lain dari wire, mencerminkan cara `zix.Http2` mengekspos primitive frame / HPACK-nya.
 - Eksplisit bukan implisit: setiap perilaku disebutkan dalam konfigurasi, `dispatch_model` wajib tanpa default.
-- Pemisahan tanggung jawab: `src/udp/http3/` berada di atas `src/udp/datagram.zig` (socket datagram raw) dan memakai ulang `src/tls/` untuk builder pesan TLS 1.3 dan key schedule.
+- Pemisahan tanggung jawab: `src/udp/http3/` berada di atas `src/udp/datagram.zig` (socket datagram raw) dan memakai ulang `src/tlz/src/` untuk builder pesan TLS 1.3 dan key schedule.
 
 ---
 
@@ -133,7 +133,7 @@ pub const Http3ServerConfig = struct {
     socket_sndbuf:           usize = 4 * 1024 * 1024, // SO_SNDBUF yang diminta (kernel clamp)
     gso_enabled:             bool  = true,       // UDP GSO saat kirim, diprobe saat worker mulai
 
-    tls: ?*Tls.Context = null, // TLS 1.3 context (cert / key / ALPN), wajib, null ditolak saat run
+    tls: ?*tlz.Context = null, // TLS 1.3 context (cert / key / ALPN), wajib, null ditolak saat run
 
     cid_len:              u8    = 8,     // panjang connection-id terbitan server (RFC 9000 5.1)
     max_idle_ms:          u32   = 30000, // idle timeout (RFC 9000 10.1)
@@ -286,7 +286,7 @@ Model single-worker `.ASYNC` adalah referensi yang migration-safe. Model per-cor
 
 ## Ringkasan Handshake
 
-QUIC melipat TLS 1.3 ke dalam transport. Layer deterministik pure-Zig dari RFC, builder pesan TLS 1.3 dan key schedule adalah kode `src/tls/` yang sudah ada dan teruji, hanya framing yang berubah (byte handshake raw masuk ke CRYPTO frame, bukan TLS record).
+QUIC melipat TLS 1.3 ke dalam transport. Layer deterministik pure-Zig dari RFC, builder pesan TLS 1.3 dan key schedule adalah kode `src/tlz/src/` yang sudah ada dan teruji, hanya framing yang berubah (byte handshake raw masuk ke CRYPTO frame, bukan TLS record).
 
 | Langkah | Yang terjadi |
 | :- | :- |
@@ -296,7 +296,7 @@ QUIC melipat TLS 1.3 ke dalam transport. Layer deterministik pure-Zig dari RFC, 
 | Handshake flight | EncryptedExtensions (ALPN `h3` + `quic_transport_parameters`), Certificate, CertificateVerify, Finished, semuanya dalam satu CRYPTO frame yang di-seal dengan Handshake keys. Application keys 1-RTT diturunkan. |
 | 1-RTT | Short-header packet, application keys, request dilayani. |
 
-Sertifikat bisa ECDSA P-256, Ed25519, atau RSA, dari `Tls.Context` yang sama seperti engine TCP (sertifikat RSA menandatangani dengan `rsa_pss_rsae_sha256`). 0-RTT ditolak secara default.
+Sertifikat bisa ECDSA P-256, Ed25519, atau RSA, dari `tlz.Context` yang sama seperti engine TCP (sertifikat RSA menandatangani dengan `rsa_pss_rsae_sha256`). 0-RTT ditolak secara default.
 
 ---
 
@@ -345,7 +345,7 @@ Allocator harus general-purpose (mis. `std.heap.smp_allocator`), syarat yang sam
 - **RFC 9002 (QUIC recovery)**: estimasi RTT, loss detection, Probe Timeout, congestion control NewReno.
 - **RFC 9114 (HTTP/3)**: layer framing dan semantik (HEADERS / DATA / SETTINGS, control stream, validasi pesan).
 - **RFC 9204 (QPACK)** dan **RFC 7541 (tabel Huffman)**: kompresi header.
-- **RFC 8446 (TLS 1.3)**: handshake dan key schedule, dipakai ulang dari `src/tls/`.
+- **RFC 8446 (TLS 1.3)**: handshake dan key schedule, dipakai ulang dari `src/tlz/src/`.
 
 ---
 
