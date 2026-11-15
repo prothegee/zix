@@ -102,7 +102,7 @@
 | [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) | gRPC h2c: goals, architecture, API, all 4 RPC types, codec, dispatch models |
 | [`docs/hld-proxy-en.md`](docs/hld-proxy-en.md) | Reverse proxy (nginx, haproxy) for zix.Http1, zix.Grpc |
 | [`docs/hld-logger-en.md`](docs/hld-logger-en.md) | Logger: goals, API, log methods, formats, file rotation, protocol wiring |
-| [`docs/hld-tls-en.md`](docs/hld-tls-en.md) | TLS: goals, version policy, Tls.Context, handshake flow, engine integration, client |
+| [`src/tlz/docs/hld-en.md`](src/tlz/docs/hld-en.md) | TLS (tlz): goals, version policy, tlz.Context, handshake flow, use in zix, client |
 | [`docs/hld-http3-en.md`](docs/hld-http3-en.md) | HTTP/3 (QUIC): goals, runtime model, API, router, dispatch models, handshake, QPACK, memory model |
 | [`docs/hld-webrtc-en.md`](docs/hld-webrtc-en.md) | WebRTC: goals, runtime model, API, ICE-lite, data channels, media forwarding, dispatch models, memory model |
 | [`docs/lld-http1-en.md`](docs/lld-http1-en.md) | HTTP/1: internal parsing, write helpers, router, EPOLL engine, WebSocket codec |
@@ -114,7 +114,8 @@
 | [`docs/lld-fix-en.md`](docs/lld-fix-en.md) | FIX: internal data structures and serveConn algorithm |
 | [`docs/lld-channel-en.md`](docs/lld-channel-en.md) | Channel: ring buffer internals, locking, send/recv algorithms |
 | [`docs/lld-logger-en.md`](docs/lld-logger-en.md) | Logger: internal write buffer, spinlock, rotation algorithm |
-| [`docs/lld-tls-en.md`](docs/lld-tls-en.md) | TLS: wire / handshake / key-schedule / record internals, Tls.Context validate, serve paths |
+| [`src/tlz/docs/lld-en.md`](src/tlz/docs/lld-en.md) | TLS (tlz): wire / handshake / key-schedule / record internals, tlz.Context validate, zix serve paths |
+| [`src/tlz/docs/bench-en.md`](src/tlz/docs/bench-en.md) | TLS (tlz): RSA, ECDSA P-256, Ed25519, and AES-128-GCM record cost next to `openssl speed` |
 | [`docs/lld-http3-en.md`](docs/lld-http3-en.md) | HTTP/3 (QUIC): per-layer internals (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
 | [`docs/lld-webrtc-en.md`](docs/lld-webrtc-en.md) | WebRTC: per-layer internals (demux, STUN, ICE, DTLS, SCTP, data channels, SDP, media, dispatch) |
 | [`docs/zix-deploy-en.md`](docs/zix-deploy-en.md) | Deployment: build a Docker image (zig fetch or vendor) and configure the TLS context for Ed25519 / ECDSA P-256 / RSA |
@@ -431,9 +432,7 @@ Opt-in, per-worker submission-queue backpressure on `zix.Http1` under `.URING`. 
 
 __*15. Pure-Zig TLS (https, h2, wss):*__
 
-> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
-
-TLS 1.3 with a TLS 1.2 floor, on `std.crypto`, no OpenSSL. Opt-in and additive: `zix.Http1` serves https/1.1, `zix.Http2` and `zix.Grpc` serve h2 over TLS (ALPN h2), and SSE and WebSocket run over TLS (wss) on the thread-per-connection path. Server certificates are ECDSA P-256, Ed25519, or RSA, configured by a user-owned `Tls.Context` (validated curves / ciphers, HSTS). A verifying native client (`zix.Tls.Client`) checks the chain and hostname.
+TLS 1.3 with a TLS 1.2 floor, on `std.crypto`, no OpenSSL, from the standalone `tlz` package (`zix.tlz`). Opt-in and additive: `zix.Http1` serves https/1.1, `zix.Http2` and `zix.Grpc` serve h2 over TLS (ALPN h2), and SSE and WebSocket run over TLS (wss) on every dispatch model. Server certificates are ECDSA P-256, Ed25519, or RSA, configured by a user-owned `zix.tlz.Context` (validated curves / ciphers). A verifying native client (`zix.tlz.Client`) checks the chain and hostname.
 
 > Encrypted transport is a config gate in front of the unchanged cleartext engines, not a separate server, so the same handler serves http and https.
 
@@ -443,7 +442,7 @@ __*16. HTTP/3 over QUIC, pure-Zig:*__
 
 > TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
-`zix.Http3` serves HTTP/3 (RFC 9114) over QUIC (RFC 9000 / 9001 / 9002), built from the RFCs on `std.crypto`: packet protection, the TLS 1.3 handshake over CRYPTO streams, loss recovery, QPACK, and per-core dispatch on the `zix.Udp` substrate. Same comptime `Router` and `Tls.Context` as the TCP engines.
+`zix.Http3` serves HTTP/3 (RFC 9114) over QUIC (RFC 9000 / 9001 / 9002), built from the RFCs on `std.crypto`: packet protection, the TLS 1.3 handshake over CRYPTO streams, loss recovery, QPACK, and per-core dispatch on the `zix.Udp` substrate. Same comptime `Router` and `tlz.Context` as the TCP engines.
 
 > The newest HTTP transport ships in-tree with no C QUIC library, sharing the router and TLS config already used for HTTP/1 and HTTP/2.
 
@@ -1470,7 +1469,7 @@ See `docs/zix-config-en.md` for the field reference.
 
 > TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
-`zix.Http2` is an HTTP/2 server in its own right: h2c (cleartext) by default, or h2 over TLS when a `Tls.Context` is attached (ALPN negotiates h2, which browsers require for HTTP/2). It is also the h2c transport that `zix.Grpc` runs on.
+`zix.Http2` is an HTTP/2 server in its own right: h2c (cleartext) by default, or h2 over TLS when a `zix.tlz.Context` is attached (ALPN negotiates h2, which browsers require for HTTP/2). It is also the h2c transport that `zix.Grpc` runs on.
 
 **When to use:** reach for `zix.Http2` directly when you need raw HTTP/2 framing (h2c or h2-over-TLS) without gRPC semantics, for example an h2 endpoint for a browser or an h2 client. For ordinary web traffic `zix.Http1` leads the benchmarks, and for RPC use `zix.Grpc` (which rides this engine).
 
@@ -1599,19 +1598,23 @@ See [`docs/hld-grpc-en.md`](docs/hld-grpc-en.md) for full documentation includin
 
 ### TLS (https / h2)
 
-> TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
-
-The Http1 and Http2 servers serve cleartext by default. Attach a `zix.Tls.Context` to opt into TLS on a gated path, leaving the cleartext engines untouched. The context loads the cert / key and validates the policy once at startup, then every connection reuses it. For Http2 and gRPC the `.EPOLL` / `.URING` models terminate TLS in the dispatch worker and multiplex many connections per core, so https does not spawn a thread per connection.
+The Http1, Http2, and Grpc servers serve cleartext by default. Attach a `zix.tlz.Context` to opt into TLS on a gated path, leaving the cleartext engines untouched. The context loads the cert / key and validates the policy once at startup, then every connection reuses it. Under `.EPOLL` / `.URING` every engine terminates TLS in the dispatch worker and multiplexes many connections per core, so https does not spawn a thread per connection.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "examples/certs/ecdsa_p256_cert.pem",
-    .key_path  = "examples/certs/ecdsa_p256_key.pem",
-    .alpn      = &.{ .HTTP_1_1 }, // .H2 for the Http2 server
+    .key_path = "examples/certs/ecdsa_p256_key.pem",
+    .alpn = &.{.HTTP_1_1}, // .H2 for the Http2 and Grpc servers
 });
 defer tls.deinit();
 
-var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls, .dispatch_model = .EPOLL });
+var server = zix.Http1.Server.init(handler, .{
+    .io = io,
+    .ip = "127.0.0.1",
+    .port = 9060,
+    .tls = &tls,
+    .dispatch_model = .EPOLL,
+});
 ```
 
 With `tls` set the server is TLS-only on `port`. Add `tls_port` to serve BOTH from one server (the dual listener,): cleartext on `port` and TLS on `tls_port` from the same worker fleet, instead of launching a second server that duplicates workers, fd tables, and caches. Available on Http1, Http2, and Grpc, every dispatch model (under `.URING` the TLS side runs on the ring).
@@ -1627,12 +1630,15 @@ var server = zix.Http1.Server.init(handler, .{
 });
 ```
 
-The two paths are required, the rest default to a secure posture (TLS 1.2 floor, 1.3 preferred, ECDHE-only). `Tls.Context.Config` also exposes `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, and `hsts_max_age_s`. Curves and ciphers are validated to the implemented set, so an unsupported value is a startup error. The cert can be ECDSA P-256, Ed25519, or RSA: `Tls.Context.init` detects the key type from the cert (an RSA cert requires TLS 1.3 and signs the CertificateVerify with `rsa_pss_rsae_sha256`). For a new deployment prefer Ed25519 (cheapest handshake signature), then ECDSA P-256, then RSA (use RSA to serve a pre-issued RSA cert). See [docs/zix-deploy-en.md](docs/zix-deploy-en.md) for per-type config snippets and Docker image deployment.
+The two paths are required, the rest default to a secure posture (TLS 1.2 floor, 1.3 preferred, ECDHE-only). `zix.tlz.Context.Config` also exposes `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, and `hsts_max_age_s`. Curves and ciphers are validated to the implemented set, so an unsupported value is a startup error. The cert can be ECDSA P-256, Ed25519, or RSA: `zix.tlz.Context.init` detects the key type from the cert (an RSA cert requires TLS 1.3 and signs the CertificateVerify with `rsa_pss_rsae_sha256`). For a new deployment prefer Ed25519 (cheapest handshake signature), then ECDSA P-256, then RSA (use RSA to serve a pre-issued RSA cert). See [docs/zix-deploy-en.md](docs/zix-deploy-en.md) for per-type config snippets and Docker image deployment, and [src/tlz/README-en.md](src/tlz/README-en.md) for tlz on its own.
 
 - [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
 - [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
 - [examples/tls/tls_http1_ed25519.zig](examples/tls/tls_http1_ed25519.zig) - Ed25519 server cert
 - [examples/tls/tls_http1_dual.zig](examples/tls/tls_http1_dual.zig) - dual listener (cleartext + https, one server)
+- [examples/tls/tls_http1_sse.zig](examples/tls/tls_http1_sse.zig) - SSE over TLS
+- [examples/tls/tls_http1_ws.zig](examples/tls/tls_http1_ws.zig) - WebSocket over TLS (wss)
+- [examples/tls/tls_grpc_basic.zig](examples/tls/tls_grpc_basic.zig) - gRPC over TLS
 
 <br>
 
@@ -2047,7 +2053,7 @@ pub fn main(process: std.process.Init) !void {
 
 > TBD: not ported to zix 0.6.x yet. This section still describes zix 0.5.x.
 
-HTTP/3 runs over QUIC, which runs over UDP, so `zix.Http3` sits on the same `zix.Udp` datagram substrate above, not on the TCP / TLS stack. It is a pure-Zig HTTP/3 server over QUIC (RFC 9114 / 9000 / 9001 / 9002). The QUIC transport, packet protection, TLS 1.3 handshake glue, and QPACK header compression are all written from the RFCs and proven byte-exact against the RFC worked examples. TLS 1.3 is folded into the QUIC handshake (there is no cleartext mode and no TLS record layer), configured by the same `zix.Tls.Context` as the TCP engines, so an ECDSA P-256, Ed25519, or RSA cert all work.
+HTTP/3 runs over QUIC, which runs over UDP, so `zix.Http3` sits on the same `zix.Udp` datagram substrate above, not on the TCP / TLS stack. It is a pure-Zig HTTP/3 server over QUIC (RFC 9114 / 9000 / 9001 / 9002). The QUIC transport, packet protection, TLS 1.3 handshake glue, and QPACK header compression are all written from the RFCs and proven byte-exact against the RFC worked examples. TLS 1.3 is folded into the QUIC handshake (there is no cleartext mode and no TLS record layer), configured by the same `zix.tlz.Context` as the TCP engines, so an ECDSA P-256, Ed25519, or RSA cert all work.
 
 Routes are a comptime table (`zix.Http3.Router`), the same shape as `zix.Http1` / `zix.Http2`, dispatched on the decoded request path.
 
@@ -2064,7 +2070,7 @@ const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
 });
 
 pub fn main(process: std.process.Init) !void {
-    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+    var tls = try zix.tlz.Context.init(std.heap.smp_allocator, process.io, .{
         .cert_path = "examples/certs/ecdsa_p256_cert.pem",
         .key_path  = "examples/certs/ecdsa_p256_key.pem",
     });
@@ -2126,7 +2132,7 @@ fn onEvent(event: zix.Webrtc.Event, ctx: *zix.Webrtc.Context) !void {
 }
 
 pub fn main(process: std.process.Init) !void {
-    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+    var tls = try zix.tlz.Context.init(std.heap.smp_allocator, process.io, .{
         .cert_path = "examples/certs/ecdsa_p256_cert.pem",
         .key_path  = "examples/certs/ecdsa_p256_key.pem",
     });
