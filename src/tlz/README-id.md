@@ -1,6 +1,6 @@
 # tlz
 
-TLS 1.3, TLS 1.2, dan DTLS 1.2, ditulis dalam Zig murni di atas `std.crypto`. Tanpa OpenSSL, tanpa C.
+TLS 1.3, TLS 1.2, dan DTLS 1.2, ditulis dalam Zig murni di atas `std.crypto`. Jalur default tanpa OpenSSL dan tanpa C.
 
 - Sans-I/O: pemanggilan handshake menerima byte yang diterima dan mengembalikan byte yang harus dikirim. Pemanggil memiliki socket, jadi tlz cocok untuk blocking task, epoll worker, atau io_uring ring dengan cara yang sama.
 - Server: TLS 1.3 dengan TLS 1.2 sebagai batas bawah. Tidak ada yang di bawah 1.2 yang pernah ditawarkan.
@@ -8,6 +8,7 @@ TLS 1.3, TLS 1.2, dan DTLS 1.2, ditulis dalam Zig murni di atas `std.crypto`. Ta
 - DTLS 1.2 untuk transport datagram, dengan ekspor kunci SRTP.
 - Sertifikat: ECDSA P-256, Ed25519, atau RSA (2048 ke atas).
 - Tidak ada allocator di jalur handshake maupun record. Semua bekerja di buffer milik pemanggil.
+- Backend OpenSSL opsional, dipilih per context dengan `initWith(..., .OPENSSL)`, hanya dipakai jika sistem menyediakan libssl (lihat [Backend OpenSSL](#backend-openssl-opsional)).
 - Build di Zig 0.17.
 
 Untuk arsitektur lihat [`docs/hld-id.md`](docs/hld-id.md), untuk detail internal lihat [`docs/lld-id.md`](docs/lld-id.md), untuk biaya yang diukur lihat [`docs/bench-id.md`](docs/bench-id.md).
@@ -105,11 +106,41 @@ try client.verifyServerCert(trust_anchor_der, "example.com", now_sec);
 
 `tlz.Client12` adalah client TLS 1.2 dengan bentuk `start` dan `finish` yang sama.
 
+## Backend OpenSSL (opsional)
+
+Backend native adalah default. Jika host build memiliki OpenSSL 3.0 atau lebih baru (ditemukan oleh `pkg-config openssl`), build juga mengompilasi backend OpenSSL dan me-link libssl, libcrypto, dan libc. Tidak ada build flag. Context atau client memilihnya lewat parameter terakhir:
+
+```zig
+// Config sama dengan Context.init, binding adalah parameter terakhir.
+var ssl_ctx = try tlz.Context.initWith(allocator, io, .{
+    .cert_path = "certs/ecdsa_p256_cert.pem",
+    .key_path = "certs/ecdsa_p256_key.pem",
+    .alpn = &.{.H2},
+}, .OPENSSL);
+defer ssl_ctx.deinit();
+
+var conn = try ssl_ctx.newConnection();
+defer conn.deinit();
+
+// Client: file CA, nama server (SNI dan cek nama), penawaran ALPN.
+var client = try tlz.Client.connectWith("ca.pem", "example.com", &.{.H2}, .OPENSSL);
+defer client.deinit();
+```
+
+- `Context.init` dan `initWith(..., .DEFAULT)` tetap native, bahkan ketika OpenSSL ikut di-build.
+- Memilih `.OPENSSL` tanpa OpenSSL di host build adalah build error, bukan error saat runtime.
+- Handshake berupa loop: `conn.handshake(incoming, &out)` sampai `conn.handshakeDone()`. Client mulai dengan `handshake(&.{}, &out)`, yang menulis ClientHello. Selama `conn.pendingLen()` di atas 0, panggil `conn.drain(&out)` dan kirim byte-nya.
+- Setelah handshake: `readAppData`, `writeAppData`, `closeNotify`, `selectedAlpn`, nama yang sama dengan native.
+- Hanya `cert_path`, `key_path`, `alpn`, `min_version`, dan `max_version` yang berlaku. Curve dan cipher memakai default OpenSSL.
+
+Detailnya ada di [`docs/hld-id.md`](docs/hld-id.md#model-backend) dan [`docs/lld-id.md`](docs/lld-id.md#openssl).
+
 ## Permukaan publik
 
 | Nama | Apa itu |
 | :- | :- |
 | `Context`, `Version`, `DEFAULT_CURVES`, `DEFAULT_CIPHERS` | context server dan policy-nya |
+| `Binding`, `Context.initWith`, `Context.ContextFor`, `Client.connectWith`, `Client.ConnectionFor` | pilihan backend (native atau OpenSSL) |
 | `serverHandshake`, `serverHelloRetry`, `serverHandshakeAfterRetry` | handshake server TLS 1.3 |
 | `Connection`, `HandshakeOptions`, `HandshakeResult`, `RetryState`, `RetryFlight` | input dan output handshake, serta koneksi yang sudah established |
 | `alertForError`, `alertRecordForError`, `parseInboundAlert` | alert keluar dan masuk |
