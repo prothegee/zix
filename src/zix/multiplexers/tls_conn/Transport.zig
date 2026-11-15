@@ -183,7 +183,7 @@ pub fn sendShared(self: *Self, bytes: []const u8) bool {
     var off: usize = 0;
     while (off < bytes.len) {
         const rc = linux.write(self.fd, bytes[off..].ptr, bytes.len - off);
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
 
@@ -222,7 +222,7 @@ pub fn sendRaw(self: *Self, bytes: []const u8) bool {
     var off: usize = 0;
     while (off < bytes.len) {
         const rc = linux.write(self.fd, bytes[off..].ptr, bytes.len - off);
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
 
@@ -284,7 +284,7 @@ pub fn sendPlainGather(self: *Self, prefix: []const u8, tail: []const u8, sealed
 pub fn onWritable(self: *Self, epfd: std.posix.fd_t) bool {
     while (self.woff < self.wlen) {
         const rc = linux.write(self.fd, self.wbuf[self.woff..].ptr, self.wlen - self.woff);
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) return false;
 
@@ -323,7 +323,7 @@ fn drainFd(fd: std.posix.fd_t, sink: []u8) usize {
     var total: usize = 0;
     while (total < sink.len) {
         const rc = linux.read(fd, sink[total..].ptr, sink.len - total);
-        if (std.posix.errno(rc) != .SUCCESS or rc == 0) break;
+        if (linux.errno(rc) != .SUCCESS or rc == 0) break;
 
         total += rc;
     }
