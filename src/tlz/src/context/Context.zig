@@ -43,6 +43,9 @@ const Version = @import("version.zig").Version;
 const Alpn = @import("../alpn.zig").Alpn;
 const NamedGroup = @import("../named_group.zig").NamedGroup;
 const CipherSuite = @import("../cipher_suite.zig").CipherSuite;
+const binding_mod = @import("../binding.zig");
+const Binding = binding_mod.Binding;
+const OpensslContext = @import("../openssl/Context.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const Ed25519 = std.crypto.sign.Ed25519;
@@ -201,6 +204,36 @@ fn signingKeyFor(
     };
 }
 
+/// Map an error from the OpenSSL context into this module's set.
+fn opensslError(err: OpensslContext.Error) Error {
+    @branchHint(.cold);
+
+    return switch (err) {
+        error.Tlz_OpensslContext_ContextCreateFailed => Error.Tlz_Context_ContextCreateFailed,
+        error.Tlz_OpensslContext_PathTooLong => Error.Tlz_Context_PathTooLong,
+        error.Tlz_OpensslContext_CertLoadFailed => Error.Tlz_Context_CertLoadFailed,
+        error.Tlz_OpensslContext_KeyLoadFailed => Error.Tlz_Context_KeyLoadFailed,
+        error.Tlz_OpensslContext_KeyMismatch => Error.Tlz_Context_KeyMismatch,
+        error.Tlz_OpensslContext_InvalidVersionRange => Error.Tlz_Context_InvalidVersionRange,
+        error.Tlz_OpensslContext_VersionSetFailed => Error.Tlz_Context_VersionSetFailed,
+        error.Tlz_OpensslContext_AlpnTooLong => Error.Tlz_Context_AlpnTooLong,
+        error.Tlz_OpensslContext_OutOfMemory => Error.Tlz_Context_OutOfMemory,
+        error.Tlz_OpensslContext_SslCreateFailed => Error.Tlz_Context_SslCreateFailed,
+        error.Tlz_OpensslContext_BioCreateFailed => Error.Tlz_Context_BioCreateFailed,
+        error.Tlz_OpensslContext_BioWriteFailed => Error.Tlz_Context_BioWriteFailed,
+        error.Tlz_OpensslContext_InputTooLarge => Error.Tlz_Context_InputTooLarge,
+        error.Tlz_OpensslContext_HandshakeFailed => Error.Tlz_Context_HandshakeFailed,
+        error.Tlz_OpensslContext_PeerVerifyFailed => Error.Tlz_Context_PeerVerifyFailed,
+        error.Tlz_OpensslContext_NoProtocolNegotiated => {
+            return Error.Tlz_Context_NoProtocolNegotiated;
+        },
+        error.Tlz_OpensslContext_PeerClosed => Error.Tlz_Context_PeerClosed,
+        error.Tlz_OpensslContext_ReadFailed => Error.Tlz_Context_ReadFailed,
+        error.Tlz_OpensslContext_WriteFailed => Error.Tlz_Context_WriteFailed,
+        error.Tlz_OpensslContext_ShutdownFailed => Error.Tlz_Context_ShutdownFailed,
+    };
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -230,6 +263,24 @@ pub const Error = error{
     Tlz_Context_InvalidKey,
     Tlz_Context_RsaKeyTooSmall,
     Tlz_Context_OutOfMemory,
+    Tlz_Context_ContextCreateFailed,
+    Tlz_Context_PathTooLong,
+    Tlz_Context_CertLoadFailed,
+    Tlz_Context_KeyLoadFailed,
+    Tlz_Context_KeyMismatch,
+    Tlz_Context_VersionSetFailed,
+    Tlz_Context_AlpnTooLong,
+    Tlz_Context_SslCreateFailed,
+    Tlz_Context_BioCreateFailed,
+    Tlz_Context_BioWriteFailed,
+    Tlz_Context_InputTooLarge,
+    Tlz_Context_HandshakeFailed,
+    Tlz_Context_PeerVerifyFailed,
+    Tlz_Context_NoProtocolNegotiated,
+    Tlz_Context_PeerClosed,
+    Tlz_Context_ReadFailed,
+    Tlz_Context_WriteFailed,
+    Tlz_Context_ShutdownFailed,
 };
 
 /// Load the certificate and key, detect the key type, and check the policy.
@@ -280,6 +331,61 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, config: Config) Error!Self
         .max_version = config.max_version,
         .prefer_server_ciphers = config.prefer_server_ciphers,
         .hsts_max_age_s = config.hsts_max_age_s,
+    };
+}
+
+/// The context type a binding builds.
+///
+/// Param:
+/// binding - Binding (the backend, a build error when it is not compiled in)
+///
+/// Return:
+/// - Self for `.DEFAULT`
+/// - the OpenSSL context for `.OPENSSL`
+pub fn ContextFor(comptime binding: Binding) type {
+    binding_mod.requireBuilt(binding);
+
+    return switch (binding) {
+        .DEFAULT => Self,
+        .OPENSSL => OpensslContext,
+    };
+}
+
+/// Build a context on the chosen backend, from the same config as `init`.
+///
+/// Note:
+/// - `initWith(..., .DEFAULT)` is `init`: native, even when OpenSSL is compiled in.
+/// - The OpenSSL context reads the PEM files itself, so `io` is not used there.
+///
+/// Param:
+/// allocator - std.mem.Allocator (owns what the context keeps until `deinit`)
+/// io - std.Io (reads the PEM files on the native backend)
+/// config - Config (the settings, checked by the chosen backend)
+/// binding - Binding (the backend, a build error when it is not compiled in)
+///
+/// Usage:
+/// ```zig
+/// var ssl_ctx = try tlz.Context.initWith(allocator, io, .{
+///     .cert_path = "cert.pem",
+///     .key_path = "key.pem",
+/// }, .OPENSSL);
+/// defer ssl_ctx.deinit();
+///
+/// var conn = try ssl_ctx.newConnection();
+/// ```
+///
+/// Return:
+/// - ContextFor(binding)
+/// - Error with the same condition the chosen backend failed on
+pub fn initWith(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: Config,
+    comptime binding: Binding,
+) Error!ContextFor(binding) {
+    return switch (binding) {
+        .DEFAULT => init(allocator, io, config),
+        .OPENSSL => OpensslContext.init(allocator, config) catch |err| opensslError(err),
     };
 }
 
@@ -384,6 +490,18 @@ fn tmpPath(buf: []u8, tmp: *const std.testing.TmpDir, name: []const u8) ![]const
     return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}/{s}", .{
         tmp.sub_path,
         name,
+    });
+}
+
+/// Write the ECDSA cert and key into `tmp` as cert.pem and key.pem.
+fn writeEcFiles(tmp: *const std.testing.TmpDir) !void {
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "cert.pem",
+        .data = EC_CERT_PEM,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "key.pem",
+        .data = EC_KEY_PEM,
     });
 }
 
@@ -506,5 +624,101 @@ test "tlz context: Context, init with a certificate that is not PEM is invalid" 
             .key_path = "unused.pem",
         },
     ));
+}
+
+test "tlz context: Context, ContextFor DEFAULT is the native context" {
+    try std.testing.expect(ContextFor(.DEFAULT) == Self);
+}
+
+test "tlz context: Context, ContextFor OPENSSL is the OpenSSL context" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        try std.testing.expect(ContextFor(.OPENSSL) == OpensslContext);
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "tlz context: Context, initWith DEFAULT loads the native context" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeEcFiles(&tmp);
+    var cert_path_buf: [128]u8 = undefined;
+    var key_path_buf: [128]u8 = undefined;
+
+    var ctx = try initWith(std.testing.allocator, std.testing.io, .{
+        .cert_path = try tmpPath(&cert_path_buf, &tmp, "cert.pem"),
+        .key_path = try tmpPath(&key_path_buf, &tmp, "key.pem"),
+    }, .DEFAULT);
+    defer ctx.deinit();
+
+    try std.testing.expect(ctx.signing_key == .ecdsa_p256);
+}
+
+test "tlz context: Context, initWith DEFAULT with a bad policy fails like init" {
+    try std.testing.expectError(Error.Tlz_Context_NoCurves, initWith(
+        std.testing.allocator,
+        std.testing.io,
+        .{
+            .cert_path = "does-not-exist.pem",
+            .key_path = "does-not-exist.pem",
+            .curves = &.{},
+        },
+        .DEFAULT,
+    ));
+}
+
+test "tlz context: Context, initWith OPENSSL loads the OpenSSL context" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try writeEcFiles(&tmp);
+        var cert_path_buf: [128]u8 = undefined;
+        var key_path_buf: [128]u8 = undefined;
+
+        var ctx = try initWith(std.testing.allocator, std.testing.io, .{
+            .cert_path = try tmpPath(&cert_path_buf, &tmp, "cert.pem"),
+            .key_path = try tmpPath(&key_path_buf, &tmp, "key.pem"),
+            .alpn = &.{.H2},
+        }, .OPENSSL);
+        defer ctx.deinit();
+
+        try std.testing.expect(ctx.alpn_list.len > 0);
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "tlz context: Context, initWith OPENSSL with a missing certificate fails to load" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        try std.testing.expectError(Error.Tlz_Context_CertLoadFailed, initWith(
+            std.testing.allocator,
+            std.testing.io,
+            .{
+                .cert_path = "tlz-does-not-exist-cert.pem",
+                .key_path = "tlz-does-not-exist-key.pem",
+            },
+            .OPENSSL,
+        ));
+    } else {
+        return error.SkipZigTest;
+    }
+}
+
+test "tlz context: Context, initWith OPENSSL with an inverted range is invalid" {
+    if (comptime binding_mod.isBuilt(.OPENSSL)) {
+        try std.testing.expectError(Error.Tlz_Context_InvalidVersionRange, initWith(
+            std.testing.allocator,
+            std.testing.io,
+            .{
+                .cert_path = "unused.pem",
+                .key_path = "unused.pem",
+                .min_version = .TLS_1_3,
+                .max_version = .TLS_1_2,
+            },
+            .OPENSSL,
+        ));
+    } else {
+        return error.SkipZigTest;
+    }
 }
 
