@@ -86,6 +86,9 @@ pub const VERSION_STRING = getVersionString();
 /// ZIX Logger
 pub const Logger = @import("logger/Logger.zig");
 
+/// ZIX Channel
+pub const Channel = @import("channel/Channel.zig");
+
 /// ZIX Http1
 pub const Http1 = @import("tcp/http1/Http1.zig");
 
