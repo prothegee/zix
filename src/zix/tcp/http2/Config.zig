@@ -30,6 +30,7 @@
 //!
 
 const std = @import("std");
+const tlz = @import("tlz");
 const DispatchModel = @import("../../shared/dispatch.zig").Model;
 const Logger = @import("../../logger/Logger.zig");
 const ServeOpts = @import("ServeOpts.zig");
@@ -79,8 +80,14 @@ cache_max_value_bytes: u32 = 16 * 1024,
 cache_ttl_ms: u32 = 1000,
 /// Ceiling on per-worker cache memory in bytes. 0 disables the ceiling.
 cache_max_total_bytes: usize = 0,
-// TODO: tls: ?*Tls.Context = null,
-// TODO: tls_port: u16 = 0,
+/// h2 over TLS, opt in. When set, the server serves HTTP/2 over TLS (zix.tlz),
+/// ALPN h2 required. The context carries the cert, key, ALPN, and policy.
+/// Caller owns, must outlive.
+tls: ?*tlz.Context = null,
+/// Companion TLS port for the dual listener. 0 keeps one listener (with tls
+/// set, TLS only on port). Non-zero serves h2c on port and h2 over TLS on
+/// tls_port. Ignored when tls is null.
+tls_port: u16 = 0,
 logger: ?*Logger = null,
 /// Per-handler budget in milliseconds. 0 disables it. Seeds the context
 /// deadline at dispatch.
@@ -279,5 +286,22 @@ test "zix http2: Config, serveOpts keeps the defaults" {
     try std.testing.expectEqual(expected.max_body, opts.max_body);
     try std.testing.expect(!opts.response_cache);
     try std.testing.expect(opts.logger == null);
+}
+
+test "zix http2: Config, TLS is off by default" {
+    const config = testConfig();
+
+    try std.testing.expect(config.tls == null);
+    try std.testing.expectEqual(@as(u16, 0), config.tls_port);
+}
+
+test "zix http2: Config, keeps a TLS context and port" {
+    var ctx: tlz.Context = undefined;
+    var config = testConfig();
+    config.tls = &ctx;
+    config.tls_port = 9443;
+
+    try std.testing.expect(config.tls.? == &ctx);
+    try std.testing.expectEqual(@as(u16, 9443), config.tls_port);
 }
 
