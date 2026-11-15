@@ -102,7 +102,7 @@
 | [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) | gRPC h2c: tujuan, arsitektur, API, 4 tipe RPC, codec, model dispatch |
 | [`docs/hld-proxy-id.md`](docs/hld-proxy-id.md) | Reverse proxy (nginx, haproxy) untuk zix.Http1, zix.Grpc |
 | [`docs/hld-logger-id.md`](docs/hld-logger-id.md) | Logger: tujuan, API, metode log, format, rotasi file, pemasangan protokol |
-| [`docs/hld-tls-id.md`](docs/hld-tls-id.md) | TLS: tujuan, version policy, Tls.Context, alur handshake, integrasi engine, client |
+| [`src/tlz/docs/hld-id.md`](src/tlz/docs/hld-id.md) | TLS (tlz): tujuan, version policy, tlz.Context, alur handshake, pemakaian di zix, client |
 | [`docs/hld-http3-id.md`](docs/hld-http3-id.md) | HTTP/3 (QUIC): tujuan, runtime model, API, router, dispatch model, handshake, QPACK, memory model |
 | [`docs/hld-webrtc-id.md`](docs/hld-webrtc-id.md) | WebRTC: tujuan, runtime model, API, ICE-lite, data channel, forwarding media, dispatch model, memory model |
 | [`docs/lld-http1-id.md`](docs/lld-http1-id.md) | HTTP/1: parsing internal, write helper, router, engine EPOLL, codec WebSocket |
@@ -114,7 +114,8 @@
 | [`docs/lld-fix-id.md`](docs/lld-fix-id.md) | FIX: struktur data internal dan algoritma serveConn |
 | [`docs/lld-channel-id.md`](docs/lld-channel-id.md) | Channel: internal ring buffer, locking, algoritma send/recv |
 | [`docs/lld-logger-id.md`](docs/lld-logger-id.md) | Logger: buffer tulis internal, spinlock, algoritma rotasi |
-| [`docs/lld-tls-id.md`](docs/lld-tls-id.md) | TLS: internal wire / handshake / key-schedule / record, validate Tls.Context, jalur serve |
+| [`src/tlz/docs/lld-id.md`](src/tlz/docs/lld-id.md) | TLS (tlz): internal wire / handshake / key-schedule / record, validate tlz.Context, jalur serve zix |
+| [`src/tlz/docs/bench-id.md`](src/tlz/docs/bench-id.md) | TLS (tlz): biaya RSA, ECDSA P-256, Ed25519, dan record AES-128-GCM di samping `openssl speed` |
 | [`docs/lld-http3-id.md`](docs/lld-http3-id.md) | HTTP/3 (QUIC): internal per-layer (crypto, packet, frame, flow, recovery, QPACK, connection, demux, dispatch) |
 | [`docs/lld-webrtc-id.md`](docs/lld-webrtc-id.md) | WebRTC: internal per-layer (demux, STUN, ICE, DTLS, SCTP, data channel, SDP, media, dispatch) |
 | [`docs/zix-deploy-id.md`](docs/zix-deploy-id.md) | Deployment: bangun Docker image (zig fetch atau vendor) dan konfigurasi TLS context untuk Ed25519 / ECDSA P-256 / RSA |
@@ -431,9 +432,7 @@ Backpressure submission-queue per-worker yang opt-in pada `zix.Http1` di bawah `
 
 __*15. TLS pure-Zig (https, h2, wss):*__
 
-> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
-
-TLS 1.3 dengan floor TLS 1.2, di atas `std.crypto`, tanpa OpenSSL. Opt-in dan additive: `zix.Http1` menyajikan https/1.1, `zix.Http2` dan `zix.Grpc` menyajikan h2 di atas TLS (ALPN h2), dan SSE serta WebSocket berjalan di atas TLS (wss) pada jalur thread-per-koneksi. Sertifikat server bisa ECDSA P-256, Ed25519, atau RSA, dikonfigurasi oleh `Tls.Context` milik pemanggil (curve / cipher tervalidasi, HSTS). Client native yang memverifikasi (`zix.Tls.Client`) memeriksa chain dan hostname.
+TLS 1.3 dengan floor TLS 1.2, di atas `std.crypto`, tanpa OpenSSL, dari package mandiri `tlz` (`zix.tlz`). Opt-in dan additive: `zix.Http1` menyajikan https/1.1, `zix.Http2` dan `zix.Grpc` menyajikan h2 di atas TLS (ALPN h2), dan SSE serta WebSocket berjalan di atas TLS (wss) di semua dispatch model. Sertifikat server bisa ECDSA P-256, Ed25519, atau RSA, dikonfigurasi oleh `zix.tlz.Context` milik pemanggil (curve / cipher tervalidasi). Client native yang memverifikasi (`zix.tlz.Client`) memeriksa chain dan hostname.
 
 > Transport terenkripsi adalah gate config di depan engine cleartext yang tak berubah, bukan server terpisah, jadi handler yang sama menyajikan http dan https.
 
@@ -443,7 +442,7 @@ __*16. HTTP/3 di atas QUIC, pure-Zig:*__
 
 > TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
-`zix.Http3` menyajikan HTTP/3 (RFC 9114) di atas QUIC (RFC 9000 / 9001 / 9002), dibangun dari RFC di atas `std.crypto`: packet protection, handshake TLS 1.3 di atas CRYPTO stream, loss recovery, QPACK, dan dispatch per-core di atas substrat `zix.Udp`. `Router` comptime dan `Tls.Context` yang sama dengan engine TCP.
+`zix.Http3` menyajikan HTTP/3 (RFC 9114) di atas QUIC (RFC 9000 / 9001 / 9002), dibangun dari RFC di atas `std.crypto`: packet protection, handshake TLS 1.3 di atas CRYPTO stream, loss recovery, QPACK, dan dispatch per-core di atas substrat `zix.Udp`. `Router` comptime dan `tlz.Context` yang sama dengan engine TCP.
 
 > Transport HTTP terbaru hadir in-tree tanpa C QUIC library, berbagi router dan config TLS yang sudah dipakai untuk HTTP/1 dan HTTP/2.
 
@@ -1479,7 +1478,7 @@ Lihat `docs/zix-config-id.md` untuk referensi field.
 
 > TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
-`zix.Http2` adalah server HTTP/2 yang berdiri sendiri: h2c (cleartext) secara default, atau h2 over TLS saat sebuah `Tls.Context` dipasang (ALPN menegosiasikan h2, yang diwajibkan browser untuk HTTP/2). Ia juga merupakan transport h2c yang dijalankan oleh `zix.Grpc`.
+`zix.Http2` adalah server HTTP/2 yang berdiri sendiri: h2c (cleartext) secara default, atau h2 over TLS saat sebuah `zix.tlz.Context` dipasang (ALPN menegosiasikan h2, yang diwajibkan browser untuk HTTP/2). Ia juga merupakan transport h2c yang dijalankan oleh `zix.Grpc`.
 
 **Kapan digunakan:** jangkau `zix.Http2` secara langsung saat kamu butuh framing HTTP/2 mentah (h2c atau h2-over-TLS) tanpa semantik gRPC, misalnya endpoint h2 untuk browser atau client h2. Untuk trafik web biasa `zix.Http1` memimpin benchmark, dan untuk RPC pakai `zix.Grpc` (yang berjalan di atas engine ini).
 
@@ -1608,19 +1607,23 @@ Lihat [`docs/hld-grpc-id.md`](docs/hld-grpc-id.md) untuk dokumentasi lengkap ter
 
 ### TLS (https / h2)
 
-> TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
-
-Server Http1 dan Http2 melayani cleartext secara default. Pasang sebuah `zix.Tls.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu tiap koneksi memakainya ulang. Untuk Http2 dan gRPC, model `.EPOLL` / `.URING` menterminasi TLS di dispatch worker dan memultipleks banyak koneksi per core, jadi https tidak men-spawn thread per koneksi.
+Server Http1, Http2, dan Grpc melayani cleartext secara default. Pasang sebuah `zix.tlz.Context` untuk opt-in ke TLS di jalur ber-gate, membiarkan engine cleartext tidak tersentuh. Context memuat cert / key dan memvalidasi policy sekali saat startup, lalu tiap koneksi memakainya ulang. Di `.EPOLL` / `.URING` setiap engine menterminasi TLS di dispatch worker dan memultipleks banyak koneksi per core, jadi https tidak men-spawn thread per koneksi.
 
 ```zig
-var tls = try zix.Tls.Context.init(allocator, io, .{
+var tls = try zix.tlz.Context.init(allocator, io, .{
     .cert_path = "examples/certs/ecdsa_p256_cert.pem",
-    .key_path  = "examples/certs/ecdsa_p256_key.pem",
-    .alpn      = &.{ .HTTP_1_1 }, // .H2 untuk server Http2
+    .key_path = "examples/certs/ecdsa_p256_key.pem",
+    .alpn = &.{.HTTP_1_1}, // .H2 untuk server Http2 dan Grpc
 });
 defer tls.deinit();
 
-var server = zix.Http1.Server.init(handler, .{ .io = io, .ip = "127.0.0.1", .port = 9060, .tls = &tls, .dispatch_model = .EPOLL });
+var server = zix.Http1.Server.init(handler, .{
+    .io = io,
+    .ip = "127.0.0.1",
+    .port = 9060,
+    .tls = &tls,
+    .dispatch_model = .EPOLL,
+});
 ```
 
 Dengan `tls` diisi, server menjadi TLS-only di `port`. Tambahkan `tls_port` untuk melayani KEDUANYA dari satu server (dual listener,): cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama, alih-alih meluncurkan server kedua yang menduplikasi worker, tabel fd, dan cache. Tersedia di Http1, Http2, dan Grpc, semua dispatch model (di bawah `.URING` sisi TLS berjalan di ring).
@@ -1636,12 +1639,15 @@ var server = zix.Http1.Server.init(handler, .{
 });
 ```
 
-Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutamakan, ECDHE-only). `Tls.Context.Config` juga mengekspos `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, dan `hsts_max_age_s`. Curve dan cipher divalidasi ke set yang diimplementasi, jadi value yang tidak didukung adalah error saat startup. Cert bisa ECDSA P-256, Ed25519, atau RSA: `Tls.Context.init` mendeteksi tipe key dari cert (cert RSA membutuhkan TLS 1.3 dan menandatangani CertificateVerify dengan `rsa_pss_rsae_sha256`). Untuk deployment baru utamakan Ed25519 (signature handshake termurah), lalu ECDSA P-256, lalu RSA (pakai RSA untuk menyajikan cert RSA yang sudah diterbitkan). Lihat [docs/zix-deploy-id.md](docs/zix-deploy-id.md) untuk snippet config per tipe dan deployment Docker image.
+Dua path wajib diisi, sisanya default ke postur aman (floor TLS 1.2, 1.3 diutamakan, ECDHE-only). `zix.tlz.Context.Config` juga mengekspos `min_version` / `max_version`, `curves`, `ciphers`, `prefer_server_ciphers`, dan `hsts_max_age_s`. Curve dan cipher divalidasi ke set yang diimplementasi, jadi value yang tidak didukung adalah error saat startup. Cert bisa ECDSA P-256, Ed25519, atau RSA: `zix.tlz.Context.init` mendeteksi tipe key dari cert (cert RSA membutuhkan TLS 1.3 dan menandatangani CertificateVerify dengan `rsa_pss_rsae_sha256`). Untuk deployment baru utamakan Ed25519 (signature handshake termurah), lalu ECDSA P-256, lalu RSA (pakai RSA untuk menyajikan cert RSA yang sudah diterbitkan). Lihat [docs/zix-deploy-id.md](docs/zix-deploy-id.md) untuk snippet config per tipe dan deployment Docker image, dan [src/tlz/README-id.md](src/tlz/README-id.md) untuk tlz secara mandiri.
 
 - [examples/tls/tls_http1_basic.zig](examples/tls/tls_http1_basic.zig) - https/1.1
 - [examples/tls/tls_http2_basic.zig](examples/tls/tls_http2_basic.zig) - h2 over TLS
 - [examples/tls/tls_http1_ed25519.zig](examples/tls/tls_http1_ed25519.zig) - server cert Ed25519
 - [examples/tls/tls_http1_dual.zig](examples/tls/tls_http1_dual.zig) - dual listener (cleartext + https, satu server)
+- [examples/tls/tls_http1_sse.zig](examples/tls/tls_http1_sse.zig) - SSE lewat TLS
+- [examples/tls/tls_http1_ws.zig](examples/tls/tls_http1_ws.zig) - WebSocket lewat TLS (wss)
+- [examples/tls/tls_grpc_basic.zig](examples/tls/tls_grpc_basic.zig) - gRPC lewat TLS
 
 <br>
 
@@ -2056,7 +2062,7 @@ pub fn main(process: std.process.Init) !void {
 
 > TBD: belum di-port ke zix 0.6.x. Section ini masih menjelaskan zix 0.5.x.
 
-HTTP/3 berjalan di atas QUIC, yang berjalan di atas UDP, jadi `zix.Http3` berada pada substrat datagram `zix.Udp` yang sama di atas, bukan pada stack TCP / TLS. Ini adalah server HTTP/3 pure-Zig di atas QUIC (RFC 9114 / 9000 / 9001 / 9002). Transport QUIC, packet protection, glue handshake TLS 1.3, dan kompresi header QPACK semuanya ditulis dari RFC dan dibuktikan byte-exact terhadap worked example RFC. TLS 1.3 dilipat ke dalam handshake QUIC (tidak ada mode cleartext dan tidak ada TLS record layer), dikonfigurasi oleh `zix.Tls.Context` yang sama seperti engine TCP, jadi cert ECDSA P-256, Ed25519, atau RSA semuanya bekerja.
+HTTP/3 berjalan di atas QUIC, yang berjalan di atas UDP, jadi `zix.Http3` berada pada substrat datagram `zix.Udp` yang sama di atas, bukan pada stack TCP / TLS. Ini adalah server HTTP/3 pure-Zig di atas QUIC (RFC 9114 / 9000 / 9001 / 9002). Transport QUIC, packet protection, glue handshake TLS 1.3, dan kompresi header QPACK semuanya ditulis dari RFC dan dibuktikan byte-exact terhadap worked example RFC. TLS 1.3 dilipat ke dalam handshake QUIC (tidak ada mode cleartext dan tidak ada TLS record layer), dikonfigurasi oleh `zix.tlz.Context` yang sama seperti engine TCP, jadi cert ECDSA P-256, Ed25519, atau RSA semuanya bekerja.
 
 Route adalah table comptime (`zix.Http3.Router`), berbentuk sama seperti `zix.Http1` / `zix.Http2`, di-dispatch pada path request terdekode.
 
@@ -2073,7 +2079,7 @@ const Routes = zix.Http3.Router(&[_]zix.Http3.Route{
 });
 
 pub fn main(process: std.process.Init) !void {
-    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+    var tls = try zix.tlz.Context.init(std.heap.smp_allocator, process.io, .{
         .cert_path = "examples/certs/ecdsa_p256_cert.pem",
         .key_path  = "examples/certs/ecdsa_p256_key.pem",
     });
@@ -2135,7 +2141,7 @@ fn onEvent(event: zix.Webrtc.Event, ctx: *zix.Webrtc.Context) !void {
 }
 
 pub fn main(process: std.process.Init) !void {
-    var tls = try zix.Tls.Context.init(std.heap.smp_allocator, process.io, .{
+    var tls = try zix.tlz.Context.init(std.heap.smp_allocator, process.io, .{
         .cert_path = "examples/certs/ecdsa_p256_cert.pem",
         .key_path  = "examples/certs/ecdsa_p256_key.pem",
     });
