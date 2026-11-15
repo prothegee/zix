@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+<!-- Author/Designer: Prana Ron / @prothegee -->
+<!-- License:CC BY-ND (https://creativecommons.org/licenses/by-nd/4.0/) -->
+<svg
+   viewBox="0 0 600 200"
+   version="1.1"
+   id="svg12"
+   sodipodi:docname="tlz-logo.svg"
+   inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   xml:space="preserve"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"><defs
+     id="defs12"><inkscape:path-effect
+       effect="fillet_chamfer"
+       id="path-effect30"
+       is_visible="true"
+       lpeversion="1"
+       nodesatellites_param="F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1 @ F,0,0,1,0,0,0,1"
+       radius="0"
+       unit="px"
+       method="auto"
+       mode="F"
+       chamfer_steps="1"
+       flexible="false"
+       use_knot_distance="true"
+       apply_no_radius="true"
+       apply_with_radius="true"
+       only_selected="false"
+       hide_knots="false" /></defs><sodipodi:namedview
+     id="namedview12"
+     pagecolor="#505050"
+     bordercolor="#ffffff"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="1"
+     inkscape:deskcolor="#505050"
+     inkscape:zoom="2"
+     inkscape:cx="224"
+     inkscape:cy="47.75"
+     inkscape:window-width="1904"
+     inkscape:window-height="1032"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="g12"
+     showguides="true" /><style
+     id="style1">
+    .letter { 
+      font-family: Arial, Helvetica, sans-serif; 
+      font-weight: bold; 
+      fill: #F7A41D; 
+    }
+  </style><!-- Huruf J --><!-- Huruf Z dari logo Zig (ikon) --><!-- Huruf O --><!-- Huruf N --><style
+     id="style12">
+#text { fill: #121212 }
+@media (prefers-color-scheme: dark) { #text { fill: #f2f2f2 } }
+</style><path
+     style="fill:#f7a41d;stroke-width:1.42677"
+     d="M 512.62786,0.12592498 442.716,31.51492 h -64.20476 l -27.10868,31.388995 h 65.24418 L 302.8923,199.87407 372.80415,167.05831 h 64.20476 l 27.10868,-31.389 h -65.02126 z"
+     id="polygon1"
+     inkscape:label="z" /><g
+     id="g12"
+     inkscape:label="l"><path
+       style="display:inline;vector-effect:non-scaling-stroke;fill:#f7a41d;fill-opacity:1;stroke:none;stroke-width:1.42677;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;-inkscape-stroke:hairline"
+       d="m 308.96908,31.514506 h 46.53206 l -89.57929,104.605994 -46.2217,-0.001 z"
+       id="path7"
+       sodipodi:nodetypes="ccccc" /><path
+       style="display:inline;vector-effect:non-scaling-stroke;fill:#f7a41d;fill-opacity:1;stroke:none;stroke-width:1.42677;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;-inkscape-stroke:hairline"
+       d="m 305.42325,167.04119 25.65672,-31.12077 h -111.1893 l -27.14812,31.12077 z"
+       id="path7-8"
+       sodipodi:nodetypes="ccccc" /></g><g
+     id="g11"
+     inkscape:label="t"><path
+       style="display:inline;vector-effect:non-scaling-stroke;fill:#f7a41d;fill-opacity:1;stroke:none;stroke-width:1.42677;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;-inkscape-stroke:hairline"
+       d="m 199.98339,31.514506 h 46.53206 l -112.92159,135.613574 -46.221711,-0.001 z"
+       id="path7-5"
+       sodipodi:nodetypes="ccccc" /><path
+       style="display:inline;vector-effect:non-scaling-stroke;fill:#f7a41d;fill-opacity:1;stroke:none;stroke-width:1.42677;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;-inkscape-stroke:hairline"
+       d="M 261.62303,62.673493 287.27976,31.552731 H 147.555 l -27.14812,31.120762 z"
+       id="path7-8-3"
+       sodipodi:nodetypes="ccccc" /></g></svg>
