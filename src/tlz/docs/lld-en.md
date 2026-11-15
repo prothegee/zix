@@ -2,7 +2,7 @@
 
 Internals per module. For the architecture and the goals see [`hld-en.md`](hld-en.md).
 
-tlz is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the clients by `client.zig` and `tls12/client.zig`. The caller owns the socket. Paths below are relative to `src/tlz/src/` unless they start with `src/zix/`.
+tlz is sans-I/O. The server handshake is driven by `connection.serverHandshake`, the clients by `client.zig` and `tls12/client.zig`. The optional OpenSSL backend lives in `openssl/` and is reached through `binding.zig`. The caller owns the socket. Paths below are relative to `src/tlz/src/` unless they start with `src/zix/`.
 
 ## File kinds
 
@@ -10,7 +10,7 @@ A lower_snake_case file holds functions, a PascalCase file is one record. A func
 
 ## Errors
 
-Every module that can fail declares its own `pub const Error`. Member names read `Tlz_<Module>_<Condition>`, for example `Tlz_Context_KeyFileNotFound` or `Tlz_Record_BadMac`. A module never aliases another module's set: an error from a callee is translated into the caller's own member, once, at the caller's public function. So `Context.init` reports `Tlz_Context_InvalidKey`, not the `Tlz_RsaPrivateKey_InvalidKey` it got from the key parser.
+Every module that can fail declares its own `pub const Error`. Member names read `Tlz_<Module>_<Condition>`, for example `Tlz_Context_KeyFileNotFound` or `Tlz_Record_BadMac`. A module never aliases another module's set: an error from a callee is translated into the caller's own member, once, at the caller's public function. So `Context.init` reports `Tlz_Context_InvalidKey`, not the `Tlz_RsaPrivateKey_InvalidKey` it got from the key parser. In the same way, `Context.initWith` turns `Tlz_OpensslContext_KeyMismatch` into `Tlz_Context_KeyMismatch`, and `Client.connectWith` turns `Tlz_OpensslClient_*` into `Tlz_Client_*`.
 
 ## wire/
 
@@ -179,6 +179,67 @@ Three traps worth knowing:
 - `dtls/connection.zig` builds its own flights and reuses only leaf primitives from the 1.2 track. The DTLS transcript is taken over 12 byte DTLS headers as if unfragmented, without the first ClientHello and the HelloVerifyRequest (RFC 6347 4.2.6). Getting this wrong is invisible until a real peer rejects the Finished.
 - The anti-replay window in `dtls/record.zig` is checked before the AEAD and updated after it. Updating first would let a forged far-ahead sequence clear the window.
 - DTLS-SRTP export uses the no-context seed form. Passing an empty context slice appends a two byte zero length and breaks interop.
+
+## binding.zig
+
+`Binding` is `enum(u8) { DEFAULT, OPENSSL }`. `isBuilt(binding)` is `true` for `.DEFAULT` and follows `c.ENABLED` for `.OPENSSL`. `requireBuilt(binding)` raises a `@compileError` (install the libssl dev package so `pkg-config openssl` finds it) when the backend is not built.
+
+- `context/Context.zig`: `ContextFor(binding)` is `Self` for `.DEFAULT` and `openssl/Context.zig` for `.OPENSSL`. `initWith(allocator, io, config, binding)` calls `init` or the OpenSSL `init`, and translates the OpenSSL error into `Tlz_Context_*`.
+- `client.zig`: `ConnectionFor(.OPENSSL)` is `openssl/Connection.zig`, `.DEFAULT` is a `@compileError` that points to `start` plus `finish`. `connectWith(ca_path, host, alpn_prefs, binding)` calls `openssl/client.connect` and translates its error into `Tlz_Client_*`.
+- `lib.zig` re-exports `Binding`.
+
+## openssl/
+
+The OpenSSL backend. Only compiled when `build.zig` detected OpenSSL.
+
+### Build
+
+`build.zig` exposes `detectOpenssl(b, target)` and `linkOpenssl(b, target, optimize, module)`. `detectOpenssl` returns `false` for a cross target, otherwise it runs `pkg-config --exists openssl` and falls back to the standard `ssl.h` paths. The result goes into the `tlz_options` module as `openssl`. Zig 0.17 has no `@cImport`, so `linkOpenssl` writes a small header (`ssl.h`, `err.h`, `x509v3.h`) into the build cache, translates it with `addTranslateC`, adds it as the `openssl_c` module, and links libssl, libcrypto, and libc. No C header is tracked in the tree. The zix root `build.zig` calls the same two functions.
+
+### c.zig
+
+The single importer of `openssl_c`. `ENABLED` is `tlz_options.openssl`. `raw` is the translated module when enabled, an empty namespace otherwise. A `comptime` block rejects an `OPENSSL_VERSION_NUMBER` below `0x30000000` (OpenSSL 3.0). Every other openssl file uses `c.raw`, never an OpenSSL header directly.
+
+### error.zig
+
+Reads the OpenSSL error queue, which is per thread. `clearQueue` runs before each OpenSSL call so a later read sees only that call. `drainMatch(lib, reasons)` empties the queue and reports whether one entry matched a library reason (used for the ALPN failure). `describe` and `drainLastLine` copy the readable line into a caller buffer (`LINE_BUF_LEN = 256`), never a borrowed C pointer. The text is for logs, control flow uses the codes. It cannot fail, so it has no error set.
+
+### Context.zig
+
+Server `SSL_CTX` on `TLS_server_method`. `init(allocator, config)`:
+
+1. Copies `cert_path` and `key_path` into zero-terminated buffers (`PathTooLong` past `PATH_MAX`).
+2. `SSL_CTX_use_certificate_chain_file`, `SSL_CTX_use_PrivateKey_file`, and `SSL_CTX_check_private_key` (`CertLoadFailed`, `KeyLoadFailed`, `KeyMismatch`).
+3. Maps `min_version` and `max_version` to the OpenSSL proto versions (`InvalidVersionRange`, `VersionSetFailed`).
+4. Builds the ALPN wire list with `allocator` and installs a select callback. The callback picks the first server protocol the client also offers (RFC 7301 3.2). No overlap is a fatal `no_application_protocol` alert, like the native server.
+
+Curves and ciphers keep the OpenSSL defaults. `newConnection` returns a server `Connection`. `deinit` frees the `SSL_CTX` and the ALPN list. A live `Connection` keeps the `SSL_CTX` alive, but not the ALPN list, so free every connection before the context.
+
+### Connection.zig
+
+Fields: `ssl`, `network_in`, `network_out`. `SSL_set_bio` attaches two memory BIOs: peer bytes are written into `network_in`, OpenSSL writes the bytes to send into `network_out`. `initServer` and `initClient` set the accept or connect state.
+
+- `handshake(incoming, out)`: write `incoming` into `network_in`, run `SSL_do_handshake`, then `drain(out)`. `WANT_READ` and `WANT_WRITE` are not errors, they return whatever is queued (possibly empty). A client starts with an empty `incoming`, which produces the ClientHello.
+- A failed handshake maps in this order: `ZERO_RETURN` to `PeerClosed`, a bad verify result to `PeerVerifyFailed`, an ALPN reason in the queue to `NoProtocolNegotiated`, else `HandshakeFailed`. An alert may still be queued after the error, so `drain` it to tell the peer.
+- `pendingLen` and `drain`: OpenSSL can queue more than `out` holds (a large flight, an alert, a session ticket after a read). Drain until `pendingLen` is 0 before waiting on the peer.
+- `writeAppData`, `readAppData`, `closeNotify`, `selectedAlpn` mirror the native `Connection`. `readAppData` returns an empty slice until a full record has arrived. Input longer than `c_int` is `InputTooLarge`.
+- `deinit` calls `SSL_free`, which frees both BIOs.
+
+### client.zig
+
+`connect(ca_path, host, alpn_prefs)` builds a fresh `SSL_CTX` on `TLS_client_method` for each call:
+
+1. `SSL_CTX_load_verify_file(ca_path)` and `SSL_VERIFY_PEER` (`CaLoadFailed`).
+2. Minimum version TLS 1.2 (`VersionSetFailed`).
+3. A client `Connection`. The context is freed at the end of `connect`, the `SSL` keeps its own reference.
+4. `host` is required (`HostMissing`, since OpenSSL would skip the name check on an empty host) and at most 253 bytes (`HostTooLong`). It is set as SNI (`SSL_set_tlsext_host_name`) and as the name to verify (`SSL_set1_host`).
+5. The ALPN offer, when not empty (`AlpnTooLong`, `AlpnSetFailed`).
+
+The returned `Connection` is not handshaken yet. The first `handshake(&.{}, out)` writes the ClientHello.
+
+### Tests
+
+Unit and edge tests live in each file and skip with `error.SkipZigTest` when OpenSSL is not built. Loopback tests run an OpenSSL client against an OpenSSL server in one process: TLS 1.2 and 1.3, ALPN (server order, no overlap), a hostname mismatch, an untrusted chain, and close_notify. Cross-check tests use the `openssl s_client` and `openssl s_server` tools as the peer. An ALPN parity test runs `s_client` (offering h2 and http/1.1) against the native server and the OpenSSL server with the same server order, and expects the same protocol from both.
 
 ## Use in zix
 
