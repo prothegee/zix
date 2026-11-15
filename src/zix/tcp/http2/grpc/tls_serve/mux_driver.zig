@@ -410,7 +410,7 @@ test "zix http2 grpc: mux_driver, answers a unary call and ends with close_notif
 
     try sendRecord(fds[0], plain[0..len]);
     const shut_rc = std.os.linux.shutdown(fds[0], std.os.linux.SHUT.WR);
-    try std.testing.expect(std.posix.errno(shut_rc) == .SUCCESS);
+    try std.testing.expect(std.os.linux.errno(shut_rc) == .SUCCESS);
 
     const seen = try readUntilClose(fds[0]);
     thread.join();
@@ -431,7 +431,7 @@ test "zix http2 grpc: mux_driver, a hangup mid-call gets GOAWAY" {
 
     try sendRecord(fds[0], plain[0..len]);
     const shut_rc = std.os.linux.shutdown(fds[0], std.os.linux.SHUT.WR);
-    try std.testing.expect(std.posix.errno(shut_rc) == .SUCCESS);
+    try std.testing.expect(std.os.linux.errno(shut_rc) == .SUCCESS);
 
     const seen = try readUntilClose(fds[0]);
     thread.join();
