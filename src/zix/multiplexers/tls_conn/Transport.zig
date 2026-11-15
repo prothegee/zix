@@ -45,7 +45,6 @@ const linux = std.os.linux;
 
 fd: std.posix.fd_t,
 tls: Session,
-
 /// Outbound ciphertext staged on EAGAIN. wbuf is the capacity, the live bytes
 /// are wbuf[woff..wlen], so a grown buffer never sends its uninitialized tail.
 wbuf: []u8 = &.{},
@@ -55,21 +54,17 @@ wlen: usize = 0,
 wclose: bool = false,
 /// EPOLLOUT must be armed for this connection.
 want_out: bool = false,
-
 /// First wbuf allocation size.
 wbuf_initial: usize = tls_conn.WRITE_BUF_INITIAL,
-
 /// The epoll data word this connection was registered with. A dual-listener
 /// loop tags TLS events here, so an EPOLLOUT re-arm keeps the tag.
 ep_data: u64 = 0,
-
 /// A ring send owns wbuf[woff..wlen] right now. While set the live bytes never
 /// move: no compaction, and a grown buffer keeps the old one in retired.
 inflight: bool = false,
 /// The buffer an in-flight ring send still reads after a grow. Freed by
 /// releaseRetired once that send completes.
 retired: []u8 = &.{},
-
 /// Owns wbuf and retired.
 allocator: std.mem.Allocator = std.heap.smp_allocator,
 
