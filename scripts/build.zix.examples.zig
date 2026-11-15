@@ -187,6 +187,16 @@ const EXAMPLES = .{
         "examples/tls/tls_http1_ws.zig",
         "tls",
     },
+    .{
+        "zix-example-tls_http2_basic",
+        "examples/tls/tls_http2_basic.zig",
+        "tls",
+    },
+    .{
+        "zix-example-tls_grpc_basic",
+        "examples/tls/tls_grpc_basic.zig",
+        "tls",
+    },
 };
 
 // --------------------------------------------------------- //
