@@ -197,6 +197,32 @@ const EXAMPLES = .{
         "examples/tls/tls_grpc_basic.zig",
         "tls",
     },
+    // channel
+    .{
+        "zix-example-channel_basic",
+        "examples/channel_basic.zig",
+        "channel",
+    },
+    .{
+        "zix-example-channel_worker_pool",
+        "examples/channel_worker_pool.zig",
+        "channel",
+    },
+    .{
+        "zix-example-channel_pipeline",
+        "examples/channel_pipeline.zig",
+        "channel",
+    },
+    .{
+        "zix-example-channel_ipc_a",
+        "examples/channel_ipc_a.zig",
+        "channel",
+    },
+    .{
+        "zix-example-channel_ipc_b",
+        "examples/channel_ipc_b.zig",
+        "channel",
+    },
 };
 
 // --------------------------------------------------------- //
@@ -235,7 +261,7 @@ pub fn addSteps(
     // const group_webrtc = b.step("zix-example-webrtc", "ZIX: Build all webrtc examples");
     // const group_uds = b.step("zix-example-uds", "ZIX: Build all uds examples");
     const group_tls = b.step("zix-example-tls", "ZIX: Build all tls examples");
-    // const group_channel = b.step("zix-example-channel", "ZIX: Build all channel examples");
+    const group_channel = b.step("zix-example-channel", "ZIX: Build all channel examples");
 
     // step.dependOn(group_tcp);
     // step.dependOn(group_fix);
@@ -247,7 +273,7 @@ pub fn addSteps(
     // step.dependOn(group_webrtc);
     // step.dependOn(group_uds);
     step.dependOn(group_tls);
-    // step.dependOn(group_channel);
+    step.dependOn(group_channel);
 
     inline for (EXAMPLES) |pair| {
         const exec_module = b.createModule(.{
@@ -273,6 +299,8 @@ pub fn addSteps(
             group_grpc
         else if (comptime std.mem.eql(u8, pair[2], "tls"))
             group_tls
+        else if (comptime std.mem.eql(u8, pair[2], "channel"))
+            group_channel
         // const group = if (comptime std.mem.eql(u8, pair[2], "tcp"))
         //     group_tcp
         // else if (comptime std.mem.eql(u8, pair[2], "fix"))
