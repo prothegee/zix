@@ -48,6 +48,10 @@ const EXAMPLES = [_][]const u8{
     "cert_verify",
     "tls13_echo_server",
     "tls13_echo_client",
+    "bench_rsa",
+    "bench_ecdsa_p256",
+    "bench_ed25519",
+    "bench_record",
 };
 
 /// Behaviour tier suites, one per file under `tests/behaviour/`.
