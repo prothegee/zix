@@ -288,9 +288,9 @@ ICE-lite, DTLS 1.2, data channel SCTP, forwarding media SRTP opsional, semuanya 
 | send_timeout_ms | 0 | timeout send socket (SO_SNDTIMEO), 0 = nonaktif | memblok send melewati ini | atur untuk membuang konsumen lambat | konsumen dibuang lebih cepat | konsumen lambat ditoleransi | 0 menunggu tanpa batas |
 | logger | null | logger opsional untuk baris lifecycle | | pasang untuk logging | | | |
 
-## TLS context (`Tls.Context.Config`)
+## TLS context (`tlz.Context.Config`)
 
-Policy TLS sisi server, divalidasi sekali saat init. Pasang `Tls.Context` yang sudah dibangun lewat pointer ke field `tls` sebuah engine. Mengosongkan field opsional menghasilkan default aman (forward secrecy, AEAD, ECDHE-only).
+Policy TLS sisi server, divalidasi sekali saat init. Pasang `tlz.Context` yang sudah dibangun lewat pointer ke field `tls` sebuah engine. Mengosongkan field opsional menghasilkan default aman (forward secrecy, AEAD, ECDHE-only).
 
 | field | default | fungsi | dampak performa | cara menyetel | jika lebih kecil | jika lebih besar | konsekuensi salah atur |
 | :- | :- | :- | :- | :- | :- | :- | :- |
