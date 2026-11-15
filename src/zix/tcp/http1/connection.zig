@@ -311,10 +311,10 @@ test "zix http1: connection, serves a miss then a hit from the response cache" {
     const request =
         "GET /cached HTTP/1.1\r\nConnection: keep-alive\r\n\r\n" ++
         "GET /cached HTTP/1.1\r\nConnection: close\r\n\r\n";
-    try std.testing.expectEqual(
-        @as(usize, request.len),
-        std.posix.system.write(fds[0], request.ptr, request.len),
-    );
+    const written = std.posix.system.write(fds[0], request.ptr, request.len);
+
+    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(written));
+    try std.testing.expectEqual(@as(usize, request.len), @as(usize, @intCast(written)));
 
     const thread = try std.Thread.spawn(.{}, ServeProbe.run, .{fds[1]});
     thread.join();
@@ -342,10 +342,10 @@ test "zix http1: connection, serves gzip through sendNegotiated" {
     defer _ = std.posix.system.close(fds[0]);
 
     const request = "GET /gz HTTP/1.1\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n";
-    try std.testing.expectEqual(
-        @as(usize, request.len),
-        std.posix.system.write(fds[0], request.ptr, request.len),
-    );
+    const written = std.posix.system.write(fds[0], request.ptr, request.len);
+
+    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(written));
+    try std.testing.expectEqual(@as(usize, request.len), @as(usize, @intCast(written)));
 
     const thread = try std.Thread.spawn(.{}, CompressProbe.run, .{fds[1]});
     thread.join();
