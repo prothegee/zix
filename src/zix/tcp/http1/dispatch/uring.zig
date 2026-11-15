@@ -1601,7 +1601,7 @@ fn testRecvBufSize(fd: std.posix.fd_t) !usize {
         std.mem.asBytes(&value),
         &len,
     );
-    if (std.posix.errno(rc) != .SUCCESS) return error.ZixTest_GetSockOptFailed;
+    if (linux.errno(rc) != .SUCCESS) return error.ZixTest_GetSockOptFailed;
 
     return @intCast(value);
 }
@@ -1678,7 +1678,7 @@ fn testReadAvailable(fd: std.posix.fd_t, out: []u8) []u8 {
             null,
             null,
         );
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 const count: usize = @intCast(rc);
                 if (count == 0) break;
