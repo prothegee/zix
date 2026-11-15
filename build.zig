@@ -32,6 +32,7 @@
 const std = @import("std");
 const tools = @import("scripts/build.tools.zig");
 const examples = @import("scripts/build.zix.examples.zig");
+const tlz_build = @import("src/tlz/build.zig");
 const VersionInfo = tools.VersionInfo;
 
 // --------------------------------------------------------- //
@@ -86,12 +87,16 @@ pub fn build(b: *std.Build) void {
     tlz_options.addOption(usize, "version_minor", tlz_zon.semver.minor);
     tlz_options.addOption(usize, "version_patch", tlz_zon.semver.patch);
 
+    const tlz_openssl = tlz_build.detectOpenssl(b, target);
+    tlz_options.addOption(bool, "openssl", tlz_openssl);
+
     const tlz = b.addModule("tlz", .{
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("src/tlz/src/lib.zig"),
     });
     tlz.addOptions("tlz_options", tlz_options);
+    if (tlz_openssl) tlz_build.linkOpenssl(b, target, optimize, tlz);
     zix.addImport("tlz", tlz);
 
     // Brotli static dictionary (RFC 7932 Appendix A): generated into the build cache
@@ -216,6 +221,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tlz/src/test.zig"),
     });
     tlz_unit_and_edge_test_mod.addOptions("tlz_options", tlz_options);
+    if (tlz_openssl) tlz_build.linkOpenssl(b, target, optimize, tlz_unit_and_edge_test_mod);
 
     const tlz_unit_and_edge_test = b.addTest(.{
         .root_module = tlz_unit_and_edge_test_mod,
