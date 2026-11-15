@@ -38,6 +38,7 @@ const builtin = @import("builtin");
 
 test {
     _ = @import("lib.zig");
+    _ = @import("channel/Channel.zig");
     _ = @import("logger/FileSink.zig");
     _ = @import("logger/Flusher.zig");
     _ = @import("logger/Logger.zig");
@@ -307,6 +308,7 @@ test {
     _ = @import("utils/pwhash/pbkdf2.zig");
     _ = @import("utils/pwhash/scrypt.zig");
     _ = @import("utils/socket/pair.zig");
+    _ = @import("utils/socket/path.zig");
     _ = @import("utils/static/StaticCache.zig");
     _ = @import("utils/static/StaticCacheRegistry.zig");
     _ = @import("utils/static/StaticHit.zig");
