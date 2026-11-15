@@ -174,6 +174,33 @@ pub fn compact(self: *Self) void {
     self.rend = len;
 }
 
+/// Free room for need more bytes at the tail of rbuf, sliding a partial frame
+/// to the front when the tail is short.
+///
+/// Note:
+/// - Unlike compact, this slides before rbuf is full. A feeder that hands over
+///   whole decrypted records needs the room up front.
+///
+/// Param:
+/// need - usize (bytes the caller wants to append)
+///
+/// Return:
+/// - usize (bytes that fit now, at most need. 0 when one frame fills rbuf)
+pub fn makeRoom(self: *Self, need: usize) usize {
+    if (self.rstart == self.rend) {
+        self.rstart = 0;
+        self.rend = 0;
+    } else if (self.rbuf.len - self.rend < need and self.rstart > 0) {
+        const len = self.rend - self.rstart;
+        std.mem.copyForwards(u8, self.rbuf[0..len], self.rbuf[self.rstart..self.rend]);
+
+        self.rstart = 0;
+        self.rend = len;
+    }
+
+    return @min(need, self.rbuf.len - self.rend);
+}
+
 /// Claim a free slot for sid and open a pooled stream in it.
 ///
 /// Param:
@@ -409,5 +436,40 @@ test "zix http2 mux: MuxConn, compact leaves a buffer with room alone" {
 
     try std.testing.expectEqual(@as(usize, 2), conn.rstart);
     try std.testing.expectEqual(@as(usize, 5), conn.rend);
+}
+
+test "zix http2 mux: MuxConn, makeRoom slides a partial frame to the front" {
+    const conn = try init(UNUSED_FD, TEST_OPTS, std.testing.io);
+    defer conn.deinit();
+
+    conn.rstart = 10;
+    conn.rend = conn.rbuf.len;
+
+    const room = conn.makeRoom(64);
+
+    try std.testing.expectEqual(@as(usize, 0), conn.rstart);
+    try std.testing.expectEqual(conn.rbuf.len - 10, conn.rend);
+    try std.testing.expectEqual(@as(usize, 10), room);
+}
+
+test "zix http2 mux: MuxConn, makeRoom resets an empty buffer" {
+    const conn = try init(UNUSED_FD, TEST_OPTS, std.testing.io);
+    defer conn.deinit();
+
+    conn.rstart = 40;
+    conn.rend = 40;
+
+    try std.testing.expectEqual(@as(usize, 64), conn.makeRoom(64));
+    try std.testing.expectEqual(@as(usize, 0), conn.rend);
+}
+
+test "zix http2 mux: MuxConn, makeRoom on one frame filling rbuf is 0" {
+    const conn = try init(UNUSED_FD, TEST_OPTS, std.testing.io);
+    defer conn.deinit();
+
+    conn.rstart = 0;
+    conn.rend = conn.rbuf.len;
+
+    try std.testing.expectEqual(@as(usize, 0), conn.makeRoom(1));
 }
 
