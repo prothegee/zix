@@ -150,5 +150,13 @@ test {
     _ = @import("dtls/client/State.zig");
     _ = @import("dtls/client/ClientConnection.zig");
     _ = @import("dtls/client/FinishResult.zig");
+
+    _ = @import("openssl/c.zig");
+    if (@import("tlz_options").openssl) {
+        _ = @import("openssl/error.zig");
+        _ = @import("openssl/Context.zig");
+        _ = @import("openssl/Connection.zig");
+        _ = @import("openssl/client.zig");
+    }
 }
 
