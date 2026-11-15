@@ -165,7 +165,7 @@ fn setNoDelay(fd: std.posix.fd_t) void {
 
 fn setNonBlock(fd: std.posix.fd_t) bool {
     const rc = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (std.posix.errno(rc) != .SUCCESS) return false;
+    if (linux.errno(rc) != .SUCCESS) return false;
 
     const flags: linux.O = @bitCast(@as(u32, @intCast(rc)));
     var nonblock = flags;
@@ -173,7 +173,7 @@ fn setNonBlock(fd: std.posix.fd_t) bool {
     const bits: u32 = @bitCast(nonblock);
     const set_rc = linux.fcntl(fd, linux.F.SETFL, @intCast(bits));
 
-    return std.posix.errno(set_rc) == .SUCCESS;
+    return linux.errno(set_rc) == .SUCCESS;
 }
 
 fn closeListeners(listeners: []std.Io.net.Server, io: std.Io) void {
@@ -263,7 +263,7 @@ fn drainInput(fd: std.posix.fd_t) void {
             null,
             null,
         );
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 const received: usize = @intCast(rc);
                 if (received == 0) return;
@@ -332,7 +332,7 @@ fn armOut(conn: *Conn, epfd: std.posix.fd_t) bool {
         &event,
     );
 
-    return std.posix.errno(rc) == .SUCCESS;
+    return linux.errno(rc) == .SUCCESS;
 }
 
 fn disarmOut(conn: *Conn, epfd: std.posix.fd_t) bool {
@@ -347,7 +347,7 @@ fn disarmOut(conn: *Conn, epfd: std.posix.fd_t) bool {
         &event,
     );
 
-    return std.posix.errno(rc) == .SUCCESS;
+    return linux.errno(rc) == .SUCCESS;
 }
 
 fn stagePending(
@@ -436,7 +436,7 @@ fn serveDrain(conn: *Conn, scratch: []u8) ConnOutcome {
             null,
             null,
         );
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 const received: usize = @intCast(rc);
                 if (received == 0) return .close;
@@ -806,7 +806,7 @@ fn acceptAll(
             null,
             std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
         );
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {},
             .AGAIN => return,
             .INTR, .CONNABORTED => continue,
@@ -831,7 +831,7 @@ fn acceptAll(
             fd,
             &event,
         );
-        if (std.posix.errno(add_rc) != .SUCCESS) {
+        if (linux.errno(add_rc) != .SUCCESS) {
             connFree(allocator, conn);
             _ = linux.close(fd);
         }
@@ -864,7 +864,7 @@ fn workerMain(ctx: WorkerCtx) void {
     }
 
     const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-    if (std.posix.errno(epfd_rc) != .SUCCESS) {
+    if (linux.errno(epfd_rc) != .SUCCESS) {
         failSetup(&worker);
         return;
     }
@@ -881,7 +881,7 @@ fn workerMain(ctx: WorkerCtx) void {
         listener_fd,
         &listener_event,
     );
-    if (std.posix.errno(add_rc) != .SUCCESS) {
+    if (linux.errno(add_rc) != .SUCCESS) {
         failSetup(&worker);
         return;
     }
@@ -938,7 +938,7 @@ fn workerMain(ctx: WorkerCtx) void {
             tls_listener_fd,
             &tls_event,
         );
-        if (std.posix.errno(tls_add_rc) != .SUCCESS) {
+        if (linux.errno(tls_add_rc) != .SUCCESS) {
             failSetup(&worker);
             return;
         }
@@ -972,7 +972,7 @@ fn workerMain(ctx: WorkerCtx) void {
             EPOLL_MAX_EVENTS,
             EPOLL_WAIT_TIMEOUT_MS,
         );
-        switch (std.posix.errno(wait_rc)) {
+        switch (linux.errno(wait_rc)) {
             .SUCCESS => {},
             .INTR => continue,
             else => {
@@ -1243,7 +1243,7 @@ fn testRecvBufSize(fd: std.posix.fd_t) !usize {
         std.mem.asBytes(&value),
         &len,
     );
-    if (std.posix.errno(rc) != .SUCCESS) return error.ZixTest_GetSockOptFailed;
+    if (linux.errno(rc) != .SUCCESS) return error.ZixTest_GetSockOptFailed;
 
     return @intCast(value);
 }
@@ -1297,7 +1297,7 @@ fn testReadAvailable(fd: std.posix.fd_t, out: []u8) []u8 {
             null,
             null,
         );
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 const count: usize = @intCast(rc);
                 if (count == 0) break;
@@ -1749,7 +1749,7 @@ test "zix http1: epoll, stages a partial write until EPOLLOUT" {
     const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
     try std.testing.expectEqual(
         std.posix.E.SUCCESS,
-        std.posix.errno(epfd_rc),
+        linux.errno(epfd_rc),
     );
     const epfd: std.posix.fd_t = @intCast(epfd_rc);
     defer _ = linux.close(epfd);
@@ -1760,7 +1760,7 @@ test "zix http1: epoll, stages a partial write until EPOLLOUT" {
     };
     try std.testing.expectEqual(
         std.posix.E.SUCCESS,
-        std.posix.errno(linux.epoll_ctl(
+        linux.errno(linux.epoll_ctl(
             epfd,
             linux.EPOLL.CTL_ADD,
             conn.fd,
@@ -1812,7 +1812,7 @@ test "zix http1: epoll, drains queued input before close" {
         null,
         null,
     );
-    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(rc));
+    try std.testing.expectEqual(std.posix.E.AGAIN, linux.errno(rc));
 }
 
 test "zix http1: epoll, sends 100 Continue while the body still arrives" {
