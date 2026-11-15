@@ -7,10 +7,10 @@ Pure-Zig WebRTC peer: ICE-lite (RFC 8445) over STUN (RFC 8489), DTLS 1.2 (RFC 63
 ## Goals
 
 - Reach a browser. That is the whole reason this engine exists: a browser cannot open a raw socket, and WebRTC is the only transport it offers that gives unreliable delivery, a per-channel ordering choice, and audio and video.
-- One coherent engine family: the same `DispatchModel` enum, the same `Tls.Context`, the same flat config shape as every other zix engine.
+- One coherent engine family: the same `DispatchModel` enum, the same `tlz.Context`, the same flat config shape as every other zix engine.
 - Pure-Zig from the RFCs, with 32 current-generation WebRTC RFCs read rather than a library wrapped.
 - The server is the product, the primitives are exposed: STUN, ICE, SCTP, DCEP, SDP and SRTP building blocks are public so a peer or a test harness can build the other side of the wire.
-- Separation of concern: one file owns one wire format. 84 files under `src/udp/webrtc/`, plus the 9 `dtls_*` files that live in `src/tls/` beside the TLS code they share primitives with.
+- Separation of concern: one file owns one wire format. 84 files under `src/udp/webrtc/`, plus the DTLS files that live in `src/tlz/src/dtls/` beside the TLS code they share primitives with.
 - Forward media, never decode it. The engine has no codec and no opinion about what a payload is.
 
 ---
@@ -148,7 +148,7 @@ pub const WebrtcServerConfig = struct {
     ice_ufrag:    []const u8,           // this agent's ufrag, required
     ice_password: []const u8,           // this agent's password, required
 
-    tls: ?*Tls.Context,                 // certificate and ECDSA P-256 key, required
+    tls: ?*tlz.Context,                 // certificate and ECDSA P-256 key, required
 
     carry_media: bool = false,          // forward audio and video between peers
     max_peers:   usize = 64,            // per worker
