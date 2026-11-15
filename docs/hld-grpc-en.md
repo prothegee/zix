@@ -7,7 +7,7 @@
 - All 3 dispatch models: ASYNC (portable), EPOLL (Linux-only), URING (Linux-only). Required, no default.
 - Minimal protobuf codec (varint + LEN wire types) for payload encoding without codegen.
 - grpc-timeout header parsing, grpc-status trailer serialization.
-- Native TLS (TLS 1.3 / 1.2, ALPN h2) via a `Tls.Context`, additive over the h2c default. A reverse proxy (nginx, haproxy) stays an option for offloading.
+- Native TLS (TLS 1.3 / 1.2, ALPN h2) via a `tlz.Context`, additive over the h2c default. A reverse proxy (nginx, haproxy) stays an option for offloading.
 
 ## Architecture
 
@@ -392,7 +392,7 @@ const n = try zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*Tls.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_mux.zig`), with no socketpair and no thread per connection. Under `.ASYNC`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. With `tls_port` set next to `tls`, ONE server serves h2c on `port` and gRPC over TLS on `tls_port` from the same worker fleet (ADR-060).
+`zix.Grpc` serves h2c (cleartext) by default. Setting `tls: ?*tlz.Context` on the config opts into gRPC over TLS (TLS 1.3, with a 1.2 fallback, ALPN h2), with two serve paths selected by `dispatch_model` (ADR-052). Under `.EPOLL` / `.URING`, one `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker (`grpc/tls_mux.zig`), with no socketpair and no thread per connection. Under `.ASYNC`, a thread-per-connection terminator (`grpc/tls_serve.zig`) runs the shared `tcp/tls/h2_terminator.zig` with an inline-mux driver that drives the resumable gRPC mux directly over the decrypted records and seals frames back into TLS records via a thread-local write hook (also used by Http2). The cert / key / policy live in the `tlz.Context` (ADR-047), reused across engines. With `tls_port` set next to `tls`, ONE server serves h2c on `port` and gRPC over TLS on `tls_port` from the same worker fleet (ADR-060).
 
 ```mermaid
 graph LR
