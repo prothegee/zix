@@ -1,6 +1,6 @@
 # Reverse proxy: nginx and haproxy in front of zix
 
-`zix.Http1` and `zix.Grpc` both serve TLS natively (set `tls: ?*Tls.Context`, see [`docs/hld-tls-en.md`](hld-tls-en.md)). Putting nginx or haproxy in front is an option, not a requirement, and it is the right call when you want TLS offload onto the proxy, host or path routing, load balancing across backends, or sharing port 443 with other services. The zix server then runs cleartext behind the proxy: HTTP/1.1 for `zix.Http1`, or h2c (HTTP/2 cleartext) for `zix.Grpc`. External clients connect to the proxy over TLS, and the proxy forwards to the backend.
+`zix.Http1` and `zix.Grpc` both serve TLS natively (set `tls: ?*tlz.Context`, see [`src/tlz/docs/hld-en.md`](../src/tlz/docs/hld-en.md)). Putting nginx or haproxy in front is an option, not a requirement, and it is the right call when you want TLS offload onto the proxy, host or path routing, load balancing across backends, or sharing port 443 with other services. The zix server then runs cleartext behind the proxy: HTTP/1.1 for `zix.Http1`, or h2c (HTTP/2 cleartext) for `zix.Grpc`. External clients connect to the proxy over TLS, and the proxy forwards to the backend.
 
 ## Architecture
 
