@@ -65,6 +65,9 @@ pub const MultipartField = @import("MultipartField.zig");
 /// ZIX Utils generator
 pub const Generator = @import("generator.zig");
 
+/// ZIX Utils socket path: absolute local socket path for a server and its client
+pub const SocketPath = @import("socket/path.zig");
+
 /// ZIX Utils password hash
 pub const Pwhash = struct {
     pub const Argon2 = @import("pwhash/argon2.zig");
