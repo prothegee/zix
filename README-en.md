@@ -288,13 +288,19 @@ __*6. Predictable, Transparent Memory Management.*__
 
 __*0. Zero dependencies:*__
 
-Only the Zig standard library. No third-party packages (an empty `build.zig.zon` dependency
-set), no C libraries, and no libc linking: TLS 1.3 / 1.2 runs pure-Zig on `std.crypto` (no
-OpenSSL), gzip / deflate on `std.compress.flate` plus an in-tree fast gzip encoder for small
-dynamic bodies, and brotli, QUIC, HPACK, and QPACK are authored in-tree from their RFCs.
+Only the Zig standard library in the default build. No third-party packages (an empty
+`build.zig.zon` dependency set), no C libraries, and no libc linking: TLS 1.3 / 1.2 runs
+pure-Zig on `std.crypto` (no OpenSSL), gzip / deflate on `std.compress.flate` plus an in-tree
+fast gzip encoder for small dynamic bodies, and brotli, QUIC, HPACK, and QPACK are authored
+in-tree from their RFCs.
 
 > One `zig build` compiles the whole stack from source with nothing to vendor, pin, or keep
 patched, so the supply chain is the Zig toolchain plus this repository.
+
+Note: when the build host has OpenSSL 3.0 or newer, the build detects it and links libssl,
+libcrypto, and libc for the optional `zix.tlz` OpenSSL backend, even when no code chooses it.
+A host without OpenSSL keeps the build above. See
+[`src/tlz/README-en.md`](src/tlz/README-en.md#openssl-backend-optional).
 
 <br>
 
@@ -1616,6 +1622,8 @@ var server = zix.Http1.Server.init(handler, .{
     .dispatch_model = .EPOLL,
 });
 ```
+
+`zix.tlz` also has an optional OpenSSL backend (`zix.tlz.Context.initWith(..., .OPENSSL)`), compiled in only when the build host provides libssl (OpenSSL 3.0 or newer). The servers above take the native `zix.tlz.Context`. See [`src/tlz/README-en.md`](src/tlz/README-en.md#openssl-backend-optional).
 
 With `tls` set the server is TLS-only on `port`. Add `tls_port` to serve BOTH from one server (the dual listener,): cleartext on `port` and TLS on `tls_port` from the same worker fleet, instead of launching a second server that duplicates workers, fd tables, and caches. Available on Http1, Http2, and Grpc, every dispatch model (under `.URING` the TLS side runs on the ring).
 
