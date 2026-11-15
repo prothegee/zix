@@ -79,7 +79,7 @@ pub fn armOut(epfd: std.posix.fd_t, fd: std.posix.fd_t, data: u64, on: bool) voi
     };
     const rc = linux.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &event);
 
-    switch (std.posix.errno(rc)) {
+    switch (linux.errno(rc)) {
         else => {},
     }
 }
