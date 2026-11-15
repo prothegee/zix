@@ -206,7 +206,7 @@ handler_timeout_ms: u32 = 0,   // global deadline seeded onto Context.deadline, 
 public_dir:     []const u8 = "",        // static file root, "" disables static serving
 public_dir_cache_ttl_ms:      u32 = 0,  // 0 = never cached, the shipped default
 public_dir_cache_max_entries: u32 = 256,// static cache slots, one per file plus its siblings
-tls:            ?*Tls.Context = null,   // non-null serves h2 over TLS (ALPN h2), else h2c cleartext
+tls:            ?*tlz.Context = null,   // non-null serves h2 over TLS (ALPN h2), else h2c cleartext
 logger:         ?*Logger = null,        // lifecycle lines only, see Logging section
 ```
 
@@ -330,12 +330,12 @@ Send-side flow control follows RFC 7540 6.9. Each `MuxConn` carries a connection
 
 ## h2 over TLS
 
-Setting `config.tls` (a `*Tls.Context`) opts into HTTP/2 over TLS (TLS 1.3 with a 1.2 fallback, ALPN h2). The `Server.zig` `run()` switch picks one of two terminators by `dispatch_model`:
+Setting `config.tls` (a `*tlz.Context`) opts into HTTP/2 over TLS (TLS 1.3 with a 1.2 fallback, ALPN h2). The `Server.zig` `run()` switch picks one of two terminators by `dispatch_model`:
 
 - `.EPOLL` / `.URING`: `tls_mux.runTlsMux`. One `SO_REUSEPORT` epoll worker per core terminates TLS in place via a resumable session (`tcp/tls/tls_session.zig`) and multiplexes many connections per worker, with no socketpair and no thread per connection. The resumable h2 mux consumes the decrypted plaintext, and its reply frames are encrypted back into TLS records through the thread-local frame write hook. Outbound ciphertext that does not fit is staged per connection and flushed on the next EPOLLOUT, so a slow client never parks the worker.
 - `.ASYNC`: `tls_serve.runTls`. An accept loop hands each connection to its own worker thread, which runs the shared terminator (`tcp/tls/h2_terminator.zig`) with an inline-mux driver that drives the same resumable mux directly over the decrypted stream (one thread per connection, no socketpair). This path also serves TLS 1.2.
 
-The write hook (`writer.write_hook`) is the shared mechanism: the mux writes plaintext through `writer.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The cleartext hook is installed by `coalesce.zig`, `mux/` only writes through `writer`. The cert / key / policy live in the `Tls.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`docs/hld-tls-en.md`](hld-tls-en.md).
+The write hook (`writer.write_hook`) is the shared mechanism: the mux writes plaintext through `writer.writeAllFD`, and the hook seals it into records on the TLS path (the same hook batches frames into one write per readable batch on the cleartext `.EPOLL` / `.URING` path). The cleartext hook is installed by `coalesce.zig`, `mux/` only writes through `writer`. The cert / key / policy live in the `tlz.Context` (ADR-047), reused across engines. TLS runs on its own performance band. See [`src/tlz/docs/hld-en.md`](../src/tlz/docs/hld-en.md).
 
 ---
 
@@ -374,11 +374,11 @@ The `.EPOLL` / `.URING` mux borrows each stream slot from a per-worker thread-lo
 | Header block scratch | `.EPOLL` / `.URING`: `max_header_scratch` per connection (4 KB default). `.ASYNC`: a fixed 4 KiB per stream (`Stream.HEADER_SCRATCH_SIZE`). A header set that overflows it is answered with `COMPRESSION_ERROR` and RST_STREAM |
 | Frame size | A frame larger than `max_frame_size` plus slack is a `FRAME_SIZE_ERROR` and closes the connection with GOAWAY. Outbound DATA is sized by the peer's advertised value instead, never by this one |
 | Static files | `public_dir` serves whole files and single ranges. A multi-range header answers the first range only, and there is no `public_dir_upload` companion on this engine |
-| TLS | h2 over TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, on its own perf band. `.EPOLL` / `.URING` terminate in an event-driven epoll-mux worker, `.ASYNC` per connection in a worker thread. See [`docs/hld-tls-en.md`](hld-tls-en.md) |
+| TLS | h2 over TLS (TLS 1.3 + 1.2, ALPN h2), opt-in via `config.tls`, on its own perf band. `.EPOLL` / `.URING` terminate in an event-driven epoll-mux worker, `.ASYNC` per connection in a worker thread. See [`src/tlz/docs/hld-en.md`](../src/tlz/docs/hld-en.md) |
 
 Endpoints that need a large request body should read it in DATA frames within `max_body`, or move the bulk transfer to a streaming design (the buffered model covers bounded bodies).
 
-For implementation details see [`docs/lld-http2-en.md`](lld-http2-en.md). For the TLS terminator see [`docs/hld-tls-en.md`](hld-tls-en.md).
+For implementation details see [`docs/lld-http2-en.md`](lld-http2-en.md). For the TLS terminator see [`src/tlz/docs/hld-en.md`](../src/tlz/docs/hld-en.md).
 
 ---
 
