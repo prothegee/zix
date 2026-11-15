@@ -289,7 +289,7 @@ that works alongside all three dispatch models. A Channel connects producer and 
 process boundary.
 
 ```
-Producer task --> [ Channel(T) ring buffer ] --> Consumer task
+Producer task --> [ Channel ring buffer ] --> Consumer task
 ```
 
 All three dispatch models can spawn `io.async()` tasks or OS threads that communicate through
