@@ -75,7 +75,8 @@ Source: `src/lib.zig`. Each module is exercised via `std.testing.refAllDecls`, w
 
 | Module | Coverage |
 | :- | :- |
-| `channel/channel.zig` | `refAllDecls` + behavioral: `Channel(u32)` init capacity and count, ring buffer tail arithmetic |
+| `channel/Channel.zig` | in-file tests: init defaults, ring tail arithmetic, capacity 1, FIFO wrap, slice / struct / zero-size element types, TypeMismatch on send and recv, Closed after close, drain after close, blocked send and recv resume (`std.Io.concurrent`), close wakes a waiting recv, two OS threads pass 100 items |
+| `utils/socket/path.zig` | in-file tests: separator per platform, absolute and repeatable path, directory kept in the path, PathTooLong on a small buffer, clear on a missing or stale file |
 
 ### zix.Fix
 
@@ -471,18 +472,6 @@ Ports: 18200-18206.
 | gRPC trailers-only error is received as INVALID_ARGUMENT | `errorOnlyHandler` calls `res.finish(INVALID_ARGUMENT, ...)` without sending data, client receives the error status |
 | gRPC two streams on same connection both return OK | two sequential unary RPCs on one connection, both streams receive correct responses |
 
-### tests/integration/channel/
-
-#### `channel_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `Channel(u32)` init capacity | `buf.len == 8`, `count == 0`, `head == 0` |
-| `Channel([]const u8)` compiles | slice element type accepted |
-| `Channel(struct)` compiles | struct element type accepted |
-| `Channel(u32)` send and recv round-trip | send then recv returns the sent value |
-| `Channel(u32)` drain after close | send two items, close, recv both, third recv returns `error.ZixClosed` |
-
 ---
 
 ## Behaviour Tests
@@ -690,19 +679,6 @@ RFC 10008 QUERY support through the public `zix.Http1` surface.
 | `GrpcPrefix` roundtrip | writePrefix -> readPrefix preserves compress flag and message length |
 | `parsePath` valid path | `/helloworld.Greeter/SayHello` -> `package_service="helloworld.Greeter"`, `method="SayHello"` |
 | `parseTimeout` seconds | `"2S"` -> 2,000,000,000 nanoseconds |
-
-### tests/behaviour/channel/
-
-#### `channel_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| `closed` field defaults to false | `init()` invariant |
-| `head` starts at zero | `init()` invariant |
-| Ring tail formula is `(head + count) % buf.len` | manually set state verifies arithmetic |
-| `send` increments count | count goes from 0 to 1 after one send |
-| `recv` decrements count | count returns to 0 after recv |
-| `close` sets closed field | `ch.closed == true` after close |
 
 ---
 
@@ -928,18 +904,6 @@ Ports: 18220-18221.
 | `GrpcClient.connect` port zero | returns `error.ZixPortNotConfigured` |
 | `serveConn` closes cleanly on immediate client disconnect | server accepts, client disconnects immediately, no crash or error |
 | gRPC finish-only handler delivers error status to client | handler calls `res.finish(INVALID_ARGUMENT, ...)` only, client receives the error status without any data frames |
-
-### tests/edge/channel/
-
-#### `channel_test.zig`
-
-| Test | What it verifies |
-| :- | :- |
-| Capacity 1 allocates exactly one slot | `buf.len == 1`, `count == 0` |
-| Ring head wraps at `buf.len` | `(3+1) % 4 == 0` |
-| Full boundary: `count == buf.len` | tail index wraps back to head |
-| `send` after close | returns `error.ZixClosed` |
-| `recv` on empty closed channel | returns `error.ZixClosed` |
 
 ---
 
