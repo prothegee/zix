@@ -310,6 +310,324 @@ fn writePair(tmp: *std.testing.TmpDir, cert_pem: []const u8, key_pem: []const u8
     });
 }
 
+const builtin = @import("builtin");
+
+/// Seconds a socket read waits before the `s_client` cross-check is called stuck.
+const PEER_TIMEOUT_S: isize = 5;
+
+/// Buffer for one read from the peer or one flight to it.
+const PEER_BUF_LEN: usize = 16 * 1024;
+
+/// Fail when a raw Linux call returned an errno.
+fn checkRc(rc: usize) !usize {
+    if (std.os.linux.errno(rc) != .SUCCESS) return error.TestUnexpectedResult;
+
+    return rc;
+}
+
+/// Make reads and accepts on `fd` give up after `PEER_TIMEOUT_S`.
+fn setReadTimeout(fd: std.posix.fd_t) !void {
+    const linux = std.os.linux;
+    const timeout: linux.timeval = .{
+        .sec = PEER_TIMEOUT_S,
+        .usec = 0,
+    };
+
+    _ = try checkRc(linux.setsockopt(
+        fd,
+        linux.SOL.SOCKET,
+        linux.SO.RCVTIMEO,
+        std.mem.asBytes(&timeout),
+        @sizeOf(linux.timeval),
+    ));
+}
+
+/// Listen on a Unix socket at `path`, so the peer needs no TCP port.
+fn listenUnix(path: []const u8) !std.posix.fd_t {
+    const linux = std.os.linux;
+    var addr: linux.sockaddr.un = .{
+        .path = @splat(0),
+    };
+    if (path.len >= addr.path.len) return error.NameTooLong;
+
+    @memcpy(addr.path[0..path.len], path);
+
+    const sock_type = linux.SOCK.STREAM | linux.SOCK.CLOEXEC;
+    const fd: std.posix.fd_t = @intCast(try checkRc(linux.socket(linux.AF.UNIX, sock_type, 0)));
+    errdefer _ = linux.close(fd);
+
+    _ = try checkRc(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un)));
+    _ = try checkRc(linux.listen(fd, 1));
+    try setReadTimeout(fd);
+
+    return fd;
+}
+
+/// Accept one peer on `listen_fd`, with the read timeout set.
+fn acceptPeer(listen_fd: std.posix.fd_t) !std.posix.fd_t {
+    const linux = std.os.linux;
+    const accepted = try checkRc(linux.accept4(listen_fd, null, null, linux.SOCK.CLOEXEC));
+    const fd: std.posix.fd_t = @intCast(accepted);
+    errdefer _ = linux.close(fd);
+
+    try setReadTimeout(fd);
+
+    return fd;
+}
+
+fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var done: usize = 0;
+
+    while (done < bytes.len) {
+        done += try checkRc(std.os.linux.write(fd, bytes[done..].ptr, bytes.len - done));
+    }
+}
+
+/// Read what the peer has sent so far. A closed peer is `error.EndOfStream`.
+fn readSomeFd(fd: std.posix.fd_t, buf: []u8) ![]const u8 {
+    const read = try checkRc(std.os.linux.read(fd, buf.ptr, buf.len));
+    if (read == 0) return error.EndOfStream;
+
+    return buf[0..read];
+}
+
+/// Run the server handshake over `fd` until OpenSSL calls it done.
+fn serveHandshake(conn: *Connection, fd: std.posix.fd_t) !void {
+    var in_buf: [PEER_BUF_LEN]u8 = undefined;
+    var out_buf: [PEER_BUF_LEN]u8 = undefined;
+
+    while (!conn.handshakeDone()) {
+        const incoming = try readSomeFd(fd, &in_buf);
+        const outgoing = try conn.handshake(incoming, &out_buf);
+
+        try writeAllFd(fd, outgoing);
+    }
+}
+
+/// Read application data from `fd` until `want` shows up in `plain_buf`.
+fn readAppUntil(
+    conn: *Connection,
+    fd: std.posix.fd_t,
+    want: []const u8,
+    plain_buf: []u8,
+) ![]const u8 {
+    var in_buf: [PEER_BUF_LEN]u8 = undefined;
+    var len: usize = 0;
+
+    while (std.mem.find(u8, plain_buf[0..len], want) == null) {
+        var incoming = try readSomeFd(fd, &in_buf);
+
+        // One call opens one record: keep calling until the buffered bytes run out.
+        while (true) {
+            const plain = try conn.readAppData(incoming, plain_buf[len..]);
+            incoming = &.{};
+            if (plain.len == 0) break;
+
+            len += plain.len;
+        }
+    }
+
+    return plain_buf[0..len];
+}
+
+/// Start `openssl s_client` against the Unix socket, trusting `ca_path` for `host`.
+fn spawnSClient(
+    sock_path: []const u8,
+    ca_path: []const u8,
+    host: []const u8,
+) !std.process.Child {
+    return std.process.spawn(std.testing.io, .{
+        .argv = &.{
+            "openssl",
+            "s_client",
+            "-unix",
+            sock_path,
+            "-CAfile",
+            ca_path,
+            "-servername",
+            "localhost",
+            "-verify_hostname",
+            host,
+            "-verify_return_error",
+            "-alpn",
+            "h2,http/1.1",
+            "-quiet",
+        },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch |err| switch (err) {
+        error.FileNotFound => error.SkipZigTest,
+        else => err,
+    };
+}
+
+/// One server context on cert.pem and key.pem, offering h2, plus its Unix socket path.
+const SClientFixture = struct {
+    tmp: std.testing.TmpDir,
+    context: Self,
+    cert_buf: [256]u8 = undefined,
+    sock_buf: [256]u8 = undefined,
+
+    fn init() !SClientFixture {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try writePair(&tmp, EC_CERT_PEM, EC_KEY_PEM);
+        var cert_buf: [256]u8 = undefined;
+        var key_buf: [256]u8 = undefined;
+
+        const context = try Self.init(std.testing.allocator, .{
+            .cert_path = try tmpPath(&cert_buf, &tmp, "cert.pem"),
+            .key_path = try tmpPath(&key_buf, &tmp, "key.pem"),
+            .alpn = &.{.H2},
+        });
+
+        return .{
+            .tmp = tmp,
+            .context = context,
+        };
+    }
+
+    fn deinit(self: *SClientFixture) void {
+        self.context.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn certPath(self: *SClientFixture) ![]const u8 {
+        return tmpPath(&self.cert_buf, &self.tmp, "cert.pem");
+    }
+
+    fn sockPath(self: *SClientFixture) ![]const u8 {
+        return tmpPath(&self.sock_buf, &self.tmp, "s.sock");
+    }
+};
+
+const NativeContext = @import("../context/Context.zig");
+const native_connection = @import("../connection.zig");
+
+/// The byte length of a TLS record header: type, version, length.
+const RECORD_HEADER_LEN: usize = 5;
+
+/// The record type of a ChangeCipherSpec, sent by a TLS 1.3 client for middlebox
+/// compatibility (RFC 8446 D.4). It carries nothing.
+const CONTENT_TYPE_CHANGE_CIPHER_SPEC: u8 = 20;
+
+/// Fill `buf` from `fd`. A closed peer is `error.EndOfStream`.
+fn readExactFd(fd: std.posix.fd_t, buf: []u8) !void {
+    var done: usize = 0;
+
+    while (done < buf.len) {
+        done += (try readSomeFd(fd, buf[done..])).len;
+    }
+}
+
+/// Read one whole TLS record (header included) from `fd` into `buf`.
+fn readRecordFd(fd: std.posix.fd_t, buf: []u8) ![]const u8 {
+    try readExactFd(fd, buf[0..RECORD_HEADER_LEN]);
+
+    const body_len = std.mem.readInt(u16, buf[3..5], .big);
+    const record_len = RECORD_HEADER_LEN + body_len;
+    if (record_len > buf.len) return error.TestUnexpectedResult;
+
+    try readExactFd(fd, buf[RECORD_HEADER_LEN..record_len]);
+
+    return buf[0..record_len];
+}
+
+/// The next record from `fd` that is not a compatibility ChangeCipherSpec.
+fn readRecordSkipCcsFd(fd: std.posix.fd_t, buf: []u8) ![]const u8 {
+    while (true) {
+        const rec = try readRecordFd(fd, buf);
+        if (rec[0] != CONTENT_TYPE_CHANGE_CIPHER_SPEC) return rec;
+    }
+}
+
+/// 32 fresh random bytes, for a hello random or an ephemeral secret.
+fn randomBytes() [32]u8 {
+    var bytes: [32]u8 = undefined;
+    std.testing.io.random(&bytes);
+
+    return bytes;
+}
+
+/// Run `s_client` (offering h2 and http/1.1) against the native server with
+/// `alpn_prefs`, and return the protocol the native server picked.
+fn nativeAlpnWithSClient(alpn_prefs: []const alpn.Alpn) !?alpn.Alpn {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writePair(&tmp, EC_CERT_PEM, EC_KEY_PEM);
+    var cert_buf: [256]u8 = undefined;
+    var key_buf: [256]u8 = undefined;
+    var sock_buf: [256]u8 = undefined;
+    const cert_path = try tmpPath(&cert_buf, &tmp, "cert.pem");
+    const sock_path = try tmpPath(&sock_buf, &tmp, "s.sock");
+
+    var context = try NativeContext.init(std.testing.allocator, io, .{
+        .cert_path = cert_path,
+        .key_path = try tmpPath(&key_buf, &tmp, "key.pem"),
+        .alpn = alpn_prefs,
+    });
+    defer context.deinit();
+    const listen_fd = try listenUnix(sock_path);
+    defer _ = std.os.linux.close(listen_fd);
+    var child = try spawnSClient(sock_path, cert_path, "localhost");
+    defer child.kill(io);
+    const fd = try acceptPeer(listen_fd);
+    defer _ = std.os.linux.close(fd);
+
+    var record_buf: [PEER_BUF_LEN]u8 = undefined;
+    const hello_record = try readRecordFd(fd, &record_buf);
+    const pss_salt: [32]u8 = randomBytes();
+    const opts = context.handshakeOptions(randomBytes(), randomBytes(), pss_salt);
+    var flight_buf: [PEER_BUF_LEN]u8 = undefined;
+    var result = try native_connection.serverHandshake(
+        opts,
+        hello_record[RECORD_HEADER_LEN..],
+        &flight_buf,
+    );
+
+    try writeAllFd(fd, result.to_send);
+
+    // A verified client Finished proves `s_client` accepted the selected protocol.
+    try result.connection.verifyClientFinished(try readRecordSkipCcsFd(fd, &record_buf));
+
+    return result.alpn;
+}
+
+/// Run `s_client` (offering h2 and http/1.1) against the OpenSSL server with
+/// `alpn_prefs`, and return the protocol the OpenSSL server picked.
+fn opensslAlpnWithSClient(alpn_prefs: []const alpn.Alpn) !?alpn.Alpn {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writePair(&tmp, EC_CERT_PEM, EC_KEY_PEM);
+    var cert_buf: [256]u8 = undefined;
+    var key_buf: [256]u8 = undefined;
+    var sock_buf: [256]u8 = undefined;
+    const cert_path = try tmpPath(&cert_buf, &tmp, "cert.pem");
+    const sock_path = try tmpPath(&sock_buf, &tmp, "s.sock");
+
+    var context = try Self.init(std.testing.allocator, .{
+        .cert_path = cert_path,
+        .key_path = try tmpPath(&key_buf, &tmp, "key.pem"),
+        .alpn = alpn_prefs,
+    });
+    defer context.deinit();
+    const listen_fd = try listenUnix(sock_path);
+    defer _ = std.os.linux.close(listen_fd);
+    var child = try spawnSClient(sock_path, cert_path, "localhost");
+    defer child.kill(io);
+    const fd = try acceptPeer(listen_fd);
+    defer _ = std.os.linux.close(fd);
+    var conn = try context.newConnection();
+    defer conn.deinit();
+
+    try serveHandshake(&conn, fd);
+
+    return conn.selectedAlpn();
+}
+
 test "tlz openssl: Context, init loads an ECDSA P-256 certificate and key" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -460,5 +778,114 @@ test "tlz openssl: Context, newConnection starts a server connection" {
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(c_int, 1), c.SSL_is_server(conn.ssl));
+}
+
+test "tlz openssl: Context, s_client verifies the server and exchanges data" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    var fixture = try SClientFixture.init();
+    defer fixture.deinit();
+    const listen_fd = try listenUnix(try fixture.sockPath());
+    defer _ = std.os.linux.close(listen_fd);
+    var child = try spawnSClient(try fixture.sockPath(), try fixture.certPath(), "localhost");
+    defer child.kill(io);
+    const fd = try acceptPeer(listen_fd);
+    defer _ = std.os.linux.close(fd);
+    var conn = try fixture.context.newConnection();
+    defer conn.deinit();
+
+    try serveHandshake(&conn, fd);
+    try child.stdin.?.writeStreamingAll(io, "ping\n");
+    var plain_buf: [256]u8 = undefined;
+    const request = try readAppUntil(&conn, fd, "\n", &plain_buf);
+    var out_buf: [PEER_BUF_LEN]u8 = undefined;
+    try writeAllFd(fd, try conn.writeAppData("pong\n", &out_buf));
+    try writeAllFd(fd, try conn.closeNotify(&out_buf));
+    var reply_buf: [256]u8 = undefined;
+    const reply = try readSomeFd(child.stdout.?.handle, &reply_buf);
+
+    try std.testing.expectEqualStrings("ping\n", request);
+    try std.testing.expectEqualStrings("pong\n", reply);
+    try std.testing.expectEqual(@as(?alpn.Alpn, .H2), conn.selectedAlpn());
+}
+
+test "tlz openssl: Context, s_client exits clean after close_notify" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    var fixture = try SClientFixture.init();
+    defer fixture.deinit();
+    const listen_fd = try listenUnix(try fixture.sockPath());
+    defer _ = std.os.linux.close(listen_fd);
+    var child = try spawnSClient(try fixture.sockPath(), try fixture.certPath(), "localhost");
+    defer child.kill(io);
+    const fd = try acceptPeer(listen_fd);
+    var conn = try fixture.context.newConnection();
+    defer conn.deinit();
+
+    try serveHandshake(&conn, fd);
+    var out_buf: [PEER_BUF_LEN]u8 = undefined;
+    try writeAllFd(fd, try conn.closeNotify(&out_buf));
+    _ = std.os.linux.close(fd);
+    const term = try child.wait(io);
+
+    try std.testing.expect(term.success());
+}
+
+test "tlz openssl: Context, s_client with a hostname mismatch aborts the handshake" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    var fixture = try SClientFixture.init();
+    defer fixture.deinit();
+    const listen_fd = try listenUnix(try fixture.sockPath());
+    defer _ = std.os.linux.close(listen_fd);
+    var child = try spawnSClient(
+        try fixture.sockPath(),
+        try fixture.certPath(),
+        "other.example",
+    );
+    defer child.kill(io);
+    const fd = try acceptPeer(listen_fd);
+    defer _ = std.os.linux.close(fd);
+    var conn = try fixture.context.newConnection();
+    defer conn.deinit();
+
+    try std.testing.expectError(
+        Connection.Error.Tlz_OpensslConnection_HandshakeFailed,
+        serveHandshake(&conn, fd),
+    );
+}
+
+
+test "tlz openssl: Context, ALPN parity with s_client when the server prefers h2" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const prefs = [_]alpn.Alpn{
+        .H2,
+        .HTTP_1_1,
+    };
+
+    const native = try nativeAlpnWithSClient(&prefs);
+    const openssl = try opensslAlpnWithSClient(&prefs);
+
+    try std.testing.expectEqual(@as(?alpn.Alpn, .H2), openssl);
+    try std.testing.expectEqual(openssl, native);
+}
+
+test "tlz openssl: Context, ALPN parity with s_client when the server prefers http/1.1" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+
+    const prefs = [_]alpn.Alpn{
+        .HTTP_1_1,
+        .H2,
+    };
+
+    const native = try nativeAlpnWithSClient(&prefs);
+    const openssl = try opensslAlpnWithSClient(&prefs);
+
+    try std.testing.expectEqual(@as(?alpn.Alpn, .HTTP_1_1), openssl);
+    try std.testing.expectEqual(openssl, native);
 }
 
