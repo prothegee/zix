@@ -32,9 +32,13 @@
 //!
 
 const std = @import("std");
+const tlz = @import("tlz");
 const dispatch_async = @import("dispatch/async.zig");
 const dispatch_epoll = @import("dispatch/epoll.zig");
 const dispatch_uring = @import("dispatch/uring.zig");
+const log = @import("log.zig");
+const tls_mux = @import("tls_mux.zig");
+const tls_serve = @import("tls_serve.zig");
 const Config = @import("Config.zig");
 const DispatchModel = @import("../../../shared/dispatch.zig").Model;
 const OS = @import("builtin").target.os.tag;
@@ -104,6 +108,106 @@ fn dispatchUringError(err: dispatch_uring.Error) Error {
     };
 }
 
+fn dispatchTlsServeError(err: tls_serve.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_GrpcTlsServe_ResolveFailed
+            => Error.ZixHttp2_GrpcServer_ResolveFailed,
+        error.ZixHttp2_GrpcTlsServe_ListenFailed
+            => Error.ZixHttp2_GrpcServer_ListenFailed,
+        error.ZixHttp2_GrpcTlsServe_AcceptFailed
+            => Error.ZixHttp2_GrpcServer_AcceptFailed,
+    };
+}
+
+fn dispatchTlsMuxError(err: tls_mux.Error) Error {
+    return switch (err) {
+        error.ZixHttp2_GrpcTlsMux_ResolveFailed
+            => Error.ZixHttp2_GrpcServer_ResolveFailed,
+        error.ZixHttp2_GrpcTlsMux_ListenFailed
+            => Error.ZixHttp2_GrpcServer_ListenFailed,
+        error.ZixHttp2_GrpcTlsMux_Unsupported,
+        error.ZixHttp2_GrpcTlsMux_OutOfMemory,
+        error.ZixHttp2_GrpcTlsMux_SpawnFailed,
+        error.ZixHttp2_GrpcTlsMux_SetupFailed,
+            => Error.ZixHttp2_GrpcServer_TlsSetupFailed,
+    };
+}
+
+/// The .ASYNC dual listener thread for one Router. std.Thread.spawn takes a
+/// plain function, so the comptime Router is bound here.
+fn TlsThread(comptime RouterType: type) type {
+    return struct {
+        /// gRPC over TLS on tls_port while the cleartext model serves port. A
+        /// failure is logged, cleartext keeps serving.
+        fn run(config: Config, ctx: *const tlz.Context) void {
+            tls_serve.runTls(RouterType, config, ctx) catch |err| {
+                log.logSystem(
+                    config,
+                    .ERROR,
+                    "grpc TLS listener on {s}:{d} stopped ({s}), cleartext still serving",
+                    .{ config.ip, config.port, @errorName(err) },
+                );
+            };
+        }
+    };
+}
+
+/// Serve gRPC over TLS only, on config.port.
+///
+/// Note:
+/// - .ASYNC runs one task per connection and also serves TLS 1.2.
+/// - .EPOLL and .URING run the multiplexed TLS workers (TLS 1.3).
+fn runTlsOnly(comptime RouterType: type, config: Config, ctx: *const tlz.Context) Error!void {
+    return switch (config.dispatch_model) {
+        .ASYNC => tls_serve.runTls(RouterType, config, ctx) catch |err| {
+            return dispatchTlsServeError(err);
+        },
+        .EPOLL,
+        .URING,
+        => tls_mux.run(RouterType, config, ctx) catch |err| {
+            return dispatchTlsMuxError(err);
+        },
+        // Never pass gateDispatchModel.
+        .IOCP,
+        .KQUEUE,
+        => Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported,
+    };
+}
+
+/// Start the TLS side of the dual listener (config.tls_port).
+///
+/// Note:
+/// - .ASYNC: one extra accept thread serves gRPC over TLS on tls_port.
+/// - .EPOLL and .URING host the TLS connections in the cleartext workers, so
+///   their dispatch binds tls_port itself. Nothing starts here.
+fn startTlsSide(comptime RouterType: type, config: Config, ctx: *const tlz.Context) Error!void {
+    if (config.tls_port == config.port) return Error.ZixHttp2_GrpcServer_TlsPortConflict;
+
+    switch (config.dispatch_model) {
+        .ASYNC => {
+            var tls_config = config;
+            tls_config.port = config.tls_port;
+            tls_config.tls_port = 0;
+
+            const thread = std.Thread.spawn(
+                .{},
+                TlsThread(RouterType).run,
+                .{ tls_config, ctx },
+            ) catch |err| switch (err) {
+                else => return Error.ZixHttp2_GrpcServer_TlsSetupFailed,
+            };
+            thread.detach();
+        },
+        .EPOLL,
+        .URING,
+        => {},
+        // Never pass gateDispatchModel.
+        .IOCP,
+        .KQUEUE,
+        => return Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported,
+    }
+}
+
 // --------------------------------------------------------- //
 // Public:
 
@@ -122,6 +226,10 @@ pub const Error = error {
     ZixHttp2_GrpcServer_EpollSetupFailed,
     /// E.Q.: error.ZixHttp2_GrpcUring_SetupFailed
     ZixHttp2_GrpcServer_UringSetupFailed,
+    /// config.tls_port equals config.port
+    ZixHttp2_GrpcServer_TlsPortConflict,
+    /// E.Q.: error.ZixHttp2_GrpcTlsMux_SetupFailed
+    ZixHttp2_GrpcServer_TlsSetupFailed,
 };
 
 /// The server type for one Router.
@@ -153,9 +261,18 @@ pub fn GrpcServer(comptime RouterType: type) type {
         /// - Error.ZixHttp2_GrpcServer_AcceptFailed from the .ASYNC model
         /// - Error.ZixHttp2_GrpcServer_EpollSetupFailed or UringSetupFailed
         ///   when a Linux model could not start its workers
+        /// - Error.ZixHttp2_GrpcServer_TlsPortConflict when tls_port equals port
+        /// - Error.ZixHttp2_GrpcServer_TlsSetupFailed when the TLS side could
+        ///   not start
         pub fn run(self: *const Self) Error!void {
             try gatePort(self.config);
             try gateDispatchModel(self.config.dispatch_model);
+
+            if (self.config.tls) |ctx| {
+                if (self.config.tls_port == 0) return runTlsOnly(RouterType, self.config, ctx);
+
+                try startTlsSide(RouterType, self.config, ctx);
+            }
 
             return switch (self.config.dispatch_model) {
                 .ASYNC => {
@@ -347,5 +464,74 @@ test "zix http2 grpc: server, an unresolvable ip is ResolveFailed" {
     defer server.deinit();
 
     try std.testing.expectError(Error.ZixHttp2_GrpcServer_ResolveFailed, server.run());
+}
+
+test "zix http2 grpc: server, tls_port equal to port is TlsPortConflict" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(9036, .ASYNC);
+    defer server.deinit();
+    server.config.tls = &ctx;
+    server.config.tls_port = 9036;
+
+    try std.testing.expectError(Error.ZixHttp2_GrpcServer_TlsPortConflict, server.run());
+}
+
+test "zix http2 grpc: server, TLS on IOCP is not supported" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(9036, .IOCP);
+    defer server.deinit();
+    server.config.tls = &ctx;
+
+    try std.testing.expectError(
+        Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported,
+        server.run(),
+    );
+}
+
+test "zix http2 grpc: server, dual listener on KQUEUE is not supported" {
+    var ctx: tlz.Context = undefined;
+    var server = testServer(9036, .KQUEUE);
+    defer server.deinit();
+    server.config.tls = &ctx;
+    server.config.tls_port = 9443;
+
+    try std.testing.expectError(
+        Error.ZixHttp2_GrpcServer_DispatchModel_NotSupported,
+        server.run(),
+    );
+}
+
+test "zix http2 grpc: server, TLS with an unresolvable ip is ResolveFailed" {
+    var ctx: tlz.Context = undefined;
+    var server = testServerAt("not-an-ip", .ASYNC);
+    defer server.deinit();
+    server.config.tls = &ctx;
+
+    try std.testing.expectError(Error.ZixHttp2_GrpcServer_ResolveFailed, server.run());
+}
+
+test "zix http2 grpc: server, TLS mux with an unresolvable ip is ResolveFailed" {
+    if (comptime OS != .linux) return error.SkipZigTest;
+
+    var ctx: tlz.Context = undefined;
+    var server = testServerAt("not-an-ip", .EPOLL);
+    defer server.deinit();
+    server.config.tls = &ctx;
+
+    try std.testing.expectError(Error.ZixHttp2_GrpcServer_ResolveFailed, server.run());
+}
+
+test "zix http2 grpc: server, dispatchTlsServeError maps ListenFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_GrpcServer_ListenFailed,
+        dispatchTlsServeError(tls_serve.Error.ZixHttp2_GrpcTlsServe_ListenFailed),
+    );
+}
+
+test "zix http2 grpc: server, dispatchTlsMuxError maps SpawnFailed" {
+    try std.testing.expectEqual(
+        Error.ZixHttp2_GrpcServer_TlsSetupFailed,
+        dispatchTlsMuxError(tls_mux.Error.ZixHttp2_GrpcTlsMux_SpawnFailed),
+    );
 }
 
