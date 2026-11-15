@@ -7,7 +7,7 @@
 - Semua 3 model dispatch: ASYNC (portabel), EPOLL (hanya Linux), URING (hanya Linux). Wajib, tidak ada default.
 - Codec protobuf minimal (tipe wire varint + LEN) untuk encoding payload tanpa codegen.
 - Parsing header grpc-timeout, serialisasi trailer grpc-status.
-- TLS native (TLS 1.3 / 1.2, ALPN h2) via `Tls.Context`, aditif di atas default h2c. Reverse proxy (nginx, haproxy) tetap opsi untuk offloading.
+- TLS native (TLS 1.3 / 1.2, ALPN h2) via `tlz.Context`, aditif di atas default h2c. Reverse proxy (nginx, haproxy) tetap opsi untuk offloading.
 
 ## Arsitektur
 
@@ -392,7 +392,7 @@ const n = try zix.Grpc.encodeString(1, "world", &out);
 
 ## TLS
 
-`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*Tls.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_mux.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `Tls.Context` (ADR-047), dipakai ulang lintas engine. Dengan `tls_port` diisi bersama `tls`, SATU server melayani h2c di `port` dan gRPC over TLS di `tls_port` dari worker fleet yang sama (ADR-060).
+`zix.Grpc` melayani h2c (cleartext) secara default. Menyetel `tls: ?*tlz.Context` di config opt-in ke gRPC over TLS (TLS 1.3, dengan fallback 1.2, ALPN h2), dengan dua jalur serve yang dipilih oleh `dispatch_model` (ADR-052). Pada `.EPOLL` / `.URING`, satu worker epoll `SO_REUSEPORT` per core menterminasi TLS di tempat lewat session resumable (`tcp/tls/tls_session.zig`) dan memultipleks banyak koneksi per worker (`grpc/tls_mux.zig`), tanpa socketpair dan tanpa thread per koneksi. Pada `.ASYNC`, terminator thread-per-koneksi (`grpc/tls_serve.zig`) menjalankan `tcp/tls/h2_terminator.zig` bersama dengan driver inline-mux yang menggerakkan mux gRPC resumable langsung di atas record terdekripsi dan menyegel frame kembali ke record TLS lewat write hook thread-local (dipakai juga oleh Http2). Cert / key / policy berada di `tlz.Context` (ADR-047), dipakai ulang lintas engine. Dengan `tls_port` diisi bersama `tls`, SATU server melayani h2c di `port` dan gRPC over TLS di `tls_port` dari worker fleet yang sama (ADR-060).
 
 ```mermaid
 graph LR
