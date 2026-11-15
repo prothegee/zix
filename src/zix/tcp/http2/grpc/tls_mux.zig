@@ -98,14 +98,14 @@ fn setNoDelay(fd: std.posix.fd_t) void {
 
 fn setNonBlock(fd: std.posix.fd_t) bool {
     const rc = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (std.posix.errno(rc) != .SUCCESS) return false;
+    if (linux.errno(rc) != .SUCCESS) return false;
 
     var flags: linux.O = @bitCast(@as(u32, @intCast(rc)));
     flags.NONBLOCK = true;
     const bits: u32 = @bitCast(flags);
     const set_rc = linux.fcntl(fd, linux.F.SETFL, @intCast(bits));
 
-    return std.posix.errno(set_rc) == .SUCCESS;
+    return linux.errno(set_rc) == .SUCCESS;
 }
 
 fn closeListeners(listeners: []std.Io.net.Server, io: std.Io) void {
@@ -221,7 +221,7 @@ fn WorkerEntry(comptime RouterType: type) type {
             if (!setNonBlock(listener_fd)) return worker.failSetup();
 
             const epfd_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
-            if (std.posix.errno(epfd_rc) != .SUCCESS) return worker.failSetup();
+            if (linux.errno(epfd_rc) != .SUCCESS) return worker.failSetup();
 
             const epfd: std.posix.fd_t = @intCast(epfd_rc);
             defer _ = linux.close(epfd);
@@ -236,7 +236,7 @@ fn WorkerEntry(comptime RouterType: type) type {
                 listener_fd,
                 &listener_event,
             );
-            if (std.posix.errno(add_rc) != .SUCCESS) return worker.failSetup();
+            if (linux.errno(add_rc) != .SUCCESS) return worker.failSetup();
 
             var table = ConnTable.init() catch |err| switch (err) {
                 error.ZixMultiplexers_ConnTable_OutOfMemory,
@@ -253,7 +253,7 @@ fn WorkerEntry(comptime RouterType: type) type {
                     EPOLL_MAX_EVENTS,
                     EPOLL_WAIT_TIMEOUT_MS,
                 );
-                switch (std.posix.errno(wait_rc)) {
+                switch (linux.errno(wait_rc)) {
                     .SUCCESS => {},
                     .INTR => continue,
                     else => return worker.failSetup(),
@@ -389,7 +389,7 @@ pub fn onReadable(comptime RouterType: type, conn: *TlsConn) bool {
         if (room == 0) return false;
 
         const rc = linux.read(conn.transport.fd, &cipher, @min(cipher.len, room));
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => if (rc == 0) return hangupGoaway(conn),
             .INTR => continue,
             .AGAIN => return true,
@@ -442,7 +442,7 @@ pub fn acceptAll(
             null,
             std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
         );
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {},
             .AGAIN => return,
             .INTR, .CONNABORTED => continue,
@@ -469,7 +469,7 @@ pub fn acceptAll(
             .data = .{ .u64 = conn.transport.ep_data },
         };
         const add_rc = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &event);
-        if (std.posix.errno(add_rc) != .SUCCESS) {
+        if (linux.errno(add_rc) != .SUCCESS) {
             table.drop(fd);
             _ = linux.close(fd);
         }
@@ -626,7 +626,7 @@ fn testWriteAll(fd: std.posix.fd_t, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) {
         const rc = linux.write(fd, bytes[off..].ptr, bytes.len - off);
-        if (std.posix.errno(rc) != .SUCCESS) return error.ZixTest_WriteFailed;
+        if (linux.errno(rc) != .SUCCESS) return error.ZixTest_WriteFailed;
 
         off += rc;
     }
@@ -638,7 +638,7 @@ fn readRecordFd(fd: std.posix.fd_t, buf: []u8) ![]const u8 {
     var total: usize = 5;
     while (got < total) {
         const rc = linux.read(fd, buf[got..].ptr, total - got);
-        if (std.posix.errno(rc) != .SUCCESS) return error.ZixTest_ReadFailed;
+        if (linux.errno(rc) != .SUCCESS) return error.ZixTest_ReadFailed;
         if (rc == 0) return error.ZixTest_Closed;
 
         got += rc;
@@ -653,7 +653,7 @@ fn drainNonblock(fd: std.posix.fd_t, buf: []u8, len: usize) usize {
     var total = len;
     while (total < buf.len) {
         const rc = linux.read(fd, buf[total..].ptr, buf.len - total);
-        switch (std.posix.errno(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {
                 if (rc == 0) break;
 
