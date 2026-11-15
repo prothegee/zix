@@ -449,7 +449,7 @@ Access logging per-request adalah tanggung jawab engine, bukan handler. Saat `co
 | Body request besar (upload) | Drain melebarkan receive window via `large_body_recv_buf` (SO_RCVBUF), lihat [`docs/zix-config-id.md`](zix-config-id.md) |
 | Body request chunked | Di-decode ke body buffer. Frame yang tidak bisa dijalani decoder dijawab `400`, body chunked melewati buffer dijawab `413` (chunked tidak mendeklarasikan panjang di muka, jadi buffer menggantikan `max_request_body`) |
 | Versi HTTP | Hanya HTTP/1.0 dan HTTP/1.1, selain itu `400` |
-| TLS | https/1.1 native (TLS 1.3 + 1.2), opt-in via `config.tls`, pada perf band-nya sendiri. `.ASYNC` melakukan terminasi per koneksi di worker thread, `.EPOLL` / `.URING` di worker epoll-mux event-driven. Lihat [`docs/hld-tls-id.md`](hld-tls-id.md) |
+| TLS | https/1.1 native (TLS 1.3 + 1.2), opt-in via `config.tls`, pada perf band-nya sendiri. `.ASYNC` melakukan terminasi per koneksi di worker thread, `.EPOLL` / `.URING` di worker epoll-mux event-driven. Lihat [`src/tlz/docs/hld-id.md`](../src/tlz/docs/hld-id.md) |
 
 Endpoint yang menerima upload besar membaca `req.bodyReceived()` pada semua dispatch model (byte yang dibuang dihitung, tidak di-buffer) dan `req.bodyComplete()` untuk membedakan upload yang selesai dari yang diputus peer.
 
