@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
     tlz_options.addOption(usize, "version_patch", tlz_zon.semver.patch);
 
     const tlz_openssl = tlz_build.detectOpenssl(b, target);
-    tlz_options.addOption(bool, "openssl", tlz_openssl);
+    tlz_options.addOption(bool, "openssl", tlz_openssl != null);
 
     const tlz = b.addModule("tlz", .{
         .target = target,
@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tlz/src/lib.zig"),
     });
     tlz.addOptions("tlz_options", tlz_options);
-    if (tlz_openssl) tlz_build.linkOpenssl(b, target, optimize, tlz);
+    if (tlz_openssl) |found| tlz_build.linkOpenssl(b, target, optimize, tlz, &found);
     zix.addImport("tlz", tlz);
 
     // Brotli static dictionary (RFC 7932 Appendix A): generated into the build cache
@@ -221,7 +221,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tlz/src/test.zig"),
     });
     tlz_unit_and_edge_test_mod.addOptions("tlz_options", tlz_options);
-    if (tlz_openssl) tlz_build.linkOpenssl(b, target, optimize, tlz_unit_and_edge_test_mod);
+    if (tlz_openssl) |found| {
+        tlz_build.linkOpenssl(b, target, optimize, tlz_unit_and_edge_test_mod, &found);
+    }
 
     const tlz_unit_and_edge_test = b.addTest(.{
         .root_module = tlz_unit_and_edge_test_mod,
@@ -232,6 +234,19 @@ pub fn build(b: *std.Build) void {
     const tlz_unit_and_edge_test_step =
         b.step("tlz-unit_edge-test", "TLZ: Run unit & edge tests.");
     tlz_unit_and_edge_test_step.dependOn(&tlz_unit_and_edge_test_artifact.step);
+    tlz_build.addBuildHelperTests(b, tlz_unit_and_edge_test_step, &.{
+        b.path("src/tlz/scripts/OpensslProbe.zig"),
+        b.path("src/tlz/scripts/openssl_check.zig"),
+    });
+
+    // Tlz OpenSSL check: probe again, compare with this build
+    tlz_build.addOpensslCheck(
+        b,
+        "tlz-openssl-check",
+        "TLZ: Probe OpenSSL again and compare it with this build.",
+        b.path("src/tlz/scripts/openssl_check.zig"),
+        tlz_openssl,
+    );
 
     // Tlz package steps: each one runs `zig build <step>` inside src/tlz
     const tlz_steps = [_][3][]const u8{
