@@ -41,6 +41,7 @@ const tls_mux = @import("tls_mux.zig");
 const tls_serve = @import("tls_serve.zig");
 const Config = @import("Config.zig");
 const DispatchModel = @import("../../../shared/dispatch.zig").Model;
+const ignoreSigpipe = @import("../../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 const OS = @import("builtin").target.os.tag;
 
 // --------------------------------------------------------- //
@@ -265,6 +266,8 @@ pub fn GrpcServer(comptime RouterType: type) type {
         /// - Error.ZixHttp2_GrpcServer_TlsSetupFailed when the TLS side could
         ///   not start
         pub fn run(self: *const Self) Error!void {
+            ignoreSigpipe();
+
             try gatePort(self.config);
             try gateDispatchModel(self.config.dispatch_model);
 
