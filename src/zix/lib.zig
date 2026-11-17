@@ -98,6 +98,9 @@ pub const Http2 = @import("tcp/http2/Http2.zig");
 /// ZIX Grpc
 pub const Grpc = @import("tcp/http2/grpc/Grpc.zig");
 
+/// ZIX Uds
+pub const Uds = @import("uds/Uds.zig");
+
 /// ZIX Utils
 pub const utils = @import("utils/Utils.zig");
 
@@ -145,6 +148,11 @@ test "zix: Http2, exports the h2c server" {
 test "zix: Grpc, exports the gRPC server" {
     try std.testing.expect(@hasDecl(Grpc, "Server"));
     try std.testing.expect(@hasDecl(Grpc.Server, "init"));
+}
+
+test "zix: Uds, exports the UDS server" {
+    try std.testing.expect(@hasDecl(Uds, "Server"));
+    try std.testing.expect(@hasDecl(Uds.Server, "init"));
 }
 
 test "zix: utils, exports the compression facade" {
