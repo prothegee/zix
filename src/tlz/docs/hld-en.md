@@ -164,14 +164,26 @@ graph TD
     CIMP --> LIB[libssl and libcrypto]
 ```
 
-- Detection: `build.zig` looks for OpenSSL on the build host, first with `pkg-config openssl`, then in the standard header paths. There is no build flag. When found, the package links libssl, libcrypto, and libc, and the binding is compiled in. When not found, nothing from OpenSSL is linked or included. A cross target is never detected.
+- Detection: `build.zig` looks for OpenSSL on the build host, in this order: the `OPENSSL_DIR` env var (`<dir>/include` and `<dir>/lib`), then `pkg-config openssl`, then `/usr/include` and `/usr/local/include` (never on a Windows host). There is no build flag. When found, the package links libssl, libcrypto, and libc, and the binding is compiled in. When not found, nothing from OpenSSL is linked or included. A cross target is never detected. The build logs one info line with the result, for example `tlz build: OpenSSL 4.1.0 detected (pkg-config), binding enabled (4.x: SSL_set1_dnsname)`. An `OPENSSL_DIR` without OpenSSL headers stops the build.
+- Cache: Zig caches the configure result. The build watches the `opensslv.h` it found (or, when OpenSSL is not found, the standard include directories), so the probe runs again only when OpenSSL changes. Env vars are not watched. `zig build openssl-check` (zix root: `zig build tlz-openssl-check`) probes again, compares with the build, and fails on a difference. It never changes the build: clear the cache (zix root: `zig build cleanup`) to probe again.
 - Selection: the binding is a `comptime` parameter, placed last. The return type follows the binding, so there is no runtime switch. `Context.ContextFor(binding)` and `Client.ConnectionFor(binding)` name that type, for a struct field.
 - `Context.init` and `Context.initWith(..., .DEFAULT)` build the same native context, even when OpenSSL is compiled in.
 - Choosing `.OPENSSL` on a build without OpenSSL is a build error with a clear message, never a runtime error. A build that never chooses `.OPENSSL` always compiles.
 - `Client.connectWith(..., .DEFAULT)` is a build error: the native client is `Client.start` plus `Client.finish`.
-- Version floor: OpenSSL 3.0. An older OpenSSL is a build error.
+- Version floor: OpenSSL 3.5 on the 3.x line, 4.0 on the 4.x line. A version below 3.5 stops the build with a log line, also when no code chooses `.OPENSSL`.
 - The OpenSSL context reads only `cert_path`, `key_path`, `alpn`, `min_version`, and `max_version` from `Config`. Curves and ciphers keep the OpenSSL defaults.
 - No silent fallback: a failed OpenSSL handshake returns an error, it never switches to native.
+
+Both OpenSSL lines are supported. The call that sets the server name check differs per line, and so do its host rules:
+
+| Line | Floor | Name check call | Host rules at `Client.connectWith` |
+| :- | :- | :- | :- |
+| 3.x | 3.5 | `SSL_set1_host` | a label above 63 bytes and an IPv6 literal pass setup. An IPv4 literal is checked against the IP SAN. |
+| 4.x | 4.0 | `SSL_set1_dnsname` (`SSL_set1_host` is deprecated in 4.0) | a label above 63 bytes and an IPv6 literal are `Tlz_Client_HostSetFailed`. An IPv4 literal is checked as a DNS name, so it does not match an IP SAN. |
+
+SNI is `SSL_set_tlsext_host_name` on both lines. A valid DNS name behaves the same on both.
+
+Windows: without OpenSSL the build is native only, and the tests compile for `x86_64-windows-gnu` and `x86_64-windows-msvc` (checked by cross-compile, not run on Windows yet). The OpenSSL backend on Windows (through `pkg-config` or `OPENSSL_DIR`) is not verified yet. The Zig default Windows ABI is `gnu`, which links `ssl` and `crypto`, so the OpenSSL build must match the ABI (an MSVC build ships `libssl.lib`). The OpenSSL DLLs must be on `PATH` to run the tests.
 
 ```zig
 var ssl_ctx = try tlz.Context.initWith(allocator, io, .{
