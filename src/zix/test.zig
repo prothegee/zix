@@ -252,6 +252,9 @@ test {
     _ = @import("tls/tls_session/Session.zig");
     _ = @import("tls/tls_session/outcome.zig");
     _ = @import("tls/tls_session/phase.zig");
+    _ = @import("uds/Config.zig");
+    _ = @import("uds/frame.zig");
+    _ = @import("uds/handler.zig");
     _ = @import("utils/Multipart.zig");
     _ = @import("utils/MultipartField.zig");
     _ = @import("utils/cache/ResponseCache.zig");
