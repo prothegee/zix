@@ -38,12 +38,14 @@ const tlz_options = @import("tlz_options");
 // --------------------------------------------------------- //
 // Private:
 
-/// The oldest supported OpenSSL: 3.0.0 (the 3.0 LTS line), as `OPENSSL_VERSION_NUMBER`.
-const VERSION_FLOOR: c_long = 0x30000000;
+/// The oldest supported OpenSSL, as `OPENSSL_VERSION_NUMBER`: 3.5.0 on the 3.x line.
+/// Every 4.x release (floor 4.0.0) is above it.
+const VERSION_FLOOR: c_long = 0x30500000;
 
 comptime {
     if (ENABLED and raw.OPENSSL_VERSION_NUMBER < VERSION_FLOOR) {
-        @compileError("tlz openssl binding requires OpenSSL 3.0 or newer.");
+        @compileError("tlz openssl binding requires OpenSSL 3.5 or newer (3.x), " ++
+            "or 4.0 or newer (4.x).");
     }
 }
 
@@ -56,6 +58,10 @@ pub const ENABLED: bool = tlz_options.openssl;
 /// The translated OpenSSL headers (ssl.h, err.h, x509v3.h).
 /// An empty namespace when OpenSSL was not detected.
 pub const raw = if (ENABLED) @import("openssl_c") else struct {};
+
+/// The OpenSSL major version of the headers: 3 or 4. 0 when OpenSSL was not detected.
+/// The openssl files pick a call per major with it (see `client.zig`).
+pub const VERSION_MAJOR: c_int = if (ENABLED) raw.OPENSSL_VERSION_MAJOR else 0;
 
 // --------------------------------------------------------- //
 // --------------------------------------------------------- //
@@ -71,16 +77,37 @@ test "tlz openssl: c, raw is empty without OpenSSL" {
     try std.testing.expect(!@hasDecl(raw, "SSL_CTX_new"));
 }
 
-test "tlz openssl: c, linked version meets the 3.0 floor" {
+test "tlz openssl: c, VERSION_MAJOR is 0 without OpenSSL" {
+    if (ENABLED) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(c_int, 0), VERSION_MAJOR);
+}
+
+test "tlz openssl: c, linked version meets the 3.5 floor" {
     if (!ENABLED) return error.SkipZigTest;
 
     try std.testing.expect(raw.OpenSSL_version_num() >= VERSION_FLOOR);
 }
 
-test "tlz openssl: c, header version meets the 3.0 floor" {
+test "tlz openssl: c, header version meets the 3.5 floor" {
     if (!ENABLED) return error.SkipZigTest;
 
     try std.testing.expect(raw.OPENSSL_VERSION_NUMBER >= VERSION_FLOOR);
+}
+
+test "tlz openssl: c, VERSION_MAJOR is a supported line" {
+    if (!ENABLED) return error.SkipZigTest;
+
+    try std.testing.expect(VERSION_MAJOR == 3 or VERSION_MAJOR == 4);
+}
+
+test "tlz openssl: c, VERSION_MAJOR matches the linked library" {
+    if (!ENABLED) return error.SkipZigTest;
+
+    try std.testing.expectEqual(
+        @as(c_uint, @intCast(VERSION_MAJOR)),
+        raw.OPENSSL_version_major(),
+    );
 }
 
 test "tlz openssl: c, SSL_CTX_new creates a context" {
