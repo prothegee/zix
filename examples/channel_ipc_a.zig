@@ -61,15 +61,15 @@ fn writeFrame(writer: *std.Io.Writer, message: []const u8) std.Io.Writer.Error!v
     try writer.flush();
 }
 
-/// Fill dst completely.
+/// Fill destination (dest) completely.
 ///
 /// Return:
-/// - true when dst is full
+/// - true when dest is full
 /// - false when the peer closed the connection first
-fn readExact(reader: *std.Io.Reader, dst: []u8) std.Io.Reader.ShortError!bool {
+fn readExact(reader: *std.Io.Reader, dest: []u8) std.Io.Reader.ShortError!bool {
     var filled: usize = 0;
-    while (filled < dst.len) {
-        const got = try reader.readSliceShort(dst[filled..]);
+    while (filled < dest.len) {
+        const got = try reader.readSliceShort(dest[filled..]);
         if (got == 0) return false;
 
         filled += got;
