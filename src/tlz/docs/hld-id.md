@@ -164,14 +164,26 @@ graph TD
     CIMP --> LIB[libssl dan libcrypto]
 ```
 
-- Deteksi: `build.zig` mencari OpenSSL di host build, pertama dengan `pkg-config openssl`, lalu di path header standar. Tidak ada build flag. Jika ditemukan, package me-link libssl, libcrypto, dan libc, dan binding ikut dikompilasi. Jika tidak ditemukan, tidak ada apa pun dari OpenSSL yang di-link atau di-include. Target cross tidak pernah terdeteksi.
+- Deteksi: `build.zig` mencari OpenSSL di host build dengan urutan ini: env var `OPENSSL_DIR` (`<dir>/include` dan `<dir>/lib`), lalu `pkg-config openssl`, lalu `/usr/include` dan `/usr/local/include` (tidak pernah di host Windows). Tidak ada build flag. Jika ditemukan, package me-link libssl, libcrypto, dan libc, dan binding ikut dikompilasi. Jika tidak ditemukan, tidak ada apa pun dari OpenSSL yang di-link atau di-include. Target cross tidak pernah terdeteksi. Build menulis satu baris log info berisi hasilnya, contohnya `tlz build: OpenSSL 4.1.0 detected (pkg-config), binding enabled (4.x: SSL_set1_dnsname)`. `OPENSSL_DIR` tanpa header OpenSSL menghentikan build.
+- Cache: Zig men-cache hasil configure. Build memantau `opensslv.h` yang ditemukan (atau, jika OpenSSL tidak ditemukan, direktori include standar), jadi probe hanya jalan lagi ketika OpenSSL berubah. Env var tidak dipantau. `zig build openssl-check` (root zix: `zig build tlz-openssl-check`) menjalankan probe lagi, membandingkannya dengan build, dan gagal jika berbeda. Step ini tidak pernah mengubah build: bersihkan cache (root zix: `zig build cleanup`) untuk probe ulang.
 - Pemilihan: binding adalah parameter `comptime`, diletakkan paling akhir. Tipe kembalian mengikuti binding, jadi tidak ada switch saat runtime. `Context.ContextFor(binding)` dan `Client.ConnectionFor(binding)` menamai tipe itu, untuk field struct.
 - `Context.init` dan `Context.initWith(..., .DEFAULT)` membangun context native yang sama, bahkan ketika OpenSSL ikut dikompilasi.
 - Memilih `.OPENSSL` di build tanpa OpenSSL adalah build error dengan pesan yang jelas, tidak pernah error saat runtime. Build yang tidak pernah memilih `.OPENSSL` selalu bisa dikompilasi.
 - `Client.connectWith(..., .DEFAULT)` adalah build error: client native adalah `Client.start` ditambah `Client.finish`.
-- Batas versi: OpenSSL 3.0. OpenSSL yang lebih lama adalah build error.
+- Batas versi: OpenSSL 3.5 di jalur 3.x, 4.0 di jalur 4.x. Versi di bawah 3.5 menghentikan build dengan satu baris log, juga ketika tidak ada kode yang memilih `.OPENSSL`.
 - Context OpenSSL hanya membaca `cert_path`, `key_path`, `alpn`, `min_version`, dan `max_version` dari `Config`. Curve dan cipher memakai default OpenSSL.
 - Tanpa fallback diam-diam: handshake OpenSSL yang gagal mengembalikan error, tidak pernah berpindah ke native.
+
+Kedua jalur OpenSSL didukung. Pemanggilan yang memasang cek nama server berbeda per jalur, begitu juga aturan host-nya:
+
+| Jalur | Batas | Pemanggilan cek nama | Aturan host di `Client.connectWith` |
+| :- | :- | :- | :- |
+| 3.x | 3.5 | `SSL_set1_host` | label di atas 63 byte dan literal IPv6 lolos setup. Literal IPv4 dicek terhadap IP SAN. |
+| 4.x | 4.0 | `SSL_set1_dnsname` (`SSL_set1_host` deprecated di 4.0) | label di atas 63 byte dan literal IPv6 menjadi `Tlz_Client_HostSetFailed`. Literal IPv4 dicek sebagai nama DNS, jadi tidak cocok dengan IP SAN. |
+
+SNI memakai `SSL_set_tlsext_host_name` di kedua jalur. Nama DNS yang valid berperilaku sama di kedua jalur.
+
+Windows: tanpa OpenSSL, build hanya native, dan test bisa dikompilasi untuk `x86_64-windows-gnu` dan `x86_64-windows-msvc` (dicek lewat cross-compile, belum dijalankan di Windows). Backend OpenSSL di Windows (lewat `pkg-config` atau `OPENSSL_DIR`) belum diverifikasi. ABI bawaan Zig di Windows adalah `gnu`, yang me-link `ssl` dan `crypto`, jadi build OpenSSL harus cocok dengan ABI-nya (build MSVC membawa `libssl.lib`). DLL OpenSSL harus ada di `PATH` untuk menjalankan test.
 
 ```zig
 var ssl_ctx = try tlz.Context.initWith(allocator, io, .{
