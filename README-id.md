@@ -297,9 +297,11 @@ ditulis in-tree dari RFC masing-masing.
 > Satu `zig build` mengompilasi seluruh stack dari source tanpa ada yang perlu di-vendor,
 di-pin, atau terus di-patch, jadi supply chain-nya adalah Zig toolchain plus repository ini.
 
-Catatan: jika host build memiliki OpenSSL 3.0 atau lebih baru, build mendeteksinya dan me-link
-libssl, libcrypto, dan libc untuk backend OpenSSL opsional di `zix.tlz`, walaupun tidak ada kode
-yang memilihnya. Host tanpa OpenSSL tetap memakai build di atas. Lihat
+Catatan: jika host build memiliki OpenSSL 3.5 atau lebih baru (3.x) atau 4.0 atau lebih baru
+(4.x), build mendeteksinya dan me-link libssl, libcrypto, dan libc untuk backend OpenSSL opsional
+di `zix.tlz`, walaupun tidak ada kode yang memilihnya. OpenSSL di bawah 3.5 menghentikan build.
+Host tanpa OpenSSL tetap memakai build di atas. `zig build tlz-openssl-check` menunjukkan apakah
+build yang ter-cache masih cocok dengan OpenSSL di host. Lihat
 [`src/tlz/README-id.md`](src/tlz/README-id.md#backend-openssl-opsional).
 
 <br>
@@ -1630,7 +1632,7 @@ var server = zix.Http1.Server.init(handler, .{
 });
 ```
 
-`zix.tlz` juga punya backend OpenSSL opsional (`zix.tlz.Context.initWith(..., .OPENSSL)`), hanya ikut dikompilasi jika host build menyediakan libssl (OpenSSL 3.0 atau lebih baru). Server di atas menerima `zix.tlz.Context` native. Lihat [`src/tlz/README-id.md`](src/tlz/README-id.md#backend-openssl-opsional).
+`zix.tlz` juga punya backend OpenSSL opsional (`zix.tlz.Context.initWith(..., .OPENSSL)`), hanya ikut dikompilasi jika host build menyediakan libssl (OpenSSL 3.5 atau lebih baru di 3.x, 4.0 atau lebih baru di 4.x). OpenSSL di bawah 3.5 menghentikan build. Server di atas menerima `zix.tlz.Context` native. Lihat [`src/tlz/README-id.md`](src/tlz/README-id.md#backend-openssl-opsional).
 
 Dengan `tls` diisi, server menjadi TLS-only di `port`. Tambahkan `tls_port` untuk melayani KEDUANYA dari satu server (dual listener,): cleartext di `port` dan TLS di `tls_port` dari worker fleet yang sama, alih-alih meluncurkan server kedua yang menduplikasi worker, tabel fd, dan cache. Tersedia di Http1, Http2, dan Grpc, semua dispatch model (di bawah `.URING` sisi TLS berjalan di ring).
 
