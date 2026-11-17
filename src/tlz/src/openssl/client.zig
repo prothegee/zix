@@ -16,6 +16,11 @@
 //! `host` is a DNS name: it is sent as SNI and checked against the certificate. An
 //! empty host is refused, because OpenSSL would then skip the name check.
 //!
+//! The name check call differs per OpenSSL line: `SSL_set1_dnsname` on 4.x,
+//! `SSL_set1_host` on 3.x (deprecated in 4.0). Their host rules differ: on 4.x a label
+//! above 63 bytes or an IPv6 literal is refused at setup, and an IPv4 literal is
+//! checked as a DNS name. On 3.x those hosts pass setup.
+//!
 //! ---------------------------------------------------------
 //!
 //! ### licenses:
@@ -32,7 +37,8 @@
 //!
 
 const std = @import("std");
-const c = @import("c.zig").raw;
+const c_mod = @import("c.zig");
+const c = c_mod.raw;
 const openssl_error = @import("error.zig");
 const Connection = @import("Connection.zig");
 const alpn = @import("../alpn.zig");
@@ -42,6 +48,16 @@ const alpn = @import("../alpn.zig");
 
 /// The longest DNS name (RFC 1035 2.3.4), as text without the trailing dot.
 const MAX_HOST_LEN: usize = 253;
+
+/// The name check uses `SSL_set1_dnsname` (OpenSSL 4.x), else `SSL_set1_host` (3.x).
+const USES_DNSNAME: bool = c_mod.VERSION_MAJOR >= 4;
+
+/// Set the name the certificate must match, with the call of the OpenSSL line.
+fn setCheckName(conn: *Connection, host_z: [*:0]const u8) bool {
+    if (comptime USES_DNSNAME) return c.SSL_set1_dnsname(conn.ssl, host_z) == 1;
+
+    return c.SSL_set1_host(conn.ssl, host_z) == 1;
+}
 
 /// Build the client context: TLS 1.2 floor, peer verification, and the CA file.
 fn newContext(ca_path: []const u8) Error!*c.SSL_CTX {
@@ -78,7 +94,7 @@ fn setHost(conn: *Connection, host: []const u8) Error!void {
     @memcpy(host_z[0..host.len], host);
 
     const sni_ok = c.SSL_set_tlsext_host_name(conn.ssl, &host_z) == 1;
-    const name_ok = c.SSL_set1_host(conn.ssl, &host_z) == 1;
+    const name_ok = setCheckName(conn, &host_z);
 
     if (!sni_ok or !name_ok) {
         openssl_error.clearQueue();
@@ -306,6 +322,43 @@ fn runHandshake(client_conn: *Connection, server_conn: *Connection) !void {
     }
 
     return error.TestUnexpectedResult;
+}
+
+/// Connect as `host` to a server on the fixture certificate (SAN DNS localhost,
+/// IP 127.0.0.1) and run the handshake.
+fn handshakeAsHost(host: []const u8) !void {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var context = try Context.init(std.testing.allocator, .{
+        .cert_path = try fixture.certPath(),
+        .key_path = try fixture.keyPath(),
+    });
+    defer context.deinit();
+    var server_conn = try context.newConnection();
+    defer server_conn.deinit();
+    var client_conn = try connect(try fixture.certPath(), host, &.{});
+    defer client_conn.deinit();
+
+    try runHandshake(&client_conn, &server_conn);
+}
+
+/// A host with one label of `label_len` bytes, inside `buf`.
+fn labelHost(buf: []u8, label_len: usize) []const u8 {
+    @memset(buf[0..label_len], 'a');
+
+    return buf[0..label_len];
+}
+
+/// Skip a test written for the other OpenSSL line, with an info line.
+fn skipOtherLine(comptime wanted_major: c_int) !void {
+    if (c_mod.VERSION_MAJOR == wanted_major) return;
+
+    std.log.info("OpenSSL {d}.x only (found {d}.x), test skipped", .{
+        wanted_major,
+        c_mod.VERSION_MAJOR,
+    });
+
+    return error.SkipZigTest;
 }
 
 const builtin = @import("builtin");
@@ -805,12 +858,103 @@ test "tlz openssl: client, connect with a host past MAX_HOST_LEN is HostTooLong"
 test "tlz openssl: client, connect with a host at MAX_HOST_LEN is accepted" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
-    const host: [MAX_HOST_LEN]u8 = @splat('a');
+    // A valid DNS name: labels of at most 63 bytes (RFC 1035 2.3.4), joined by dots.
+    // OpenSSL 4 refuses a longer label in `SSL_set1_host`.
+    const max_label_len: usize = 63;
+    var host: [MAX_HOST_LEN]u8 = @splat('a');
+    var dot_pos: usize = max_label_len;
+    while (dot_pos < host.len) : (dot_pos += max_label_len + 1) {
+        host[dot_pos] = '.';
+    }
 
     var conn = try connect(try fixture.certPath(), &host, &.{});
     defer conn.deinit();
 
     try std.testing.expect(!conn.handshakeDone());
+}
+
+test "tlz openssl: client, USES_DNSNAME follows the linked OpenSSL major" {
+    try std.testing.expectEqual(c.OPENSSL_version_major() >= 4, USES_DNSNAME);
+}
+
+test "tlz openssl: client, connect with a 63 byte label is accepted" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var host_buf: [64]u8 = undefined;
+
+    var conn = try connect(try fixture.certPath(), labelHost(&host_buf, 63), &.{});
+    defer conn.deinit();
+
+    try std.testing.expect(!conn.handshakeDone());
+}
+
+test "tlz openssl: client, OpenSSL 4 connect with a 64 byte label is HostSetFailed" {
+    try skipOtherLine(4);
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var host_buf: [64]u8 = undefined;
+
+    try std.testing.expectError(
+        Error.Tlz_OpensslClient_HostSetFailed,
+        connect(try fixture.certPath(), labelHost(&host_buf, 64), &.{}),
+    );
+}
+
+test "tlz openssl: client, OpenSSL 3 connect with a 64 byte label passes setup" {
+    try skipOtherLine(3);
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var host_buf: [64]u8 = undefined;
+
+    var conn = try connect(try fixture.certPath(), labelHost(&host_buf, 64), &.{});
+    defer conn.deinit();
+
+    try std.testing.expect(!conn.handshakeDone());
+}
+
+test "tlz openssl: client, OpenSSL 4 connect with an IPv6 literal is HostSetFailed" {
+    try skipOtherLine(4);
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+
+    try std.testing.expectError(
+        Error.Tlz_OpensslClient_HostSetFailed,
+        connect(try fixture.certPath(), "::1", &.{}),
+    );
+}
+
+test "tlz openssl: client, OpenSSL 3 connect with an IPv6 literal passes setup" {
+    try skipOtherLine(3);
+
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+
+    var conn = try connect(try fixture.certPath(), "::1", &.{});
+    defer conn.deinit();
+
+    try std.testing.expect(!conn.handshakeDone());
+}
+
+test "tlz openssl: client, OpenSSL 4 IPv4 literal is checked as a DNS name" {
+    try skipOtherLine(4);
+
+    try std.testing.expectError(
+        Connection.Error.Tlz_OpensslConnection_PeerVerifyFailed,
+        handshakeAsHost("127.0.0.1"),
+    );
+}
+
+test "tlz openssl: client, OpenSSL 3 IPv4 literal matches the IP SAN" {
+    try skipOtherLine(3);
+
+    try handshakeAsHost("127.0.0.1");
+}
+
+test "tlz openssl: client, DNS host matches the DNS SAN on both lines" {
+    try handshakeAsHost("localhost");
 }
 
 test "tlz openssl: client, connect sends SNI in the ClientHello" {
