@@ -65,19 +65,19 @@ fn entrySize(name: []const u8, value: []const u8) usize {
 
 /// Copy bytes to the end of buf and return the stored slice.
 fn store(self: *Self, bytes: []const u8) []const u8 {
-    const dst = self.buf[self.buf_pos..][0..bytes.len];
-    @memcpy(dst, bytes);
+    const dest = self.buf[self.buf_pos..][0..bytes.len];
+    @memcpy(dest, bytes);
     self.buf_pos += bytes.len;
 
-    return dst;
+    return dest;
 }
 
 /// Move one stored slice down to new_pos and return the moved slice.
 fn moveDown(self: *Self, bytes: []const u8, new_pos: usize) []const u8 {
-    const dst = self.buf[new_pos..][0..bytes.len];
-    std.mem.copyForwards(u8, dst, bytes);
+    const dest = self.buf[new_pos..][0..bytes.len];
+    std.mem.copyForwards(u8, dest, bytes);
 
-    return dst;
+    return dest;
 }
 
 /// Repack the live entries at the start of buf, oldest first.
