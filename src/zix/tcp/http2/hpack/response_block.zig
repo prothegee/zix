@@ -84,23 +84,23 @@ fn lookup(
     return null;
 }
 
-/// Copy a cached prefix into dst and return its length.
-fn copyCached(dst: []u8, entry: *const RespPrefix) Inner!usize {
-    if (entry.block_len > dst.len) return Error.ZixHttp2_ResponseBlock_BufferFull;
+/// Copy a cached prefix into destination (dest) and return its length.
+fn copyCached(dest: []u8, entry: *const RespPrefix) Inner!usize {
+    if (entry.block_len > dest.len) return Error.ZixHttp2_ResponseBlock_BufferFull;
 
-    @memcpy(dst[0..entry.block_len], entry.block[0..entry.block_len]);
+    @memcpy(dest[0..entry.block_len], entry.block[0..entry.block_len]);
 
     return entry.block_len;
 }
 
-/// Encode the prefix into dst. An empty content_type or content_encoding is omitted.
+/// Encode the prefix into dest. An empty content_type or content_encoding is omitted.
 fn encodePrefix(
-    dst: []u8,
+    dest: []u8,
     status: u16,
     content_type: []const u8,
     content_encoding: []const u8,
 ) Inner!usize {
-    var encoder = HpackEncoder.init(dst);
+    var encoder = HpackEncoder.init(dest);
 
     var status_buf: [STATUS_DIGITS]u8 = undefined;
     const status_text = std.fmt.bufPrint(&status_buf, "{d}", .{status}) catch |err|
@@ -117,22 +117,22 @@ fn encodePrefix(
     return encoder.pos;
 }
 
-/// Write the prefix into dst from the cache, encoding and caching it on a miss.
+/// Write the prefix into destination from the cache, encoding and caching it on a miss.
 fn writePrefix(
-    dst: []u8,
+    dest: []u8,
     status: u16,
     content_type: []const u8,
     content_encoding: []const u8,
 ) Inner!usize {
     const count = @atomicLoad(usize, &prefix_count, .acquire);
     if (lookup(status, content_type, content_encoding, count)) |entry| {
-        return copyCached(dst, entry);
+        return copyCached(dest, entry);
     }
 
     const too_long =
         content_type.len > RespPrefix.CONTENT_TYPE_MAX or
         content_encoding.len > RespPrefix.CONTENT_ENCODING_MAX;
-    if (too_long) return encodePrefix(dst, status, content_type, content_encoding);
+    if (too_long) return encodePrefix(dest, status, content_type, content_encoding);
 
     while (prefix_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
     defer prefix_lock.store(false, .release);
@@ -140,17 +140,17 @@ fn writePrefix(
     // another worker may have inserted this triple since the load above
     const now = @atomicLoad(usize, &prefix_count, .acquire);
     if (lookup(status, content_type, content_encoding, now)) |entry| {
-        return copyCached(dst, entry);
+        return copyCached(dest, entry);
     }
 
     if (now == PREFIX_CACHE_LEN) {
-        return encodePrefix(dst, status, content_type, content_encoding);
+        return encodePrefix(dest, status, content_type, content_encoding);
     }
 
     var scratch: [PREFIX_SCRATCH]u8 = undefined;
     const encoded_len = try encodePrefix(&scratch, status, content_type, content_encoding);
     if (encoded_len > RespPrefix.BLOCK_MAX) {
-        return encodePrefix(dst, status, content_type, content_encoding);
+        return encodePrefix(dest, status, content_type, content_encoding);
     }
 
     const entry = &prefix_cache[now];
@@ -164,21 +164,21 @@ fn writePrefix(
 
     @atomicStore(usize, &prefix_count, now + 1, .release);
 
-    return copyCached(dst, entry);
+    return copyCached(dest, entry);
 }
 
 fn respHeaderBlockInner(
-    dst: []u8,
+    dest: []u8,
     status: u16,
     content_type: []const u8,
     content_encoding: []const u8,
     content_length: ?u64,
 ) Inner!usize {
-    const prefix_len = try writePrefix(dst, status, content_type, content_encoding);
+    const prefix_len = try writePrefix(dest, status, content_type, content_encoding);
     const length = content_length orelse return prefix_len;
 
     var encoder: HpackEncoder = .{
-        .buf = dst,
+        .buf = dest,
         .pos = prefix_len,
     };
     var length_buf: [LENGTH_DIGITS]u8 = undefined;
@@ -203,31 +203,31 @@ pub const Error = error {
 };
 
 /// Encode a response header block
-/// [:status, content-type, content-encoding, content-length] into dst.
+/// [:status, content-type, content-encoding, content-length] into dest.
 ///
 /// Note:
 /// - The first three fields come from the prefix cache. Only content-length is
 ///   encoded on every call.
 ///
 /// Param:
-/// dst - []u8 (destination for the block)
+/// dest - []u8 (destination for the block)
 /// status - u16 (response status, e.g. 200)
 /// content_type - []const u8 (empty omits the header)
 /// content_encoding - []const u8 (empty omits the header)
 /// content_length - ?u64 (null omits the header)
 ///
 /// Return:
-/// - usize (block length in dst)
-/// - error.ZixHttp2_ResponseBlock_BufferFull when dst is too small
+/// - usize (block length in dest)
+/// - error.ZixHttp2_ResponseBlock_BufferFull when destination is too small
 pub fn respHeaderBlock(
-    dst: []u8,
+    dest: []u8,
     status: u16,
     content_type: []const u8,
     content_encoding: []const u8,
     content_length: ?u64,
 ) Error!usize {
     return respHeaderBlockInner(
-        dst,
+        dest,
         status,
         content_type,
         content_encoding,
@@ -359,7 +359,7 @@ test "zix http2 hpack: response_block, too-long content-type bypasses the cache"
     try std.testing.expectEqualSlices(u8, &long_type, out[1].value);
 }
 
-test "zix http2 hpack: response_block, small dst is BufferFull" {
+test "zix http2 hpack: response_block, small destination is BufferFull" {
     var block: [2]u8 = undefined;
 
     const result = respHeaderBlock(&block, 200, "application/json", "", 42);
