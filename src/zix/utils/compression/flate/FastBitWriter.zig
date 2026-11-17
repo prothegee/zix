@@ -49,17 +49,17 @@ const Self = @This();
 // --------------------------------------------------------- //
 // Public:
 
-/// Start a writer at the first byte of dst.
+/// Start a writer at the first byte of destination.
 ///
 /// Param:
-/// dst - []u8 (destination, sized by the caller)
+/// dest - []u8 (destination, sized by the caller)
 ///
 /// Return:
 /// - Self
-pub fn init(dst: []u8) Self {
+pub fn init(dest: []u8) Self {
     return .{
-        .out = dst.ptr,
-        .start = dst.ptr,
+        .out = dest.ptr,
+        .start = dest.ptr,
     };
 }
 
