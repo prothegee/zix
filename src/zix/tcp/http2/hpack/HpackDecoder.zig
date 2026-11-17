@@ -100,11 +100,11 @@ fn getEntry(self: *const Self, index: usize) ?Header {
 fn copyIntoScratch(src: []const u8, scratch: []u8, scratch_pos: *usize) Inner![]const u8 {
     if (scratch_pos.* + src.len > scratch.len) return Error.ZixHttp2_HpackDecoder_ScratchFull;
 
-    const dst = scratch[scratch_pos.*..][0..src.len];
-    @memcpy(dst, src);
+    const dest = scratch[scratch_pos.*..][0..src.len];
+    @memcpy(dest, src);
     scratch_pos.* += src.len;
 
-    return dst;
+    return dest;
 }
 
 /// Decode one string literal (plain or Huffman) into scratch.
