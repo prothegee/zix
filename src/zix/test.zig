@@ -301,6 +301,7 @@ test {
     _ = @import("utils/http/RangeSpec.zig");
     _ = @import("utils/http/range_header.zig");
     _ = @import("utils/http/status.zig");
+    _ = @import("utils/ignore_sigpipe.zig");
     _ = @import("utils/media_type.zig");
     _ = @import("utils/peer_address.zig");
     _ = @import("utils/pwhash/argon2.zig");
