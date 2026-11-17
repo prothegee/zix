@@ -223,6 +223,12 @@ const EXAMPLES = .{
         "examples/channel_ipc_b.zig",
         "channel",
     },
+    // uds
+    .{
+        "zix-example-uds_server",
+        "examples/uds_server.zig",
+        "uds",
+    },
 };
 
 // --------------------------------------------------------- //
@@ -259,7 +265,7 @@ pub fn addSteps(
     // const group_udp = b.step("zix-example-udp", "ZIX: Build all udp examples");
     // const group_http3 = b.step("zix-example-http3", "ZIX: Build all http3 examples");
     // const group_webrtc = b.step("zix-example-webrtc", "ZIX: Build all webrtc examples");
-    // const group_uds = b.step("zix-example-uds", "ZIX: Build all uds examples");
+    const group_uds = b.step("zix-example-uds", "ZIX: Build all uds examples");
     const group_tls = b.step("zix-example-tls", "ZIX: Build all tls examples");
     const group_channel = b.step("zix-example-channel", "ZIX: Build all channel examples");
 
@@ -271,7 +277,7 @@ pub fn addSteps(
     // step.dependOn(group_udp);
     // step.dependOn(group_http3);
     // step.dependOn(group_webrtc);
-    // step.dependOn(group_uds);
+    step.dependOn(group_uds);
     step.dependOn(group_tls);
     step.dependOn(group_channel);
 
@@ -301,6 +307,8 @@ pub fn addSteps(
             group_tls
         else if (comptime std.mem.eql(u8, pair[2], "channel"))
             group_channel
+        else if (comptime std.mem.eql(u8, pair[2], "uds"))
+            group_uds
         // const group = if (comptime std.mem.eql(u8, pair[2], "tcp"))
         //     group_tcp
         // else if (comptime std.mem.eql(u8, pair[2], "fix"))
