@@ -108,7 +108,7 @@ try client.verifyServerCert(trust_anchor_der, "example.com", now_sec);
 
 ## OpenSSL backend (optional)
 
-The native backend is the default. When the build host has OpenSSL 3.0 or newer (found by `pkg-config openssl`), the build also compiles an OpenSSL backend and links libssl, libcrypto, and libc. There is no build flag. A context or a client opts in with the last parameter:
+The native backend is the default. When the build host has OpenSSL 3.5 or newer on 3.x, or 4.0 or newer on 4.x (found by `pkg-config openssl`), the build also compiles an OpenSSL backend and links libssl, libcrypto, and libc. There is no build flag. A context or a client opts in with the last parameter:
 
 ```zig
 // Same config as Context.init, the binding is the last parameter.
@@ -132,6 +132,10 @@ defer client.deinit();
 - The handshake is a loop: `conn.handshake(incoming, &out)` until `conn.handshakeDone()`. A client starts with `handshake(&.{}, &out)`, which writes the ClientHello. While `conn.pendingLen()` is above 0, call `conn.drain(&out)` and send the bytes.
 - After the handshake: `readAppData`, `writeAppData`, `closeNotify`, `selectedAlpn`, the same names as native.
 - Only `cert_path`, `key_path`, `alpn`, `min_version`, and `max_version` apply. Curves and ciphers keep the OpenSSL defaults.
+- The build logs the result, for example `tlz build: OpenSSL 4.1.0 detected (pkg-config), binding enabled (4.x: SSL_set1_dnsname)`. OpenSSL below 3.5 stops the build.
+- Without `pkg-config` (for example the Windows installer), set `OPENSSL_DIR` to the install (`<dir>/include`, `<dir>/lib`).
+- `zig build openssl-check` probes again and compares with the build. Zig caches the configure result, so after a change it tells when the cache must be cleared.
+- The server name check differs per OpenSSL line (`SSL_set1_host` on 3.x, `SSL_set1_dnsname` on 4.x). A valid DNS name behaves the same. A label above 63 bytes, an IPv6 literal, or an IPv4 literal does not, see [`docs/hld-en.md`](docs/hld-en.md#backend-model).
 
 Details are in [`docs/hld-en.md`](docs/hld-en.md#backend-model) and [`docs/lld-en.md`](docs/lld-en.md#openssl).
 
