@@ -297,9 +297,11 @@ in-tree from their RFCs.
 > One `zig build` compiles the whole stack from source with nothing to vendor, pin, or keep
 patched, so the supply chain is the Zig toolchain plus this repository.
 
-Note: when the build host has OpenSSL 3.0 or newer, the build detects it and links libssl,
-libcrypto, and libc for the optional `zix.tlz` OpenSSL backend, even when no code chooses it.
-A host without OpenSSL keeps the build above. See
+Note: when the build host has OpenSSL 3.5 or newer (3.x) or 4.0 or newer (4.x), the build
+detects it and links libssl, libcrypto, and libc for the optional `zix.tlz` OpenSSL backend,
+even when no code chooses it. OpenSSL below 3.5 stops the build. A host without OpenSSL keeps
+the build above. `zig build tlz-openssl-check` shows whether the cached build still matches the
+host OpenSSL. See
 [`src/tlz/README-en.md`](src/tlz/README-en.md#openssl-backend-optional).
 
 <br>
@@ -1621,7 +1623,7 @@ var server = zix.Http1.Server.init(handler, .{
 });
 ```
 
-`zix.tlz` also has an optional OpenSSL backend (`zix.tlz.Context.initWith(..., .OPENSSL)`), compiled in only when the build host provides libssl (OpenSSL 3.0 or newer). The servers above take the native `zix.tlz.Context`. See [`src/tlz/README-en.md`](src/tlz/README-en.md#openssl-backend-optional).
+`zix.tlz` also has an optional OpenSSL backend (`zix.tlz.Context.initWith(..., .OPENSSL)`), compiled in only when the build host provides libssl (OpenSSL 3.5 or newer on 3.x, 4.0 or newer on 4.x). OpenSSL below 3.5 stops the build. The servers above take the native `zix.tlz.Context`. See [`src/tlz/README-en.md`](src/tlz/README-en.md#openssl-backend-optional).
 
 With `tls` set the server is TLS-only on `port`. Add `tls_port` to serve BOTH from one server (the dual listener,): cleartext on `port` and TLS on `tls_port` from the same worker fleet, instead of launching a second server that duplicates workers, fd tables, and caches. Available on Http1, Http2, and Grpc, every dispatch model (under `.URING` the TLS side runs on the ring).
 
