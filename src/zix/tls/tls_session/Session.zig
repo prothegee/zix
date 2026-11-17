@@ -105,14 +105,14 @@ fn recordLen(buf: []const u8) ?usize {
     return RECORD_HEADER_LEN + length;
 }
 
-/// Append src into dst at offset at.
+/// Append src into destination (dest) at offset at.
 ///
 /// Return:
 /// - usize (bytes written, 0 when src does not fit)
-fn appendInto(dst: []u8, at: usize, src: []const u8) usize {
-    if (at + src.len > dst.len) return 0;
+fn appendInto(dest: []u8, at: usize, src: []const u8) usize {
+    if (at + src.len > dest.len) return 0;
 
-    @memcpy(dst[at..][0..src.len], src);
+    @memcpy(dest[at..][0..src.len], src);
 
     return src.len;
 }
