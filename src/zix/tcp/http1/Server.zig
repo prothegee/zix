@@ -34,6 +34,7 @@ const tlz = @import("tlz");
 const Config = @import("Config.zig");
 const HandlerFn = @import("handler.zig").HandlerFn;
 const StaticCacheRegistry = @import("../../utils/static/StaticCacheRegistry.zig");
+const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 const OS = @import("builtin").target.os.tag;
 const dispatch_async = @import("dispatch/async.zig");
 const dispatch_epoll = @import("dispatch/epoll.zig");
@@ -392,7 +393,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn run(self: *const Self) Error!void {
-    std.log.info("TODO: ignoreSigpipe", .{});
+    ignoreSigpipe();
 
     std.log.info("TODO: gateDispatchModel", .{});
 
