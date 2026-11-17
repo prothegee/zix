@@ -257,6 +257,7 @@ test {
     _ = @import("uds/handler.zig");
     _ = @import("uds/serve.zig");
     _ = @import("uds/Server.zig");
+    _ = @import("uds/Uds.zig");
     _ = @import("utils/Multipart.zig");
     _ = @import("utils/MultipartField.zig");
     _ = @import("utils/cache/ResponseCache.zig");
