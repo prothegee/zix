@@ -65,6 +65,9 @@ pub const MultipartField = @import("MultipartField.zig");
 /// ZIX Utils generator
 pub const Generator = @import("generator.zig");
 
+/// ZIX Utils ignore sigpipe: process-wide SIGPIPE ignore for stream servers
+pub const IgnoreSigpipe = @import("ignore_sigpipe.zig");
+
 /// ZIX Utils socket path: absolute local socket path for a server and its client
 pub const SocketPath = @import("socket/path.zig");
 
