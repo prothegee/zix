@@ -194,11 +194,11 @@ The OpenSSL backend. Only compiled when `build.zig` detected OpenSSL.
 
 ### Build
 
-`build.zig` exposes `detectOpenssl(b, target)` and `linkOpenssl(b, target, optimize, module)`. `detectOpenssl` returns `false` for a cross target, otherwise it runs `pkg-config --exists openssl` and falls back to the standard `ssl.h` paths. The result goes into the `tlz_options` module as `openssl`. Zig 0.17 has no `@cImport`, so `linkOpenssl` writes a small header (`ssl.h`, `err.h`, `x509v3.h`) into the build cache, translates it with `addTranslateC`, adds it as the `openssl_c` module, and links libssl, libcrypto, and libc. No C header is tracked in the tree. The zix root `build.zig` calls the same two functions.
+The probe lives in `scripts/OpensslProbe.zig` (no `std.Build`, so the check program reuses it). `probe` tries `OPENSSL_DIR` (`<dir>/include/openssl/ssl.h` must exist, else `Tlz_OpensslProbe_EnvDirInvalid`), then `pkg-config --modversion openssl` and `--variable=includedir`, then `/usr/include` and `/usr/local/include` on a host that is not Windows. The version comes from `pkg-config`, else from `OPENSSL_VERSION_STR` in `opensslv.h`. Paths are joined with `std.fs.path.join`. `build.zig` exposes `detectOpenssl(b, target)` (returns `?OpensslProbe`), `linkOpenssl(b, target, optimize, module, openssl)`, `addOpensslCheck`, and `addBuildHelperTests`. `detectOpenssl` returns null for a cross target and logs one info line: cross target, not detected, version unknown, or the version with its source and the name check call of its line. A version below 3.5 or an invalid `OPENSSL_DIR` stops the build (`std.process.fatal`). An unknown version keeps the binding, `c.zig` checks the floor again. Zig caches the configure result, so `detectOpenssl` watches the found `opensslv.h` (`b.dependOnFileContents`) or, when not found, the standard include directories that exist (`b.dependOnDirectoryMetadata`). A missing path is never watched, because Zig would then configure on every build. `zig build openssl-check` runs `scripts/openssl_check.zig`: it probes again and compares with the configured state (`none`, `unknown`, or the version), and exits with 1 on a difference. The result goes into the `tlz_options` module as `openssl`. Zig 0.17 has no `@cImport`, so `linkOpenssl` writes a small header (`ssl.h`, `err.h`, `x509v3.h`) into the build cache, translates it with `addTranslateC` (with the found include directory), adds it as the `openssl_c` module, and links libssl, libcrypto, and libc (`libssl` and `libcrypto` on an MSVC target, not verified on Windows yet). With `OPENSSL_DIR` the library directory is added and `pkg-config` is not used for linking. No C header is tracked in the tree. The zix root `build.zig` calls the same functions.
 
 ### c.zig
 
-The single importer of `openssl_c`. `ENABLED` is `tlz_options.openssl`. `raw` is the translated module when enabled, an empty namespace otherwise. A `comptime` block rejects an `OPENSSL_VERSION_NUMBER` below `0x30000000` (OpenSSL 3.0). Every other openssl file uses `c.raw`, never an OpenSSL header directly.
+The single importer of `openssl_c`. `ENABLED` is `tlz_options.openssl`. `raw` is the translated module when enabled, an empty namespace otherwise. A `comptime` block rejects an `OPENSSL_VERSION_NUMBER` below `0x30500000` (OpenSSL 3.5). `VERSION_MAJOR` is `OPENSSL_VERSION_MAJOR` (3 or 4, 0 without OpenSSL). Every other openssl file uses `c.raw`, never an OpenSSL header directly.
 
 ### error.zig
 
@@ -232,14 +232,14 @@ Fields: `ssl`, `network_in`, `network_out`. `SSL_set_bio` attaches two memory BI
 1. `SSL_CTX_load_verify_file(ca_path)` and `SSL_VERIFY_PEER` (`CaLoadFailed`).
 2. Minimum version TLS 1.2 (`VersionSetFailed`).
 3. A client `Connection`. The context is freed at the end of `connect`, the `SSL` keeps its own reference.
-4. `host` is required (`HostMissing`, since OpenSSL would skip the name check on an empty host) and at most 253 bytes (`HostTooLong`). It is set as SNI (`SSL_set_tlsext_host_name`) and as the name to verify (`SSL_set1_host`).
+4. `host` is required (`HostMissing`, since OpenSSL would skip the name check on an empty host) and at most 253 bytes (`HostTooLong`). It is set as SNI (`SSL_set_tlsext_host_name`) and as the name to verify: `SSL_set1_dnsname` on 4.x, `SSL_set1_host` on 3.x, picked at compile time from `c.VERSION_MAJOR`. The host rules of the two calls differ (see the table in [`hld-en.md`](hld-en.md#backend-model)).
 5. The ALPN offer, when not empty (`AlpnTooLong`, `AlpnSetFailed`).
 
 The returned `Connection` is not handshaken yet. The first `handshake(&.{}, out)` writes the ClientHello.
 
 ### Tests
 
-Unit and edge tests live in each file and skip with `error.SkipZigTest` when OpenSSL is not built. Loopback tests run an OpenSSL client against an OpenSSL server in one process: TLS 1.2 and 1.3, ALPN (server order, no overlap), a hostname mismatch, an untrusted chain, and close_notify. Cross-check tests use the `openssl s_client` and `openssl s_server` tools as the peer. An ALPN parity test runs `s_client` (offering h2 and http/1.1) against the native server and the OpenSSL server with the same server order, and expects the same protocol from both.
+Unit and edge tests live in each file and skip with `error.SkipZigTest` when OpenSSL is not built. A test for one OpenSSL line skips on the other with an info line, for example `OpenSSL 3.x only (found 4.x), test skipped`. Loopback tests run an OpenSSL client against an OpenSSL server in one process: TLS 1.2 and 1.3, ALPN (server order, no overlap), a hostname mismatch, an untrusted chain, and close_notify. Cross-check tests use the `openssl s_client` and `openssl s_server` tools as the peer. An ALPN parity test runs `s_client` (offering h2 and http/1.1) against the native server and the OpenSSL server with the same server order, and expects the same protocol from both.
 
 ## Use in zix
 
