@@ -108,7 +108,7 @@ try client.verifyServerCert(trust_anchor_der, "example.com", now_sec);
 
 ## Backend OpenSSL (opsional)
 
-Backend native adalah default. Jika host build memiliki OpenSSL 3.0 atau lebih baru (ditemukan oleh `pkg-config openssl`), build juga mengompilasi backend OpenSSL dan me-link libssl, libcrypto, dan libc. Tidak ada build flag. Context atau client memilihnya lewat parameter terakhir:
+Backend native adalah default. Jika host build memiliki OpenSSL 3.5 atau lebih baru di 3.x, atau 4.0 atau lebih baru di 4.x (ditemukan oleh `pkg-config openssl`), build juga mengompilasi backend OpenSSL dan me-link libssl, libcrypto, dan libc. Tidak ada build flag. Context atau client memilihnya lewat parameter terakhir:
 
 ```zig
 // Config sama dengan Context.init, binding adalah parameter terakhir.
@@ -132,6 +132,10 @@ defer client.deinit();
 - Handshake berupa loop: `conn.handshake(incoming, &out)` sampai `conn.handshakeDone()`. Client mulai dengan `handshake(&.{}, &out)`, yang menulis ClientHello. Selama `conn.pendingLen()` di atas 0, panggil `conn.drain(&out)` dan kirim byte-nya.
 - Setelah handshake: `readAppData`, `writeAppData`, `closeNotify`, `selectedAlpn`, nama yang sama dengan native.
 - Hanya `cert_path`, `key_path`, `alpn`, `min_version`, dan `max_version` yang berlaku. Curve dan cipher memakai default OpenSSL.
+- Build menulis hasilnya ke log, contohnya `tlz build: OpenSSL 4.1.0 detected (pkg-config), binding enabled (4.x: SSL_set1_dnsname)`. OpenSSL di bawah 3.5 menghentikan build.
+- Tanpa `pkg-config` (misalnya installer Windows), isi `OPENSSL_DIR` dengan lokasi instalasinya (`<dir>/include`, `<dir>/lib`).
+- `zig build openssl-check` menjalankan probe lagi dan membandingkannya dengan build. Zig men-cache hasil configure, jadi setelah ada perubahan step ini memberi tahu kapan cache harus dibersihkan.
+- Cek nama server berbeda per jalur OpenSSL (`SSL_set1_host` di 3.x, `SSL_set1_dnsname` di 4.x). Nama DNS yang valid berperilaku sama. Label di atas 63 byte, literal IPv6, atau literal IPv4 tidak, lihat [`docs/hld-id.md`](docs/hld-id.md#model-backend).
 
 Detailnya ada di [`docs/hld-id.md`](docs/hld-id.md#model-backend) dan [`docs/lld-id.md`](docs/lld-id.md#openssl).
 
