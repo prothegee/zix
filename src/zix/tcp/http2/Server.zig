@@ -42,6 +42,7 @@ const log = @import("log.zig");
 const tls_mux = @import("tls_mux.zig");
 const tls_serve = @import("tls_serve.zig");
 const StaticCacheRegistry = @import("../../utils/static/StaticCacheRegistry.zig");
+const ignoreSigpipe = @import("../../utils/ignore_sigpipe.zig").ignoreSigpipe;
 const OS = @import("builtin").target.os.tag;
 
 // --------------------------------------------------------- //
@@ -357,6 +358,8 @@ pub fn deinit(self: *Self) void {
 /// - Error.ZixHttp2_Server_TlsPortConflict when tls_port equals port
 /// - Error.ZixHttp2_Server_TlsSetupFailed when the TLS side could not start
 pub fn run(self: *const Self) Error!void {
+    ignoreSigpipe();
+
     try gatePort(self.config);
     try gateDispatchModel(self.config.dispatch_model);
     try gatePublicDir(self.config);
